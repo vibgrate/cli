@@ -1,0 +1,97 @@
+{
+  "name": "@vibgrate/cli",
+  "version": "2026.625.0",
+  "description": "vg — local codebase intelligence CLI + MCP server for AI coding agents: deterministic code graph, drift reporting, and version-correct library docs (Apache-2.0)",
+  "type": "module",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@9.0.0",
+  "author": "Vibgrate",
+  "homepage": "https://vibgrate.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vibgrate/cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vibgrate/cli/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "vg": "dist/cli.js",
+    "vibgrate": "dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "grammars",
+    "skills",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "DOCS.md"
+  ],
+  "scripts": {
+    "build": "pnpm run bundle:grammars && tsup",
+    "bundle:grammars": "node scripts/bundle-grammars.mjs",
+    "dev": "tsx src/cli.ts",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "code-graph",
+    "codebase-intelligence",
+    "ast",
+    "tree-sitter",
+    "mcp",
+    "ai-agents",
+    "drift",
+    "deterministic",
+    "impact-analysis",
+    "cli"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.19.0",
+    "@noble/hashes": "^2.2.0",
+    "@vibgrate/core-open": "workspace:*",
+    "chalk": "^5.3.0",
+    "commander": "^15.0.0",
+    "gpt-tokenizer": "^3.0.0",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
+    "graphology-metrics": "^2.4.0",
+    "graphology-shortest-path": "^2.1.0",
+    "graphology-traversal": "^0.3.1",
+    "ignore": "^7.0.0",
+    "semver": "^7.8.5",
+    "tinypool": "^2.1.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "typescript": "^5.4.0",
+    "web-tree-sitter": "0.25.10"
+  },
+  "optionalDependencies": {
+    "fastembed": "^2.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/semver": "^7.5.0",
+    "@typescript-eslint/eslint-plugin": "^8.61.0",
+    "@typescript-eslint/parser": "^8.61.1",
+    "eslint": "^10.5.0",
+    "graphology-types": "^0.24.8",
+    "tsup": "^8.0.0",
+    "tsx": "^4.22.4",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

@@ -1,0 +1,92 @@
+[
+  {
+    "name": "npm-badges-buried",
+    "ecosystem": "npm",
+    "query": "create a client and send a request",
+    "budget": 110,
+    "criticalAtTop": false,
+    "readme": "# acme\n\n![build](https://img.shields.io/badge/build.svg) ![cov](https://img.shields.io/badge/cov.svg)\n\n## Table of Contents\n- [Install](#install)\n- [Usage](#usage)\n\n## Installation\n```sh\nnpm i acme\n```\n\n## Background\nLong history paragraph about motivation, prior art, design philosophy, goals and non-goals, and roadmap notes that go on for a while to push usage past a small budget.\n\nMore architecture prose, acknowledgements, and comparisons with alternatives, continuing for several lines so the usage section is well past the top.\n\n## Usage\n```ts\nimport { AcmeClient } from 'acme';\nconst client = new AcmeClient({ apiKey: 'x' });\nawait client.send('/path', { body: {} });\n```\n\n## License\nMIT",
+    "critical": ["new AcmeClient(", "client.send("],
+    "noise": ["Table of Contents", "shields.io", "## License", "npm i acme"]
+  },
+  {
+    "name": "npm-api-reference",
+    "ecosystem": "npm",
+    "query": "parse with custom options separator",
+    "budget": 90,
+    "criticalAtTop": false,
+    "readme": "# parseutil\n\n## Installation\n```sh\nnpm i parseutil\n```\n\n## parse(input)\nParses a string.\n```ts\nparse('a,b');\n```\n\n## parseOptions(input, opts)\nParse with options.\n```ts\nparseOptions('a;b', { sep: ';' });\n```\n\n## stringify(value)\nInverse of parse.\n```ts\nstringify(['a','b']);\n```\n\n## License\nMIT",
+    "critical": ["parseOptions('a;b'"],
+    "noise": ["npm i parseutil", "## License"]
+  },
+  {
+    "name": "python-usage",
+    "ecosystem": "pypi",
+    "query": "run the pipeline",
+    "budget": 90,
+    "criticalAtTop": false,
+    "readme": "# pipeflow\n\n## Installation\n```sh\npip install pipeflow\n```\n\n## About\nA data pipeline library with a long blurb about design, history, and rationale spanning a couple of lines to push usage down.\n\nEven more about ecosystem fit and comparisons and philosophy for padding here.\n\n## Usage\n```python\nfrom pipeflow import Pipeline\np = Pipeline()\np.run(steps)\n```\n\n## License\nMIT",
+    "critical": ["Pipeline()", "p.run("],
+    "noise": ["pip install", "## License"]
+  },
+  {
+    "name": "rust-usage",
+    "ecosystem": "rust",
+    "query": "spawn a task on the pool",
+    "budget": 90,
+    "criticalAtTop": false,
+    "readme": "# taskpool\n\n## Installation\n```sh\ncargo add taskpool\n```\n\n## Overview\nA tiny task pool. Background and motivation text that runs on for a bit to push the usage example below a small token budget so prefix truncation would miss it entirely.\n\n## Usage\n```rust\nuse taskpool::Pool;\nlet pool = Pool::new(4);\npool.spawn(|| work());\n```\n\n## License\nMIT",
+    "critical": ["Pool::new(", "pool.spawn("],
+    "noise": ["cargo add", "## License"]
+  },
+  {
+    "name": "critical-at-top",
+    "ecosystem": "npm",
+    "query": "get started quickly",
+    "budget": 120,
+    "criticalAtTop": true,
+    "readme": "# quickstart\n\n## Usage\n```ts\nimport { go } from 'quickstart';\ngo({ now: true });\n```\n\n## Background\nLots of history and rationale and design notes here after the usage section, padded.\n\n## Installation\n```sh\nnpm i quickstart\n```\n\n## License\nMIT",
+    "critical": ["go({ now: true })"],
+    "noise": ["## License", "## Installation"]
+  },
+  {
+    "name": "no-headings-blob",
+    "ecosystem": "npm",
+    "query": "pack data with blob",
+    "budget": 70,
+    "criticalAtTop": false,
+    "readme": "# blobly\n\nA small utility library, installed via npm i blobly, with no section headings at all.\n\nSome background prose about why it exists and what problems it solves, padded to be reasonably long so the usage is not at the very top of the file.\n\nMore filler about the philosophy and comparisons and trade-offs to push things down further still.\n\n```ts\nimport { blob } from 'blobly';\nblob.pack(data);\n```\n\nTrailing notes about license (MIT) and contributing guidelines and links to the docs site.",
+    "critical": ["blob.pack("],
+    "noise": []
+  },
+  {
+    "name": "all-preamble",
+    "ecosystem": "npm",
+    "query": "use barething",
+    "budget": 80,
+    "criticalAtTop": false,
+    "readme": "# barething\n\n## Installation\n```sh\nnpm i barething\n```\n\n## License\nMIT\n\n## Contributing\nPRs welcome.",
+    "critical": [],
+    "noise": ["npm i barething", "Contributing"]
+  },
+  {
+    "name": "short-readme",
+    "ecosystem": "npm",
+    "query": "use tiny",
+    "budget": 500,
+    "criticalAtTop": true,
+    "readme": "# tiny\n\n## Usage\n```ts\nimport tiny from 'tiny';\ntiny();\n```",
+    "critical": ["tiny()"],
+    "noise": []
+  },
+  {
+    "name": "npm-no-query",
+    "ecosystem": "npm",
+    "query": "",
+    "budget": 110,
+    "criticalAtTop": false,
+    "readme": "# acme\n\n![build](https://img.shields.io/badge/build.svg)\n\n## Table of Contents\n- [Usage](#usage)\n\n## Installation\n```sh\nnpm i acme\n```\n\n## Background\nLong history paragraph about motivation and prior art and design philosophy that goes on for a while to push the usage section past a small budget so the top does not contain it.\n\n## Usage\n```ts\nimport { AcmeClient } from 'acme';\nconst client = new AcmeClient();\nawait client.send('/path');\n```\n\n## License\nMIT",
+    "critical": ["client.send("],
+    "noise": ["Table of Contents", "shields.io", "## License"]
+  }
+]

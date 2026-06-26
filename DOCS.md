@@ -179,7 +179,6 @@ vibgrate scan [path] [--format text|json|sarif|md] [--out <file>] [--fail-on war
 | `--dsn <dsn>` | `VIBGRATE_DSN` env | DSN used for `--push` authentication |
 | `--region <region>` | — | Override data residency (`us`, `eu`) during push |
 | `--strict` | — | Fail scan command if push fails |
-| `--install-tools` | — | Auto-install missing local security tools via Homebrew |
 | `--ui-purpose` | — | Enable optional UI-purpose evidence extraction |
 | `--offline` | — | Disable network calls and disable upload/push behavior |
 | `--package-manifest <file>` | — | JSON or ZIP package-version manifest used for offline/latest lookups (latest bundle: `https://github.com/vibgrate/manifests/latest-packages.zip`) |
@@ -248,14 +247,18 @@ Export SBOMs from an existing scan artifact or compare two artifacts.
 ```bash
 vibgrate sbom export [--in <file>] [--format cyclonedx|spdx] [--out <file>]
 vibgrate sbom delta --from <file> --to <file> [--out <file>]
+vibgrate sbom vex [--from <file>] [--statement <json>...] [--product <ref>] [--out <file>]
 ```
 
 | Command | Description |
 |---------|-------------|
 | `vibgrate sbom export` | Emit CycloneDX or SPDX JSON from a scan artifact |
 | `vibgrate sbom delta` | Compare dependencies between two artifacts (added/removed/changed + drift delta) |
+| `vibgrate sbom vex` | Emit a spec-compliant OpenVEX document (exploitability statements) for attestation |
 
 Use this to treat SBOMs as operational intelligence instead of static compliance output.
+
+`vibgrate sbom vex` is input-agnostic: it assembles a complete OpenVEX document from the statements you supply (`--from <file>` and/or repeatable `--statement`), so it works regardless of which scanner flagged the components. A zero-statement document is valid and honest — it asserts no known affected components.
 
 ---
 
@@ -344,15 +347,15 @@ This makes drift a formal quality gate (fitness function), not just reporting.
 
 The Upgrade Drift Score is a deterministic, versioned metric (0–100) that represents how far behind your codebase is relative to the current stable ecosystem baseline.
 
-**Higher score = healthier upgrade posture.**
+**Lower score = healthier upgrade posture.** 0 means no drift (fully current); 100 means maximum drift. Higher is worse.
 
 ### Risk Levels
 
 | Score  | Risk Level                           |
 | ------ | ------------------------------------ |
-| 70–100 | **Low** — You're in good shape       |
-| 40–69  | **Moderate** — Some attention needed |
-| 0–39   | **High** — Significant upgrade debt  |
+| 0–30   | **Low** — You're in good shape       |
+| 31–60  | **Moderate** — Some attention needed |
+| 61–100 | **High** — Significant upgrade debt  |
 
 ### Score Components
 

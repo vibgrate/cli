@@ -1,0 +1,31 @@
+node_modules
+dist
+*.tsbuildinfo
+
+# Vibgrate runtime artifacts
+.vibgrate/
+
+# Cloudflare Wrangler
+.wrangler/
+
+# Environment / secrets
+.env
+.env.local
+.env.production
+.env.development
+*.dsn
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+*.swp
+tests/vms365/
+
+obj/
+bin/
+
+/src/Api/obj/**
+**/obj/**

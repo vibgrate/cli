@@ -1,0 +1,51 @@
+# Publishes @vibgrate/cli to npm on a v* tag, with npm provenance.
+#
+# REQUIRED SECRET: NPM_TOKEN must be set as a repository secret (an npm
+# automation/granular access token with publish rights for @vibgrate/cli).
+# Without it, `npm publish` will fail. Provenance additionally requires the
+# `id-token: write` permission below — do not remove it.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write # required for npm provenance
+
+jobs:
+  publish:
+    name: Build and publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Verify checks
+        run: |
+          pnpm typecheck
+          pnpm lint
+          pnpm test
+
+      - name: Publish to npm (public, with provenance)
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

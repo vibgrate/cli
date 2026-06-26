@@ -1,0 +1,18 @@
+{
+  "version": "REPLACED_AT_RELEASE",
+  "description": "Deterministic, no-API-key code graph for AI assistants (vg)",
+  "homepage": "https://vibgrate.com",
+  "license": "Apache-2.0",
+  "depends": "nodejs",
+  "notes": "Installs the @vibgrate/cli package globally, exposing the `vg` command.",
+  "installer": {
+    "script": ["npm install -g @vibgrate/cli@$version"]
+  },
+  "uninstaller": {
+    "script": ["npm uninstall -g @vibgrate/cli"]
+  },
+  "checkver": {
+    "url": "https://registry.npmjs.org/@vibgrate/cli/latest",
+    "jsonpath": "$.version"
+  }
+}

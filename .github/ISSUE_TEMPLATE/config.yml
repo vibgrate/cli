@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation & Help
+    url: https://vibgrate.com/help
+    about: Read the docs, guides, and FAQs before filing an issue.
+  - name: Security vulnerability
+    url: https://github.com/vibgrate/cli/security/policy
+    about: Please report vulnerabilities privately — do not open a public issue.

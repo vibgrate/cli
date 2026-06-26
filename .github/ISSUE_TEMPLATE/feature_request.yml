@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest a new capability or improvement for the Vibgrate CLI.
+title: "feat: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! Please search existing issues first to avoid duplicates.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem would this solve? What are you trying to do?
+      placeholder: "When working with large monorepos I need ..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the command, flag, or behavior you'd like. Sketch the UX if you can.
+      placeholder: "Add `vg areas --json` that ..."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about, and why they fall short.
+    validations:
+      required: false
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This can be implemented with public, Apache-2.0 functionality only (no proprietary internals).
+        - label: This preserves deterministic output (same input → same result).
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+    validations:
+      required: false

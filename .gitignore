@@ -1,0 +1,7 @@
+node_modules
+dist
+*.tsbuildinfo
+# Bundled grammar .wasm files are generated from tree-sitter-wasms at build time
+grammars/
+# Generated graph artifacts from fixture/dev runs
+test/**/.vibgrate/

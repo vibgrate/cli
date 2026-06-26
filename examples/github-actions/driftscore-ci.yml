@@ -1,0 +1,30 @@
+name: DriftScore CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  drift-score:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Vibgrate drift gate
+        run: |
+          npx @vibgrate/cli scan . \
+            --format json \
+            --out vibgrate-report.json \
+            --fail-on error \
+            --drift-budget 40
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibgrate-report
+          path: vibgrate-report.json

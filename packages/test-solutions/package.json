@@ -1,0 +1,15 @@
+{
+  "name": "vibgrate-cli-test-solutions",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test solutions for vibgrate CLI scanner validation",
+  "type": "module",
+  "scripts": {
+    "test": "tsx test-runner.ts",
+    "test:verbose": "tsx test-runner.ts --verbose",
+    "test:update-baselines": "tsx test-runner.ts --update-baselines"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0"
+  }
+}

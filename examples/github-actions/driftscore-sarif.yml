@@ -1,0 +1,30 @@
+name: DriftScore SARIF
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  drift-sarif:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate SARIF
+        run: |
+          npx @vibgrate/cli scan . \
+            --format sarif \
+            --out vibgrate-results.sarif \
+            --fail-on error
+
+      - name: Upload SARIF to GitHub code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: vibgrate-results.sarif
+          category: vibgrate-drift

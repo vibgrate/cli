@@ -1,0 +1,40 @@
+Vibgrate Graph (vg)
+Copyright 2026 Vibgrate
+
+This product includes software developed by Vibgrate (https://vibgrate.com).
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+the files in this distribution except in compliance with the License. A copy of
+the License is provided in the accompanying LICENSE file and at
+http://www.apache.org/licenses/LICENSE-2.0.
+
+This package is a self-contained, open code-graph engine. It does NOT reuse the
+Vibgrate HCS Rust/WASM kernel, the HCS facts ABI, or any HCS governance,
+licensing, or policy machinery. Every command runs on open dependencies with no
+account and no API key.
+
+------------------------------------------------------------------------------
+THIRD-PARTY COMPONENTS
+------------------------------------------------------------------------------
+
+This product bundles or depends on the following open-source components:
+
+  - web-tree-sitter (MIT) — WASM tree-sitter runtime
+  - tree-sitter-wasms (Unlicense) — pre-compiled tree-sitter grammar .wasm files
+  - graphology and graphology-* (MIT) — in-memory graph model and algorithms
+  - @noble/hashes (MIT) — BLAKE3 content hashing
+  - tinypool (MIT) — worker_threads pool
+  - commander, chalk (MIT) — CLI surface
+
+Each component remains under its own license; see that project for details.
+
+------------------------------------------------------------------------------
+TRADEMARKS
+------------------------------------------------------------------------------
+
+"Vibgrate", "vg", the Vibgrate logo, and the Vibgrate DriftScore badge are
+trademarks of Vibgrate. The Apache License, Version 2.0 grants rights to the
+software only; it does NOT grant any right to use these marks. Forks must adopt
+a distinct name and remove Vibgrate branding from any user-facing surface.
+
+Trademark enquiries: legal@vibgrate.com
