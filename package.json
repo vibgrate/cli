@@ -89,7 +89,7 @@
     "graphology-types": "^0.24.8",
     "tsup": "^8.0.0",
     "tsx": "^4.22.4",
-    "vitest": "^2.0.0"
+    "vitest": "^4.1.9"
   },
   "engines": {
     "node": ">=20.0.0"
