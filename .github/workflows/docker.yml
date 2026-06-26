@@ -44,17 +44,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve version
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Resolve & stamp version
         id: version
         run: |
           set -euo pipefail
           IN="${{ github.event.inputs.tag }}"
           if [ -n "$IN" ]; then
-            VER="${IN#v}"
+            VER="$(node scripts/stamp-version.mjs --version "${IN#v}")"
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VER="${GITHUB_REF_NAME#v}"
+            VER="$(node scripts/stamp-version.mjs --version "${GITHUB_REF_NAME#v}")"
           else
-            VER="$(node -p "require('./package.json').version")"
+            VER="$(node scripts/stamp-version.mjs)"
           fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "### Image \`${IMAGE}:${VER}\`" >> "$GITHUB_STEP_SUMMARY"

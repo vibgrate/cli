@@ -5,9 +5,14 @@
 # Without it, `npm publish` will fail. Provenance additionally requires the
 # `id-token: write` permission below — do not remove it.
 #
-# Manual runs: Actions → Release → Run workflow. The published version is the
-# one in package.json. Use the "dry-run" option to validate the build + npm
-# pack without publishing.
+# Versioning is the calendar scheme YYYY.MDD.N. On a tag push the version comes
+# from the tag; on a manual run it is computed as the next counter for today
+# from what is already on npm (scripts/stamp-version.mjs) — so every publish
+# auto-increments instead of re-using the committed placeholder. The resolved
+# version is stamped into package.json AND src/version.ts before the build.
+#
+# Manual runs: Actions → Release → Run workflow. Use the "dry-run" option to
+# validate the build + npm pack without publishing.
 name: Release
 
 on:
@@ -47,6 +52,25 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Stamp the real version BEFORE building, so src/version.ts (embedded for
+      # `vg --version`) and package.json agree with what gets published.
+      - name: Resolve & stamp version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VER=$(node scripts/stamp-version.mjs --version "${GITHUB_REF_NAME#v}")
+          else
+            VER=$(node scripts/stamp-version.mjs)
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "### Releasing \`@vibgrate/cli@${VER}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "- Trigger: manual (computed next calendar version)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Trigger: tag \`${GITHUB_REF_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Build
         run: pnpm build
 
@@ -55,16 +79,6 @@ jobs:
           pnpm typecheck
           pnpm lint
           pnpm test
-
-      - name: Show release target
-        run: |
-          VER=$(node -p "require('./package.json').version")
-          echo "### Releasing \`@vibgrate/cli@${VER}\`" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "- Trigger: manual (workflow_dispatch)" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- Trigger: tag \`${GITHUB_REF_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Publish dry run (pack only)
         if: github.event_name == 'workflow_dispatch' && inputs.dry-run == true
