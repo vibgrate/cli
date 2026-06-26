@@ -10,6 +10,13 @@ updates:
       include: "scope"
     labels:
       - "dependencies"
+    ignore:
+      # web-tree-sitter 0.26.x changed the WASM ABI: the precompiled grammars in
+      # tree-sitter-wasms@0.1.x only load under 0.25.x, so 0.26+ breaks every
+      # grammar load (all parsing). There is no security advisory on 0.25.x.
+      # Re-evaluate when tree-sitter-wasms ships 0.26-ABI grammars.
+      - dependency-name: "web-tree-sitter"
+        versions: [">= 0.26.0"]
 
   - package-ecosystem: "github-actions"
     directory: "/"

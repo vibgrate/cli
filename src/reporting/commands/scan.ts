@@ -11,8 +11,8 @@ import {
   detectVcs,
   resolveRepositoryName,
   parseExcludePatterns,
-} from '@vibgrate/core-open';
-import type { ScanOptions, ScanArtifact } from '@vibgrate/core-open';
+} from '../../core-open/index.js';
+import type { ScanOptions, ScanArtifact } from '../../core-open/index.js';
 import { loadAdvancedScanHook } from '../advanced-hook.js';
 import { VERSION } from '../version.js';
 import { resolveIngestHost } from './dsn.js';

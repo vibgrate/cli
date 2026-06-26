@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 import { Command } from 'commander';
 import chalk from 'chalk';
-import { runCoreScan } from '@vibgrate/core-open';
+import { runCoreScan } from '../../core-open/index.js';
 import { writeJsonFile } from '../utils/fs.js';
 import { loadAdvancedScanHook } from '../advanced-hook.js';
 

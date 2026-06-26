@@ -1,4 +1,4 @@
-import type { AdvancedScanHook } from '@vibgrate/core-open';
+import type { AdvancedScanHook } from '../core-open/index.js';
 
 /**
  * Open build: there is no proprietary advanced-analysis hook.
