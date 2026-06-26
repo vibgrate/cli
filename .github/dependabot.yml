@@ -10,6 +10,14 @@ updates:
       include: "scope"
     labels:
       - "dependencies"
+    # Collapse routine npm updates into two PRs (prod / dev) instead of one per
+    # package, so the queue stays reviewable.
+    groups:
+      npm-production:
+        dependency-type: "production"
+        update-types: ["minor", "patch"]
+      npm-development:
+        dependency-type: "development"
     ignore:
       # web-tree-sitter 0.26.x changed the WASM ABI: the precompiled grammars in
       # tree-sitter-wasms@0.1.x only load under 0.25.x, so 0.26+ breaks every
@@ -28,3 +36,7 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+    # One grouped PR for all GitHub Actions bumps instead of one per action.
+    groups:
+      github-actions:
+        patterns: ["*"]

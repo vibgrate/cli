@@ -1,15 +1,26 @@
-# Publishes @vibgrate/cli to npm on a v* tag, with npm provenance.
+# Publishes @vibgrate/cli to npm with provenance — on a v* tag, or manually.
 #
 # REQUIRED SECRET: NPM_TOKEN must be set as a repository secret (an npm
 # automation/granular access token with publish rights for @vibgrate/cli).
 # Without it, `npm publish` will fail. Provenance additionally requires the
 # `id-token: write` permission below — do not remove it.
+#
+# Manual runs: Actions → Release → Run workflow. The published version is the
+# one in package.json. Use the "dry-run" option to validate the build + npm
+# pack without publishing.
 name: Release
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Build and pack only — do not publish to npm"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -45,7 +56,24 @@ jobs:
           pnpm lint
           pnpm test
 
+      - name: Show release target
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          echo "### Releasing \`@vibgrate/cli@${VER}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "- Trigger: manual (workflow_dispatch)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Trigger: tag \`${GITHUB_REF_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Publish dry run (pack only)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry-run == true
+        run: |
+          npm publish --access public --provenance --dry-run
+          echo "> **Dry run** — nothing was published." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish to npm (public, with provenance)
+        if: github.event_name != 'workflow_dispatch' || inputs.dry-run == false
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
