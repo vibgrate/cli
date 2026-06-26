@@ -75,7 +75,7 @@
     "tinypool": "^2.1.0",
     "tree-sitter-wasms": "^0.1.13",
     "typescript": "^5.4.0",
-    "web-tree-sitter": "0.25.10"
+    "web-tree-sitter": "0.26.9"
   },
   "optionalDependencies": {
     "fastembed": "^2.1.0"
