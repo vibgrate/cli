@@ -99,7 +99,7 @@ jobs:
       # GitHub-native SLSA build provenance (available on org repos), pushed to
       # the registry as an OCI attestation.
       - name: Attest build provenance (SLSA)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
