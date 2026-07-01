@@ -5,8 +5,8 @@ type: application
 # Chart version follows semver (the K8s ecosystem expects it) and iterates
 # independently of the CLI. appVersion pins the tested scanner image tag — a bump
 # PR keeps it in sync with a released @vibgrate/cli calendar version.
-version: 0.1.0
-appVersion: "2026.618.2"
+version: 0.1.1
+appVersion: "2026.701.3"
 home: https://vibgrate.com
 icon: https://vibgrate.com/web-app-manifest-512x512.png
 sources:

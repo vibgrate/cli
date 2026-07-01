@@ -1,5 +1,5 @@
 name: 'Vibgrate Scan'
-description: 'Scan a repository for upgrade drift & supply-chain risk using the signed Vibgrate scanner image. Emits SARIF and a Drift Score.'
+description: 'Scan a repository for upgrade drift & supply-chain risk with the signed Vibgrate scanner. Emits SARIF and a DriftScore.'
 author: 'Vibgrate'
 
 branding:
@@ -46,7 +46,7 @@ inputs:
   image-tag:
     description: 'Scanner image tag to run (defaults to a pinned, tested release).'
     required: false
-    default: '2026.3.1'
+    default: '2026.701.3'
   verify:
     description: 'Verify the image cosign signature + provenance before running (requires cosign on the runner).'
     required: false
