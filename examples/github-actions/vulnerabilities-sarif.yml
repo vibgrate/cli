@@ -1,0 +1,46 @@
+name: Vibgrate Vulnerabilities
+
+# Scan installed dependencies for known vulnerabilities on every pull request,
+# fail the check on critical/high findings (PR gate), and surface every finding
+# in the GitHub Security tab as SARIF.
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF to code scanning
+
+jobs:
+  vulnerabilities:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so each vulnerability is attributed to the commit that
+          # introduced the affected version (exposure window + remediation MTTR).
+          fetch-depth: 0
+
+      # One step: scan for known vulnerabilities, gate the PR on error-level
+      # findings, and upload the SARIF to code scanning. `--vulns` checks every
+      # installed dependency against the public OSV database.
+      - name: Vibgrate vulnerability scan
+        uses: vibgrate/cli@v1
+        with:
+          vulns: true
+          format: sarif
+          output: vibgrate-vulns.sarif
+          fail-on: error        # critical/high block the merge
+          upload-sarif: true
+          category: vibgrate-vulns
+
+      # Optional: push the results (incl. CRA remediation metrics) to Vibgrate Cloud.
+      # - name: Push to Vibgrate Cloud
+      #   uses: vibgrate/cli@v1
+      #   with:
+      #     vulns: true
+      #     args: --push
+      #     dsn: ${{ secrets.VIBGRATE_DSN }}

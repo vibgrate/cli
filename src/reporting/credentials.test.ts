@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import {
   clearStoredCredentials,
   credentialsPath,
+  gitignoreEntryForCredentials,
   readStoredCredentials,
   resolveDsn,
   writeStoredCredentials,
@@ -66,5 +67,20 @@ describe('credentials store', () => {
     fs.mkdirSync(path.dirname(credentialsPath()), { recursive: true });
     fs.writeFileSync(credentialsPath(), 'not json', 'utf8');
     expect(readStoredCredentials()).toBeNull();
+  });
+
+  it('derives a repo-relative .gitignore entry when creds live in the repo', () => {
+    // With HOME pointed at the repo root, the credentials file is inside it.
+    expect(gitignoreEntryForCredentials(home)).toBe('.vibgrate/credentials.json');
+  });
+
+  it('falls back to the conventional path when creds are outside the repo', () => {
+    const repo = fs.mkdtempSync(path.join(tmpdir(), 'vibgrate-repo-'));
+    try {
+      // creds live under $HOME, which is a different tree than `repo`.
+      expect(gitignoreEntryForCredentials(repo)).toBe('.vibgrate/credentials.json');
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
   });
 });

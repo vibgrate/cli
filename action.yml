@@ -1,0 +1,129 @@
+name: 'Vibgrate Scan'
+description: 'Scan a repository for upgrade drift & supply-chain risk using the signed Vibgrate scanner image. Emits SARIF and a Drift Score.'
+author: 'Vibgrate'
+
+branding:
+  icon: 'shield'
+  color: 'green'
+
+inputs:
+  path:
+    description: 'Path to scan.'
+    required: false
+    default: '.'
+  format:
+    description: 'Output format (sarif, json, md, ...).'
+    required: false
+    default: 'sarif'
+  output:
+    description: 'Output file path.'
+    required: false
+    default: 'vibgrate.sarif'
+  fail-on:
+    description: 'Fail the job on findings of this severity or higher (e.g. "error"). Empty = never fail on findings.'
+    required: false
+    default: ''
+  vulns:
+    description: 'Also scan installed dependencies for known vulnerabilities (adds --vulns). With fetch-depth:0 on checkout, findings are attributed to the introducing commit.'
+    required: false
+    default: 'false'
+  upload-sarif:
+    description: 'Upload the SARIF to GitHub code scanning. Only applies when format is "sarif"; the calling workflow needs `permissions: security-events: write`.'
+    required: false
+    default: 'false'
+  category:
+    description: 'Category for the uploaded SARIF, so multiple Vibgrate scans coexist in code scanning.'
+    required: false
+    default: 'vibgrate'
+  args:
+    description: 'Additional raw arguments appended to `vibgrate scan`.'
+    required: false
+    default: ''
+  dsn:
+    description: 'Optional VIBGRATE_DSN to push results to your workspace dashboard.'
+    required: false
+    default: ''
+  image-tag:
+    description: 'Scanner image tag to run (defaults to a pinned, tested release).'
+    required: false
+    default: '2026.3.1'
+  verify:
+    description: 'Verify the image cosign signature + provenance before running (requires cosign on the runner).'
+    required: false
+    default: 'false'
+
+outputs:
+  output-file:
+    description: 'Path to the written scan output file.'
+    value: ${{ steps.scan.outputs.output-file }}
+
+# Composite action that runs the cosign-signed scanner container, so users of the
+# Action inherit the exact provenance chain we publish. See
+# docs/ARTIFACT-DISTRIBUTION-STRATEGY.md §3.5. Inputs are passed via env (never
+# interpolated into the shell) to avoid script injection.
+runs:
+  using: composite
+  steps:
+    - name: Verify image provenance
+      if: inputs.verify == 'true'
+      shell: bash
+      env:
+        IMAGE: ghcr.io/vibgrate/cli
+        INPUT_TAG: ${{ inputs.image-tag }}
+      run: |
+        set -euo pipefail
+        if ! command -v cosign >/dev/null 2>&1; then
+          echo "::warning::cosign not found on runner — add sigstore/cosign-installer before this Action to enable verification."
+          exit 0
+        fi
+        cosign verify "${IMAGE}:${INPUT_TAG}" \
+          --certificate-identity-regexp 'https://github.com/vibgrate/cli/.github/workflows/.+' \
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+    - name: Run Vibgrate scan
+      id: scan
+      shell: bash
+      env:
+        IMAGE: ghcr.io/vibgrate/cli
+        INPUT_TAG: ${{ inputs.image-tag }}
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_OUTPUT: ${{ inputs.output }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_VULNS: ${{ inputs.vulns }}
+        INPUT_ARGS: ${{ inputs.args }}
+        VIBGRATE_DSN: ${{ inputs.dsn }}
+      run: |
+        set -euo pipefail
+        extra=()
+        if [ -n "${INPUT_FAIL_ON}" ]; then
+          extra+=(--fail-on "${INPUT_FAIL_ON}")
+        fi
+        if [ "${INPUT_VULNS}" = "true" ]; then
+          extra+=(--vulns)
+        fi
+        if [ -n "${INPUT_ARGS}" ]; then
+          # Word-split intentionally: callers pass extra flags as a string.
+          # shellcheck disable=SC2206
+          extra+=(${INPUT_ARGS})
+        fi
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -v "${PWD}:/work" -w /work \
+          ${VIBGRATE_DSN:+-e VIBGRATE_DSN} \
+          "${IMAGE}:${INPUT_TAG}" \
+          scan "${INPUT_PATH}" \
+          --format "${INPUT_FORMAT}" \
+          --out "${INPUT_OUTPUT}" \
+          "${extra[@]}"
+        echo "output-file=${INPUT_OUTPUT}" >> "$GITHUB_OUTPUT"
+
+    # Surface findings in the Security tab. `always()` so the SARIF still uploads
+    # when `fail-on` failed the scan step — the PR check goes red AND the findings
+    # are visible. Needs `permissions: security-events: write` on the workflow.
+    - name: Upload SARIF to code scanning
+      if: ${{ always() && inputs.upload-sarif == 'true' && inputs.format == 'sarif' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.output }}
+        category: ${{ inputs.category }}

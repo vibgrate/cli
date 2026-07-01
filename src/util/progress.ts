@@ -1,11 +1,12 @@
 import { c } from './output.js';
+import { brandProgressBar } from '../core-open/ui/bar.js';
 
 /**
- * A small, self-contained progress bar matching the scanner's style
- * (`vibgrate-core-open/src/ui/progress.ts`): a `━`/`╌` bar, a braille spinner,
- * percent, elapsed and ETA. Replicated here (not imported) so the open graph
- * package stays standalone. Renders to **stderr** in place, and only when stderr
- * is a TTY — under a pipe/CI it stays silent so logs aren't polluted.
+ * A small progress bar matching the scanner's style
+ * (`vibgrate-core-open/src/ui/progress.ts`): a smooth sub-cell gradient bar
+ * (shared `brandProgressBar`), a braille spinner, percent, elapsed and ETA.
+ * Renders to **stderr** in place, and only when stderr is a TTY — under a
+ * pipe/CI it stays silent so logs aren't polluted.
  */
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
@@ -29,8 +30,7 @@ export function formatProgressLine(
   frame: number,
 ): string {
   const ratio = total > 0 ? Math.min(done / total, 1) : 0;
-  const filled = Math.round(ratio * WIDTH);
-  const bar = c.greenBright('━'.repeat(filled)) + c.dim('╌'.repeat(Math.max(WIDTH - filled, 0)));
+  const bar = brandProgressBar(ratio, WIDTH);
   const pct = Math.round(ratio * 100);
   const spin = c.cyan(FRAMES[((frame % FRAMES.length) + FRAMES.length) % FRAMES.length]);
   const eta = ratio > 0.02 && ratio < 1 ? ` · eta ${fmtDuration((elapsedMs / ratio) * (1 - ratio))}` : '';

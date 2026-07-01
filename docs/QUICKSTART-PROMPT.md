@@ -27,7 +27,7 @@ echo 'export VIBGRATE_DSN="<dsn-from-step-1>"' >> ~/.zshrc && source ~/.zshrc
 ### Step 3: Run Scan with Dashboard Push
 Run a scan and push results to the dashboard:
 ```bash
-npx vibgrate scan . --push --no-color
+npx vibgrate scan --push --no-color
 ```
 
 ### Step 4: Explain My Results

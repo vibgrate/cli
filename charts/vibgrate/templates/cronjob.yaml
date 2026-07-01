@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "vibgrate.fullname" . }}
+  labels:
+    {{- include "vibgrate.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: {{ .Values.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.failedJobsHistoryLimit }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "vibgrate.selectorLabels" . | nindent 8 }}
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "vibgrate.selectorLabels" . | nindent 12 }}
+          {{- with .Values.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          {{- include "vibgrate.podSpec" . | nindent 10 }}

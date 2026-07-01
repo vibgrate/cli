@@ -1,0 +1,20 @@
+Vibgrate scanner installed as {{ include "vibgrate.fullname" . }}.
+
+Image:    {{ include "vibgrate.image" . }}
+Schedule: {{ .Values.schedule }}
+
+{{- if not .Values.repository.url }}
+
+NOTE: repository.url is not set, so the scan runs against an empty work volume.
+Either set repository.url to clone a repo, or mount your source at /work via
+extraVolumes/extraVolumeMounts.
+{{- end }}
+
+Scans push to your Vibgrate workspace using the configured DSN. Track results at
+https://dash.vibgrate.com.
+
+The scanner image is cosign-signed with SLSA provenance and an SBOM. Verify it
+before running in regulated environments — recipe at https://vibgrate.com/trust.
+
+Trigger a scan now instead of waiting for the schedule:
+  kubectl create job --from=cronjob/{{ include "vibgrate.fullname" . }} {{ include "vibgrate.fullname" . }}-manual

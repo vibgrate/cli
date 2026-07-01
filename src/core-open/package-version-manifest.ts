@@ -7,6 +7,27 @@ import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import type { RuntimeCatalog } from './runtimes/types.js';
 
+/**
+ * An advisory entry as carried by an offline package-version manifest, used for
+ * air-gapped vulnerability scanning. Mirrors the affected-range shape of an OSV
+ * advisory so the same version-matching logic applies online and offline.
+ */
+export interface ManifestAdvisory {
+  id: string;
+  aliases?: string[];
+  summary?: string;
+  severity?: 'low' | 'moderate' | 'high' | 'critical' | 'unknown';
+  cvss?: number;
+  cvssVector?: string;
+  /** Affected semver ranges as [introduced, fixed) pairs (either bound optional). */
+  ranges?: Array<{ introduced?: string; fixed?: string }>;
+  /** Explicit affected versions, as an alternative/complement to `ranges`. */
+  versions?: string[];
+  published?: string;
+  withdrawn?: string;
+  references?: string[];
+}
+
 export interface EcosystemVersionEntry {
   latest?: string;
   versions?: string[];
@@ -19,6 +40,12 @@ export interface EcosystemVersionEntry {
    * this from `npm view <pkg> time` (or the equivalent per ecosystem).
    */
   releaseDates?: Record<string, string>;
+  /**
+   * Optional known-vulnerability advisories for this package, enabling air-gapped
+   * vulnerability scanning. Each advisory carries its own affected ranges so the
+   * matcher decides applicability against the installed version.
+   */
+  vulns?: ManifestAdvisory[];
 }
 
 export interface PackageVersionManifest {

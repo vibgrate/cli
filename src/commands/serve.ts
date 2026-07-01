@@ -16,16 +16,18 @@ import { c, info } from '../util/output.js';
 export function registerServe(program: Command): void {
   const cmd = program
     .command('serve')
-    .description('let your AI assistant use the map (local MCP server)')
+    .description('start Vibgrate AI Context — local, offline MCP serving your code map, drift & version-correct docs to your AI')
     .option('--http', 'serve over streamable HTTP instead of stdio')
     .option('--port <n>', 'port for --http', '7437')
     .option('--host <h>', 'host for --http', '127.0.0.1')
     .option('--savings', 'record local, counts-only usage savings (opt-in; off by default)')
-    .action(async function (this: Command, opts: { http?: boolean; port?: string; host?: string; savings?: boolean }) {
+    .option('--dedup', "collapse a node's heavy relation lists on repeat reads within a session (opt-in; saves tokens)")
+    .action(async function (this: Command, opts: { http?: boolean; port?: string; host?: string; savings?: boolean; dedup?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
       const graphPath = global.graph ?? defaultGraphPath(root);
       const savings = opts.savings === true;
+      const dedup = opts.dedup === true;
       const local = global.local === true;
 
       if (!fs.existsSync(graphPath)) {
@@ -36,17 +38,17 @@ export function registerServe(program: Command): void {
       }
 
       if (opts.http) {
-        await serveHttp(graphPath, opts.host ?? '127.0.0.1', Number(opts.port) || 7437, savings, local);
+        await serveHttp(graphPath, opts.host ?? '127.0.0.1', Number(opts.port) || 7437, savings, local, dedup);
       } else {
         // stdio: NOTHING may go to stdout except the protocol stream.
         info(c.dim('vg · MCP server on stdio (read-only). Connect your assistant to this process.'));
-        await serveStdio(graphPath, savings, local);
+        await serveStdio(graphPath, savings, local, dedup);
       }
     });
   applyGlobalOptions(cmd);
 }
 
-async function serveHttp(graphPath: string, host: string, port: number, savings: boolean, local: boolean): Promise<void> {
+async function serveHttp(graphPath: string, host: string, port: number, savings: boolean, local: boolean, dedup: boolean): Promise<void> {
   const { createServer: createHttp } = await import('node:http');
   const { StreamableHTTPServerTransport } = await import(
     '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -59,9 +61,10 @@ async function serveHttp(graphPath: string, host: string, port: number, savings:
     }
     try {
       // Stateless: a fresh server+transport per request (no session state) —
-      // simple and robust for a local single-user endpoint.
+      // simple and robust for a local single-user endpoint. (Per-request, so
+      // `--dedup` only accumulates within stdio sessions, not across HTTP calls.)
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      const server = createServer(graphPath, savings, local);
+      const server = createServer(graphPath, savings, local, dedup);
       res.on('close', () => {
         void transport.close();
         void server.close();

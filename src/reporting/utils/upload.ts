@@ -20,6 +20,9 @@ export interface ScanUploadInput {
   body: Buffer;
   contentEncoding: string;
   timestamp: string;
+  /** Force a fresh ingest server-side even when the repo is unchanged (skips the
+   *  duplicate-vcsSha reuse). Set for scheduled and dashboard-triggered scans. */
+  force?: boolean;
 }
 
 export interface ScanUploadResult {
@@ -29,7 +32,9 @@ export interface ScanUploadResult {
 }
 
 function postOnce(input: ScanUploadInput, host: string): Promise<Response> {
-  const url = `${input.scheme}://${host}/v1/ingest/scan`;
+  const url = input.force
+    ? `${input.scheme}://${host}/v1/ingest/scan?force=1`
+    : `${input.scheme}://${host}/v1/ingest/scan`;
   return fetch(url, {
     method: 'POST',
     headers: {

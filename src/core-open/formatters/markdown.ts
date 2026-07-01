@@ -20,7 +20,7 @@ export function formatMarkdown(artifact: ScanArtifact): string {
   lines.push(`| **Projects** | ${artifact.projects.length} |`);
   if (billing) {
     lines.push(
-      `| **Classification** | ${billing.microCount} micro · ${billing.smallCount} small · ${billing.standardCount} standard |`,
+      `| **Classification** | ${billing.nanoCount} nano · ${billing.microCount} micro · ${billing.smallCount} small · ${billing.standardCount} standard |`,
     );
     lines.push(
       `| **Billable Projects** | ${billing.billableProjects} (${billing.totalScanned} detected → ${billing.billableProjects} billable) |`,

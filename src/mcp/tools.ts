@@ -5,19 +5,23 @@ import { GraphIndex } from '../engine/relations.js';
 import { shortestPath } from '../engine/paths.js';
 import { impactOf } from '../engine/impact.js';
 import { coveringTests } from '../engine/test-query.js';
-import { inventory } from '../engine/drift.js';
+import { loadVulnerabilities, filterBySeverity, resolvePackageTarget, openFixableAdvisories } from './vuln-data.js';
+import { attributedInventory } from './attribution.js';
+import { computeUpgradeImpact, getChangelogSignals, type VulnSeverity } from '../core-open/index.js';
 import { discoverModels } from '../engine/models.js';
 import { FREE_PACK } from '../grounding/pack.js';
 import { loadCatalog, resolveLib, readDoc, driftFor, resolveVersion, localPackageDocs, localApiSurface } from '../engine/lib.js';
 import { selectForBudget, symbolsFromApi } from '../engine/select.js';
 import { assessDocQuality } from '../engine/quality.js';
+import { boundList, NODE_EDGE_CAP } from './response.js';
 import type { VgGraph } from '../schema.js';
 
 /**
- * The read-only tool set for the LOCAL `vg serve` MCP. Every tool is pure over
- * the in-memory graph, side-effect-free, and `readOnlyHint: true` (auto-
- * approvable). This is a self-contained local server — it never touches the
- * network and is independent of Vibgrate's hosted cloud MCP.
+ * The read-only tool set for the LOCAL `vg serve` MCP. Every tool is
+ * side-effect-free and `readOnlyHint: true` (auto-approvable), and independent of
+ * Vibgrate's hosted cloud MCP. The server is offline by default; the only network
+ * access is explicit opt-in — the embedder's one-time model fetch and
+ * `upgrade_impact`'s `changelog` option — and both are disabled under `--local`.
  *
  * Phase 2/3 add `tests_for`, `get_facts`, `guide_node`, `check_drift`,
  * `list_models`, `resolve_library`, `library_docs`.
@@ -28,6 +32,10 @@ export interface ToolContext {
   root: string;
   /** `--local`: keep the server air-gapped — no model download, lexical only. */
   local?: boolean;
+  /** `--dedup`: collapse a node's heavy relation lists on repeat reads this session. */
+  dedup?: boolean;
+  /** Per-session set of node ids already returned in full (drives `--dedup`). */
+  seen?: Set<string>;
 }
 
 export interface VgTool {
@@ -61,19 +69,50 @@ export const TOOLS: VgTool[] = [
     name: 'get_graph_summary',
     description: 'High-level summary of the code map: counts, languages, clustering, top areas and hubs.',
     inputSchema: obj({}),
-    handler: (graph) => ({
-      counts: graph.meta.counts,
-      languages: graph.meta.languages,
-      cluster: graph.meta.cluster,
-      resolver: graph.provenance.resolver,
-      generatedAt: graph.generatedAt,
-      topAreas: [...graph.areas].sort((a, b) => b.size - a.size).slice(0, 10).map((a) => ({ id: a.id, label: a.label, size: a.size })),
-      topHubs: graph.nodes
-        .filter((n) => n.isHub)
-        .sort((a, b) => b.importance - a.importance)
-        .slice(0, 10)
-        .map((n) => ({ name: n.qualifiedName, file: n.file, importance: n.importance })),
-    }),
+    handler: (graph) => summarize(graph),
+  },
+  {
+    name: 'orient',
+    description:
+      'ONE-SHOT orientation before changing code: the map summary + the most relevant nodes for your question + the blast radius of the top hit, in a single call. Prefer this over separate get_graph_summary + query_graph + impact_of — same answer, far fewer round-trips (each round-trip re-bills the whole conversation).',
+    inputSchema: obj(
+      {
+        question: { type: 'string', description: 'what you are about to do or look for' },
+        budget: { type: 'number', description: 'approx token budget for the context block (default 1500)' },
+      },
+      ['question'],
+    ),
+    handler: async (graph, args, ctx) => {
+      const question = String(args.question ?? '');
+      if (!question) return { error: 'bad_request', message: 'question is required' };
+      const budget = numOr(args.budget, 1500);
+      // Same retrieval path as query_graph: semantic when available, else lexical.
+      const embedder = await sharedEmbedder(ctx.local);
+      let q;
+      let mode = 'lexical';
+      if (embedder) {
+        const nodeVectors = await getNodeEmbeddings(graph, embedder, ctx.root);
+        q = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors });
+        mode = `semantic (${embedder.id})`;
+      } else {
+        q = queryGraph(graph, question, { budget });
+      }
+      // Blast radius of the single most relevant hit, so the model sees what a
+      // change there would touch without spending a second round-trip on it.
+      let topImpact = null;
+      const top = q.matches[0]?.node;
+      if (top) {
+        const r = impactOf(graph, top.id, { depth: 3 });
+        topImpact = { node: top.qualifiedName, direct: r.direct, transitive: r.transitive, affected: r.affected.slice(0, 10).map(stripId) };
+      }
+      return {
+        summary: summarize(graph),
+        mode,
+        context: q.context,
+        matches: q.matches.map((m) => ({ name: m.node.qualifiedName, kind: m.node.kind, file: m.node.file, line: m.node.span.start, score: m.score })),
+        topImpact,
+      };
+    },
   },
   {
     name: 'query_graph',
@@ -115,11 +154,11 @@ export const TOOLS: VgTool[] = [
       { name: { type: 'string' }, pick: { type: 'number', description: 'choose nth candidate when ambiguous' } },
       ['name'],
     ),
-    handler: (graph, args) => {
+    handler: (graph, args, ctx) => {
       const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
       if (!node) return { error: candidates.length ? 'ambiguous' : 'not_found', candidates: candidates.slice(0, 10).map((n) => n.qualifiedName) };
       const index = new GraphIndex(graph);
-      return {
+      const base = {
         name: node.qualifiedName,
         kind: node.kind,
         file: node.file,
@@ -128,8 +167,27 @@ export const TOOLS: VgTool[] = [
         importance: node.importance,
         isHub: node.isHub,
         area: node.area,
-        calls: uniqueNames(index.callees(node.id).map((x) => x.node.qualifiedName)),
-        calledBy: uniqueNames(index.callers(node.id).map((x) => x.node.qualifiedName)),
+      };
+      // `--dedup`: if this exact node (content-addressed id) was already
+      // returned in full this session, the model already has its relations —
+      // re-sending them just re-bills the same tokens every turn. Return the
+      // lightweight identity plus the totals and a `repeat` flag instead.
+      if (ctx?.dedup && ctx.seen?.has(node.id)) {
+        return { ...base, repeat: true, callsTotal: uniqueNames(index.callees(node.id).map((x) => x.node.qualifiedName)).length, calledByTotal: uniqueNames(index.callers(node.id).map((x) => x.node.qualifiedName)).length };
+      }
+      // Bound the relationship arrays: a hub can have hundreds of callers, and
+      // every one is paid for on every subsequent turn. Cap to the first ranked
+      // NODE_EDGE_CAP and report the true totals so nothing is silently dropped
+      // (the model can widen the blast radius with `impact_of`).
+      const calls = boundList(uniqueNames(index.callees(node.id).map((x) => x.node.qualifiedName)), NODE_EDGE_CAP);
+      const calledBy = boundList(uniqueNames(index.callers(node.id).map((x) => x.node.qualifiedName)), NODE_EDGE_CAP);
+      ctx?.seen?.add(node.id);
+      return {
+        ...base,
+        calls: calls.items,
+        callsTotal: calls.total,
+        calledBy: calledBy.items,
+        calledByTotal: calledBy.total,
       };
     },
   },
@@ -155,7 +213,9 @@ export const TOOLS: VgTool[] = [
       const { node } = resolveOne(graph, String(args.name ?? ''));
       if (!node) return { error: 'not_found' };
       const r = impactOf(graph, node.id, { depth: numOr(args.depth, 4) });
-      return { root: r.root.name, direct: r.direct, transitive: r.transitive, affected: r.affected.slice(0, 100) };
+      // Drop the internal content-hash `id` from each item — the model reasons
+      // over name/file/line, and a 32-char blake3 per row is pure overhead.
+      return { root: r.root.name, direct: r.direct, transitive: r.transitive, affected: r.affected.slice(0, 100).map(stripId) };
     },
   },
   {
@@ -214,9 +274,104 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'check_drift',
-    description: 'Offline dependency inventory across npm/pypi/go (currency enrichment is the CLI’s --online opt-in).',
-    inputSchema: obj({}),
-    handler: (_graph, _args, ctx) => inventory(ctx.root),
+    description: 'Offline dependency inventory across npm/pypi/go (currency enrichment is the CLI’s --online opt-in). Pass attribute:true to add git "who added this / who set the version" attribution for npm deps.',
+    inputSchema: obj(
+      { attribute: { type: 'boolean', description: 'enrich npm deps with git introduction attribution (requires git; slower)' } },
+      [],
+    ),
+    handler: (_graph, args, ctx) => attributedInventory(ctx.root, { attribute: args.attribute === true }),
+  },
+  {
+    name: 'vuln_attribution',
+    description: 'Who introduced each open vulnerability and how long you have been exposed, plus CRA remediation metrics: open exposure windows, SLA breaches, and real remediation time (MTTR) reconstructed from vulnerable versions that were later bumped out or removed in git history. Offline read of the last `vg scan --vulns`.',
+    inputSchema: obj({ package: { type: 'string', description: 'optional: restrict to one package' } }, []),
+    handler: (_graph, args, ctx) => {
+      const data = loadVulnerabilities(ctx.root);
+      if (!data) {
+        return {
+          status: 'not_scanned',
+          message: 'No vulnerability data found. Run `vg scan --vulns` first (attribution needs git history at scan time).',
+        };
+      }
+      const only = args.package ? String(args.package) : null;
+      const packages = (only ? data.packages.filter((p) => p.package === only) : data.packages).map((p) => ({
+        ecosystem: p.ecosystem,
+        package: p.package,
+        installedVersion: p.version,
+        advisories: p.advisories.map((a) => ({
+          id: a.id,
+          cve: a.aliases.find((x) => x.startsWith('CVE-')) ?? null,
+          severity: a.severity,
+          cvss: a.cvss,
+          exposureDays: a.exposureDays ?? null,
+          introduced: a.introduced ?? null,
+          fixedVersions: a.fixedVersions,
+        })),
+      }));
+      return { status: 'ok', source: data.source, cra: data.cra ?? null, packages };
+    },
+  },
+  {
+    name: 'list_vulnerabilities',
+    description: 'Known vulnerabilities for installed dependencies, from the last `vg scan --vulns`. Offline read of the local scan artifact (no network); reports advisory id/CVE, severity, CVSS, and the fixed version.',
+    inputSchema: obj(
+      { severity: { type: 'string', enum: ['low', 'moderate', 'high', 'critical'], description: 'optional minimum severity to include' } },
+      [],
+    ),
+    handler: (_graph, args, ctx) => {
+      const data = loadVulnerabilities(ctx.root);
+      if (!data) {
+        return {
+          status: 'not_scanned',
+          message: 'No vulnerability data found. Run `vg scan --vulns` first (online OSV, or offline with a --package-manifest carrying advisories).',
+        };
+      }
+      const filtered = filterBySeverity(data, args.severity as VulnSeverity | undefined);
+      return {
+        status: 'ok',
+        source: filtered.source,
+        totalAdvisories: filtered.totalAdvisories,
+        affectedPackages: filtered.packages.length,
+        severityCounts: filtered.severityCounts,
+        packages: filtered.packages.map((p) => ({
+          ecosystem: p.ecosystem,
+          package: p.package,
+          installedVersion: p.version,
+          advisories: p.advisories.map((a) => ({
+            id: a.id,
+            cve: a.aliases.find((x) => x.startsWith('CVE-')) ?? null,
+            severity: a.severity,
+            cvss: a.cvss,
+            fixedVersions: a.fixedVersions,
+            summary: a.summary,
+          })),
+        })),
+      };
+    },
+  },
+  {
+    name: 'upgrade_impact',
+    description: 'A local "what breaks if I upgrade this" brief for a package: major-version distance + interim majors to step through, source blast radius (how many files import it), open vulnerabilities the upgrade would fix, and a recommended posture. Offline; richest after `vg scan`. Pass changelog:true to also fetch breaking-change signals from the package\'s GitHub releases (online; ignored under --local).',
+    inputSchema: obj(
+      {
+        package: { type: 'string', description: 'package name to assess' },
+        changelog: { type: 'boolean', description: 'also fetch breaking-change signals from GitHub releases between your version and latest (online; ignored under --local)' },
+      },
+      ['package'],
+    ),
+    handler: async (_graph, args, ctx) => {
+      const pkg = String(args.package ?? '');
+      if (!pkg) return { error: 'bad_request', message: 'package is required' };
+      const target = resolvePackageTarget(ctx.root, pkg);
+      const fixesVulnerabilities = openFixableAdvisories(ctx.root, pkg);
+      const impact = computeUpgradeImpact(ctx.root, { package: pkg, ...target }, { fixesVulnerabilities });
+      // Online breaking-change signals are strictly opt-in and never run under --local.
+      const changelog =
+        args.changelog === true && !ctx.local && target.ecosystem !== 'unknown'
+          ? await getChangelogSignals(target.ecosystem, pkg, target.currentVersion, target.latestVersion)
+          : undefined;
+      return { status: 'ok', ...impact, ...(changelog ? { changelog } : {}) };
+    },
   },
   {
     name: 'list_models',
@@ -292,12 +447,17 @@ export const TOOLS: VgTool[] = [
     handler: (_graph, args, ctx) => {
       const id = String(args.targetId ?? args.query ?? args.name ?? '');
       if (!id) return { error: 'bad_request', message: 'targetId or query is required' };
+      const query = String(args.query ?? args.name ?? '');
+      // Adaptive default: a focused question gets a `concise` slice (the ranked
+      // sections that answer it); a bare "give me the docs" keeps `balanced` so
+      // breadth isn't lost. Either is overridable via `verbosity`/`max_tokens`.
       const verbosity = ['concise', 'balanced', 'exhaustive'].includes(String(args.verbosity))
         ? (String(args.verbosity) as keyof typeof VERBOSITY_BUDGET)
-        : 'balanced';
+        : query
+          ? 'concise'
+          : 'balanced';
       const budget = numOrU(args.max_tokens) ?? numOrU(args.tokens) ?? VERBOSITY_BUDGET[verbosity];
       const ver = resolveVersion(ctx.root, id);
-      const query = String(args.query ?? args.name ?? '');
       const render = (readme: string, libName: string) => {
         const apiSurface = localApiSurface(ctx.root, libName);
         const sel = selectForBudget({ readme, query, apiSurface, budget });
@@ -361,6 +521,29 @@ export const TOOLS: VgTool[] = [
 
 /** Default token budgets by verbosity (canonical §4) when no explicit `max_tokens` is given. */
 const VERBOSITY_BUDGET = { concise: 1500, balanced: 4000, exhaustive: 12000 } as const;
+
+/** Shared map overview used by both `get_graph_summary` and `orient`. */
+function summarize(graph: VgGraph) {
+  return {
+    counts: graph.meta.counts,
+    languages: graph.meta.languages,
+    cluster: graph.meta.cluster,
+    resolver: graph.provenance.resolver,
+    generatedAt: graph.generatedAt,
+    topAreas: [...graph.areas].sort((a, b) => b.size - a.size).slice(0, 10).map((a) => ({ id: a.id, label: a.label, size: a.size })),
+    topHubs: graph.nodes
+      .filter((n) => n.isHub)
+      .sort((a, b) => b.importance - a.importance)
+      .slice(0, 10)
+      .map((n) => ({ name: n.qualifiedName, file: n.file, importance: n.importance })),
+  };
+}
+
+/** Drop the internal content-hash `id` from an impact item — model noise. */
+function stripId<T extends { id?: string }>(item: T): Omit<T, 'id'> {
+  const { id: _id, ...rest } = item;
+  return rest;
+}
 
 /** Map the internal drift note to the canonical §4 driftStatus vocabulary. */
 function driftStatusOf(d: { drift: string }): string {

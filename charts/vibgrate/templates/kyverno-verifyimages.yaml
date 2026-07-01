@@ -1,0 +1,80 @@
+{{- if and .Values.policy.enabled (or (eq .Values.policy.engine "kyverno") (eq .Values.policy.engine "both")) -}}
+# Requires Kyverno in the cluster: https://kyverno.io/docs/installation/
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: {{ include "vibgrate.fullname" . }}-verify-images
+  labels:
+    {{- include "vibgrate.labels" . | nindent 4 }}
+spec:
+  validationFailureAction: {{ .Values.policy.kyverno.validationFailureAction }}
+  webhookTimeoutSeconds: 30
+  background: false
+  rules:
+    - name: verify-vibgrate-images
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - {{ .Values.policy.registryGlob | quote }}
+          mutateDigest: true
+          required: true
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    subject: {{ .Values.policy.identityRegexp | quote }}
+                    issuer: {{ .Values.policy.oidcIssuer | quote }}
+                    rekor:
+                      url: {{ .Values.policy.rekorUrl | quote }}
+          {{- if or .Values.policy.requireSlsa .Values.policy.requireSbom .Values.policy.requireHcs .Values.policy.requireVex }}
+          attestations:
+            {{- if .Values.policy.requireSlsa }}
+            - type: {{ .Values.policy.slsaPredicateType | quote }}
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: "^https://github.com/slsa-framework/.*"
+                        issuer: {{ .Values.policy.oidcIssuer | quote }}
+                        rekor:
+                          url: {{ .Values.policy.rekorUrl | quote }}
+            {{- end }}
+            {{- if .Values.policy.requireSbom }}
+            - type: {{ .Values.policy.sbomPredicateType | quote }}
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: {{ .Values.policy.identityRegexp | quote }}
+                        issuer: {{ .Values.policy.oidcIssuer | quote }}
+                        rekor:
+                          url: {{ .Values.policy.rekorUrl | quote }}
+            {{- end }}
+            {{- if .Values.policy.requireHcs }}
+            - type: {{ .Values.policy.hcsPredicateType | quote }}
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: {{ .Values.policy.identityRegexp | quote }}
+                        issuer: {{ .Values.policy.oidcIssuer | quote }}
+                        rekor:
+                          url: {{ .Values.policy.rekorUrl | quote }}
+            {{- end }}
+            {{- if .Values.policy.requireVex }}
+            - type: {{ .Values.policy.vexPredicateType | quote }}
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: {{ .Values.policy.identityRegexp | quote }}
+                        issuer: {{ .Values.policy.oidcIssuer | quote }}
+                        rekor:
+                          url: {{ .Values.policy.rekorUrl | quote }}
+            {{- end }}
+          {{- end }}
+{{- end }}

@@ -4,9 +4,11 @@
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { XMLParser } from 'fast-xml-parser';
-import { readTextFile, FileCache } from '../utils/fs.js';
+import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
 import { withTimeout } from '../utils/timeout.js';
 import { MavenCache } from './maven-cache.js';
+import { loadGradleLockIndex, type GradleLockIndex } from './gradle-lockfile.js';
+import type { LockfileIo } from './npm-lockfile.js';
 import { latestLts, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
 import type { RuntimeCatalog } from '../runtimes/types.js';
@@ -335,7 +337,8 @@ function parseGradleBuild(content: string, filePath: string): GradleData {
 function mavenToSemver(ver: string): string | null {
   let v = ver.trim();
   if (!v || v.includes('$')) return null;
-  if (/(?:-SNAPSHOT|-alpha|-beta|-rc|-M\d|-CR\d)/i.test(v)) return null;
+  // Maven pre-release markers — both hyphen (-alpha, -rc) and dot (.Beta1, .RC1) forms
+  if (/(?:[-.](?:SNAPSHOT|alpha|beta|rc|M\d+|CR\d+))/i.test(v)) return null;
   v = v.replace(/\.(?:RELEASE|Final|GA)$/i, '');
   const parts = v.split('.');
   while (parts.length < 3) parts.push('0');
@@ -475,6 +478,16 @@ async function scanOneJavaProject(
     if (cycle) runtimeEolDate = eolDate(catalog, 'java', cycle);
   }
 
+  // Gradle's optional dependency locking pins exact resolved versions in gradle.lockfile (beside
+  // build.gradle). Prefer it over the declared/BOM-supplied version. Maven projects have no such
+  // file, so this is a no-op there.
+  const lockIo: LockfileIo = {
+    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
+    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
+    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
+  };
+  const lockIndex: GradleLockIndex | null = await loadGradleLockIndex(dir, lockIo).catch(() => null);
+
   // Resolve dependencies against Maven Central
   const dependencies: DependencyRow[] = [];
   const frameworks: DetectedFramework[] = [];
@@ -489,7 +502,9 @@ async function scanOneJavaProject(
   const resolved = await Promise.all(metaPromises);
 
   for (const { key, dep, meta } of resolved) {
-    const resolvedVersion = mavenToSemver(dep.version);
+    // Prefer the lockfile's exact version for this coordinate; else the declared version.
+    const lockedVersion = lockIndex?.resolve(key) ?? null;
+    const resolvedVersion = mavenToSemver(lockedVersion ?? dep.version);
     const latestStable = meta.latestStableOverall;
 
     let majorsBehind: number | null = null;

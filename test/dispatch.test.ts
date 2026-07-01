@@ -8,12 +8,16 @@ afterEach(() => {
 });
 
 describe('dispatch (simple-as-Google routing)', () => {
-  it('bare invocation builds the current folder', () => {
-    expect(dispatch([], '/tmp')).toEqual(['build']);
+  it('bare invocation scans (and maps) the current folder', () => {
+    expect(dispatch([], '/tmp')).toEqual(['scan']);
   });
 
-  it('global flags with no positional default to build', () => {
+  it('a build-only flag with no positional stays on build', () => {
     expect(dispatch(['--json'], '/tmp')).toEqual(['build', '--json']);
+  });
+
+  it('a non-build flag with no positional scans', () => {
+    expect(dispatch(['--quiet'], '/tmp')).toEqual(['scan', '--quiet']);
   });
 
   it('does not mistake a -C value for a command', () => {
@@ -32,10 +36,16 @@ describe('dispatch (simple-as-Google routing)', () => {
     expect(dispatch(['auth'], '/tmp')).toEqual(['ask', 'auth']);
   });
 
-  it('an existing path routes to build', () => {
+  it('an existing path routes to scan (which also maps)', () => {
     const dir = makeProject({ 'a.ts': 'x' });
     dirs.push(dir);
-    expect(dispatch([dir], '/tmp')).toEqual(['build', dir]);
+    expect(dispatch([dir], '/tmp')).toEqual(['scan', dir]);
+  });
+
+  it('an existing path with a build-only flag stays on build', () => {
+    const dir = makeProject({ 'a.ts': 'x' });
+    dirs.push(dir);
+    expect(dispatch([dir, '--only', 'ts'], '/tmp')).toEqual(['build', dir, '--only', 'ts']);
   });
 
   it('an explicit command moves to the front', () => {

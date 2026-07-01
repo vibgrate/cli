@@ -1,12 +1,10 @@
 {
-  "name": "@vibgrate/cli-public",
+  "name": "@vibgrate/cli",
   "version": "2026.625.0",
   "description": "vg — local codebase intelligence CLI + MCP server for AI coding agents: deterministic code graph, drift reporting, and version-correct library docs (Apache-2.0)",
   "type": "module",
   "license": "Apache-2.0",
   "packageManager": "pnpm@9.0.0",
-  "//name": "Canonical source of truth for the public CLI — we develop it in the monorepo (see the root AGENTS.md). github.com/vibgrate/cli is a published replica whose accepted community PRs are synced back via .github/workflows/sync-public-cli.yml. It is `private` so it never publishes from here; the replica publishes to npm as `@vibgrate/cli` (see `_publishedAs`).",
-  "private": true,
   "author": "Vibgrate",
   "homepage": "https://vibgrate.com",
   "repository": {
@@ -19,7 +17,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "_publishedAs": "@vibgrate/cli",
   "bin": {
     "vg": "dist/cli.js",
     "vibgrate": "dist/cli.js"

@@ -40,6 +40,16 @@ describe('uploadScanArtifact', () => {
     expect(url).toBe('https://us.ingest.vibgrate.com/v1/ingest/scan');
   });
 
+  it('appends ?force=1 when force is set (fresh ingest for scheduled/dashboard scans)', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse(200, { status: 'ok', ingestId: 'ing_3' }));
+
+    await uploadScanArtifact({ ...baseInput, force: true });
+
+    expect(fetchMock.mock.calls[0][0]).toBe('https://us.ingest.vibgrate.com/v1/ingest/scan?force=1');
+  });
+
   it('retries against the pinned region on a 409 REGION_MISMATCH', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')

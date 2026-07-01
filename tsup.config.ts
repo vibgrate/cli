@@ -20,7 +20,9 @@ export default defineConfig({
   //  - web-tree-sitter / tree-sitter-wasms ship their own .wasm assets.
   //  - typescript uses CommonJS require() internally; bundling breaks the resolver.
   //  - fastembed / onnxruntime-node carry native binaries (lazy, optional).
-  external: ['web-tree-sitter', 'tree-sitter-wasms', 'typescript', 'fastembed', 'onnxruntime-node'],
+  //  - yaml's CJS modules call require("process"); bundling into ESM turns that
+  //    into a dynamic-require shim that throws at runtime.
+  external: ['web-tree-sitter', 'tree-sitter-wasms', 'typescript', 'fastembed', 'onnxruntime-node', 'yaml'],
   minify: false,
   treeshake: true,
   sourcemap: true,

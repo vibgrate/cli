@@ -44,9 +44,13 @@ import { parseDsn } from './utils/dsn.js';
 import { loadPackageVersionManifest } from './package-version-manifest.js';
 import { generateWorkspaceRelationshipMermaid, generateProjectRelationshipMermaid, generateSolutionRelationshipMermaid } from './utils/mermaid.js';
 import { classifyProject, summarizeBilling } from './scanners/project-classification.js';
+import { collectVulnTargets, scanVulnerabilities, generateVulnerabilityFindings } from './scanners/vulnerability-scanner.js';
+import { attributeVulnerabilities } from './scoring/vuln-attribution.js';
+import { gitHistoryAvailable } from './utils/git-history.js';
+import { buildVersionTimelines } from './utils/version-timeline.js';
 import type {
   ScanArtifact, ScanOptions, ProjectScan, ExtendedScanResults, RepositoryInfo, SolutionScan,
-  VibgrateConfig,
+  VibgrateConfig, Finding,
 } from './types.js';
 import type { RuntimeCatalog } from './runtimes/types.js';
 
@@ -182,6 +186,7 @@ export async function runCoreScan(
     { id: 'drift', label: 'Computing drift score' },
     { id: 'findings', label: 'Generating findings' },
   ];
+  if (opts.postScan) steps.push({ id: 'map', label: 'Building code map' });
   progress.setSteps(steps);
 
   // ── Step: Config ──
@@ -616,6 +621,48 @@ export async function runCoreScan(
     stale: runtimeCatalogStale,
   };
 
+  // ── Step: Vulnerability scan (opt-in) ──
+  // Open detection via OSV (online) or advisories carried in an offline
+  // package-version manifest (air-gapped). Off unless `--vulns` is set, so the
+  // default scan keeps its behaviour, latency, and network surface.
+  let vulnFindings: Finding[] = [];
+  if (opts.vulns) {
+    progress.insertStepBefore('drift', { id: 'vulns', label: 'Scanning for vulnerabilities', weight: 3 });
+    progress.startStep('vulns');
+    const targets = collectVulnTargets(allProjects);
+    const vulnerabilities = await scanVulnerabilities(targets, { sem, offline: offlineMode, manifest: packageManifest });
+    // Attribute exposure to introducing commits via git history. Best-effort:
+    // skipped silently when git history is unavailable. We also run it when a
+    // package manifest is present but nothing is open, so remediation analysis can
+    // surface advisories for packages that are clean today but were vulnerable in
+    // history (real MTTR), not just the currently-open ones.
+    const wantRemediation = packageManifest != null;
+    if ((vulnerabilities.packages.length > 0 || wantRemediation) && (await gitHistoryAvailable(rootDir))) {
+      const cacheDir = !opts.noLocalArtifacts && !maxPrivacyMode ? path.join(rootDir, '.vibgrate') : undefined;
+      const timelines = await buildVersionTimelines(rootDir, { cacheDir });
+      attributeVulnerabilities(vulnerabilities, timelines, new Date().toISOString(), { manifest: packageManifest });
+    }
+    if (
+      vulnerabilities.source !== 'none' ||
+      vulnerabilities.packages.length > 0 ||
+      (vulnerabilities.cra != null && vulnerabilities.cra.remediatedCount > 0)
+    ) {
+      extended.vulnerabilities = vulnerabilities;
+    }
+    vulnFindings = generateVulnerabilityFindings(vulnerabilities);
+    const affected = vulnerabilities.packages.length;
+    progress.completeStep(
+      'vulns',
+      affected > 0
+        ? `${vulnerabilities.totalAdvisories} advisor${vulnerabilities.totalAdvisories === 1 ? 'y' : 'ies'} across ${affected} package${affected === 1 ? '' : 's'}`
+        // Distinguish "OSV unreachable" from a clean result so an empty answer is
+        // never read as "no vulnerabilities" (GUARDRAILS §1.4 — absent ≠ zero).
+        : vulnerabilities.source === 'unreachable'
+          ? 'OSV unreachable — not checked'
+          : 'none found',
+    );
+  }
+
   // ── Step: Drift score ──
   progress.startStep('drift');
   const drift = computeDriftScore(allProjects);
@@ -623,7 +670,7 @@ export async function runCoreScan(
 
   // ── Step: Findings ──
   progress.startStep('findings');
-  const findings = generateFindings(allProjects, config);
+  const findings = [...generateFindings(allProjects, config), ...vulnFindings];
   const warnCount = findings.filter((f) => f.level === 'warning').length;
   const errCount = findings.filter((f) => f.level === 'error').length;
   const noteCount = findings.filter((f) => f.level === 'note').length;
@@ -633,6 +680,19 @@ export async function runCoreScan(
   if (warnCount > 0) findingParts.push(`${warnCount} warning${warnCount !== 1 ? 's' : ''}`);
   if (noteCount > 0) findingParts.push(`${noteCount} note${noteCount !== 1 ? 's' : ''}`);
   progress.completeStep('findings', findingParts.join(', ') || 'none');
+
+  // ── Step: Code map (optional post-scan hook) ──
+  // Runs inside the same progress bar so one command yields the Drift Score plus
+  // a ready code map. Fail-soft: a map error never fails the scan.
+  if (opts.postScan) {
+    progress.startStep('map');
+    try {
+      const detail = await opts.postScan((done, total, phase) => progress.updateStepProgress('map', done, total, phase));
+      progress.completeStep('map', detail || 'done');
+    } catch {
+      progress.completeStep('map', 'skipped (map build failed)');
+    }
+  }
 
   progress.finish();
 

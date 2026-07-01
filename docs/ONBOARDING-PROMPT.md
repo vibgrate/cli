@@ -12,7 +12,7 @@ Help me set up Vibgrate to track upgrade drift in this project. Do the following
 1. Install the Vibgrate CLI:
    npm install -g @vibgrate/cli@latest
 
-2. Create a DSN token for dashboard uploads:
+2. Create a DSN token for Vibgrate Cloud uploads:
    npx vibgrate dsn create --workspace new
    
    Copy the DSN output (starts with vibgrate+https://...)
@@ -21,8 +21,8 @@ Help me set up Vibgrate to track upgrade drift in this project. Do the following
    - Add to ~/.zshrc (or ~/.bashrc): export VIBGRATE_DSN="<the-dsn-from-step-2>"
    - Source it: source ~/.zshrc
 
-4. Run a scan with dashboard push:
-   npx vibgrate scan . --push
+4. Run a scan with Vibgrate Cloud push:
+   npx vibgrate scan --push
 
 5. After the scan completes, tell me:
    - My overall drift score and risk level
@@ -41,12 +41,12 @@ When you paste this prompt, your AI assistant will:
 1. **Install the CLI** — Gets the latest Vibgrate CLI globally
 2. **Create a DSN** — Generates a token using `dsn create --workspace new`
 3. **Configure your environment** — Adds `VIBGRATE_DSN` to your shell profile
-4. **Run a scan with push** — Scans and uploads results to the dashboard
+4. **Run a scan with push** — Scans and uploads results to Vibgrate Cloud
 5. **Explain the results** — Summarizes your drift score and top priorities
 
 ---
 
-## Alternative: Quick Start Without Dashboard
+## Alternative: Quick Start Without Vibgrate Cloud
 
 If you just want to scan without creating an account, use this simpler prompt:
 
@@ -72,9 +72,9 @@ Add Vibgrate to my CI pipeline to track upgrade drift on every build.
 
 1. Create a GitHub Actions workflow at .github/workflows/drift.yml that:
    - Runs on push to main and on pull requests
-   - Executes: npx @vibgrate/cli scan . --format sarif --output drift.sarif
+   - Executes: npx @vibgrate/cli scan --format sarif --output drift.sarif
    - Uploads the SARIF file to GitHub Code Scanning
-   - Pushes results to the Vibgrate dashboard using secrets.VIBGRATE_DSN
+   - Pushes results to Vibgrate Cloud using secrets.VIBGRATE_DSN
 
 2. Add instructions for setting up the VIBGRATE_DSN secret in GitHub
 
@@ -107,7 +107,7 @@ Store this securely:
 ```
 The Vibgrate scan failed. Please:
 1. Check if there's a package.json, .csproj, requirements.txt, or pom.xml in the project
-2. Run with verbose output: npx @vibgrate/cli scan . --verbose
+2. Run with verbose output: npx @vibgrate/cli scan --verbose
 3. Explain what went wrong and how to fix it
 ```
 

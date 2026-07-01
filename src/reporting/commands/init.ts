@@ -31,7 +31,7 @@ export const initCommand = new Command('init')
 
     console.log('');
     console.log(chalk.bold('Next steps:'));
-    console.log(`  ${chalk.cyan('vibgrate scan .')}          Scan for upgrade drift`);
-    console.log(`  ${chalk.cyan('vibgrate baseline .')}      Create a drift baseline`);
+    console.log(`  ${chalk.cyan('vibgrate scan')}            Scan for upgrade drift`);
+    console.log(`  ${chalk.cyan('vibgrate baseline')}        Create a drift baseline`);
     console.log('');
   });

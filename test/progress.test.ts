@@ -9,14 +9,14 @@ describe('formatProgressLine (scan-style bar)', () => {
     expect(line).toContain('embedding');
     expect(line).toContain('50%');
     expect(line).toContain('50/100');
-    expect(line).toContain('━'); // filled segment
-    expect(line).toContain('╌'); // empty segment
+    expect(line).toContain('█'); // filled segment (smooth block bar)
+    expect(line).toContain('░'); // empty segment
   });
 
   it('clamps to 100% when done', () => {
     const line = plain(formatProgressLine('x', 10, 10, 1000, 3));
     expect(line).toContain('100%');
-    expect(line).not.toContain('╌'); // fully filled
+    expect(line).not.toContain('░'); // fully filled
   });
 
   it('shows an ETA mid-run but not at the very start', () => {

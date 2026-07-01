@@ -44,20 +44,22 @@ export type ProjectType =
 /**
  * Billing classification for a scanned project ("micro-project pricing").
  *
- * Every package is placed in one of three tiers by source-file count, source
+ * Every package is placed in one of four tiers by source-file count, source
  * byte size and dependency count, satisfying any two of the three limits for
  * the tier:
  *
- * - `'micro'`    — a very small, single-purpose package (e.g. a serverless
- *   function or micro-service). Billed at 1/10 of a standard project.
+ * - `'nano'`     — a minimal single-file or single-purpose package (e.g. a
+ *   tiny serverless function). Billed at 1/25 of a standard project.
+ * - `'micro'`    — a very small package (e.g. a serverless function or
+ *   micro-service). Billed at 1/10 of a standard project.
  * - `'small'`    — a modest component. Billed at 1/3 of a standard project.
  * - `'standard'` — a normal product component / solution sub-package. Billed
  *   as one full project.
  *
- * Billing weight is never risk weight: micro and small projects still roll up
- * fully into drift scores and the portfolio view.
+ * Billing weight is never risk weight: nano, micro and small projects still
+ * roll up fully into drift scores and the portfolio view.
  */
-export type ProjectClassification = 'micro' | 'small' | 'standard';
+export type ProjectClassification = 'nano' | 'micro' | 'small' | 'standard';
 
 export type OutputFormat = 'text' | 'json' | 'sarif' | 'md';
 
@@ -351,6 +353,179 @@ export interface RiskScore {
   methodologyVersion: string;
 }
 
+// ── Vulnerability detection (open: OSV / air-gap manifest) ──
+
+/** Package ecosystems for which vulnerability advisories can be resolved. */
+export type VulnEcosystem =
+  | 'npm'
+  | 'pypi'
+  | 'maven'
+  | 'nuget'
+  | 'go'
+  | 'cargo'
+  | 'composer'
+  | 'rubygems'
+  | 'pub'
+  | 'hex';
+
+/** Qualitative severity band. `unknown` distinguishes "no severity data" from a real low. */
+export type VulnSeverity = 'low' | 'moderate' | 'high' | 'critical' | 'unknown';
+
+/** Commit attribution: who introduced something, and when (from git history). */
+export interface CommitAttribution {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  /** Author date, ISO-8601 (from the commit, never wall-clock). */
+  date: string;
+  subject: string;
+}
+
+/** An affected version range, `[introduced, fixed)` (either bound optional). */
+export interface AffectedRange {
+  introduced?: string;
+  fixed?: string;
+}
+
+/** A single advisory affecting an installed package version. */
+export interface VulnerabilityAdvisory {
+  /** Primary advisory id (e.g. an OSV/GHSA id). */
+  id: string;
+  /** Alias identifiers, including CVE ids when present. */
+  aliases: string[];
+  /** Short human-readable summary, when provided. */
+  summary: string | null;
+  /** Qualitative severity. */
+  severity: VulnSeverity;
+  /** CVSS v3 base score (0–10), or null when not derivable from the advisory. */
+  cvss: number | null;
+  /** Raw CVSS vector string, when the advisory carried one. */
+  cvssVector: string | null;
+  /** First fixed version per affected range (empty when no fix is published). */
+  fixedVersions: string[];
+  /** ISO-8601 publish date, when known. */
+  published: string | null;
+  /** ISO-8601 withdrawal date; non-null means the advisory was withdrawn. */
+  withdrawn: string | null;
+  /** Advisory reference URLs. */
+  references: string[];
+  /** Affected version ranges for this package (used to attribute exposure over git history). */
+  affectedRanges?: AffectedRange[];
+  /** Explicit affected versions for this package, complementing ranges. */
+  affectedVersions?: string[];
+  /**
+   * Commit that started the current exposure to this advisory — i.e. when the
+   * installed package most recently entered (and stayed in) the affected range.
+   * Populated only when `--vulns` runs with git history available; null when
+   * unattributable (no git, non-npm ecosystem, or exposure predates the window).
+   */
+  introduced?: CommitAttribution | null;
+  /** Days from {@link introduced} to the scan time (open exposure). Null when not attributable. */
+  exposureDays?: number | null;
+}
+
+/** All advisories affecting one installed package@version. */
+export interface PackageVulnerabilities {
+  ecosystem: VulnEcosystem;
+  package: string;
+  version: string;
+  advisories: VulnerabilityAdvisory[];
+}
+
+/**
+ * CRA-style remediation metrics over currently-open vulnerabilities.
+ *
+ * Computed from exposure attribution (when did each advisory start applying to
+ * the installed code). All time-relative figures use the scan timestamp, not the
+ * wall clock, so a scan's metrics are reproducible. Counts distinguish "no data"
+ * (null) from zero.
+ */
+export interface CraRemediationMetrics {
+  /** Number of open (currently-affecting) advisories. */
+  openCount: number;
+  /** Open advisories by severity. */
+  openBySeverity: Record<VulnSeverity, number>;
+  /** SLA target days per severity used to flag breaches. */
+  slaDays: Record<VulnSeverity, number | null>;
+  /** Open advisories whose exposure age exceeds their severity SLA. */
+  slaBreaches: number;
+  /** Longest open exposure in days across attributed advisories, or null if none attributed. */
+  maxOpenExposureDays: number | null;
+  /** Mean open exposure in days across attributed advisories, or null if none attributed. */
+  meanOpenExposureDays: number | null;
+  /** How many open advisories had a usable introduction commit (attribution coverage). */
+  attributedCount: number;
+  /**
+   * Closed exposure windows found in git history: a vulnerable version that was
+   * later bumped out of the affected range or removed entirely. The real
+   * remediation signal, distinct from the still-open exposure above.
+   */
+  remediatedCount: number;
+  /** Mean real remediation time (introduced→remediated) across closed windows — actual MTTR — or null if none. */
+  meanRemediationDays: number | null;
+  /** Longest real remediation time across closed windows, or null if none. */
+  maxRemediationDays: number | null;
+}
+
+/** Result of the (opt-in) vulnerability scan. */
+export interface VulnerabilityScanResult {
+  /**
+   * How advisory data was sourced:
+   * - `osv` — OSV was reached and answered (empty `packages` means "checked, clean").
+   * - `manifest` — advisories matched from an offline package-version manifest.
+   * - `unreachable` — OSV could not be reached (all batches failed after retries) and
+   *   no manifest data was available. Empty `packages` here means "not checked", NOT
+   *   "clean" — callers must distinguish absent from zero (GUARDRAILS §1.4).
+   * - `none` — no targets to scan / nothing to report.
+   */
+  source: 'osv' | 'manifest' | 'unreachable' | 'none';
+  /** Packages with at least one advisory affecting the installed version, sorted deterministically. */
+  packages: PackageVulnerabilities[];
+  /** Total distinct (package, advisory) pairs. */
+  totalAdvisories: number;
+  /** Count of affected packages by their worst advisory severity. */
+  severityCounts: Record<VulnSeverity, number>;
+  /** CRA remediation metrics (present when attribution ran). */
+  cra?: CraRemediationMetrics;
+}
+
+// ── Upgrade impact (open: drift distance × source usage) ──
+
+/** Where and how much an installed package is used in the source tree. */
+export interface UpgradeUsage {
+  /** Total import/require sites referencing the package. */
+  importSites: number;
+  /** Distinct source files that reference the package. */
+  filesTouched: number;
+  /** A few example files (repo-relative), for orientation. */
+  sampleFiles: string[];
+}
+
+/** How disruptive upgrading a drifted package is likely to be. */
+export type BlastRadius = 'none' | 'low' | 'moderate' | 'high';
+
+/** Recommended upgrade posture for a package. */
+export type UpgradePosture = 'current' | 'patch-minor' | 'single-major' | 'multi-major-plan';
+
+/** Local "what breaks if I upgrade this" brief for one drifted package. */
+export interface UpgradeImpactResult {
+  package: string;
+  ecosystem: VulnEcosystem | 'unknown';
+  currentVersion: string | null;
+  latestVersion: string | null;
+  majorsBehind: number | null;
+  /** Intermediate major lines to step through, e.g. ['6.x','7.x'] for 5 → 8. */
+  interimMajors: string[];
+  usage: UpgradeUsage;
+  blastRadius: BlastRadius;
+  recommendation: UpgradePosture;
+  /** Open advisory ids fixed by upgrading (when known from the last vuln scan). */
+  fixesVulnerabilities: string[];
+  /** Human-readable, deterministic notes (interim steps, hotspots, caveats). */
+  notes: string[];
+}
+
 // ── Finding (for SARIF and text output) ──
 
 export interface Finding {
@@ -392,23 +567,28 @@ export interface TreeCount {
 // ── Billing roll-up derived from project classifications ──
 
 export interface BillingSummary {
+  /** Number of projects classified as `'nano'`. */
+  nanoCount: number;
   /** Number of projects classified as `'micro'`. */
   microCount: number;
   /** Number of projects classified as `'small'`. */
   smallCount: number;
   /** Number of projects classified as `'standard'`. */
   standardCount: number;
-  /** Total scanned packages (`microCount` + `smallCount` + `standardCount`). */
+  /** Total scanned packages (`nanoCount` + `microCount` + `smallCount` + `standardCount`). */
   totalScanned: number;
+  /** How many nano projects are billed as one standard project (see {@link NANO_BILLING_RATIO}). */
+  nanoBillingRatio: number;
   /** How many micro projects are billed as one standard project (see {@link MICRO_BILLING_RATIO}). */
   microBillingRatio: number;
   /** How many small projects are billed as one standard project (see {@link SMALL_BILLING_RATIO}). */
   smallBillingRatio: number;
   /**
    * Exact fractional project-equivalents: each standard project counts as 1,
-   * each small project as 1/`smallBillingRatio` and each micro project as
-   * 1/`microBillingRatio`. Rounded to 2 decimal places. Used for the estimator
-   * and transparency, not as the headline billable figure.
+   * each small project as 1/`smallBillingRatio`, each micro project as
+   * 1/`microBillingRatio` and each nano project as 1/`nanoBillingRatio`.
+   * Rounded to 2 decimal places. Used for the estimator and transparency, not
+   * as the headline billable figure.
    */
   billableProjectsRaw: number;
   /**
@@ -470,6 +650,12 @@ export interface ScanOptions {
   maxPrivacy?: boolean;
   /** Run without any network calls; drift may be partial without a package manifest */
   offline?: boolean;
+  /**
+   * Opt in to known-vulnerability scanning. Online, queries the public OSV
+   * database; offline, matches advisories carried in a `--package-manifest`.
+   * Off by default — vulnerability scanning is a deliberate, separate pass.
+   */
+  vulns?: boolean;
   /** Path to package-version manifest JSON or ZIP used in offline/privacy workflows */
   packageManifest?: string;
   /** Fail the run if drift score is above this absolute budget */
@@ -487,6 +673,18 @@ export interface ScanOptions {
    *  directory basename / package.json name (used by scheduled scans that clone
    *  into a generic working directory). */
   repositoryName?: string;
+  /** Force a fresh ingest even when the repository is unchanged since the last
+   *  scan. Skips the "unchanged → reuse previous ingest" optimization on both
+   *  the preflight short-circuit and the ingest upload. Used by scheduled and
+   *  dashboard-triggered scans, which should always produce a new report. */
+  force?: boolean;
+  /**
+   * Optional post-scoring step run inside the scan's progress bar, after findings
+   * (e.g. building the local code map). Receives a progress reporter
+   * `(done, total, phase)` and returns a short detail string for the step.
+   * Fail-soft: a thrown error never fails the scan.
+   */
+  postScan?: (report: (done: number, total: number, phase: string) => void) => Promise<string | void>;
 }
 
 export interface InitOptions {
@@ -1048,6 +1246,13 @@ export interface ExtendedScanResults {
   ossGovernance?: OssGovernanceResult;
   /** Recommended standards/best-practices matched to the repo's detected purpose (offline). */
   standards?: StandardsRecommendations;
+  /**
+   * Known-vulnerability findings for installed package versions. Populated only
+   * when vulnerability scanning is opted in (`--vulns`, online via OSV) or when
+   * an offline package-version manifest carries advisory data. Absent otherwise —
+   * never fabricated, so "no field" means "not scanned", not "no vulnerabilities".
+   */
+  vulnerabilities?: VulnerabilityScanResult;
   /**
    * Provenance of the Runtime Catalog used to compute runtime currency and EOL —
    * where it was resolved from (live API, local cache, offline manifest, or the

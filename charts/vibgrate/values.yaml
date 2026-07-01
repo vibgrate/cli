@@ -1,0 +1,119 @@
+# Default values for the Vibgrate scanner chart.
+
+image:
+  repository: ghcr.io/vibgrate/cli
+  # Defaults to the chart's appVersion (a tested, signed CLI release) when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# --- Workspace connection -------------------------------------------------
+# DSN that pushes scan results to your Vibgrate workspace
+# (vibgrate+https://<key>:<secret>@ingest.vibgrate.com/<workspace>).
+# Provide it inline with --set dsn=... OR reference a Secret you already manage.
+dsn: ""
+existingSecret: ""
+existingSecretKey: "VIBGRATE_DSN"
+
+# --- What to scan ---------------------------------------------------------
+# If repository.url is set, an init container clones it into the work volume
+# before the scan. Otherwise mount your own source via extraVolumes/Mounts.
+repository:
+  url: ""
+  ref: ""            # optional branch/tag/SHA
+  # Secret holding a git token under the given key (for private repos).
+  tokenSecret: ""
+  tokenSecretKey: "GIT_TOKEN"
+
+# Arguments passed to the scanner. `--push` sends results to the workspace.
+scanArgs:
+  - "scan"
+  - "/work"
+  - "--push"
+
+# --- Schedule -------------------------------------------------------------
+schedule: "0 3 * * *"          # nightly at 03:00
+concurrencyPolicy: Forbid
+successfulJobsHistoryLimit: 3
+failedJobsHistoryLimit: 3
+# Set to true to run a one-off Job on install in addition to the CronJob.
+runOnInstall: false
+
+# --- Pod settings ---------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra volumes/mounts (e.g. to mount an existing source PVC at /work).
+extraVolumes: []
+extraVolumeMounts: []
+
+# --- Admission enforcement (optional) -------------------------------------
+# Ship cluster admission policies alongside the scanner so a regulated estate
+# only runs Vibgrate images that carry our full signed-and-attested set
+# (keyless signature + SLSA provenance + CycloneDX SBOM + OpenVEX). The HCS
+# self-attestation is produced on the source supply chain, not bound to the
+# public OSS image, so it is not an admission requirement here.
+# Disabled by default — installing the scanner doesn't impose cluster-wide
+# enforcement until you opt in. Requires the chosen controller to be installed
+# (Sigstore policy-controller or Kyverno). See docs/SIGNING-AND-PROVENANCE.md.
+policy:
+  enabled: false
+  # Which controller(s) to render rules for: policy-controller | kyverno | both
+  engine: policy-controller
+  # Images these rules apply to.
+  registryGlob: "ghcr.io/vibgrate/**"
+  # Keyless trust roots.
+  oidcIssuer: https://token.actions.githubusercontent.com
+  fulcioUrl: https://fulcio.sigstore.dev
+  rekorUrl: https://rekor.sigstore.dev
+  # The signing identity: a Vibgrate release workflow. Matches docker.yml in the
+  # public repo github.com/vibgrate/cli.
+  identityRegexp: "^https://github.com/vibgrate/cli/.*"
+  # Required attestations bound to the image digest.
+  requireSlsa: true
+  requireSbom: true
+  # HCS self-attestation is on the source supply chain, not the public OSS image
+  # (the closed-source engine that emits it doesn't ship in vibgrate/cli), so it
+  # is not required for admission of the public image.
+  requireHcs: false
+  # VEX is attached to every image but not required by default.
+  requireVex: false
+  slsaPredicateType: slsaprovenance
+  sbomPredicateType: cyclonedx
+  hcsPredicateType: https://vibgrate.com/attestations/hcs/v0.5
+  vexPredicateType: openvex
+  # Kyverno-only: Enforce (block) or Audit (report).
+  kyverno:
+    validationFailureAction: Enforce
+

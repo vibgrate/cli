@@ -3,14 +3,14 @@
 // and re-run the vendor script. Apache-2.0.
 import chalk from 'chalk';
 import type { ScanArtifact, ExtendedScanResults, InventoryItem, ServiceDependencyItem, LayerSummary, ArchitectureResult } from '../types.js';
+import { driftBar } from '../ui/bar.js';
+import { titleBox } from '../ui/box.js';
 
 export function formatText(artifact: ScanArtifact): string {
   const lines: string[] = [];
 
   lines.push('');
-  lines.push(chalk.bold.cyan('╔══════════════════════════════════════════╗'));
-  lines.push(chalk.bold.cyan('║        Vibgrate Drift Report             ║'));
-  lines.push(chalk.bold.cyan('╚══════════════════════════════════════════╝'));
+  lines.push(...titleBox('Vibgrate Drift Report'));
   lines.push('');
 
   // Per-project
@@ -89,9 +89,7 @@ export function formatText(artifact: ScanArtifact): string {
   // Priority actions
   const actions = generatePriorityActions(artifact);
   if (actions.length > 0) {
-    lines.push(chalk.bold.cyan('╔══════════════════════════════════════════╗'));
-    lines.push(chalk.bold.cyan('║        Top Priority Actions              ║'));
-    lines.push(chalk.bold.cyan('╚══════════════════════════════════════════╝'));
+    lines.push(...titleBox('Top Priority Actions'));
     lines.push('');
     for (let i = 0; i < actions.length; i++) {
       const a = actions[i];
@@ -112,9 +110,7 @@ export function formatText(artifact: ScanArtifact): string {
   // They are still included in JSON output for dashboard/API consumption.
 
   if (artifact.solutions && artifact.solutions.length > 0) {
-    lines.push(chalk.bold.cyan('╔══════════════════════════════════════════╗'));
-    lines.push(chalk.bold.cyan('║        Solution Drift Summary            ║'));
-    lines.push(chalk.bold.cyan('╚══════════════════════════════════════════╝'));
+    lines.push(...titleBox('Solution Drift Summary'));
     lines.push('');
     for (const solution of artifact.solutions) {
       const solScore = solution.drift?.score;
@@ -128,9 +124,7 @@ export function formatText(artifact: ScanArtifact): string {
   const scoreColor = artifact.drift.score <= 30 ? chalk.green :
     artifact.drift.score <= 60 ? chalk.yellow : chalk.red;
 
-  lines.push(chalk.bold.cyan('╔══════════════════════════════════════════╗'));
-  lines.push(chalk.bold.cyan('║        Drift Score Summary               ║'));
-  lines.push(chalk.bold.cyan('╚══════════════════════════════════════════╝'));
+  lines.push(...titleBox('Drift Score Summary'));
   lines.push('');
   lines.push(chalk.bold('  Drift Score:  ') + scoreColor.bold(`${artifact.drift.score}/100`));
   lines.push(chalk.bold('  Risk Level:   ') + riskBadge(artifact.drift.riskLevel));
@@ -142,7 +136,7 @@ export function formatText(artifact: ScanArtifact): string {
   if (billing) {
     lines.push(
       chalk.bold('  Classified:   ') +
-        `${chalk.cyan(billing.microCount)} micro · ${chalk.cyan(billing.smallCount)} small · ${chalk.cyan(billing.standardCount)} standard`,
+        `${chalk.cyan(billing.nanoCount)} nano · ${chalk.cyan(billing.microCount)} micro · ${chalk.cyan(billing.smallCount)} small · ${chalk.cyan(billing.standardCount)} standard`,
     );
     lines.push(
       chalk.bold('  Billable:     ') +
@@ -200,11 +194,8 @@ function riskBadge(level: string): string {
 
 function scoreBar(score: number): string {
   // Drift bar: the fill shows how much drift exists (0 = empty/best, 100 = full/worst).
-  const width = 20;
-  const filled = Math.round((score / 100) * width);
-  const empty = width - filled;
-  const color = score <= 30 ? chalk.green : score <= 60 ? chalk.yellow : chalk.red;
-  return color('█'.repeat(filled)) + chalk.dim('░'.repeat(empty)) + ` ${Math.round(score)}`;
+  // Sub-cell gradient fill (green → the score's own risk colour) for a smoother read.
+  return driftBar(score, 20);
 }
 
 // ── Extended results summary ──
@@ -431,9 +422,7 @@ interface PriorityAction {
 
 function formatArchitectureDiagram(arch: ArchitectureResult): string[] {
   const lines: string[] = [];
-  lines.push(chalk.bold.cyan('╔══════════════════════════════════════════╗'));
-  lines.push(chalk.bold.cyan('║        Architecture Layers               ║'));
-  lines.push(chalk.bold.cyan('╚══════════════════════════════════════════╝'));
+  lines.push(...titleBox('Architecture Layers'));
   lines.push('');
   lines.push(chalk.bold('  Archetype: ') + `${arch.archetype}` + chalk.dim(` (${Math.round(arch.archetypeConfidence * 100)}% confidence)`));
   lines.push(`  Files classified: ${arch.totalClassified}` + (arch.unclassified > 0 ? chalk.dim(` (${arch.unclassified} unclassified)`) : ''));

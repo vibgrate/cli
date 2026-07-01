@@ -66,17 +66,55 @@ export {
   summarizeBilling,
   normalizeClassification,
   classificationBillingWeight,
+  NANO_MAX_FILES,
+  NANO_MAX_SIZE_BYTES,
+  NANO_MAX_DEPENDENCIES,
   MICRO_MAX_FILES,
   MICRO_MAX_SIZE_BYTES,
   MICRO_MAX_DEPENDENCIES,
   SMALL_MAX_FILES,
   SMALL_MAX_SIZE_BYTES,
   SMALL_MAX_DEPENDENCIES,
+  NANO_BILLING_RATIO,
   MICRO_BILLING_RATIO,
   SMALL_BILLING_RATIO,
   STANDARD_BILLING_RATIO,
   type ProjectClassificationInput,
 } from './scanners/project-classification.js';
+
+// ── Vulnerability detection (open: OSV / air-gap manifest) ───────────────────
+export {
+  scanVulnerabilities,
+  collectVulnTargets,
+  generateVulnerabilityFindings,
+  isVersionAffected,
+  parseOsvAdvisory,
+  projectTypeToVulnEcosystem,
+  VULN_RULE_ID,
+  type VulnTarget,
+} from './scanners/vulnerability-scanner.js';
+export { cvssV3BaseScore, severityFromCvss, severityRank, normalizeSeverityLabel } from './scoring/cvss.js';
+export { computeUpgradeImpact, analyzeUsage, computeVersionJump } from './scanners/upgrade-impact.js';
+export {
+  getChangelogSignals,
+  extractBreakingSignals,
+  signalsFromReleases,
+  parseGitHubRepo,
+  versionFromTag,
+  inUpgradeRange,
+  type ChangelogSignals,
+  type ReleaseSignals,
+  type RawRelease,
+} from './scanners/changelog-signals.js';
+export {
+  attributeVulnerabilities,
+  computeCra,
+  findIntroduced,
+  analyzeExposureWindows,
+  isAffectedByAdvisory,
+  DEFAULT_CRA_SLA_DAYS,
+  type ExposureWindow,
+} from './scoring/vuln-attribution.js';
 
 // ── Registry caches ────────────────────────────────────────────────────────
 export { NpmCache, checkRegistryAccess } from './scanners/npm-cache.js';
@@ -107,6 +145,33 @@ export {
 export { Semaphore } from './utils/semaphore.js';
 export { parseExcludePatterns, compileGlobs } from './utils/glob.js';
 export { detectVcs } from './utils/vcs.js';
+export {
+  gitHistoryAvailable,
+  resolveToplevel,
+  resolveHead,
+  fileCommits,
+  fileAtCommit,
+  DEFAULT_MAX_COMMITS,
+  type GitCommitRef,
+} from './utils/git-history.js';
+export {
+  buildVersionTimelines,
+  findPackageTimeline,
+  findPackageAnyEcosystem,
+  parseNpmLockfile,
+  parseLockfile,
+  type VersionChange,
+  type PresenceEvent,
+  type PackageTimeline,
+  type EcosystemTimeline,
+  type VersionTimelines,
+} from './utils/version-timeline.js';
+export {
+  findVersionCrossings,
+  normalizeConstraint,
+  versionSatisfies,
+  type VersionCrossing,
+} from './utils/version-bisect.js';
 export {
   generateWorkspaceRelationshipMermaid,
   generateProjectRelationshipMermaid,

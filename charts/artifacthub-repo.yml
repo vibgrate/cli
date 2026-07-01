@@ -1,0 +1,8 @@
+# Artifact Hub repository metadata. Pushed to the OCI registry as an
+# artifacthub-repo media-type artifact by helm.yml (in vibgrate/cli) so Artifact Hub can
+# verify ownership and display the verified-publisher badge.
+# repositoryID is issued by Artifact Hub when the repo is first registered.
+repositoryID: ""
+owners:
+  - name: Vibgrate
+    email: support@vibgrate.com

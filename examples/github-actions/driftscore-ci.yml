@@ -17,7 +17,7 @@ jobs:
 
       - name: Run Vibgrate drift gate
         run: |
-          npx @vibgrate/cli scan . \
+          npx @vibgrate/cli scan \
             --format json \
             --out vibgrate-report.json \
             --fail-on error \
