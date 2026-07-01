@@ -12,7 +12,7 @@
   <a href="https://www.npmjs.com/package/@vibgrate/cli"><img src="https://img.shields.io/npm/v/@vibgrate/cli?color=blue&label=npm" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/@vibgrate/cli"><img src="https://img.shields.io/npm/dm/@vibgrate/cli?color=green" alt="npm downloads" /></a>
   <a href="https://vibgrate.com/cli"><img src="https://img.shields.io/badge/live%20demo-vibgrate.com%2Fcli-3FB0A4" alt="live demo" /></a>
-  <a href="https://vibgrate.com/mcp"><img src="https://img.shields.io/badge/MCP%20server-vibgrate.com%2Fmcp-8B5CF6" alt="MCP server" /></a>
+  <a href="https://vibgrate.com/mcp"><img src="https://img.shields.io/badge/Vibgrate%20MCP%20(hosted)-vibgrate.com%2Fmcp-8B5CF6" alt="Vibgrate MCP (hosted)" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="node 22+" />
 </p>
@@ -30,13 +30,17 @@ Everything runs **on your machine**. No API key, no network call, no data leavin
 
 <p align="center">
   <a href="https://vibgrate.com/cli">
-    <img src="https://vibgrate.com/img/cli/cli.png" alt="Vibgrate CLI scanning a repository" width="640" />
+    <img src="docs/demo/cli-demo.svg" alt="Animated terminal replay: npx @vibgrate/cli scan produces a 74/100 drift score, a score breakdown, and ranked upgrade priorities." width="620" />
   </a>
 </p>
 
 <p align="center">
+  <sub>A real <code>vg scan</code> replay — drift score, breakdown, and ranked priorities in one command. Animation plays right here on GitHub; nothing runs in your browser.</sub>
+</p>
+
+<p align="center">
   <a href="https://vibgrate.com/cli"><strong>▶ Try the live, interactive CLI simulator →</strong></a><br />
-  <sub>Replays real <code>vg</code> runs against sample repos — nothing executes in your browser.</sub>
+  <sub>Step through every command (<code>scan</code>, <code>build</code>, <code>ask</code>, <code>why</code>, …) against real sample repos.</sub>
 </p>
 
 ---
@@ -64,9 +68,11 @@ npx vg scan                     # vg is the primary command; vibgrate is an alia
 
 ## Use it with your AI assistant
 
-`vg` ships a local **MCP server** that gives any MCP-compatible AI assistant
-(Claude, Cursor, Windsurf, Copilot, Gemini CLI, …) real-time, offline access to
-your code graph — no context-window stuffing, no hallucinated APIs.
+`vg serve` starts **Vibgrate AI Context** — a local, offline MCP server that
+gives any MCP-compatible assistant (Claude, Cursor, Windsurf, Copilot, Gemini
+CLI, …) your code map, **offline drift**, local models, and **version-correct
+library docs**, all from your machine (no account, nothing uploaded). No
+context-window stuffing, no hallucinated APIs.
 
 Wire it up in one command:
 
@@ -99,7 +105,7 @@ The graph is byte-deterministic and reproducible — the same repo always produc
 
 ```bash
 vg share                        # make the graph committable + auto-updating for the team
-vg serve                        # expose graph as a local MCP server
+vg serve                        # start Vibgrate AI Context (local, offline MCP: code map + drift + version-correct docs)
 ```
 
 ---
@@ -108,7 +114,7 @@ vg serve                        # expose graph as a local MCP server
 
 ```bash
 vg scan                         # drift score + risk level + ranked priorities
-vg scan --push                  # same, and upload to your dashboard for trend tracking
+vg scan --push                  # same, and upload to Vibgrate Cloud for trend tracking
 vg baseline                     # snapshot current drift for regression gating
 vg report                       # generate a report from a saved scan artifact
 ```
@@ -120,6 +126,29 @@ One scan gives you:
 - **Per-project detail** across Node.js/TypeScript, .NET, Python, and Java
 - **Actionable findings** ranked by likely impact
 - **SBOM export** (CycloneDX / SPDX)
+- **Known vulnerabilities** (opt in with `--vulns`) — severity, CVSS, the fixing version, and, in a git repo, who introduced them
+
+---
+
+## Find known vulnerabilities and who introduced them
+
+`vg scan --vulns` checks your installed dependencies against the public OSV database and reports each known vulnerability with its severity, CVSS score, and the version that fixes it — as text, JSON, or SARIF. Add `--package-manifest` to run it fully offline from a local advisory bundle.
+
+```bash
+vg scan --vulns                 # drift score + known vulnerabilities
+vg scan --full                  # drift + vulnerabilities + a banned-dependency report
+```
+
+In a git repository, every finding is attributed from history: who introduced the vulnerable version, in which commit, and how long you have been exposed. Those exposure windows roll up into remediation metrics framed around the EU Cyber Resilience Act (CRA) — per-severity time-exposed and SLA breaches — so "are we fixing things fast enough?" has a number.
+
+```bash
+vg why lodash                   # who added a dependency, every version since, and any open vulnerabilities
+vg bisect lodash 4.17.21        # the commit where lodash crossed a version line (e.g. reached the fix)
+```
+
+Detection and attribution span the whole npm ecosystem (npm, pnpm, yarn) plus pip/poetry, cargo, composer, bundler, go, pub, hex, NuGet, and Maven/Gradle — read from each project's lockfile, so it works whatever you build in.
+
+Your AI assistant sees this too: `vg serve` exposes `list_vulnerabilities`, `vuln_attribution`, and an `upgrade_impact` tool that tells an agent what an upgrade will cost — version distance, how many files import the package, the vulnerabilities it fixes, and (online, opt in) the breaking-change notes between your version and the latest.
 
 ---
 
@@ -162,7 +191,7 @@ Drop `vg` into any pipeline to turn drift scoring into a quality gate:
 Gate on drift budgets and regression relative to a baseline:
 
 ```bash
-vg baseline .
+vg baseline
 vg scan --baseline .vibgrate/baseline.json --drift-budget 40 --drift-worsening 5
 ```
 
@@ -244,8 +273,8 @@ See [docs/QUICKSTART-PROMPT.md](./docs/QUICKSTART-PROMPT.md) for the full prompt
 | `vg tree <file>` | Call tree rooted at a node |
 | `vg insights` | Overview: hubs, hotspots, untested paths |
 | `vg lib <package>` | Version-correct, drift-annotated library docs |
-| `vg serve` | Start the local MCP server for AI assistants |
-| `vg install` | Wire the MCP server + skill into your AI assistant |
+| `vg serve` | Start **Vibgrate AI Context** (local, offline MCP: code map + drift + version-correct docs) |
+| `vg install` | Wire **Vibgrate AI Context** + skill into your AI assistant |
 | `vg share` | Make the graph committable + auto-updating for your team |
 | `vg status` | Cache/freshness, counts, staleness |
 | `vg facts <file>` | Deterministic facts for a node (contracts, invariants) |
@@ -258,19 +287,23 @@ See [docs/QUICKSTART-PROMPT.md](./docs/QUICKSTART-PROMPT.md) for the full prompt
 | Command | Description |
 | --- | --- |
 | `vg scan [path]` | Scan for upgrade drift |
-| `vg scan --push` | Scan and push results to your dashboard |
+| `vg scan --vulns` | Also detect known vulnerabilities (OSV; offline via `--package-manifest`) |
+| `vg scan --full` | Comprehensive scan: drift + vulnerabilities + a banned-dependency report |
+| `vg why <package>` | Who introduced a dependency, its version history, and any open vulnerabilities |
+| `vg bisect <package> <constraint>` | The commit where a dependency crossed a version line (`--assert` to gate CI) |
+| `vg scan --push` | Scan and push results to Vibgrate Cloud |
 | `vg baseline [path]` | Create a drift baseline |
 | `vg report` | Generate a report from a scan artifact |
 | `vg sbom export` | Export CycloneDX or SPDX SBOM |
 | `vg sbom delta` | Compare two artifacts for SBOM drift |
 | `vg vex` | Generate an OpenVEX document for attestation |
 | `vg init [path]` | Initialise config and `.vibgrate/` |
-| `vg push` | Upload scan results to your dashboard |
+| `vg push` | Upload scan results to Vibgrate Cloud |
 | `vg dsn create` | Generate a DSN token |
 | `vg update` | Check for and install updates |
 
 ```bash
-vg scan [path] [--format text|json|sarif|md] [--out <file>] [--fail-on warn|error] \
+vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [--fail-on warn|error] \
   [--offline] [--package-manifest <file>] [--no-local-artifacts] [--max-privacy] \
   [--drift-budget <score>] [--drift-worsening <percent>] [--baseline <file>]
 ```
@@ -298,6 +331,20 @@ Recommended rollout: `vg build` + `vg install` now, add `vg scan` to CI this wee
 - Node.js **22+**
 - macOS, Linux, Windows
 
+## Command name conflicts
+
+`vg` is short and occasionally conflicts with other tools (`virtualgo`, `vugu`, the oh-my-zsh `git verify-commit` alias, custom shell aliases, etc.).
+
+**`vibgrate` is an identical alias** — same binary, same flags, same behaviour. If `vg` is taken on your system, use `vibgrate` everywhere instead:
+
+```bash
+vibgrate scan          # same as: vg scan
+vibgrate build         # same as: vg build
+vibgrate serve         # same as: vg serve
+```
+
+When `@vibgrate/cli` is installed, it registers **both** bin entries unconditionally. If it detects at install time that `vg` is already claimed by another tool, it prints a one-line notice pointing you to `vibgrate`.
+
 ---
 
 <p align="center">
@@ -305,7 +352,9 @@ Recommended rollout: `vg build` + `vg install` now, add `vg scan` to CI this wee
   &nbsp;·&nbsp;
   <a href="https://vibgrate.com/cli">Try the live demo</a>
   &nbsp;·&nbsp;
-  <a href="https://vibgrate.com/mcp">MCP server docs</a>
+  <a href="./DOCS.md">Vibgrate AI Context (local MCP)</a>
+  &nbsp;·&nbsp;
+  <a href="https://vibgrate.com/mcp">Vibgrate MCP (hosted)</a>
   &nbsp;·&nbsp;
   <a href="https://vibgrate.com/skills">AI agent skills</a>
   &nbsp;·&nbsp;

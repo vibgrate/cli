@@ -4,7 +4,8 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as semver from 'semver';
-import { findPackageJsonFiles, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
+import { findPackageJsonFiles, readJsonFile, readTextFile, pathExists, FileCache } from '../utils/fs.js';
+import { loadNpmLockIndex, type NpmLockIndex, type LockfileIo } from './npm-lockfile.js';
 import { Semaphore } from '../utils/semaphore.js';
 import { withTimeout } from '../utils/timeout.js';
 import { NpmCache, isSemverSpec } from './npm-cache.js';
@@ -172,6 +173,17 @@ export async function scanNodeProjects(
     }
   } catch { /* detection is best-effort */ }
 
+  // ── Parse the root lockfile once ──
+  // A lockfile gives each dependency's EXACT installed version, which is more accurate than the
+  // registry's best-match for the declared range and is the only source of a resolved version when
+  // offline. One root lockfile covers a whole (mono)repo, so parse it once and share it.
+  const lockIo: LockfileIo = {
+    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
+    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
+    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
+  };
+  const lockIndex = await loadNpmLockIndex(rootDir, lockIo).catch(() => null);
+
   const STUCK_TIMEOUT_MS = projectScanTimeout ?? cache?.projectScanTimeout ?? 180_000;
   const cores = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length || 4;
   const projectConcurrency = Math.max(2, Math.min(16, cores * 2));
@@ -211,7 +223,7 @@ export async function scanNodeProjects(
 
   const scannedProjects = await Promise.all(packageJsonFiles.map(async (pjPath) => projectSem.run(async () => {
     try {
-      const scanPromise = scanOnePackageJson(pjPath, rootDir, npmCache, cache, catalog);
+      const scanPromise = scanOnePackageJson(pjPath, rootDir, npmCache, cache, catalog, lockIndex);
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
         return result.value;
@@ -275,6 +287,7 @@ async function scanOnePackageJson(
   npmCache: NpmCache,
   cache: FileCache | undefined,
   catalog: RuntimeCatalog,
+  lockIndex: NpmLockIndex | null = null,
 ): Promise<ProjectScan> {
   const pj = cache
     ? await cache.readJsonFile<PackageJson>(packageJsonPath)
@@ -336,10 +349,13 @@ async function scanOnePackageJson(
   const resolved = await Promise.all(metaPromises);
 
   for (const { pkg, section, spec, meta } of resolved) {
-    // Find best version satisfying the spec
-    const resolvedVersion = meta.stableVersions.length > 0
+    // Prefer the lockfile's EXACT installed version (authoritative + works offline); otherwise fall
+    // back to the registry's best match for the declared range.
+    const lockedVersion = lockIndex?.resolve(pkg, spec) ?? null;
+    const registryResolved = meta.stableVersions.length > 0
       ? semver.maxSatisfying(meta.stableVersions, spec) ?? null
       : null;
+    const resolvedVersion = (lockedVersion && semver.valid(lockedVersion)) ? lockedVersion : registryResolved;
 
     const latestStable = meta.latestStableOverall;
 

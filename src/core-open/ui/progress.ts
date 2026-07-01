@@ -4,6 +4,7 @@
 import chalk from 'chalk';
 import type { StepTiming } from './scan-history.js';
 import { ProgressTrace } from './trace.js';
+import { brandProgressBar } from './bar.js';
 
 // ── Robot mascot ASCII art ──
 const ROBOT = [
@@ -357,12 +358,11 @@ export class ScanProgress {
         }
       }
     }
-    const pct = totalWeight > 0 ? Math.min(Math.round((completedWeight / totalWeight) * 100), 99) : 0;
+    const fraction = completedWeight / Math.max(totalWeight, 1);
+    const pct = totalWeight > 0 ? Math.min(Math.round(fraction * 100), 99) : 0;
     const barWidth = 30;
-    const filled = Math.round((completedWeight / Math.max(totalWeight, 1)) * barWidth);
-    const bar =
-      chalk.greenBright('━'.repeat(Math.min(filled, barWidth))) +
-      chalk.dim('╌'.repeat(Math.max(barWidth - filled, 0)));
+    // Sub-cell gradient fill so the bar glides as the scan advances.
+    const bar = brandProgressBar(fraction, barWidth);
     const elapsedMs = Date.now() - this.startTime;
     const elapsedStr = this.formatElapsed(elapsedMs);
     const etaStr = this.computeEtaString(elapsedMs, completedWeight, totalWeight);

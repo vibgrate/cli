@@ -1,0 +1,33 @@
+apiVersion: v2
+name: vibgrate
+description: Scheduled upgrade-drift & supply-chain scanning for regulated Kubernetes estates
+type: application
+# Chart version follows semver (the K8s ecosystem expects it) and iterates
+# independently of the CLI. appVersion pins the tested scanner image tag — a bump
+# PR keeps it in sync with a released @vibgrate/cli calendar version.
+version: 0.1.0
+appVersion: "2026.618.2"
+home: https://vibgrate.com
+icon: https://vibgrate.com/web-app-manifest-512x512.png
+sources:
+  - https://github.com/vibgrate/cli
+keywords:
+  - security
+  - sbom
+  - supply-chain
+  - drift
+  - governance
+maintainers:
+  - name: Vibgrate
+    url: https://vibgrate.com
+annotations:
+  # Surfaced on Artifact Hub. The image is cosign-signed; see /trust.
+  artifacthub.io/license: LicenseRef-Proprietary
+  artifacthub.io/links: |
+    - name: Trust & Provenance
+      url: https://vibgrate.com/trust
+    - name: Documentation
+      url: https://vibgrate.com/cli/docs
+  artifacthub.io/signKey: |
+    fingerprint: keyless (Sigstore Fulcio + Rekor)
+    url: https://vibgrate.com/trust

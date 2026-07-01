@@ -14,7 +14,11 @@ backward compatible.
 
 ### Added
 
-- Placeholder for upcoming changes.
+- **Animated CLI demo in the README** — the "See it run" section now plays an
+  animated terminal replay of `vg scan` (drift score, breakdown, and ranked
+  priorities) directly on GitHub, so you can see the product before installing.
+  The asset is a deterministic, regenerable SVG (`docs/demo/cli-demo.svg`,
+  rebuilt with `pnpm demo:svg`).
 
 ## [Initial public release] - 2026-06-25
 
@@ -27,9 +31,10 @@ The first public, Apache-2.0 release of the unified Vibgrate CLI. The command is
   `build`, `ask`, `show`, `impact`, `path`, `tree`, `hubs`, `areas`, and `map`
   verbs. The same input always produces the same `graph.json` via content-hashed
   IDs and stable sorting.
-- **Local MCP server** — `vg serve` exposes read-only tools so AI coding agents
-  can query the code graph over the Model Context Protocol, reducing token cost
-  versus dumping raw files.
+- **Vibgrate AI Context (local MCP server)** — `vg serve` exposes read-only
+  tools so AI coding agents can query, over the Model Context Protocol, your code
+  map, offline drift, local models, and version-correct library docs — all from
+  your machine, reducing token cost versus dumping raw files.
 - **Drift reporting** — `vg scan`, `vg report`, `vg baseline`, and `vg sbom` for
   tracking and reporting codebase and dependency drift.
 - **Version-correct library documentation** — `vg lib` and `vg drift` inject

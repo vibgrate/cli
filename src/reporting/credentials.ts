@@ -28,6 +28,22 @@ export function credentialsPath(): string {
   return path.join(credentialsDir(), 'credentials.json');
 }
 
+/**
+ * The `.gitignore` line that keeps the stored credentials out of version
+ * control. When the credentials file lives inside `repoRoot` (e.g. a CI setup
+ * where `$HOME` is the checkout), we ignore it by its exact repo-relative path;
+ * otherwise we fall back to the conventional `.vibgrate/credentials.json` so a
+ * future local copy is still covered. The fallback is intentionally specific —
+ * it must NOT shadow `.vibgrate/graph.json`, which `vg share` commits.
+ */
+export function gitignoreEntryForCredentials(repoRoot: string): string {
+  const rel = path.relative(repoRoot, credentialsPath());
+  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+    return rel.split(path.sep).join('/');
+  }
+  return '.vibgrate/credentials.json';
+}
+
 export function readStoredCredentials(): StoredCredentials | null {
   try {
     const raw = fs.readFileSync(credentialsPath(), 'utf8');

@@ -1,0 +1,40 @@
+{{- if and .Values.policy.enabled (or (eq .Values.policy.engine "policy-controller") (eq .Values.policy.engine "both")) -}}
+# Requires the Sigstore policy-controller in the cluster:
+#   https://docs.sigstore.dev/policy-controller/overview/
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: {{ include "vibgrate.fullname" . }}
+  labels:
+    {{- include "vibgrate.labels" . | nindent 4 }}
+spec:
+  images:
+    - glob: {{ .Values.policy.registryGlob | quote }}
+  authorities:
+    - keyless:
+        url: {{ .Values.policy.fulcioUrl | quote }}
+        identities:
+          - issuer: {{ .Values.policy.oidcIssuer | quote }}
+            subjectRegExp: {{ .Values.policy.identityRegexp | quote }}
+      ctlog:
+        url: {{ .Values.policy.rekorUrl | quote }}
+      {{- if or .Values.policy.requireSlsa .Values.policy.requireSbom .Values.policy.requireHcs .Values.policy.requireVex }}
+      attestations:
+        {{- if .Values.policy.requireSlsa }}
+        - name: must-have-slsa
+          predicateType: {{ .Values.policy.slsaPredicateType | quote }}
+        {{- end }}
+        {{- if .Values.policy.requireSbom }}
+        - name: must-have-sbom
+          predicateType: {{ .Values.policy.sbomPredicateType | quote }}
+        {{- end }}
+        {{- if .Values.policy.requireHcs }}
+        - name: must-have-hcs
+          predicateType: {{ .Values.policy.hcsPredicateType | quote }}
+        {{- end }}
+        {{- if .Values.policy.requireVex }}
+        - name: must-have-vex
+          predicateType: {{ .Values.policy.vexPredicateType | quote }}
+        {{- end }}
+      {{- end }}
+{{- end }}

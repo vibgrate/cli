@@ -13,7 +13,9 @@ import {
 import type { DriftNote } from '../engine/lib.js';
 import { selectForBudget, symbolsFromApi } from '../engine/select.js';
 import { assessDocQuality } from '../engine/quality.js';
-import { fetchHostedDocs, type HostedDocsResult } from '../engine/hosted.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fetchHostedDocs, publishPrivateLibrary, type HostedDocsResult } from '../engine/hosted.js';
 import { resolveDsn } from '../reporting/credentials.js';
 import { parseDsn } from '../reporting/commands/push.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
@@ -34,14 +36,17 @@ export function registerLib(program: Command): void {
   const cmd = program
     .command('lib')
     .description('library currency: version-correct, drift-annotated usage docs')
-    .argument('[args...]', 'a library name, or: add <source> | resolve <name> | refresh')
+    .argument('[args...]', 'a library name, or: add <source> | publish <name> | resolve <name> | refresh')
     .option('--name <name>', 'library name for `add`')
-    .option('--version <v>', 'pin the doc version for `add`')
+    .option('--version <v>', 'pin the doc version for `add`/`publish`')
     .option('--online', '(deprecated; network is on by default) allow network for add/refresh URL sources')
     .option('-b, --budget <n>', 'trim docs to ~N tokens')
+    .option('--readme <path>', 'README path for `publish` (default ./README.md)')
+    .option('--dts <path>', 'TypeScript declaration (.d.ts) path for `publish`')
+    .option('--language <lang>', 'primary language for `publish`')
     .option('--region <region>', 'data-residency region for the hosted catalog (same as scans; default us)')
     .option('--ingest <url>', 'hosted catalog/ingest URL override (host extracted; wins over --region)')
-    .action(async function (this: Command, args: string[], opts: { name?: string; version?: string; online?: boolean; budget?: string; region?: string; ingest?: string }) {
+    .action(async function (this: Command, args: string[], opts: { name?: string; version?: string; online?: boolean; budget?: string; readme?: string; dts?: string; language?: string; region?: string; ingest?: string }) {
       const global = readGlobal(this);
       const root = rootOf(global);
       const [verb, ...rest] = args;
@@ -53,6 +58,7 @@ export function registerLib(program: Command): void {
       // add/refresh still gate URL/git fetching behind --online (or network default) to avoid surprise fetches.
       const online = (Boolean(opts.online) || network) && !global.local;
       if (verb === 'add') return addCmd(root, rest, { ...opts, online }, global.json);
+      if (verb === 'publish') return publishCmd(root, rest, opts, global, global.json);
       if (verb === 'resolve') return resolveCmd(root, rest, global.json);
       if (verb === 'refresh') return refreshCmd(root, { online }, global.json);
       // `vg lib <name>`: local-first; on a thin/missing local doc, fall through to the hosted
@@ -96,6 +102,67 @@ async function addCmd(root: string, rest: string[], opts: { name?: string; versi
     return;
   }
   info(`${c.green('✔')} added ${c.bold(entry.name)} ${c.dim(`@${entry.version}`)} (${entry.bytes} bytes) → ${entry.docFile}`);
+}
+
+function readPackageVersion(root: string): string | undefined {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')) as { version?: unknown };
+    return typeof pkg.version === 'string' ? pkg.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function readOptionalFile(p: string): string | undefined {
+  try {
+    const t = fs.readFileSync(p, 'utf8');
+    return t.trim() ? t : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `vg lib publish <name>` (S6) — upload a PRIVATE library's docs to the hosted catalog. Requires a
+ * DSN (workspace identity) and a paid plan; the index token cost is billed to the MCP-token meter.
+ * Reads local README (+ optional .d.ts); private docs stay tenant-isolated.
+ */
+async function publishCmd(
+  root: string,
+  rest: string[],
+  opts: { name?: string; version?: string; readme?: string; dts?: string; language?: string; region?: string; ingest?: string },
+  global: { local?: boolean },
+  asJson?: boolean,
+): Promise<void> {
+  if (global.local) throw usageError('vg lib publish uploads to the hosted catalog — it needs network (remove --local)');
+  const name = (rest.join(' ') || opts.name || '').trim();
+  if (!name) throw usageError('usage: vg lib publish <name> [--version <v>] [--readme <path>] [--dts <path>] [--language <lang>]');
+
+  const dsn = resolveDsn();
+  const parsed = dsn ? parseDsn(dsn) : null;
+  if (!parsed) throw new CliError('publishing a private library requires a DSN — run `vibgrate login` or set VIBGRATE_DSN', ExitCode.USAGE_ERROR);
+
+  const version = (opts.version || readPackageVersion(root) || '').trim();
+  if (!version) throw usageError('a --version is required (or run from a package whose package.json has a version)');
+
+  const readme = readOptionalFile(opts.readme ? path.resolve(opts.readme) : path.join(root, 'README.md'));
+  const dts = opts.dts ? readOptionalFile(path.resolve(opts.dts)) : undefined;
+  if (!readme && !dts) throw usageError('nothing to publish — no README.md found and no --dts given');
+
+  const result = await publishPrivateLibrary(
+    { name, version, readme, dts, language: opts.language },
+    { region: opts.region, ingest: opts.ingest, auth: { keyId: parsed.keyId, secret: parsed.secret } },
+  );
+  if (!result.ok) {
+    const msg = result.message || result.error || `publish failed (HTTP ${result.status})`;
+    const code = result.status === 402 ? ExitCode.GATE_FAILED : result.status === 401 ? ExitCode.USAGE_ERROR : ExitCode.ERROR;
+    throw new CliError(msg, code);
+  }
+  if (asJson) {
+    json(result);
+    return;
+  }
+  info(`${c.green('✔')} published ${c.bold(name)} ${c.dim(`@${version}`)} · ${result.entities} entities · ${result.indexedTokens} tokens indexed (MCP-token meter)`);
+  info(c.dim(`  private to your workspace · targetId ${result.targetId}`));
 }
 
 function resolveCmd(root: string, rest: string[], asJson?: boolean): void {

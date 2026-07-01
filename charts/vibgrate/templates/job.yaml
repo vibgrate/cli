@@ -1,0 +1,23 @@
+{{- if .Values.runOnInstall }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vibgrate.fullname" . }}-init
+  labels:
+    {{- include "vibgrate.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        {{- include "vibgrate.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "vibgrate.podSpec" . | nindent 6 }}
+{{- end }}

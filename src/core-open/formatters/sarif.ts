@@ -62,6 +62,11 @@ function buildRules(findings: Finding[]) {
         shortDescription: { text: 'Individual dependency severely behind' },
         helpUri: 'https://vibgrate.com/rules/dependency-major-lag',
       },
+      'vibgrate/vulnerability': {
+        id: 'vibgrate/vulnerability',
+        shortDescription: { text: 'Known vulnerability in an installed dependency' },
+        helpUri: 'https://vibgrate.com/rules/vulnerability',
+      },
     };
     return descriptions[id] ?? {
       id,
@@ -85,5 +90,8 @@ function toSarifResult(finding: Finding) {
         },
       },
     ],
+    // Surface structured finding detail (e.g. advisory id, CVSS, fixed version)
+    // to consumers like GitHub code scanning without bloating the message text.
+    ...(finding.details && Object.keys(finding.details).length > 0 ? { properties: finding.details } : {}),
   };
 }

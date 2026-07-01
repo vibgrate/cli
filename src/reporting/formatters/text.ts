@@ -1,6 +1,8 @@
 import chalk from 'chalk';
 import type { ScanArtifact, ExtendedScanResults, InventoryItem, ServiceDependencyItem, LayerSummary, ArchitectureResult } from '../types.js';
 import { VERSION } from '../version.js';
+import { driftBar } from '../../core-open/ui/bar.js';
+import { titleBox } from '../../core-open/ui/box.js';
 
 export function formatText(artifact: ScanArtifact): string {
   const lines: string[] = [];
@@ -15,9 +17,7 @@ export function formatText(artifact: ScanArtifact): string {
   lines.push('  ' + chalk.dim('┤') + teal('│') + '  ' + chalk.dim('▁▁') + '  ' + teal('│') + chalk.dim('├') + '  ' + chalk.dim(`Drift Intelligence Engine v${VERSION}`));
   lines.push('   ' + teal('╰──────╯'));
   lines.push('');
-  lines.push(teal('╔══════════════════════════════════════════╗'));
-  lines.push(teal('║        ') + chalk.bold.white('Vibgrate Drift Report') + teal('             ║'));
-  lines.push(teal('╚══════════════════════════════════════════╝'));
+  lines.push(...titleBox('Vibgrate Drift Report', teal));
   lines.push('');
 
   // Per-project
@@ -96,9 +96,7 @@ export function formatText(artifact: ScanArtifact): string {
   // Priority actions
   const actions = generatePriorityActions(artifact);
   if (actions.length > 0) {
-    lines.push(chalk.bold.cyan('╔══════════════════════════════════════════╗'));
-    lines.push(chalk.bold.cyan('║        Top Priority Actions              ║'));
-    lines.push(chalk.bold.cyan('╚══════════════════════════════════════════╝'));
+    lines.push(...titleBox('Top Priority Actions'));
     lines.push('');
     for (let i = 0; i < actions.length; i++) {
       const a = actions[i];
@@ -119,9 +117,7 @@ export function formatText(artifact: ScanArtifact): string {
   // They are still included in JSON output for dashboard/API consumption.
 
   if (artifact.solutions && artifact.solutions.length > 0) {
-    lines.push(chalk.bold.cyan('╔══════════════════════════════════════════╗'));
-    lines.push(chalk.bold.cyan('║        Solution Drift Summary            ║'));
-    lines.push(chalk.bold.cyan('╚══════════════════════════════════════════╝'));
+    lines.push(...titleBox('Solution Drift Summary'));
     lines.push('');
     for (const solution of artifact.solutions) {
       const solScore = solution.drift?.score;
@@ -135,9 +131,7 @@ export function formatText(artifact: ScanArtifact): string {
   const scoreColor = artifact.drift.score <= 30 ? chalk.green :
     artifact.drift.score <= 60 ? chalk.yellow : chalk.red;
 
-  lines.push(chalk.bold.cyan('╔══════════════════════════════════════════╗'));
-  lines.push(chalk.bold.cyan('║        Drift Score Summary               ║'));
-  lines.push(chalk.bold.cyan('╚══════════════════════════════════════════╝'));
+  lines.push(...titleBox('Drift Score Summary'));
   lines.push('');
   lines.push(chalk.bold('  Drift Score:  ') + scoreColor.bold(`${artifact.drift.score}/100`));
   lines.push(chalk.bold('  Risk Level:   ') + riskBadge(artifact.drift.riskLevel));
@@ -189,11 +183,8 @@ function riskBadge(level: string): string {
 }
 
 function scoreBar(score: number): string {
-  const width = 20;
-  const filled = Math.round((score / 100) * width);
-  const empty = width - filled;
-  const color = score <= 30 ? chalk.green : score <= 60 ? chalk.yellow : chalk.red;
-  return color('█'.repeat(filled)) + chalk.dim('░'.repeat(empty)) + ` ${Math.round(score)}`;
+  // Sub-cell gradient fill (green → the score's own risk colour) for a smoother read.
+  return driftBar(score, 20);
 }
 
 // ── Extended results summary ──
@@ -420,9 +411,7 @@ interface PriorityAction {
 
 function formatArchitectureDiagram(arch: ArchitectureResult): string[] {
   const lines: string[] = [];
-  lines.push(chalk.bold.cyan('╔══════════════════════════════════════════╗'));
-  lines.push(chalk.bold.cyan('║        Architecture Layers               ║'));
-  lines.push(chalk.bold.cyan('╚══════════════════════════════════════════╝'));
+  lines.push(...titleBox('Architecture Layers'));
   lines.push('');
   lines.push(chalk.bold('  Archetype: ') + `${arch.archetype}` + chalk.dim(` (${Math.round(arch.archetypeConfidence * 100)}% confidence)`));
   lines.push(`  Files classified: ${arch.totalClassified}` + (arch.unclassified > 0 ? chalk.dim(` (${arch.unclassified} unclassified)`) : ''));

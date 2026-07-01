@@ -19,8 +19,8 @@ export interface MavenMeta {
 function mavenToSemver(ver: string): string | null {
   let v = ver.trim();
 
-  // Maven pre-release markers
-  if (/(?:-SNAPSHOT|-alpha|-beta|-rc|-M\d|-CR\d)/i.test(v)) return null;
+  // Maven pre-release markers — both hyphen (-alpha, -rc) and dot (.Beta1, .RC1) forms
+  if (/(?:[-.](?:SNAPSHOT|alpha|beta|rc|M\d+|CR\d+))/i.test(v)) return null;
 
   // Strip ".RELEASE", ".Final" suffixes (common in Spring)
   v = v.replace(/\.(?:RELEASE|Final|GA)$/i, '');

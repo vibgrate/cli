@@ -3,9 +3,11 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as semver from 'semver';
-import { readTextFile, FileCache } from '../utils/fs.js';
+import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
 import { withTimeout } from '../utils/timeout.js';
 import { CargoCache } from './cargo-cache.js';
+import { loadCargoLockIndex, type CargoLockIndex } from './cargo-lockfile.js';
+import type { LockfileIo } from './npm-lockfile.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
 
 /** Well-known Rust frameworks / libraries to track */
@@ -243,6 +245,17 @@ async function scanOneRustProject(
   const content = cache ? await cache.readTextFile(manifestFile) : await readTextFile(manifestFile);
   const rustEdition = extractRustEdition(content);
   const allDeps = parseCargoToml(content);
+
+  // Cargo.lock pins the exact resolved version of every crate. There is one per workspace, normally
+  // beside this Cargo.toml; for a workspace member it lives at the root — so try the project dir then
+  // the root. Prefer it over coercing the declared requirement.
+  const lockIo: LockfileIo = {
+    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
+    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
+    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
+  };
+  let lockIndex: CargoLockIndex | null = await loadCargoLockIndex(dir, lockIo).catch(() => null);
+  if (!lockIndex && dir !== rootDir) lockIndex = await loadCargoLockIndex(rootDir, lockIo).catch(() => null);
   
   // Filter out dev dependencies for main analysis
   const prodDeps = allDeps.filter(d => !d.isDev);
@@ -273,8 +286,9 @@ async function scanOneRustProject(
   const resolved = await Promise.all(metaPromises);
 
   for (const { dep, meta } of resolved) {
-    // Extract version from spec (e.g., "1.0" or "^1.0" or "~1.0")
-    const resolvedVersion = semver.valid(semver.coerce(dep.version));
+    // Prefer the lockfile's exact version; otherwise coerce the declared spec (e.g. "1.0" → 1.0.0).
+    const locked = lockIndex?.resolve(dep.name, dep.version) ?? null;
+    const resolvedVersion = (locked && semver.valid(locked)) ? locked : semver.valid(semver.coerce(dep.version));
     const latestStable = meta.latestStableOverall;
 
     let majorsBehind: number | null = null;

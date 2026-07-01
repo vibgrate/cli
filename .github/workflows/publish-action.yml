@@ -1,0 +1,103 @@
+name: Publish Action
+
+# Runs in the PUBLIC repo (github.com/vibgrate/cli), where `action.yml` lives at
+# the root (mirrored from the monorepo's packages/vibgrate-cli-public/). It tags a
+# release of the composite GitHub Action and moves the floating major tag (v1) per
+# Marketplace convention, so `uses: vibgrate/cli@v1` resolves. The actual "Publish
+# to Marketplace" toggle is a one-time manual step on the GitHub Release UI; this
+# workflow creates the Release that enables it. The Action runs the already-signed
+# scanner image, so it inherits the provenance chain.
+# See docs/ARTIFACT-DISTRIBUTION-STRATEGY.md §3.5.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Dry run (validate + compute version, skip tag/release)"
+        required: false
+        default: "false"
+        type: boolean
+      major-tag:
+        description: "Floating major tag to move to this commit"
+        required: false
+        default: "v1"
+        type: string
+
+concurrency:
+  group: publish-action
+  cancel-in-progress: false
+
+permissions:
+  contents: write # tags + release
+
+jobs:
+  publish:
+    name: Tag & release the Action
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate action.yml
+        run: |
+          set -euo pipefail
+          test -f action.yml || { echo "::error::action.yml missing at repo root"; exit 1; }
+          # Must reference the signed image, and be parseable YAML.
+          grep -q 'ghcr.io/vibgrate/cli' action.yml || { echo "::error::action.yml does not reference the scanner image"; exit 1; }
+          python3 -c "import yaml,sys; yaml.safe_load(open('action.yml'))"
+
+      - name: Determine Action version
+        id: version
+        run: |
+          set -euo pipefail
+          # The Action version tracks the published @vibgrate/cli version it wraps.
+          ver=$(jq -r .version package.json)
+          test -n "${ver}" && [ "${ver}" != "null" ] || { echo "::error::could not read version from package.json"; exit 1; }
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "### Action version: \`${ver}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tag & release
+        if: inputs.dry-run == false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          MAJOR: ${{ inputs.major-tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          TAG="vibgrate-action/v${VERSION}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — skipping version tag." >> "$GITHUB_STEP_SUMMARY"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+          # Move the floating major tag (e.g. v1) so `uses: vibgrate/cli@v1` tracks latest.
+          git tag -f "$MAJOR"
+          git push origin -f "$MAJOR"
+
+          # A GitHub Release is what enables the Marketplace "Publish" toggle.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Vibgrate Action v${VERSION}" \
+              --notes "Composite GitHub Action that runs the signed Vibgrate scanner image (\`ghcr.io/vibgrate/cli\`). Reference it as \`vibgrate/cli@${MAJOR}\`. Publish to the Marketplace from this Release's page (one-time)."
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### Vibgrate Action"
+            if [ "${{ inputs.dry-run }}" = "true" ]; then
+              echo "> **Dry run** — validated only, no tag/release created."
+            else
+              echo "- Tag: \`vibgrate-action/v${{ steps.version.outputs.version }}\`"
+              echo "- Floating: \`${{ inputs.major-tag }}\` → this commit"
+              echo "- Publish to Marketplace from the new Release page (one-time toggle)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

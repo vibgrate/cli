@@ -1,8 +1,10 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { availableRegionIds } from '../regions.js';
-import { resolveIngestHost } from './dsn.js';
-import { writeStoredCredentials, credentialsPath } from '../credentials.js';
+import { resolveIngestHost, createWorkspaceDsn } from './dsn.js';
+import { writeStoredCredentials, credentialsPath, gitignoreEntryForCredentials } from '../credentials.js';
+import type { StoredCredentials } from '../credentials.js';
+import { findGitRoot, ensureGitignored } from '../utils/gitignore.js';
 import { openUrl } from '../utils/open-url.js';
 
 interface StartResponse {
@@ -103,20 +105,74 @@ export const loginCommand = new Command('login')
 
       if (token.status === 'authorization_pending') continue;
 
-      if (token.status === 'complete' && token.dsn) {
-        writeStoredCredentials({
-          dsn: token.dsn,
-          workspaceId: token.workspaceId,
-          keyId: token.keyId,
-          ingestHost: token.ingestHost ?? ingestHost,
-          savedAt: new Date().toISOString(),
-        });
+      if (token.status === 'complete') {
+        // Resolve the DSN. An existing account comes back with one from the
+        // device flow; a brand-new account has no workspace yet, so we
+        // provision one automatically in the user's region rather than making
+        // the user run "dsn create" by hand. Login itself already succeeded —
+        // only the workspace setup can still fail here.
+        let creds: StoredCredentials;
+        if (token.dsn) {
+          creds = {
+            dsn: token.dsn,
+            workspaceId: token.workspaceId,
+            keyId: token.keyId,
+            ingestHost: token.ingestHost ?? ingestHost,
+            savedAt: new Date().toISOString(),
+          };
+        } else {
+          console.log(chalk.dim('Setting up your workspace…'));
+          try {
+            const provisioned = await createWorkspaceDsn({
+              region: opts.region,
+              ingest: opts.ingest,
+            });
+            creds = {
+              dsn: provisioned.dsn,
+              workspaceId: provisioned.workspaceId,
+              keyId: provisioned.keyId,
+              ingestHost: provisioned.ingestHost,
+              savedAt: new Date().toISOString(),
+            };
+          } catch (e: unknown) {
+            console.error(
+              chalk.red('✖ Signed in, but workspace setup failed: ') +
+                (e instanceof Error ? e.message : String(e)),
+            );
+            console.error(
+              chalk.dim('  Finish setup with "vibgrate dsn create --workspace new".'),
+            );
+            process.exit(1);
+          }
+        }
+
+        writeStoredCredentials(creds);
         console.log('');
         console.log(chalk.green('✔') + ' Logged in.');
-        if (token.workspaceId) {
-          console.log('  Workspace: ' + chalk.bold(token.workspaceId));
+        if (creds.workspaceId) {
+          console.log('  Workspace: ' + chalk.bold(creds.workspaceId));
         }
         console.log(chalk.dim(`  Credentials saved to ${credentialsPath()}`));
+
+        // Defense in depth (GUARDRAILS §1.1): the DSN we just stored is a
+        // credential and must never be committed. When run inside a git repo,
+        // make sure the credentials file is git-ignored, creating .gitignore if
+        // the repo doesn't have one. This is best-effort — never fail an
+        // otherwise-successful login over .gitignore housekeeping.
+        try {
+          const root = findGitRoot();
+          if (root) {
+            const res = ensureGitignored(gitignoreEntryForCredentials(root), root);
+            if (res.status === 'created') {
+              console.log(chalk.dim(`  Created .gitignore and ignored ${res.entry}`));
+            } else if (res.status === 'added') {
+              console.log(chalk.dim(`  Added ${res.entry} to .gitignore`));
+            }
+          }
+        } catch {
+          /* non-fatal */
+        }
+
         console.log(chalk.dim('  You can now run "vibgrate scan --push".'));
         return;
       }

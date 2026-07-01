@@ -13,13 +13,18 @@ import {
   parseExcludePatterns,
 } from '../../core-open/index.js';
 import type { ScanOptions, ScanArtifact } from '../../core-open/index.js';
+import { inventory } from '../../engine/drift.js';
+import { loadStandards, checkStandards } from '../../engine/standards.js';
 import { loadAdvancedScanHook } from '../advanced-hook.js';
 import { VERSION } from '../version.js';
 import { resolveIngestHost } from './dsn.js';
 import { dashHostForIngestHost } from '../regions.js';
 import { resolveDsn } from '../credentials.js';
-import { emitIngestIdLine } from '../utils/ingest-id-output.js';
+import { emitIngestIdLine, emitDriftScoreLine } from '../utils/ingest-id-output.js';
 import { uploadScanArtifact } from '../utils/upload.js';
+import { buildGraph } from '../../engine/build.js';
+import { writeArtifacts } from '../../engine/artifacts.js';
+import { detectAiAssistant, printAiContextPrompt } from '../ai-context-prompt.js';
 
 /** Auto-push scan artifact to Vibgrate API */
 async function autoPush(
@@ -72,6 +77,7 @@ async function autoPush(
       body,
       contentEncoding,
       timestamp,
+      force: opts.force,
     });
     host = uploadedHost;
 
@@ -137,6 +143,27 @@ function collectExcludes(value: string, previous: string[]): string[] {
   return [...previous, ...parseExcludePatterns(value)];
 }
 
+/**
+ * `--full` extra: report banned dependencies against a committed standards policy
+ * (`.vibgrate/standards.json` etc.). Silent when no policy is present, and never
+ * changes the exit code — gating stays with `vg drift --fail-on standards`.
+ */
+function reportStandards(rootDir: string): void {
+  const loaded = loadStandards(rootDir);
+  if (!loaded.policy) return;
+  const violations = checkStandards(loaded.policy, inventory(rootDir).records);
+  if (violations.length === 0) {
+    console.log(chalk.green('✔') + ' Standards: no banned dependencies in use');
+    return;
+  }
+  console.log(chalk.red(`\n⚠ Standards: ${violations.length} banned dependency(ies) in use`));
+  for (const v of violations) {
+    const fix = v.use ? chalk.dim(` → use ${v.use}`) : '';
+    const why = v.reason ? chalk.dim(` (${v.reason})`) : '';
+    console.log(`  ${chalk.red('banned')} ${v.ecosystem}:${v.name}${v.installed ? chalk.dim(` ${v.installed}`) : ''}${fix}${why}`);
+  }
+}
+
 function parseNonNegativeNumber(value: string | undefined, label: string): number | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);
@@ -169,11 +196,15 @@ export const scanCommand = new Command('scan')
   .option('--no-local-artifacts', 'Do not write .vibgrate JSON artifacts to disk')
   .option('--max-privacy', 'Enable strongest privacy mode (minimal scanners, no local artifacts)')
   .option('--offline', 'Run without network calls; do not upload results')
+  .option('--full', 'Comprehensive scan: turns on known-vulnerability detection (= --vulns) and, when a standards policy exists, a banned-dependency report — on top of drift scoring and the code map')
+  .option('--vulns', 'Also scan installed dependencies for known vulnerabilities (OSV online, or advisories from --package-manifest when offline)')
   .option('--package-manifest <file>', 'Use local package-version manifest JSON/ZIP (for offline mode)')
   .option('--project-scan-timeout <seconds>', 'Per-project scan timeout in seconds (default: 180)')
   .option('--drift-budget <score>', 'Fail if drift score is above budget (0-100)')
   .option('--drift-worsening <percent>', 'Fail if drift worsens by more than % since baseline')
   .option('--repository-name <name>', 'Override the repository name recorded for this scan (defaults to the directory or package.json name)')
+  .option('--force', 'Always create a fresh scan ingest, even if the repository is unchanged since the last scan (skips the unchanged/reuse optimization). Used by scheduled and dashboard-triggered scans.')
+  .option('--no-graph', 'Skip building the local code map (the AI/docs index) that scan produces after scoring drift')
   .action(async (targetPath: string, opts: {
     out?: string;
     format: string;
@@ -190,11 +221,15 @@ export const scanCommand = new Command('scan')
     noLocalArtifacts?: boolean;
     maxPrivacy?: boolean;
     offline?: boolean;
+    full?: boolean;
+    vulns?: boolean;
     packageManifest?: string;
     projectScanTimeout?: string;
     driftBudget?: string;
     driftWorsening?: string;
     repositoryName?: string;
+    force?: boolean;
+    graph?: boolean;
   }) => {
     const rootDir = path.resolve(targetPath);
     if (!(await pathExists(rootDir))) {
@@ -204,6 +239,9 @@ export const scanCommand = new Command('scan')
 
     const hasDsn = !!resolveDsn(opts.dsn);
     const willPush = !opts.offline && (opts.push || hasDsn);
+
+    // Capture first-run before the scan writes .vibgrate/scan_result.json.
+    const isFirstRun = !(await pathExists(path.join(rootDir, '.vibgrate', 'scan_result.json')));
 
     // Region the workspace is pinned to, learned from preflight. Used to route
     // the upload to the correct ingest host up front (the push path also
@@ -270,7 +308,9 @@ export const scanCommand = new Command('scan')
               `Plan: ${preflight.plan.label} — scan credits ${preflight.scans.used}/${preflight.scans.limit} this month`,
             ),
           );
-          if (preflight.repository?.unchanged) {
+          // `--force` opts out of the unchanged short-circuit so scheduled and
+          // dashboard-triggered scans always produce a fresh report.
+          if (preflight.repository?.unchanged && !opts.force) {
             console.log(
               chalk.green('✔')
                 + ` Repository unchanged at ${preflight.repository.lastVcsSha?.slice(0, 7) ?? 'same revision'} — skipping scan.`,
@@ -312,17 +352,51 @@ export const scanCommand = new Command('scan')
       noLocalArtifacts: opts.noLocalArtifacts,
       maxPrivacy: opts.maxPrivacy,
       offline: opts.offline,
+      // `--full` is the comprehensive umbrella: it turns on vulnerability scanning.
+      vulns: opts.vulns || opts.full,
       packageManifest: opts.packageManifest,
       driftBudget: parseNonNegativeNumber(opts.driftBudget, '--drift-budget'),
       driftWorseningPercent: parseNonNegativeNumber(opts.driftWorsening, '--drift-worsening'),
       projectScanTimeout: opts.projectScanTimeout ? parseInt(opts.projectScanTimeout, 10) || undefined : undefined,
       repositoryName: opts.repositoryName?.trim() || undefined,
+      force: opts.force,
     };
+
+    // `scan` also builds the local code map (the AI/docs index) so one command
+    // yields both the Drift Score and a ready graph for `vg ask`/`guide`/`lib`
+    // and MCP. We run it as the scan's final `postScan` step so it shares the
+    // *single* progress bar (no second bar/logo). Fail-soft — a map problem
+    // never fails the scan. Skipped under --no-graph or --max-privacy.
+    const wantGraph = opts.graph !== false && !opts.maxPrivacy;
+    if (wantGraph) {
+      scanOpts.postScan = async (report) => {
+        const result = await buildGraph({
+          root: rootDir,
+          exclude: opts.exclude,
+          onParseProgress: (done, total) => report(done, total, 'parsing'),
+        });
+        writeArtifacts(result.graph, { root: rootDir });
+        const { counts } = result.graph.meta;
+        return `${counts.nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} edges`;
+      };
+    }
 
     // Open base scan. The optional advanced-analysis hook is a no-op in this
     // open build, so the scan runs entirely on the open base engine.
     const advanced = await loadAdvancedScanHook();
     const artifact = await runCoreScan(rootDir, scanOpts, advanced);
+
+    // Machine-readable drift score for the remediation agent's before/after gate
+    // (no-op unless VIBGRATE_EMIT_MARKERS=1). Emitted from the freshly computed
+    // local artifact, so it is available even without --push.
+    emitDriftScoreLine(artifact.drift.score);
+
+    // `--full` also surfaces the offline standards/policy check (otherwise only
+    // reachable via `vg drift --fail-on standards`). Report-only here — it never
+    // changes the exit code; use `vg drift --fail-on standards` to gate CI.
+    if (opts.full) {
+      reportStandards(rootDir);
+    }
 
     // Check fail-on thresholds
     if (opts.failOn) {
@@ -364,5 +438,20 @@ export const scanCommand = new Command('scan')
 
     if (willPush) {
       await autoPush(artifact, rootDir, scanOpts);
+    }
+
+    // On first run with no cloud connection and text output, prompt the user
+    // to wire Vibgrate AI Context into their AI assistant.
+    const showAiPrompt =
+      scanOpts.format === 'text' &&
+      !hasDsn &&
+      !opts.offline &&
+      !opts.noLocalArtifacts &&
+      !opts.maxPrivacy &&
+      isFirstRun;
+
+    if (showAiPrompt) {
+      const detectedAssistant = await detectAiAssistant(rootDir);
+      printAiContextPrompt(detectedAssistant);
     }
   });

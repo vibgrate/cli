@@ -3,7 +3,9 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as semver from 'semver';
-import { readTextFile, FileCache } from '../utils/fs.js';
+import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
+import { loadPythonLockIndex, type PythonLockIndex } from './python-lockfile.js';
+import type { LockfileIo } from './npm-lockfile.js';
 import { withTimeout } from '../utils/timeout.js';
 import { PyPICache } from './pypi-cache.js';
 import { latestStable, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
@@ -461,6 +463,16 @@ async function scanOnePythonProject(
     if (cycle) runtimeEolDate = eolDate(catalog, 'python', cycle);
   }
 
+  // A lockfile (poetry.lock / uv.lock / pdm.lock / Pipfile.lock) pins the exact resolved version of
+  // every dependency — the only source of a resolved version when the manifest declares a range
+  // rather than `==`. It sits beside the manifest, so load it from this project's directory.
+  const lockIo: LockfileIo = {
+    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
+    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
+    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
+  };
+  const lockIndex: PythonLockIndex | null = await loadPythonLockIndex(dir, lockIo).catch(() => null);
+
   // Resolve dependencies against PyPI
   const dependencies: DependencyRow[] = [];
   const frameworks: DetectedFramework[] = [];
@@ -476,7 +488,9 @@ async function scanOnePythonProject(
   const resolved = await Promise.all(metaPromises);
 
   for (const { dep, meta } of resolved) {
-    const pinnedVersion = extractPinnedVersion(dep.spec);
+    // Prefer the lockfile's exact version; otherwise fall back to a `==`-pinned spec.
+    const locked = lockIndex?.resolve(dep.normalisedName) ?? null;
+    const pinnedVersion = locked ?? extractPinnedVersion(dep.spec);
     const resolvedVersion = pinnedVersion ? pep440ToSemver(pinnedVersion) : null;
     const latestStable = meta.latestStableOverall;
 

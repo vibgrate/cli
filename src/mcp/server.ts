@@ -5,6 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { parseGraph } from '../engine/serialize.js';
 import { TOOLS } from './tools.js';
+import { renderToolResult } from './response.js';
 import { recordSaving, PER_FILE_TOKENS } from '../engine/savings.js';
 import { VERSION } from '../version.js';
 import type { VgGraph } from '../schema.js';
@@ -33,10 +34,16 @@ class GraphSource {
   }
 }
 
-export function createServer(graphPath: string, savings = false, local = false): Server {
+export function createServer(graphPath: string, savings = false, local = false, dedup = false): Server {
   const source = new GraphSource(graphPath);
   // root = the directory containing .vibgrate/ (graphPath = root/.vibgrate/graph.json)
   const root = path.dirname(path.dirname(graphPath));
+  // Per-session memory of node ids whose full detail was already returned — the
+  // basis for opt-in cross-call dedup (`--dedup`). Scoped to this server
+  // instance so it never leaks across sessions. Node ids are content-addressed
+  // (blake3 of content), so an edited node gets a new id and is never falsely
+  // treated as already-seen — dedup is stale-safe by construction.
+  const seen = new Set<string>();
   const server = new Server(
     { name: 'vg', version: VERSION },
     { capabilities: { tools: {} } },
@@ -66,15 +73,13 @@ export function createServer(graphPath: string, savings = false, local = false):
     }
     try {
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-      const result = await tool.handler(graph, args, { root, local });
+      const result = await tool.handler(graph, args, { root, local, dedup, seen });
       // Opt-in, counts-only savings ledger (no telemetry by default).
       if (savings && (tool.name === 'query_graph' || tool.name === 'get_node')) {
         maybeRecordSaving(root, tool.name, result);
       }
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        structuredContent: asStructured(result),
-      };
+      // Compact → clamp to the token ceiling → compact-serialise. See ./response.ts.
+      return renderToolResult(result);
     } catch (err) {
       return errorResult(`tool "${tool.name}" failed: ${(err as Error).message}`);
     }
@@ -83,8 +88,8 @@ export function createServer(graphPath: string, savings = false, local = false):
   return server;
 }
 
-export async function serveStdio(graphPath: string, savings = false, local = false): Promise<void> {
-  const server = createServer(graphPath, savings, local);
+export async function serveStdio(graphPath: string, savings = false, local = false, dedup = false): Promise<void> {
+  const server = createServer(graphPath, savings, local, dedup);
   await server.connect(new StdioServerTransport());
 }
 
@@ -100,12 +105,4 @@ function maybeRecordSaving(root: string, tool: string, result: unknown): void {
 
 function errorResult(message: string) {
   return { content: [{ type: 'text', text: message }], isError: true };
-}
-
-function asStructured(result: unknown): Record<string, unknown> {
-  // structuredContent must be an object; wrap arrays/primitives.
-  if (result && typeof result === 'object' && !Array.isArray(result)) {
-    return result as Record<string, unknown>;
-  }
-  return { result };
 }

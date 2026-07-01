@@ -1,17 +1,30 @@
-# Publishes @vibgrate/cli to npm with provenance — on a v* tag, or manually.
+# Publishes @vibgrate/cli to npm with provenance — on a merged sync PR, a v* tag,
+# or manually.
 #
 # REQUIRED SECRET: NPM_TOKEN must be set as a repository secret (an npm
 # automation/granular access token with publish rights for @vibgrate/cli).
 # Without it, `npm publish` will fail. Provenance additionally requires the
 # `id-token: write` permission below — do not remove it.
 #
-# Manual runs: Actions → Release → Run workflow. The published version is the
-# one in package.json. Use the "dry-run" option to validate the build + npm
-# pack without publishing.
+# Versioning is the calendar scheme YYYY.MDD.N:
+#   - tag push           → version comes from the tag
+#   - manual run         → next counter for today, computed from npm
+#                          (scripts/stamp-version.mjs), so it auto-increments
+#   - push to main       → publish the committed package.json version, but ONLY
+#                          when it changed in the push (a merged "Sync from
+#                          monorepo" PR). Ordinary doc/community merges don't bump
+#                          the version, so they're skipped. This is what makes a
+#                          merged sync PR publish to npm with no tag to manage.
+# The resolved version is stamped into package.json AND src/version.ts before the
+# build.
+#
+# Manual runs: Actions → Release → Run workflow. Use the "dry-run" option to
+# validate the build + npm pack without publishing.
 name: Release
 
 on:
   push:
+    branches: [main]
     tags:
       - "v*"
   workflow_dispatch:
@@ -27,8 +40,67 @@ permissions:
   id-token: write # required for npm provenance
 
 jobs:
+  # Decide whether this event should publish to npm, and at what version. Keeps
+  # the publish job from running on every commit to main — only a version bump (a
+  # merged sync PR) or an explicit tag/dispatch releases.
+  gate:
+    name: Decide release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Need the parent commit so a push to main can diff package.json.
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          release=false
+          version=""
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            release=true
+            version="$(node scripts/stamp-version.mjs --dry-run --version "${GITHUB_REF_NAME#v}")"
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
+            # Manual run: compute the next calendar version from npm.
+            release=true
+            version="$(node scripts/stamp-version.mjs --dry-run)"
+          elif [ "$EVENT" = "push" ]; then
+            # Release on a push to main ONLY when the committed version changed —
+            # the signal that a sync/release PR landed. Publish exactly that
+            # version (the monorepo already stamped it); don't recompute.
+            NEW="$(jq -r .version package.json)"
+            OLD="$(git show "${BEFORE}:package.json" 2>/dev/null | jq -r .version || echo "")"
+            if [ "$NEW" != "$OLD" ] && [ -n "$NEW" ] && [ "$NEW" != "null" ]; then
+              release=true
+              version="$NEW"
+            fi
+          fi
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [ "$release" = "true" ]; then
+            echo "### Releasing \`@vibgrate/cli@${version}\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No version change on this push — npm publish skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   publish:
     name: Build and publish to npm
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -47,6 +119,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Stamp the resolved version BEFORE building, so src/version.ts (embedded
+      # for `vg --version`) and package.json agree with what gets published.
+      - name: Stamp version
+        id: version
+        run: |
+          set -euo pipefail
+          VER=$(node scripts/stamp-version.mjs --version "${{ needs.gate.outputs.version }}")
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "### Releasing \`@vibgrate/cli@${VER}\`" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build
         run: pnpm build
 
@@ -55,16 +137,6 @@ jobs:
           pnpm typecheck
           pnpm lint
           pnpm test
-
-      - name: Show release target
-        run: |
-          VER=$(node -p "require('./package.json').version")
-          echo "### Releasing \`@vibgrate/cli@${VER}\`" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "- Trigger: manual (workflow_dispatch)" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- Trigger: tag \`${GITHUB_REF_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Publish dry run (pack only)
         if: github.event_name == 'workflow_dispatch' && inputs.dry-run == true

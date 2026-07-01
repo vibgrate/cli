@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="509" height="374" viewBox="0 0 509 374" role="img" aria-label="Animated terminal replay: typing 'npx @vibgrate/cli scan', then the Vibgrate banner and scan output print and scroll up to a 74/100 drift score with a score breakdown and ranked upgrade priorities.">
+<title>vibgrate CLI — vg scan demo</title>
+<style>.term{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;font-size:13px}
+.l0{opacity:0;animation:l0 7.6s infinite}@keyframes l0{0%,1.569%{opacity:0}1.579%,100%{opacity:1}}
+.l1{opacity:0;animation:l1 7.6s infinite}@keyframes l1{0%,4.595%{opacity:0}4.605%,100%{opacity:1}}
+.l2{opacity:0;animation:l2 7.6s infinite}@keyframes l2{0%,35.516%{opacity:0}35.526%,100%{opacity:1}}
+.l3{opacity:0;animation:l3 7.6s infinite}@keyframes l3{0%,36.306%{opacity:0}36.316%,100%{opacity:1}}
+.l4{opacity:0;animation:l4 7.6s infinite}@keyframes l4{0%,37.622%{opacity:0}37.632%,100%{opacity:1}}
+.l5{opacity:0;animation:l5 7.6s infinite}@keyframes l5{0%,38.937%{opacity:0}38.947%,100%{opacity:1}}
+.l6{opacity:0;animation:l6 7.6s infinite}@keyframes l6{0%,40.253%{opacity:0}40.263%,100%{opacity:1}}
+.l7{opacity:0;animation:l7 7.6s infinite}@keyframes l7{0%,41.569%{opacity:0}41.579%,100%{opacity:1}}
+.l8{opacity:0;animation:l8 7.6s infinite}@keyframes l8{0%,42.885%{opacity:0}42.895%,100%{opacity:1}}
+.l9{opacity:0;animation:l9 7.6s infinite}@keyframes l9{0%,43.674%{opacity:0}43.684%,100%{opacity:1}}
+.l10{opacity:0;animation:l10 7.6s infinite}@keyframes l10{0%,44.464%{opacity:0}44.474%,100%{opacity:1}}
+.l11{opacity:0;animation:l11 7.6s infinite}@keyframes l11{0%,45.253%{opacity:0}45.263%,100%{opacity:1}}
+.l12{opacity:0;animation:l12 7.6s infinite}@keyframes l12{0%,46.043%{opacity:0}46.053%,100%{opacity:1}}
+.l13{opacity:0;animation:l13 7.6s infinite}@keyframes l13{0%,46.832%{opacity:0}46.842%,100%{opacity:1}}
+.l14{opacity:0;animation:l14 7.6s infinite}@keyframes l14{0%,47.622%{opacity:0}47.632%,100%{opacity:1}}
+.l15{opacity:0;animation:l15 7.6s infinite}@keyframes l15{0%,48.411%{opacity:0}48.421%,100%{opacity:1}}
+.l16{opacity:0;animation:l16 7.6s infinite}@keyframes l16{0%,49.201%{opacity:0}49.211%,100%{opacity:1}}
+.l17{opacity:0;animation:l17 7.6s infinite}@keyframes l17{0%,49.99%{opacity:0}50%,100%{opacity:1}}
+.l18{opacity:0;animation:l18 7.6s infinite}@keyframes l18{0%,50.779%{opacity:0}50.789%,100%{opacity:1}}
+.l19{opacity:0;animation:l19 7.6s infinite}@keyframes l19{0%,51.569%{opacity:0}51.579%,100%{opacity:1}}
+.l20{opacity:0;animation:l20 7.6s infinite}@keyframes l20{0%,52.358%{opacity:0}52.368%,100%{opacity:1}}
+.l21{opacity:0;animation:l21 7.6s infinite}@keyframes l21{0%,53.148%{opacity:0}53.158%,100%{opacity:1}}
+.l22{opacity:0;animation:l22 7.6s infinite}@keyframes l22{0%,53.937%{opacity:0}53.947%,100%{opacity:1}}
+.l23{opacity:0;animation:l23 7.6s infinite}@keyframes l23{0%,54.727%{opacity:0}54.737%,100%{opacity:1}}
+.l24{opacity:0;animation:l24 7.6s infinite}@keyframes l24{0%,55.516%{opacity:0}55.526%,100%{opacity:1}}
+.l25{opacity:0;animation:l25 7.6s infinite}@keyframes l25{0%,56.306%{opacity:0}56.316%,100%{opacity:1}}
+.l26{opacity:0;animation:l26 7.6s infinite}@keyframes l26{0%,57.095%{opacity:0}57.105%,100%{opacity:1}}
+.l27{opacity:0;animation:l27 7.6s infinite}@keyframes l27{0%,57.885%{opacity:0}57.895%,100%{opacity:1}}
+.l28{opacity:0;animation:l28 7.6s infinite}@keyframes l28{0%,58.674%{opacity:0}58.684%,100%{opacity:1}}
+.l29{opacity:0;animation:l29 7.6s infinite}@keyframes l29{0%,59.464%{opacity:0}59.474%,100%{opacity:1}}
+.l30{opacity:0;animation:l30 7.6s infinite}@keyframes l30{0%,60.253%{opacity:0}60.263%,100%{opacity:1}}
+.l31{opacity:0;animation:l31 7.6s infinite}@keyframes l31{0%,61.043%{opacity:0}61.053%,100%{opacity:1}}
+.l32{opacity:0;animation:l32 7.6s infinite}@keyframes l32{0%,61.832%{opacity:0}61.842%,100%{opacity:1}}
+.l33{opacity:0;animation:l33 7.6s infinite}@keyframes l33{0%,62.622%{opacity:0}62.632%,100%{opacity:1}}
+.l34{opacity:0;animation:l34 7.6s infinite}@keyframes l34{0%,63.411%{opacity:0}63.421%,100%{opacity:1}}
+.l35{opacity:0;animation:l35 7.6s infinite}@keyframes l35{0%,64.201%{opacity:0}64.211%,100%{opacity:1}}
+.l36{opacity:0;animation:l36 7.6s infinite}@keyframes l36{0%,64.99%{opacity:0}65%,100%{opacity:1}}
+.l37{opacity:0;animation:l37 7.6s infinite}@keyframes l37{0%,65.779%{opacity:0}65.789%,100%{opacity:1}}
+.scroll{animation:scroll 7.6s linear infinite}@keyframes scroll{0%{transform:translateY(0)}35.526%{transform:translateY(0)}50.789%{transform:translateY(-18px)}51.579%{transform:translateY(-36px)}52.368%{transform:translateY(-54px)}53.158%{transform:translateY(-72px)}53.947%{transform:translateY(-90px)}54.737%{transform:translateY(-108px)}55.526%{transform:translateY(-126px)}56.316%{transform:translateY(-144px)}57.105%{transform:translateY(-162px)}57.895%{transform:translateY(-180px)}58.684%{transform:translateY(-198px)}59.474%{transform:translateY(-216px)}60.263%{transform:translateY(-234px)}61.053%{transform:translateY(-252px)}61.842%{transform:translateY(-270px)}62.632%{transform:translateY(-288px)}63.421%{transform:translateY(-306px)}64.211%{transform:translateY(-324px)}65%{transform:translateY(-342px)}65.789%{transform:translateY(-360px)}100%{transform:translateY(-360px)}}
+#typeclip rect{animation:type 7.6s steps(22,end) infinite}@keyframes type{0%,4.605%{width:0}24.342%,100%{width:171.8px}}
+.cur{opacity:0;animation:cur 7.6s infinite}@keyframes cur{0%,24.342%{opacity:0}24.566%,27.921%{opacity:1}28.145%,31.276%{opacity:0}31.500%,35.079%{opacity:1}35.302%,100%{opacity:0}}</style>
+<defs>
+<clipPath id="typeclip"><rect x="31.6" y="18" width="0" height="18"/></clipPath>
+<clipPath id="viewport"><rect x="0" y="40" width="509" height="324"/></clipPath>
+</defs>
+<rect x="0" y="0" width="509" height="374" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+<rect x="0.5" y="0.5" width="508" height="30" rx="10" fill="#161b22"/>
+<rect x="0.5" y="20" width="508" height="10" fill="#161b22"/>
+<circle cx="18" cy="15" r="5" fill="#ff5f56"/>
+<circle cx="36" cy="15" r="5" fill="#ffbd2e"/>
+<circle cx="54" cy="15" r="5" fill="#27c93f"/>
+<text x="254.5" y="19" text-anchor="middle" fill="#7d8590" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11">vibgrate — vg scan</text>
+<g clip-path="url(#viewport)">
+<g transform="translate(0,40)">
+<g class="scroll">
+<g class="term" fill="#c9d1d9">
+<g class="l0"><text x="16" y="13" xml:space="preserve" textLength="242.1" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681" font-weight="400" text-decoration="none">~/vibgrate-demos/node-turborepo</tspan></text></g>
+<g class="l1"><text x="16" y="31" xml:space="preserve" textLength="15.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681">$ </tspan></text><g clip-path="url(#typeclip)"><text x="31.6" y="31" xml:space="preserve" textLength="171.8" lengthAdjust="spacingAndGlyphs"><tspan fill="#e6edf3" font-weight="700">npx @vibgrate/cli scan</tspan></text></g></g>
+<g class="l2"><text x="16" y="49" xml:space="preserve"></text></g>
+<g class="l3"><text x="16" y="67" xml:space="preserve" textLength="93.7" lengthAdjust="spacingAndGlyphs"><tspan fill="#3FB0A4" font-weight="400" text-decoration="none">   ╭──────╮</tspan><tspan fill="#4FE3C1" font-weight="400" text-decoration="none">➜</tspan></text></g>
+<g class="l4"><text x="16" y="85" xml:space="preserve" textLength="93.7" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681" font-weight="400" text-decoration="none">  ┤</tspan><tspan fill="#3FB0A4" font-weight="400" text-decoration="none">│</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none"> </tspan><tspan fill="#4FE3C1" font-weight="400" text-decoration="none">◼</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none">  </tspan><tspan fill="#4FE3C1" font-weight="400" text-decoration="none">◼</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none"> </tspan><tspan fill="#3FB0A4" font-weight="400" text-decoration="none">│</tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">├</tspan></text></g>
+<g class="l5"><text x="16" y="103" xml:space="preserve" textLength="93.7" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681" font-weight="400" text-decoration="none">  ┤</tspan><tspan fill="#3FB0A4" font-weight="400" text-decoration="none">│</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none">  </tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">▁▁</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none">  </tspan><tspan fill="#3FB0A4" font-weight="400" text-decoration="none">│</tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">├</tspan></text></g>
+<g class="l6"><text x="16" y="121" xml:space="preserve" textLength="85.9" lengthAdjust="spacingAndGlyphs"><tspan fill="#3FB0A4" font-weight="400" text-decoration="none">   ╰──────╯</tspan></text></g>
+<g class="l7"><text x="16" y="139" xml:space="preserve" textLength="343.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#ffffff" font-weight="700" text-decoration="none">  vibgrate</tspan><tspan fill="#3FB0A4" font-weight="400" text-decoration="none"> graph</tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">  · deterministic code graph</tspan></text></g>
+<g class="l8"><text x="16" y="157" xml:space="preserve"></text></g>
+<g class="l9"><text x="16" y="175" xml:space="preserve" textLength="343.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#3fb950" font-weight="400" text-decoration="none">✔</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none"> Discovering workspace   </tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">56 files · 27 dirs</tspan></text></g>
+<g class="l10"><text x="16" y="193" xml:space="preserve" textLength="328.0" lengthAdjust="spacingAndGlyphs"><tspan fill="#3fb950" font-weight="400" text-decoration="none">✔</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none"> Indexing files          </tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">56 files indexed</tspan></text></g>
+<g class="l11"><text x="16" y="211" xml:space="preserve" textLength="281.2" lengthAdjust="spacingAndGlyphs"><tspan fill="#3fb950" font-weight="400" text-decoration="none">✔</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none"> Found Node projects     </tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">9 projects</tspan></text></g>
+<g class="l12"><text x="16" y="229" xml:space="preserve" textLength="343.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#3fb950" font-weight="400" text-decoration="none">✔</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none"> Computing drift score   </tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">74/100 — high risk</tspan></text></g>
+<g class="l13"><text x="16" y="247" xml:space="preserve" textLength="367.1" lengthAdjust="spacingAndGlyphs"><tspan fill="#3fb950" font-weight="400" text-decoration="none">✔</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none"> Building code map       </tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">208 nodes · 293 edges</tspan></text></g>
+<g class="l14"><text x="16" y="265" xml:space="preserve" textLength="242.1" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681" font-weight="400" text-decoration="none">  9 scanners completed in 27.3s</tspan></text></g>
+<g class="l15"><text x="16" y="283" xml:space="preserve"></text></g>
+<g class="l16"><text x="16" y="301" xml:space="preserve" textLength="343.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#39c5cf" font-weight="700" text-decoration="none">╔══════════════════════════════════════════╗</tspan></text></g>
+<g class="l17"><text x="16" y="319" xml:space="preserve" textLength="343.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#39c5cf" font-weight="700" text-decoration="none">║        Drift Score Summary               ║</tspan></text></g>
+<g class="l18"><text x="16" y="337" xml:space="preserve" textLength="343.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#39c5cf" font-weight="700" text-decoration="none">╚══════════════════════════════════════════╝</tspan></text></g>
+<g class="l19"><text x="16" y="355" xml:space="preserve"></text></g>
+<g class="l20"><text x="16" y="373" xml:space="preserve" textLength="171.8" lengthAdjust="spacingAndGlyphs"><tspan fill="#c9d1d9" font-weight="700" text-decoration="none">  Drift Score:  </tspan><tspan fill="#f85149" font-weight="700" text-decoration="none">74/100</tspan></text></g>
+<g class="l21"><text x="16" y="391" xml:space="preserve" textLength="171.8" lengthAdjust="spacingAndGlyphs"><tspan fill="#c9d1d9" font-weight="700" text-decoration="none">  Risk Level:   </tspan><tspan fill="#f85149" font-weight="700" text-decoration="none"> HIGH </tspan></text></g>
+<g class="l22"><text x="16" y="409" xml:space="preserve" textLength="132.8" lengthAdjust="spacingAndGlyphs"><tspan fill="#c9d1d9" font-weight="700" text-decoration="none">  Projects:     </tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none">9</tspan></text></g>
+<g class="l23"><text x="16" y="427" xml:space="preserve"></text></g>
+<g class="l24"><text x="16" y="445" xml:space="preserve" textLength="132.8" lengthAdjust="spacingAndGlyphs"><tspan fill="#c9d1d9" font-weight="700" text-decoration="underline">  Score Breakdown</tspan></text></g>
+<g class="l25"><text x="16" y="463" xml:space="preserve" textLength="328.0" lengthAdjust="spacingAndGlyphs"><tspan fill="#c9d1d9" font-weight="400" text-decoration="none">    Runtime:      </tspan><tspan fill="#f85149" font-weight="400" text-decoration="none">████████████████████</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none"> 100</tspan></text></g>
+<g class="l26"><text x="16" y="481" xml:space="preserve" textLength="328.0" lengthAdjust="spacingAndGlyphs"><tspan fill="#c9d1d9" font-weight="400" text-decoration="none">    Frameworks:   </tspan><tspan fill="#d29922" font-weight="400" text-decoration="none">█████████</tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">░░░░░░░░░░░</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none">  44</tspan></text></g>
+<g class="l27"><text x="16" y="499" xml:space="preserve" textLength="328.0" lengthAdjust="spacingAndGlyphs"><tspan fill="#c9d1d9" font-weight="400" text-decoration="none">    Dependencies: </tspan><tspan fill="#f85149" font-weight="400" text-decoration="none">██████████████████</tspan><tspan fill="#6e7681" font-weight="400" text-decoration="none">░░</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none">  88</tspan></text></g>
+<g class="l28"><text x="16" y="517" xml:space="preserve" textLength="328.0" lengthAdjust="spacingAndGlyphs"><tspan fill="#c9d1d9" font-weight="400" text-decoration="none">    EOL Risk:     </tspan><tspan fill="#f85149" font-weight="400" text-decoration="none">████████████████████</tspan><tspan fill="#c9d1d9" font-weight="400" text-decoration="none"> 100</tspan></text></g>
+<g class="l29"><text x="16" y="535" xml:space="preserve"></text></g>
+<g class="l30"><text x="16" y="553" xml:space="preserve" textLength="171.8" lengthAdjust="spacingAndGlyphs"><tspan fill="#c9d1d9" font-weight="700" text-decoration="underline">  Top Priority Actions</tspan></text></g>
+<g class="l31"><text x="16" y="571" xml:space="preserve" textLength="328.0" lengthAdjust="spacingAndGlyphs"><tspan fill="#39c5cf" font-weight="700" text-decoration="none">  1.</tspan><tspan fill="#c9d1d9" font-weight="700" text-decoration="none"> Upgrade EOL runtime in node-turborepo</tspan></text></g>
+<g class="l32"><text x="16" y="589" xml:space="preserve" textLength="460.8" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681" font-weight="400" text-decoration="none">     &gt;=18.0.0 → 24.0.0 (6 majors behind)   </tspan><tspan fill="#3fb950" font-weight="400" text-decoration="none">−10 drift points</tspan></text></g>
+<g class="l33"><text x="16" y="607" xml:space="preserve" textLength="445.2" lengthAdjust="spacingAndGlyphs"><tspan fill="#39c5cf" font-weight="700" text-decoration="none">  2.</tspan><tspan fill="#c9d1d9" font-weight="700" text-decoration="none"> Upgrade Vite 5.4.21 → 8.1.1 in @repo/admin (+2 more)</tspan></text></g>
+<g class="l34"><text x="16" y="625" xml:space="preserve" textLength="476.4" lengthAdjust="spacingAndGlyphs"><tspan fill="#6e7681" font-weight="400" text-decoration="none">     3 major versions behind               </tspan><tspan fill="#3fb950" font-weight="400" text-decoration="none">−5–15 drift points</tspan></text></g>
+<g class="l35"><text x="16" y="643" xml:space="preserve"></text></g>
+<g class="l36"><text x="16" y="661" xml:space="preserve" textLength="304.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#4FE3C1" font-weight="400" text-decoration="none">  ◆ </tspan><tspan fill="#ffffff" font-weight="700" text-decoration="none">Get AI-aware answers in your editor</tspan></text></g>
+<g class="l37"><text x="16" y="679" xml:space="preserve" textLength="156.2" lengthAdjust="spacingAndGlyphs"><tspan fill="#3FB0A4" font-weight="400" text-decoration="none">    vg install --all</tspan></text></g>
+<rect class="cur" x="204.4" y="20" width="6.8" height="13" fill="#4FE3C1"/>
+</g>
+</g>
+</g>
+</g>
+</svg>

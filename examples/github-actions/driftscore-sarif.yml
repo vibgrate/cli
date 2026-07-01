@@ -18,7 +18,7 @@ jobs:
 
       - name: Generate SARIF
         run: |
-          npx @vibgrate/cli scan . \
+          npx @vibgrate/cli scan \
             --format sarif \
             --out vibgrate-results.sarif \
             --fail-on error

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { fetchHostedDocs, hostedBase } from '../src/engine/hosted.js';
+import { fetchHostedDocs, hostedBase, publishPrivateLibrary } from '../src/engine/hosted.js';
 
 const okJson = (body: unknown): typeof fetch =>
   (async () => ({ ok: true, status: 200, json: async () => body })) as unknown as typeof fetch;
@@ -97,5 +97,48 @@ describe('fetchHostedDocs — fails closed to local', () => {
     await fetchHostedDocs({ targetId: 'pv1', query: 'send', verbosity: 'concise', maxTokens: 800 }, { base: 'https://h.test', fetchImpl: f });
     expect(captured.url).toBe('https://h.test/v1/lib/docs');
     expect(captured.body).toMatchObject({ targetId: 'pv1', query: 'send', verbosity: 'concise', max_tokens: 800 });
+  });
+});
+
+describe('publishPrivateLibrary — surfaces errors (explicit write)', () => {
+  const auth = { keyId: 'k1', secret: 's1' };
+
+  it('requires a DSN (no auth → 401, no request made)', async () => {
+    let called = false;
+    const f = (async () => {
+      called = true;
+      return { ok: true, status: 200, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+    const r = await publishPrivateLibrary({ name: 'p', version: '1.0.0', readme: 'x' }, { base: 'https://h.test', fetchImpl: f });
+    expect(r).toMatchObject({ ok: false, status: 401 });
+    expect(called).toBe(false);
+  });
+
+  it('POSTs to /v1/lib/private with DSN auth + body, returns the result', async () => {
+    let captured: { url?: string; body?: unknown; headers?: Record<string, string> } = {};
+    const f = (async (url: string, init: { body: string; headers: Record<string, string> }) => {
+      captured = { url, body: JSON.parse(init.body), headers: init.headers };
+      return { ok: true, status: 200, json: async () => ({ ok: true, targetId: 't1', ecosystem: 'private:w1', entities: 3, indexedTokens: 120 }) };
+    }) as unknown as typeof fetch;
+    const r = await publishPrivateLibrary({ name: 'acme-internal', version: '1.2.0', readme: 'R', language: 'typescript' }, { base: 'https://h.test', fetchImpl: f, auth });
+    expect(captured.url).toBe('https://h.test/v1/lib/private');
+    expect(captured.headers!['Authorization']).toBe('VibgrateDSN k1:s1');
+    expect(captured.body).toMatchObject({ name: 'acme-internal', version: '1.2.0', readme: 'R', language: 'typescript' });
+    expect(r).toEqual({ ok: true, targetId: 't1', ecosystem: 'private:w1', entities: 3, indexedTokens: 120 });
+  });
+
+  it('surfaces a 402 plan_required (paid-plan gate)', async () => {
+    const f = (async () => ({ ok: false, status: 402, json: async () => ({ error: 'plan_required', message: 'Private libraries require a paid plan.' }) })) as unknown as typeof fetch;
+    const r = await publishPrivateLibrary({ name: 'p', version: '1.0.0', readme: 'x' }, { base: 'https://h.test', fetchImpl: f, auth });
+    expect(r).toMatchObject({ ok: false, status: 402, error: 'plan_required' });
+  });
+
+  it('surfaces a network failure as ok:false (does not throw)', async () => {
+    const f = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    const r = await publishPrivateLibrary({ name: 'p', version: '1.0.0', readme: 'x' }, { base: 'https://h.test', fetchImpl: f, auth });
+    expect(r.ok).toBe(false);
+    expect((r as { status: number }).status).toBe(0);
   });
 });

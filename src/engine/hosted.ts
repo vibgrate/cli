@@ -106,3 +106,74 @@ export async function fetchHostedDocs(req: HostedDocsRequest, opts: HostedOption
     clearTimeout(timer);
   }
 }
+
+export interface PublishRequest {
+  name: string;
+  version: string;
+  readme?: string;
+  dts?: string;
+  compliance?: string[];
+  language?: string;
+  sourceUrl?: string;
+}
+export interface PublishOk {
+  ok: true;
+  targetId: string;
+  ecosystem: string;
+  entities: number;
+  indexedTokens: number;
+}
+export interface PublishErr {
+  ok: false;
+  status: number;
+  error?: string;
+  message?: string;
+}
+
+/**
+ * Publish a PRIVATE library to the hosted catalog (`POST /v1/lib/private`, S6). Unlike the read
+ * path, this is an explicit user write, so it SURFACES errors (no fail-closed): a DSN is required
+ * (workspace identity), the workspace must be on a paid plan (402), and the result reports the
+ * indexed token cost charged to the MCP-token meter.
+ */
+export async function publishPrivateLibrary(req: PublishRequest, opts: HostedOptions = {}): Promise<PublishOk | PublishErr> {
+  const f = opts.fetchImpl ?? (globalThis.fetch as typeof fetch | undefined);
+  if (!f) return { ok: false, status: 0, message: 'no network available' };
+  if (!opts.auth) return { ok: false, status: 401, message: 'a DSN is required to publish a private library (run `vibgrate login` or set VIBGRATE_DSN)' };
+  const url = `${hostedBase(opts)}/v1/lib/private`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 15000);
+  try {
+    const res = await f(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        Authorization: `VibgrateDSN ${opts.auth.keyId}:${opts.auth.secret}`,
+        'X-Vibgrate-Timestamp': String(Date.now()),
+      },
+      body: JSON.stringify({
+        name: req.name,
+        version: req.version,
+        readme: req.readme,
+        dts: req.dts,
+        compliance: req.compliance,
+        language: req.language,
+        sourceUrl: req.sourceUrl,
+      }),
+      signal: ctrl.signal,
+    });
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) return { ok: false, status: res.status, error: typeof data.error === 'string' ? data.error : undefined, message: typeof data.message === 'string' ? data.message : undefined };
+    return {
+      ok: true,
+      targetId: String(data.targetId ?? ''),
+      ecosystem: String(data.ecosystem ?? ''),
+      entities: Number(data.entities) || 0,
+      indexedTokens: Number(data.indexedTokens) || 0,
+    };
+  } catch (err) {
+    return { ok: false, status: 0, message: err instanceof Error ? err.message : 'request failed' };
+  } finally {
+    clearTimeout(timer);
+  }
+}

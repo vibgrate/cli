@@ -1,0 +1,6 @@
+# Values used by CI to lint and render the chart (a DSN is required to render).
+dsn: "vibgrate+https://key_id:secret@ingest.vibgrate.com/workspace_id"
+repository:
+  url: "https://github.com/vibgrate/cli"
+  ref: "main"
+runOnInstall: true

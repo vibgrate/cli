@@ -1,11 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
 // We test DSN parsing and HMAC computation from push.ts by extracting the logic.
 // Since parseDsn and computeHmac are not exported, we test them via the module's behavior
 // or replicate the logic here for unit testing.
 
 import * as crypto from 'node:crypto';
-import { resolveIngestHost } from './dsn.js';
+import { resolveIngestHost, createWorkspaceDsn } from './dsn.js';
 import { parseDsn, computeHmac } from './push.js';
 
 // ── DSN parsing (now exported from push.ts) ──
@@ -102,5 +102,66 @@ describe('resolveIngestHost', () => {
 
   it('throws for invalid ingest URL', () => {
     expect(() => resolveIngestHost(undefined, 'not-a-url')).toThrow('Invalid ingest URL');
+  });
+});
+
+describe('createWorkspaceDsn', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('provisions a workspace and returns a well-formed DSN pinned to the region', async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: { body: string }) => {
+        calls.push({ url, body: JSON.parse(init.body) });
+        return { ok: true, json: async () => ({}) } as Response;
+      }),
+    );
+
+    const result = await createWorkspaceDsn({ region: 'eu' });
+
+    expect(result.ingestHost).toBe('eu.ingest.vibgrate.com');
+    expect(result.region).toBe('eu');
+    // DSN shape: vibgrate+https://<24hex>:<64hex>@<host>/<16hex>
+    expect(result.dsn).toMatch(
+      /^vibgrate\+https:\/\/[0-9a-f]{24}:[0-9a-f]{64}@eu\.ingest\.vibgrate\.com\/[0-9a-f]{16}$/,
+    );
+    const parsed = parseDsn(result.dsn);
+    expect(parsed!.keyId).toBe(result.keyId);
+    expect(parsed!.workspaceId).toBe(result.workspaceId);
+
+    // The provision call hit the right host and pinned the region.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe('https://eu.ingest.vibgrate.com/v1/provision');
+    expect((calls[0].body as { region: string }).region).toBe('eu');
+  });
+
+  it('does not pin a region for a custom --ingest host', async () => {
+    const calls: Array<{ body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: { body: string }) => {
+        calls.push({ body: JSON.parse(init.body) });
+        return { ok: true, json: async () => ({}) } as Response;
+      }),
+    );
+
+    const result = await createWorkspaceDsn({ ingest: 'https://custom.example.com' });
+    expect(result.ingestHost).toBe('custom.example.com');
+    expect(result.region).toBeUndefined();
+    expect(calls[0].body).not.toHaveProperty('region');
+  });
+
+  it('throws an actionable error when provisioning fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 409, json: async () => ({ error: 'workspace exists' }) }) as Response),
+    );
+
+    await expect(createWorkspaceDsn({ region: 'us' })).rejects.toThrow(
+      /Failed to provision workspace: workspace exists/,
+    );
   });
 });

@@ -3,9 +3,11 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as semver from 'semver';
-import { readTextFile, FileCache } from '../utils/fs.js';
+import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
 import { withTimeout } from '../utils/timeout.js';
 import { RubyGemsCache } from './rubygems-cache.js';
+import { loadGemfileLockIndex, type GemfileLockIndex } from './gemfile-lock.js';
+import type { LockfileIo } from './npm-lockfile.js';
 import { latestStable, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
 import type { RuntimeCatalog } from '../runtimes/types.js';
@@ -445,6 +447,15 @@ async function scanOneRubyProject(
     if (cycle) runtimeEolDate = eolDate(catalog, 'ruby', cycle);
   }
 
+  // Gemfile.lock pins the exact resolved version of every gem — more accurate than the declared
+  // constraint and the only resolved version available offline. It sits beside the Gemfile.
+  const lockIo: LockfileIo = {
+    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
+    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
+    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
+  };
+  const lockIndex: GemfileLockIndex | null = await loadGemfileLockIndex(dir, lockIo).catch(() => null);
+
   // Resolve dependencies against RubyGems
   const dependencies: DependencyRow[] = [];
   const frameworks: DetectedFramework[] = [];
@@ -460,7 +471,9 @@ async function scanOneRubyProject(
   const resolved = await Promise.all(metaPromises);
 
   for (const { dep, meta } of resolved) {
-    const rawVersion = extractGemVersion(dep.spec);
+    // Prefer the lockfile's exact version; otherwise extract from the declared constraint.
+    const locked = lockIndex?.resolve(dep.name) ?? null;
+    const rawVersion = locked ?? extractGemVersion(dep.spec);
     const resolvedVersion = rawVersion ? rubyVersionToSemver(rawVersion) : null;
     const latestStable = meta.latestStableOverall;
 

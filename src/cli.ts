@@ -22,6 +22,8 @@ import { registerBenchmark } from './commands/benchmark.js';
 import { registerTests } from './commands/tests.js';
 import { registerFacts } from './commands/facts.js';
 import { registerGuide } from './commands/guide.js';
+import { registerWhy } from './commands/why.js';
+import { registerBisect } from './commands/bisect.js';
 import { registerDrift } from './commands/drift.js';
 import { registerModels } from './commands/models.js';
 import { registerSavings } from './commands/savings.js';
@@ -45,7 +47,7 @@ import { updateCommand } from './reporting/commands/update.js';
 import { sbomCommand } from './reporting/commands/sbom.js';
 
 /** The set of registered subcommand names (kept in sync with registration). */
-const KNOWN_COMMANDS = new Set([
+export const KNOWN_COMMANDS = new Set([
   'build',
   'status',
   'verify',
@@ -58,6 +60,8 @@ const KNOWN_COMMANDS = new Set([
   'tests',
   'facts',
   'guide',
+  'why',
+  'bisect',
   'drift',
   'models',
   'savings',
@@ -99,7 +103,7 @@ export function buildProgram(): Command {
     .showSuggestionAfterError(true)
     .addHelpText(
       'after',
-      '\nRun `vg` to build the current folder, `vg "<question>"` to ask, ' +
+      '\nRun `vg` to scan + map the current folder, `vg "<question>"` to ask, ' +
         '`vg status`/`vg verify` for state.\n' +
         'Drift: `vg scan` / `vg report`. Wire into your AI agent: `vg install`.\n' +
         'The `vibgrate` command is an alias for `vg`.\nDocs: https://vibgrate.com/help',
@@ -124,6 +128,8 @@ export function buildProgram(): Command {
   registerTests(program);
   registerFacts(program);
   registerGuide(program);
+  registerWhy(program);
+  registerBisect(program);
   registerDrift(program);
   registerModels(program);
   registerSavings(program);
@@ -149,8 +155,8 @@ export function buildProgram(): Command {
 
 /**
  * The "simple as Google" dispatch (VG-CLI-SPEC §1):
- *   vg                      → build the current folder
- *   vg <path-that-exists>   → build that path
+ *   vg                      → scan + map the current folder
+ *   vg <path-that-exists>   → scan + map that path
  *   vg "<quoted question>"  → ask (contains a space or ends with '?')
  *   vg <known-command> …    → run that command
  *   vg <other-word>         → ask (bare-string search)
@@ -174,17 +180,50 @@ const VALUE_FLAGS = new Set([
   '-b',
 ]);
 
+/**
+ * Build-only flags that `scan` has no equivalent for. When one of these appears
+ * on an otherwise-default invocation (`vg --json`, `vg --jobs 4`, `vg . --only ts`),
+ * we keep routing to `build` so the flag still means "map", rather than handing
+ * it to `scan` (which would reject the unknown option).
+ */
+const BUILD_ONLY_FLAGS = new Set([
+  '--json',
+  '--jobs',
+  '--only',
+  '--export',
+  '--graph',
+  '--generated-at',
+  '--no-cache',
+  '--deep',
+  '--scip',
+  '--no-scip',
+  '--tsc',
+  '--no-tsc',
+  '--ground',
+  '--no-ground',
+  '--html',
+  '--no-html',
+  '--report',
+  '--no-report',
+  '--warm',
+]);
+
+function hasBuildOnlyFlag(args: string[]): boolean {
+  return args.some((a) => BUILD_ONLY_FLAGS.has(a.split('=')[0]));
+}
+
 export function dispatch(argv: string[], cwd: string): string[] {
   const args = [...argv];
   const firstPositionalIdx = findFirstPositional(args);
 
-  // No positional at all (e.g. `vg`, `vg --json`): default to build, unless a
-  // terminal flag like --help/--version is present (let commander handle those).
+  // No positional at all (e.g. `vg`, `vg --quiet`): default to scan, which also
+  // builds the map (one command → Drift Score + AI/docs index). A terminal flag
+  // like --help/--version is left for commander; a build-only flag keeps `build`.
   if (firstPositionalIdx === -1) {
     if (args.includes('--help') || args.includes('-h') || args.includes('--version')) {
       return args;
     }
-    return ['build', ...args];
+    return [hasBuildOnlyFlag(args) ? 'build' : 'scan', ...args];
   }
 
   const first = args[firstPositionalIdx];
@@ -200,8 +239,10 @@ export function dispatch(argv: string[], cwd: string): string[] {
   const looksLikeQuestion = /\s/.test(first) || first.endsWith('?');
   if (looksLikeQuestion) return ['ask', ...args];
 
-  // A path (relative to cwd) → build it.
-  if (fs.existsSync(path.resolve(cwd, first))) return ['build', ...args];
+  // A path (relative to cwd) → scan + map it (a build-only flag keeps `build`).
+  if (fs.existsSync(path.resolve(cwd, first))) {
+    return [hasBuildOnlyFlag(args) ? 'build' : 'scan', ...args];
+  }
 
   // Bare word that is neither a command nor a path → treat as a search query.
   return ['ask', ...args];
