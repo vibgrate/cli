@@ -75,6 +75,16 @@ ${NUDGE_END}`;
 }
 
 /** The MCP server entry registered for local stdio use. */
-export function mcpServerEntry(): { command: string; args: string[] } {
-  return { command: 'vg', args: ['serve'] };
+export function mcpServerEntry(launch: ServeLaunch = { command: 'vg', args: ['serve'] }): {
+  command: string;
+  args: string[];
+} {
+  return { command: launch.command, args: launch.args };
+}
+
+export interface ServeLaunch {
+  command: string;
+  args: string[];
+  /** Human-readable explanation when the launch is not the plain `vg serve`. */
+  note?: string;
 }

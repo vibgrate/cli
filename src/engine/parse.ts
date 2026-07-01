@@ -35,6 +35,39 @@ function namedCapture(
   return captures.find((c) => c.name === name)?.node;
 }
 
+/**
+ * Wrapper node types that sit between a *qualified* callee identifier and the
+ * call node (`obj.foo()` / `pkg::foo()` / `recv.foo()` across the grammars).
+ * A bare call's identifier hangs directly off the call node instead.
+ */
+const MEMBER_PARENT_TYPES = new Set([
+  'member_expression', // ts/js: obj.foo()
+  'attribute', // python: obj.foo()
+  'selector_expression', // go: pkg.Foo()
+  'field_expression', // rust: recv.foo()
+  'scoped_identifier', // rust: Type::foo()
+  'member_access_expression', // c#: obj.Foo()
+]);
+
+/**
+ * Was this callee identifier part of a qualified call (`x.foo()`) rather than a
+ * bare one (`foo()`)? The queries capture only the trailing name, so the
+ * resolver needs this bit to know a same-file def with the same short name is
+ * NOT evidence — the receiver points elsewhere (see resolve.ts).
+ */
+function isQualifiedCallee(node: Node): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  if (MEMBER_PARENT_TYPES.has(parent.type)) return true;
+  // Java `method_invocation` and Ruby `call` keep receiver and name on the call
+  // node itself — qualified iff the receiver/object field is present.
+  if (parent.type === 'method_invocation') return parent.childForFieldName('object') != null;
+  // Ruby `call` carries a `receiver` field when qualified; Python's `call` has
+  // no such field (its qualified form is the `attribute` wrapper above).
+  if (parent.type === 'call') return parent.childForFieldName('receiver') != null;
+  return false;
+}
+
 function signatureOf(source: string, def: Node, langId: string): string {
   // The text up to the body opening, single-lined, bounded — a deterministic,
   // human-meaningful signature without dragging in the whole body.
@@ -202,6 +235,7 @@ export async function parseSource(
         callee: cap.node.text,
         byte: cap.node.startIndex,
         line: cap.node.startPosition.row + 1,
+        qualified: isQualifiedCallee(cap.node),
       });
     }
   }

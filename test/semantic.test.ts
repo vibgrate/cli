@@ -201,3 +201,18 @@ describe('getNodeEmbeddings — cached, resumable, progress', () => {
     }
   });
 });
+
+describe('withTimeout (embedder init ceiling)', () => {
+  it('resolves when the promise settles in time', async () => {
+    const { withTimeout } = await import('../src/engine/embeddings.js');
+    await expect(withTimeout(Promise.resolve('ok'), 1000, 'late')).resolves.toBe('ok');
+  });
+
+  it('rejects with the given message when the promise hangs', async () => {
+    const { withTimeout } = await import('../src/engine/embeddings.js');
+    const never = new Promise(() => undefined);
+    await expect(withTimeout(never, 10, 'embedding model init timed out')).rejects.toThrow(
+      'embedding model init timed out',
+    );
+  });
+});

@@ -73,8 +73,10 @@ runs:
       run: |
         set -euo pipefail
         if ! command -v cosign >/dev/null 2>&1; then
-          echo "::warning::cosign not found on runner — add sigstore/cosign-installer before this Action to enable verification."
-          exit 0
+          # The user explicitly opted into verification — running unverified
+          # anyway would silently void that choice. Fail with the fix.
+          echo "::error::verify=true but cosign is not on the runner — add sigstore/cosign-installer before this Action (or set verify: false)."
+          exit 1
         fi
         cosign verify "${IMAGE}:${INPUT_TAG}" \
           --certificate-identity-regexp 'https://github.com/vibgrate/cli/.github/workflows/.+' \
@@ -104,11 +106,19 @@ runs:
         fi
         if [ -n "${INPUT_ARGS}" ]; then
           # Word-split intentionally: callers pass extra flags as a string.
+          # Globbing stays off so a pattern like `--only *.ts` reaches the CLI
+          # verbatim instead of expanding against the workspace.
+          set -f
           # shellcheck disable=SC2206
           extra+=(${INPUT_ARGS})
+          set +f
         fi
+        # Declare the output before the scan: `fail-on` exits non-zero on
+        # findings, and downstream consumers still need the artifact path.
+        echo "output-file=${INPUT_OUTPUT}" >> "$GITHUB_OUTPUT"
         docker run --rm \
           --user "$(id -u):$(id -g)" \
+          -e HOME=/tmp \
           -v "${PWD}:/work" -w /work \
           ${VIBGRATE_DSN:+-e VIBGRATE_DSN} \
           "${IMAGE}:${INPUT_TAG}" \
@@ -116,7 +126,6 @@ runs:
           --format "${INPUT_FORMAT}" \
           --out "${INPUT_OUTPUT}" \
           "${extra[@]}"
-        echo "output-file=${INPUT_OUTPUT}" >> "$GITHUB_OUTPUT"
 
     # Surface findings in the Security tab. `always()` so the SARIF still uploads
     # when `fail-on` failed the scan step — the PR check goes red AND the findings
