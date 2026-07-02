@@ -18,6 +18,8 @@ export interface RawCall {
   callee: string; // short name of the called symbol
   byte: number; // start byte of the call site (for enclosing-scope lookup)
   line: number; // 1-based
+  /** True when the call site had a receiver/qualifier (`obj.foo()`, `pkg::foo()`); the receiver itself is not captured. */
+  qualified?: boolean;
 }
 
 export interface RawImport {

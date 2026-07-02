@@ -3,6 +3,7 @@ import { parserFor, loadLanguage } from './grammars.js';
 import { langById } from './languages.js';
 import { queriesFor, type DefRule } from './queries.js';
 import { hashString } from './hash.js';
+import { redactSecrets } from '../core-open/utils/redact.js';
 import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport } from './types.js';
 
 /**
@@ -35,6 +36,52 @@ function namedCapture(
   return captures.find((c) => c.name === name)?.node;
 }
 
+/**
+ * Wrapper node types that sit between a *qualified* callee identifier and the
+ * call node (`obj.foo()` / `pkg::foo()` / `recv.foo()` across the grammars).
+ * A bare call's identifier hangs directly off the call node instead.
+ */
+const MEMBER_PARENT_TYPES = new Set([
+  'member_expression', // ts/js: obj.foo()
+  'attribute', // python: obj.foo()
+  'selector_expression', // go: pkg.Foo()
+  'field_expression', // rust/scala/c/cpp/zig: recv.foo()
+  'scoped_identifier', // rust: Type::foo()
+  'member_access_expression', // c#: obj.Foo()
+  'qualified_identifier', // c++: ns::f(), Type::m()
+  'dot', // elixir: Mod.fun()
+  'navigation_suffix', // kotlin/swift: recv.foo()
+  'member_call_expression', // php: $x->m()
+  'nullsafe_member_call_expression', // php: $x?->m()
+  'scoped_call_expression', // php: X::m()
+  'unconditional_assignable_selector', // dart: x.foo()
+  'conditional_assignable_selector', // dart: x?.foo()
+  'cascade_selector', // dart: x..foo()
+]);
+
+/**
+ * Was this callee identifier part of a qualified call (`x.foo()`) rather than a
+ * bare one (`foo()`)? The queries capture only the trailing name, so the
+ * resolver needs this bit to know a same-file def with the same short name is
+ * NOT evidence — the receiver points elsewhere (see resolve.ts).
+ */
+function isQualifiedCallee(node: Node): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  if (MEMBER_PARENT_TYPES.has(parent.type)) return true;
+  // Java `method_invocation` and Ruby `call` keep receiver and name on the call
+  // node itself — qualified iff the receiver/object field is present.
+  if (parent.type === 'method_invocation') return parent.childForFieldName('object') != null;
+  // Ruby `call` carries a `receiver` field when qualified; Python's `call` has
+  // no such field (its qualified form is the `attribute` wrapper above), and
+  // Elixir's `call` has none either (its qualified form is the `dot` wrapper).
+  if (parent.type === 'call') return parent.childForFieldName('receiver') != null;
+  // Lua wraps every callee in `variable`; qualified iff a `table` receiver exists
+  // (`repo.fetch()` / `repo:method()` carry table:, bare `foo()` has only name:).
+  if (parent.type === 'variable') return parent.childForFieldName('table') != null;
+  return false;
+}
+
 function signatureOf(source: string, def: Node, langId: string): string {
   // The text up to the body opening, single-lined, bounded — a deterministic,
   // human-meaningful signature without dragging in the whole body.
@@ -46,7 +93,9 @@ function signatureOf(source: string, def: Node, langId: string): string {
   const full = source.slice(def.startIndex, def.endIndex);
   let head: string;
   if (langId === 'py') head = pythonHeader(full);
-  else if (langId === 'rb') head = full.split('\n')[0];
+  // Ruby/Elixir: `do…end` bodies (and Elixir `%{}` default args would break a
+  // brace cut) — the header is the first line.
+  else if (langId === 'rb' || langId === 'ex') head = full.split('\n')[0];
   else {
     const braceIdx = full.indexOf('{');
     head = braceIdx >= 0 ? full.slice(0, braceIdx) : full.split('\n')[0];
@@ -62,6 +111,11 @@ function signatureOf(source: string, def: Node, langId: string): string {
  * stripped, whitespace-collapsed, truncated; never the full body. Returns
  * undefined when there is no doc.
  */
+function scrubbedDoc(source: string, def: Node, langId: string): string | undefined {
+  const doc = docOf(source, def, langId);
+  return doc === undefined ? undefined : redactSecrets(doc);
+}
+
 function docOf(source: string, def: Node, langId: string): string | undefined {
   const lines = source.split('\n');
   if (langId === 'py') return pythonDocstring(lines, def.startPosition.row);
@@ -192,16 +246,30 @@ export async function parseSource(
     );
 
   // --- calls ---
+  // A definition's own name node must never double as a call site: in
+  // expression-based grammars (Elixir) a `def foo(…)` head is itself a `call`
+  // node, which would fabricate a recursion edge for every definition.
+  const defNameBytes = new Set<number>();
+  for (const qsrc of langQueries.defs) {
+    const q = compile(language, langId, qsrc.query);
+    if (!q) continue;
+    for (const m of q.matches(root)) {
+      const nameNode = namedCapture(m.captures, 'name');
+      if (nameNode) defNameBytes.add(nameNode.startIndex);
+    }
+  }
   const calls: RawCall[] = [];
   for (const qsrc of langQueries.calls) {
     const q = compile(language, langId, qsrc);
     if (!q) continue;
     for (const cap of q.captures(root)) {
       if (cap.name !== 'callee') continue;
+      if (defNameBytes.has(cap.node.startIndex)) continue;
       calls.push({
         callee: cap.node.text,
         byte: cap.node.startIndex,
         line: cap.node.startPosition.row + 1,
+        qualified: isQualifiedCallee(cap.node),
       });
     }
   }
@@ -251,6 +319,22 @@ export async function parseSource(
   return result;
 }
 
+/**
+ * Dart splits a function into sibling signature + body nodes (and wraps class
+ * methods in a method_signature). Return the trailing function_body so the def
+ * span covers it — otherwise calls inside the body attribute to the file and
+ * nested defs do not nest.
+ */
+function dartBodyOf(defNode: Node): Node | null {
+  if (!defNode.type.endsWith('_signature')) return null;
+  if (defNode.nextNamedSibling?.type === 'function_body') return defNode.nextNamedSibling;
+  const wrapper = defNode.parent;
+  if (wrapper?.type === 'method_signature' && wrapper.nextNamedSibling?.type === 'function_body') {
+    return wrapper.nextNamedSibling;
+  }
+  return null;
+}
+
 function collectDefs(
   language: Language,
   langId: string,
@@ -265,22 +349,28 @@ function collectDefs(
     const defNode = namedCapture(match.captures, 'def');
     const nameNode = namedCapture(match.captures, 'name');
     if (!defNode || !nameNode) continue;
+    // Dart splits a function into sibling signature + body nodes; the def span
+    // must cover the body or calls inside it would attribute to the file, and
+    // nested defs would not nest.
+    const spanEnd = dartBodyOf(defNode) ?? defNode;
     out.push({
       kind: rule.kind,
       name: nameNode.text,
       qualifiedName: nameNode.text, // refined after nesting is computed
       startLine: defNode.startPosition.row + 1,
-      endLine: defNode.endPosition.row + 1,
+      endLine: spanEnd.endPosition.row + 1,
       startByte: defNode.startIndex,
-      endByte: defNode.endIndex,
+      endByte: spanEnd.endIndex,
       signature:
         rule.kind === 'function' || rule.kind === 'method'
-          ? signatureOf(source, defNode, langId)
+          ? redactSecrets(signatureOf(source, defNode, langId))
           : undefined,
-      doc: docOf(source, defNode, langId),
+      // GUARDRAILS §1: signatures/docs are lifted verbatim from source and are
+      // persisted (graph.json, `vg share` commits it) — scrub at ingest.
+      doc: scrubbedDoc(source, defNode, langId),
       visibility: undefined,
       _start: defNode.startIndex,
-      _end: defNode.endIndex,
+      _end: spanEnd.endIndex,
     });
   }
 }

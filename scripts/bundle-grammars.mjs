@@ -22,6 +22,17 @@ const GRAMMARS = [
   'tree-sitter-rust',
   'tree-sitter-c_sharp',
   'tree-sitter-ruby',
+  'tree-sitter-php',
+  'tree-sitter-kotlin',
+  'tree-sitter-swift',
+  'tree-sitter-scala',
+  'tree-sitter-dart',
+  'tree-sitter-lua',
+  'tree-sitter-elixir',
+  'tree-sitter-bash',
+  'tree-sitter-zig',
+  'tree-sitter-c',
+  'tree-sitter-cpp',
 ];
 
 const outDir = path.dirname(require.resolve('tree-sitter-wasms/package.json')) + '/out';

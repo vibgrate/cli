@@ -5,7 +5,7 @@ import { loadGraph } from '../engine/load.js';
 import { defaultGraphPath, vibgrateDir } from '../engine/artifacts.js';
 import { cacheDir } from '../engine/cache.js';
 import { discover } from '../engine/discover.js';
-import { hashBytes } from '../engine/hash.js';
+import { probeFreshness, driftCount } from '../engine/freshness.js';
 import { c, info, json } from '../util/output.js';
 import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.js';
 
@@ -29,20 +29,27 @@ async function runStatus(global: GlobalOpts): Promise<void> {
   const graph = loadGraph(root, graphPath);
   const hasCache = fs.existsSync(path.join(cacheDir(root), 'parse-cache.json'));
 
-  // Determine staleness deterministically: compare current file hashes to the
-  // corpus the committed graph was built from.
+  // Determine staleness deterministically. Preferred path: the freshness
+  // snapshot (stat+hash per corpus file, written by every build) gives an
+  // exact per-file answer — content edits, adds, AND removes. Fallback when
+  // no snapshot exists on this machine: "files present now" vs "the graph's
+  // node file set", which sees adds/removes but not content edits.
   let stale: number | null = null;
+  let staleExact = false;
   if (graph) {
-    const files = discover({ root });
-    let changed = 0;
-    // We can't recompute the exact per-file membership cheaply without the cache,
-    // so staleness here is "files present now" vs "the graph's node file set".
-    const graphFiles = new Set(graph.nodes.filter((n) => n.kind === 'file').map((n) => n.file));
-    const currentFiles = new Set(files.map((f) => f.rel));
-    for (const f of currentFiles) if (!graphFiles.has(f)) changed++;
-    for (const f of graphFiles) if (!currentFiles.has(f)) changed++;
-    stale = changed;
-    void hashBytes; // hashing reserved for the cache-aware path
+    const probe = probeFreshness(root);
+    if (probe) {
+      stale = driftCount(probe.drift);
+      staleExact = true;
+    } else {
+      const files = discover({ root });
+      let changed = 0;
+      const graphFiles = new Set(graph.nodes.filter((n) => n.kind === 'file').map((n) => n.file));
+      const currentFiles = new Set(files.map((f) => f.rel));
+      for (const f of currentFiles) if (!graphFiles.has(f)) changed++;
+      for (const f of graphFiles) if (!currentFiles.has(f)) changed++;
+      stale = changed;
+    }
   }
 
   if (global.json) {
@@ -58,6 +65,7 @@ async function runStatus(global: GlobalOpts): Promise<void> {
       corpusHash: graph?.provenance.corpusHash ?? null,
       cache: hasCache,
       staleFiles: stale,
+      staleExact,
     });
     return;
   }

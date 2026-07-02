@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { loadGraph } from '../engine/load.js';
-import { ASSISTANTS, assistantById, installAssistant, uninstallAssistant } from '../install/registry.js';
+import { ASSISTANTS, assistantById, detectServeLaunch, installAssistant, uninstallAssistant } from '../install/registry.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
@@ -18,7 +18,7 @@ export function registerInstall(program: Command): void {
   const install = program
     .command('install')
     .description('add vg to your AI assistant(s): skill + MCP + advisory nudge')
-    .argument('[tools...]', 'assistant ids (claude, cursor, windsurf, vscode, codex, gemini)')
+    .argument('[tools...]', `assistant ids: ${ASSISTANTS.map((a) => a.id).join(', ')}`)
     .option('--all', 'install for every supported assistant')
     .option('--list', 'show the support matrix and exit')
     .option('--no-hook', 'skip the advisory nudge')
@@ -31,8 +31,9 @@ export function registerInstall(program: Command): void {
           json(ASSISTANTS.map((a) => ({ id: a.id, label: a.label, mcp: !!a.mcp, skill: !!a.skill, nudge: !!a.nudge })));
         } else {
           info(`${c.cyan('vg install')} · supported assistants`);
+          const pad = Math.max(...ASSISTANTS.map((a) => a.id.length)) + 2;
           for (const a of ASSISTANTS) {
-            info(`  ${c.bold(a.id.padEnd(10))} ${a.label}  ${c.dim(`mcp:${a.mcp ? '✓' : '—'} skill:${a.skill ? '✓' : '—'} nudge:${a.nudge ? '✓' : '—'}`)}`);
+            info(`  ${c.bold(a.id.padEnd(pad))} ${a.label}  ${c.dim(`mcp:${a.mcp ? '✓' : '—'} skill:${a.skill ? '✓' : '—'} nudge:${a.nudge ? '✓' : '—'}`)}`);
           }
         }
         return;
@@ -45,15 +46,18 @@ export function registerInstall(program: Command): void {
       const fileCount = graph ? graph.nodes.filter((n) => n.kind === 'file').length : 0;
       const smallRepo = graph !== null && fileCount > 0 && fileCount < SMALL_REPO_FILES;
 
-      const results = targets.map((a) => ({ id: a.id, ...installAssistant(a, { root, hook: opts.hook, smallRepo }) }));
+      // Detect once — every target registers the same launch command.
+      const launch = detectServeLaunch();
+      const results = targets.map((a) => ({ id: a.id, ...installAssistant(a, { root, hook: opts.hook, smallRepo, launch }) }));
 
       if (global.json) {
-        json({ root, smallRepo, results });
+        json({ root, smallRepo, launch: { command: launch.command, args: launch.args, note: launch.note ?? null }, results });
         return;
       }
       for (const r of results) {
         info(`${c.green('✔')} ${c.bold(r.id)} — wrote ${r.wrote.join(', ')}${r.skipped.length ? c.dim(` (skipped ${r.skipped.join(', ')})`) : ''}`);
       }
+      if (launch.note && results.some((r) => r.note)) info(`${c.yellow('!')} ${launch.note}`);
       if (smallRepo) info(c.dim(`  note: small repo (${fileCount} files) — nudge says searching is fine; vg is still used for impact/tests`));
       info(c.dim('  run `vg serve` is wired via MCP; build the map with `vg` if you have not yet'));
     });
@@ -82,8 +86,12 @@ export function registerInstall(program: Command): void {
 function resolve(id: string) {
   const a = assistantById(id);
   if (!a) {
+    const near = ASSISTANTS.filter(
+      (x) => x.id.startsWith(id) || id.startsWith(x.id) || x.id.includes(id) || x.label.toLowerCase().includes(id.toLowerCase()),
+    ).map((x) => x.id);
+    const hint = near.length ? ` Did you mean: ${near.join(', ')}?` : '';
     throw new CliError(
-      `unknown assistant "${id}". Supported: ${ASSISTANTS.map((x) => x.id).join(', ')} (see \`vg install --list\`)`,
+      `unknown assistant "${id}".${hint} Supported: ${ASSISTANTS.map((x) => x.id).join(', ')} (see \`vg install --list\`)`,
       ExitCode.USAGE_ERROR,
     );
   }

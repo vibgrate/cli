@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { redactSecrets, redactUrlCredentials } from '../core-open/utils/redact.js';
 import type { VgGraph } from '../schema.js';
 
 /**
@@ -28,7 +29,7 @@ export function buildEnvelope(root: string, graph: VgGraph, scanIngestId?: strin
     artifactType: 'graph',
     scanIngestId,
     vcs: { sha, shortSha: sha.slice(0, 12), branch },
-    repository: remoteUrl ? { remoteUrl: redactRemote(remoteUrl) } : undefined,
+    repository: remoteUrl ? { remoteUrl: redactUrlCredentials(remoteUrl) } : undefined,
     generatedAt: graph.generatedAt,
     graph: redactGraph(graph),
   };
@@ -42,20 +43,12 @@ export function buildEnvelope(root: string, graph: VgGraph, scanIngestId?: strin
 export function redactGraph(graph: VgGraph): VgGraph {
   return {
     ...graph,
-    nodes: graph.nodes.map((n) => (n.signature && looksSecret(n.signature) ? { ...n, signature: '[redacted]' } : n)),
+    nodes: graph.nodes.map((n) => {
+      const signature = n.signature ? redactSecrets(n.signature) : n.signature;
+      const doc = n.doc ? redactSecrets(n.doc) : n.doc;
+      return signature !== n.signature || doc !== n.doc ? { ...n, signature, doc } : n;
+    }),
   };
-}
-
-const SECRET_RE =
-  /(sk-[a-z0-9]{16,}|AKIA[0-9A-Z]{12,}|ghp_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|[A-Za-z0-9+/]{40,}={0,2})/;
-
-function looksSecret(s: string): boolean {
-  return SECRET_RE.test(s);
-}
-
-function redactRemote(url: string): string {
-  // Strip embedded credentials: https://user:token@host/… → https://host/…
-  return url.replace(/\/\/[^@/]+@/, '//');
 }
 
 function git(root: string, args: string[]): string | null {

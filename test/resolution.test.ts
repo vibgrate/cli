@@ -134,3 +134,52 @@ describe('package-scoped resolution (no import needed)', () => {
     expect(hasEdge(graph, 'extends', 'Svc', 'Base')).toBe(true);
   });
 });
+
+describe('qualified calls do not self-loop (heuristic)', () => {
+  it('does NOT resolve `crud.foo()` inside `def foo` to the enclosing def itself (Python)', async () => {
+    const { graph } = await buildGraph({
+      root: project({
+        // FastAPI-style delegation: the view function and the crud function
+        // share a name; the qualified call must not become a self-edge.
+        'app/views.py': 'from . import crud\n\ndef get_product(id):\n    return crud.get_product(id)\n',
+        'app/crud.py': 'def get_product(id):\n    return id\n',
+      }),
+      generatedAt: PIN,
+      inline: true,
+    });
+    const nameById = new Map(graph.nodes.map((n) => [n.id, n.name]));
+    const selfLoops = graph.edges.filter(
+      (e) => e.kind === 'call' && e.src === e.dst && nameById.get(e.src) === 'get_product',
+    );
+    expect(selfLoops).toHaveLength(0);
+  });
+
+  it('keeps bare recursion as an honest self-edge (Python)', async () => {
+    const { graph } = await buildGraph({
+      root: project({
+        'fib.py': 'def fib(n):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n',
+      }),
+      generatedAt: PIN,
+      inline: true,
+    });
+    const nameById = new Map(graph.nodes.map((n) => [n.id, n.name]));
+    const selfLoops = graph.edges.filter(
+      (e) => e.kind === 'call' && e.src === e.dst && nameById.get(e.src) === 'fib',
+    );
+    expect(selfLoops).toHaveLength(1);
+  });
+
+  it('does NOT resolve `this.foo()`-style member calls to the enclosing same-named def (TypeScript heuristic floor)', async () => {
+    const { graph } = await buildGraph({
+      root: project({
+        'svc.ts': 'const api = { run(): number { return 1; } };\nexport function run(): number {\n  return api.run();\n}\n',
+      }),
+      generatedAt: PIN,
+      inline: true,
+      noTsc: true,
+    });
+    const fn = graph.nodes.find((n) => n.kind === 'function' && n.name === 'run');
+    const selfLoop = graph.edges.find((e) => e.kind === 'call' && e.src === fn?.id && e.dst === fn?.id);
+    expect(selfLoop).toBeUndefined();
+  });
+});

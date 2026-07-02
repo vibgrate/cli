@@ -8,6 +8,8 @@ import {
   unavailableMessage,
   type EmbedUnavailable,
 } from '../engine/embeddings.js';
+import { refreshIfStale } from '../engine/refresh.js';
+import { driftCount } from '../engine/freshness.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
 import { c, info, json, out } from '../util/output.js';
@@ -21,6 +23,10 @@ import { ProgressBar } from '../util/progress.js';
  * to lexical alone under `--local`, `--no-semantic`, on an unsupported platform,
  * or if the model can't be fetched — `ask` never fails. The context block goes
  * to stdout (pipeable); notes/progress to stderr.
+ *
+ * Before answering, `ask` auto-refreshes the map if the working tree drifted
+ * since the last build (incremental, fail-soft; `--no-refresh` opts out), so
+ * answers reflect the code as it is now — not as it was last built.
  */
 export function registerAsk(program: Command): void {
   const cmd = program
@@ -29,12 +35,26 @@ export function registerAsk(program: Command): void {
     .argument('<question...>', 'your question (a bare quoted string also works: vg "…")')
     .option('-b, --budget <n>', 'approx token budget for the answer', '2000')
     .option('--no-semantic', 'lexical only (skip the local-embedding pass)')
-    .action(async function (this: Command, question: string[], opts: { budget?: string; semantic?: boolean }) {
+    .option('--no-refresh', 'answer from the map as built — skip the auto-rebuild when files change')
+    .action(async function (this: Command, question: string[], opts: { budget?: string; semantic?: boolean; refresh?: boolean }) {
       const global = readGlobal(this);
+      const root = rootOf(global);
+      // Answer from a map that matches the working tree: a cheap freshness
+      // probe, then an incremental rebuild only if files really drifted. A
+      // custom --graph is an explicit artifact and is never rebuilt over.
+      // Fail-soft — a refresh problem falls back to the last built map.
+      if (opts.refresh !== false && !global.graph) {
+        const refreshed = await refreshIfStale(root);
+        if (refreshed.status === 'refreshed' && !global.json) {
+          const n = driftCount(refreshed.drift);
+          info(c.dim(`  map refreshed — ${n} file(s) drifted (${(refreshed.ms / 1000).toFixed(2)}s)`));
+        } else if (refreshed.status === 'error' && !global.json) {
+          info(c.yellow(`  map refresh failed (${refreshed.message}) — answering from the last built map`));
+        }
+      }
       const { graph } = requireGraph(global);
       const budget = Number(opts.budget) || 2000;
       const q = question.join(' ');
-      const root = rootOf(global);
       // Semantic is the default; --no-semantic or --local opt out.
       const wantSemantic = opts.semantic !== false && !global.local;
 

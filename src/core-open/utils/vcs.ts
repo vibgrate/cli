@@ -3,6 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
+import { redactUrlCredentials } from './redact.js';
 import type { VcsInfo } from '../types.js';
 
 /**
@@ -136,7 +137,12 @@ async function readGitRemoteUrl(gitDir: string): Promise<string | undefined> {
     const originBlock = config.match(/\[remote\s+"origin"\]([\s\S]*?)(?=\n\[|$)/);
     if (!originBlock) return undefined;
     const urlMatch = originBlock[1]?.match(/\n\s*url\s*=\s*(.+)\s*/);
-    return urlMatch?.[1]?.trim();
+    const url = urlMatch?.[1]?.trim();
+    // GUARDRAILS §1: redact at ingest, before storage. CI clones routinely carry
+    // credentials in the remote — as userinfo (`https://user:token@host/…`) or
+    // query params (`?access_token=…`) — and the raw URL flows into the scan
+    // artifact, which `vg push` uploads.
+    return url ? redactUrlCredentials(url) : undefined;
   } catch {
     return undefined;
   }

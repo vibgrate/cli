@@ -14,6 +14,20 @@ backward compatible.
 
 ### Added
 
+- **The code map now keeps itself fresh** — `vg serve` (Vibgrate AI Context)
+  and `vg ask` detect files that changed since the last build and rebuild the
+  map incrementally before answering, so your AI always queries the code as it
+  is now. The check is a cheap stat-only probe against a per-build freshness
+  snapshot (no filesystem watcher, no daemon); touch-only changes such as a
+  `git checkout` are recognized by content hash and never trigger a rebuild,
+  and a rebuild whose corpus turns out unchanged leaves `graph.json`
+  byte-identical (no git churn). Probes are debounced with a self-tuning
+  cadence (2s floor, scaled to measured probe cost on large repos); rebuilds
+  are single-flight and cross-process locked; `--no-refresh` (on `serve` and `ask`) opts out, and a
+  custom `--graph` path implies it. `vg status` now reports exact per-file
+  staleness (edits, adds, and removes) whenever a build has run on the machine,
+  and `graph.json` is written atomically so a serving process can never read a
+  half-written map.
 - **Animated CLI demo in the README** — the "See it run" section now plays an
   animated terminal replay of `vg scan` (drift score, breakdown, and ranked
   priorities) directly on GitHub, so you can see the product before installing.

@@ -46,7 +46,12 @@ export type { AnalyzeResult, AnalyzeOptions, ClusterMode } from './engine/analyz
 export { GraphIndex } from './engine/relations.js';
 export { TOOLS } from './mcp/tools.js';
 export type { VgTool } from './mcp/tools.js';
-export { createServer, serveStdio } from './mcp/server.js';
+export { createServer, serveStdio, GraphSource } from './mcp/server.js';
+export type { ServeOptions } from './mcp/server.js';
+export { probeFreshness, writeSnapshot, loadSnapshot, driftCount, hasDrift } from './engine/freshness.js';
+export type { BuildScope, Drift, ProbeResult } from './engine/freshness.js';
+export { refreshIfStale } from './engine/refresh.js';
+export type { RefreshOutcome, RefreshOptions } from './engine/refresh.js';
 
 // Phase 2 — the moat (tests, facts, grounding, drift) + savings.
 export { isTestFile, applyStaticTestLinkage } from './engine/tests.js';

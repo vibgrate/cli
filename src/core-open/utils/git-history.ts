@@ -194,6 +194,31 @@ export async function fileAtCommit(root: string, sha: string, relPath: string): 
   return res.ok ? res.stdout : null;
 }
 
+/**
+ * Whether the working tree has uncommitted changes relative to HEAD — i.e. the
+ * scanned files may differ from the recorded commit SHA.
+ *
+ * Returns:
+ * - `true`  when `git status --porcelain` reports any change (modified/staged
+ *   tracked files, or untracked non-ignored files),
+ * - `false` when the tree is clean (output empty), so the scan corresponds to
+ *   the committed SHA,
+ * - `undefined` when we cannot tell (git missing, not a work tree, timeout).
+ *
+ * This is what lets a downstream commit-signature check honestly claim the
+ * *scanned* code is the signed commit: a signature only attests to the committed
+ * tree, so a dirty working tree must not read as "verified". Uses `--porcelain`
+ * (stable, machine format) and respects `.gitignore`, matching what the scanner
+ * itself treats as source.
+ */
+export async function workingTreeDirty(root: string): Promise<boolean | undefined> {
+  const top = await resolveToplevel(root);
+  if (!top) return undefined;
+  const res = await runGit(top, ['status', '--porcelain', '--untracked-files=normal']);
+  if (!res.ok) return undefined;
+  return res.stdout.trim().length > 0;
+}
+
 /** Test-only: clear the memoized top-level lookups so each case starts clean. */
 export function __resetGitHistoryCaches(): void {
   toplevelCache.clear();
