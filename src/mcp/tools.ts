@@ -156,7 +156,7 @@ export const TOOLS: VgTool[] = [
     ),
     handler: (graph, args, ctx) => {
       const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
-      if (!node) return { error: candidates.length ? 'ambiguous' : 'not_found', candidates: candidates.slice(0, 10).map((n) => n.qualifiedName) };
+      if (!node) return unresolved(candidates);
       const index = new GraphIndex(graph);
       const base = {
         name: node.qualifiedName,
@@ -194,11 +194,20 @@ export const TOOLS: VgTool[] = [
   {
     name: 'find_path',
     description: 'Shortest connection between two nodes (how A reaches B).',
-    inputSchema: obj({ a: { type: 'string' }, b: { type: 'string' } }, ['a', 'b']),
+    inputSchema: obj(
+      {
+        a: { type: 'string' },
+        b: { type: 'string' },
+        pick_a: { type: 'number', description: 'choose nth candidate for a when ambiguous' },
+        pick_b: { type: 'number', description: 'choose nth candidate for b when ambiguous' },
+      },
+      ['a', 'b'],
+    ),
     handler: (graph, args) => {
-      const ra = resolveOne(graph, String(args.a ?? ''));
-      const rb = resolveOne(graph, String(args.b ?? ''));
-      if (!ra.node || !rb.node) return { error: 'not_found' };
+      const ra = resolveOne(graph, String(args.a ?? ''), numOrU(args.pick_a));
+      const rb = resolveOne(graph, String(args.b ?? ''), numOrU(args.pick_b));
+      if (!ra.node) return { endpoint: 'a', ...unresolved(ra.candidates) };
+      if (!rb.node) return { endpoint: 'b', ...unresolved(rb.candidates) };
       const result = shortestPath(graph, ra.node.id, rb.node.id);
       if (!result) return { connected: false };
       const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
@@ -208,10 +217,17 @@ export const TOOLS: VgTool[] = [
   {
     name: 'impact_of',
     description: 'What breaks if a node changes: the reverse-reachability blast radius with per-result depth and confidence.',
-    inputSchema: obj({ name: { type: 'string' }, depth: { type: 'number', description: 'max depth (default 4)' } }, ['name']),
+    inputSchema: obj(
+      {
+        name: { type: 'string' },
+        depth: { type: 'number', description: 'max depth (default 4)' },
+        pick: { type: 'number', description: 'choose nth candidate when ambiguous' },
+      },
+      ['name'],
+    ),
     handler: (graph, args) => {
-      const { node } = resolveOne(graph, String(args.name ?? ''));
-      if (!node) return { error: 'not_found' };
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
+      if (!node) return unresolved(candidates);
       const r = impactOf(graph, node.id, { depth: numOr(args.depth, 4) });
       // Drop the internal content-hash `id` from each item — the model reasons
       // over name/file/line, and a 32-char blake3 per row is pure overhead.
@@ -222,7 +238,13 @@ export const TOOLS: VgTool[] = [
     name: 'list_areas',
     description: 'The natural code groupings (communities), each labelled, sized, with cohesion.',
     inputSchema: obj({ limit: { type: 'number' } }),
-    handler: (graph, args) => [...graph.areas].sort((a, b) => b.size - a.size).slice(0, numOr(args.limit, 30)),
+    // Strip `members` (raw content-hash id arrays): a model cannot use them and
+    // on a large repo they ballooned this result past 20k tokens.
+    handler: (graph, args) =>
+      [...graph.areas]
+        .sort((a, b) => b.size - a.size)
+        .slice(0, numOr(args.limit, 30))
+        .map((a) => ({ id: a.id, label: a.label, size: a.size, cohesion: a.cohesion, externalEdges: a.externalEdges })),
   },
   {
     name: 'list_hubs',
@@ -238,10 +260,10 @@ export const TOOLS: VgTool[] = [
   {
     name: 'tests_for',
     description: 'Which tests cover a node (static call linkage + runtime coverage), with the linkage basis.',
-    inputSchema: obj({ name: { type: 'string' } }, ['name']),
+    inputSchema: obj({ name: { type: 'string' }, pick: { type: 'number', description: 'choose nth candidate when ambiguous' } }, ['name']),
     handler: (graph, args) => {
-      const { node } = resolveOne(graph, String(args.name ?? ''));
-      if (!node) return { error: 'not_found' };
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
+      if (!node) return unresolved(candidates);
       return { node: node.qualifiedName, tested: node.tested, coverage: node.coverage ?? null, covers: coveringTests(graph, node) };
     },
   },
@@ -250,8 +272,8 @@ export const TOOLS: VgTool[] = [
     description: 'The deterministic open facts for a node (contract/invariant/characterization). Requires a --deep build.',
     inputSchema: obj({ name: { type: 'string' } }, ['name']),
     handler: (graph, args) => {
-      const { node } = resolveOne(graph, String(args.name ?? ''));
-      if (!node) return { error: 'not_found' };
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''));
+      if (!node) return unresolved(candidates);
       if (!graph.facts) return { node: node.qualifiedName, facts: [], note: 'facts require a --deep build' };
       return { node: node.qualifiedName, facts: graph.facts.filter((f) => f.subjectIds.includes(node.id)) };
     },
@@ -261,8 +283,8 @@ export const TOOLS: VgTool[] = [
     description: 'Cited relevant standards/practices for a node (OWASP/CWE), honest about recommended vs conjectured.',
     inputSchema: obj({ name: { type: 'string' } }, ['name']),
     handler: (graph, args) => {
-      const { node } = resolveOne(graph, String(args.name ?? ''));
-      if (!node) return { error: 'not_found' };
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''));
+      if (!node) return unresolved(candidates);
       const entries = new Map(FREE_PACK.entries.map((e) => [e.id, e]));
       return {
         node: node.qualifiedName,
@@ -543,6 +565,19 @@ function summarize(graph: VgGraph) {
 function stripId<T extends { id?: string }>(item: T): Omit<T, 'id'> {
   const { id: _id, ...rest } = item;
   return rest;
+}
+
+/**
+ * The shared "could not resolve to one node" payload. Candidates carry
+ * kind/file/line — bare qualified names were useless when several nodes share a
+ * name (the model saw ten identical strings and had nothing to `pick` by).
+ */
+function unresolved(candidates: { qualifiedName: string; kind: string; file: string; span: { start: number } }[]) {
+  return {
+    error: candidates.length ? 'ambiguous' : 'not_found',
+    candidates: candidates.slice(0, 10).map((n, i) => ({ pick: i + 1, name: n.qualifiedName, kind: n.kind, file: n.file, line: n.span.start })),
+    ...(candidates.length ? { hint: 'call again with pick:<n> or a file:line name' } : {}),
+  };
 }
 
 /** Map the internal drift note to the canonical §4 driftStatus vocabulary. */

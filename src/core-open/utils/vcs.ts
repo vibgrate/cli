@@ -136,10 +136,19 @@ async function readGitRemoteUrl(gitDir: string): Promise<string | undefined> {
     const originBlock = config.match(/\[remote\s+"origin"\]([\s\S]*?)(?=\n\[|$)/);
     if (!originBlock) return undefined;
     const urlMatch = originBlock[1]?.match(/\n\s*url\s*=\s*(.+)\s*/);
-    return urlMatch?.[1]?.trim();
+    const url = urlMatch?.[1]?.trim();
+    // GUARDRAILS §1: redact at ingest, before storage. CI clones routinely embed
+    // a token in the remote (`https://user:token@host/…`) and the raw URL flows
+    // into the scan artifact, which `vg push` uploads.
+    return url ? redactUrlCredentials(url) : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** Strip userinfo (user / user:token) from a URL: `https://x:y@host/p` → `https://host/p`. */
+export function redactUrlCredentials(url: string): string {
+  return url.replace(/\/\/[^@/]+@/, '//');
 }
 
 async function resolveGitConfigPath(gitDir: string): Promise<string | undefined> {

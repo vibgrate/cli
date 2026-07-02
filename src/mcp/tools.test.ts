@@ -123,3 +123,57 @@ describe('impact_of', () => {
     }
   });
 });
+
+describe('ambiguity payloads carry discriminating info', () => {
+  it('get_node ambiguous candidates include kind/file/line and a pick index', async () => {
+    const g = makeGraph();
+    // Two same-named nodes in different files → ambiguous by short name.
+    g.nodes.push(node('n_foo2', 'foo', 'src/z.ts', { importance: 0.4 }));
+    const r = (await tool('get_node').handler(g, { name: 'foo' }, ctx())) as {
+      error: string;
+      candidates: { pick: number; name: string; kind: string; file: string; line: number }[];
+      hint: string;
+    };
+    expect(r.error).toBe('ambiguous');
+    expect(r.candidates[0]).toMatchObject({ pick: 1, kind: 'function', file: 'src/a.ts', line: 1 });
+    expect(r.candidates[1].file).toBe('src/z.ts');
+    expect(r.hint).toContain('pick');
+  });
+
+  it('get_node honours pick to break the tie', async () => {
+    const g = makeGraph();
+    g.nodes.push(node('n_foo2', 'foo', 'src/z.ts', { importance: 0.4 }));
+    const r = (await tool('get_node').handler(g, { name: 'foo', pick: 2 }, ctx())) as { file: string };
+    expect(r.file).toBe('src/z.ts');
+  });
+
+  it('find_path reports which endpoint failed, with candidates', async () => {
+    const g = makeGraph();
+    g.nodes.push(node('n_foo2', 'foo', 'src/z.ts', { importance: 0.4 }));
+    const r = (await tool('find_path').handler(g, { a: 'foo', b: 'bar' }, ctx())) as {
+      endpoint: string;
+      error: string;
+      candidates: unknown[];
+    };
+    expect(r.endpoint).toBe('a');
+    expect(r.error).toBe('ambiguous');
+    expect(r.candidates.length).toBe(2);
+  });
+
+  it('impact_of distinguishes ambiguous from not_found', async () => {
+    const g = makeGraph();
+    g.nodes.push(node('n_foo2', 'foo', 'src/z.ts', { importance: 0.4 }));
+    const amb = (await tool('impact_of').handler(g, { name: 'foo' }, ctx())) as { error: string };
+    expect(amb.error).toBe('ambiguous');
+    const nf = (await tool('impact_of').handler(g, { name: 'nope_zzz' }, ctx())) as { error: string };
+    expect(nf.error).toBe('not_found');
+  });
+});
+
+describe('list_areas token economy', () => {
+  it('strips raw member id arrays from the response', async () => {
+    const r = (await tool('list_areas').handler(makeGraph(), {}, ctx())) as Record<string, unknown>[];
+    expect(r[0]).toMatchObject({ id: 0, label: 'core', size: 3 });
+    expect(r[0].members).toBeUndefined();
+  });
+});

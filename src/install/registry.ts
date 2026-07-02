@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { skillMarkdown, nudgeMarkdown, mcpServerEntry, NUDGE_BEGIN, NUDGE_END } from './content.js';
+import { execFileSync } from 'node:child_process';
+import { skillMarkdown, nudgeMarkdown, mcpServerEntry, NUDGE_BEGIN, NUDGE_END, type ServeLaunch } from './content.js';
+import { CliError, ExitCode } from '../util/exit.js';
 
 /**
  * Per-assistant install registry (a focused subset of VG-ASSISTANT-INSTALL §2;
@@ -91,24 +93,91 @@ export interface InstallOptions {
   root: string;
   hook?: boolean; // write the advisory nudge (default true)
   smallRepo: boolean;
+  /** Resolved MCP launch command; defaults to detectServeLaunch(). */
+  launch?: ServeLaunch;
 }
 
 export interface InstallAction {
   wrote: string[];
   skipped: string[];
+  /** Explanation when the MCP entry is not the plain `vg serve` (e.g. PATH fallback). */
+  note?: string;
+}
+
+/**
+ * Resolve how the assistant host should launch the MCP server. `command: "vg"`
+ * only works when `vg` on PATH is *this* CLI — a user who ran via npx, or whose
+ * `vg` belongs to another tool (see scripts/postinstall.mjs), would get a server
+ * that silently fails to start or, worse, launches the wrong binary. Detection
+ * is best-effort and never throws; the fallbacks keep the entry working:
+ * ours-on-PATH `vg` → ours-on-PATH `vibgrate` → `npx -y -p @vibgrate/cli vg`.
+ */
+export function detectServeLaunch(which: (cmd: string) => string | null = whichOnPath): ServeLaunch {
+  const vg = which('vg');
+  if (vg && isOwnBinary(vg)) return { command: 'vg', args: ['serve'] };
+  const vibgrate = which('vibgrate');
+  if (vibgrate && isOwnBinary(vibgrate)) {
+    return {
+      command: 'vibgrate',
+      args: ['serve'],
+      note: vg
+        ? '`vg` on PATH belongs to another tool — registered the identical `vibgrate serve` instead'
+        : '`vg` is not on PATH — registered the identical `vibgrate serve` instead',
+    };
+  }
+  return {
+    command: 'npx',
+    args: ['-y', '-p', '@vibgrate/cli', 'vg', 'serve'],
+    note: 'vg is not installed on PATH — registered an npx launcher. Install globally (`npm i -g @vibgrate/cli`) and rerun `vg install` for a faster startup.',
+  };
+}
+
+function whichOnPath(cmd: string): string | null {
+  try {
+    const out = execFileSync(process.platform === 'win32' ? 'where' : 'which', [cmd], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .trim()
+      .split(/\r?\n/)[0];
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Does this PATH entry launch *this* package? Symlink installs resolve into a
+ * `…/@vibgrate/cli/…` directory; script shims (pnpm/bun/yarn, Windows .cmd)
+ * reference the package path in their first bytes. Best-effort: unreadable or
+ * unrecognisable entries count as foreign, which only makes us pick a safer
+ * fallback.
+ */
+function isOwnBinary(binPath: string): boolean {
+  try {
+    const real = fs.realpathSync(binPath);
+    if (/[\\/]@vibgrate[\\/]cli[\\/]/.test(real)) return true;
+    const head = fs.readFileSync(real, { encoding: 'utf8' }).slice(0, 2048);
+    return head.includes('@vibgrate/cli') || head.includes('vibgrate');
+  } catch {
+    return false;
+  }
 }
 
 export function installAssistant(a: Assistant, opts: InstallOptions): InstallAction {
   const wrote: string[] = [];
   const skipped: string[] = [];
+  let note: string | undefined;
 
   if (a.skill) {
     writeFileEnsured(path.join(opts.root, a.skill), skillMarkdown());
     wrote.push(a.skill);
   }
   if (a.mcp) {
-    upsertMcp(path.join(opts.root, a.mcp.file), a.mcp);
+    const launch = opts.launch ?? detectServeLaunch();
+    upsertMcp(path.join(opts.root, a.mcp.file), a.mcp, launch);
     wrote.push(a.mcp.file);
+    note = launch.note;
   } else {
     skipped.push('mcp (host-specific setup)');
   }
@@ -119,7 +188,7 @@ export function installAssistant(a: Assistant, opts: InstallOptions): InstallAct
     skipped.push('nudge (--no-hook)');
   }
 
-  return { wrote, skipped };
+  return { wrote, skipped, note };
 }
 
 export function uninstallAssistant(a: Assistant, root: string, purge: boolean): string[] {
@@ -154,9 +223,9 @@ function writeFileEnsured(file: string, content: string): void {
   fs.writeFileSync(file, content);
 }
 
-function upsertMcp(file: string, target: McpTarget): void {
+function upsertMcp(file: string, target: McpTarget, launch: ServeLaunch): void {
   const config = readJson(file);
-  const entry = mcpServerEntry();
+  const entry = mcpServerEntry(launch);
   const value = target.vscode ? { type: 'stdio', ...entry } : entry;
   const bag = (config[target.key] && typeof config[target.key] === 'object'
     ? config[target.key]
@@ -206,12 +275,24 @@ function removeBlock(file: string): boolean {
   return true;
 }
 
+/**
+ * Read a JSON config we are about to merge into. A *missing* file is an empty
+ * config; a *malformed* file must abort — silently treating it as empty would
+ * rewrite the file and destroy the user's other MCP server entries.
+ */
 function readJson(file: string): Record<string, unknown> {
   if (!fs.existsSync(file)) return {};
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    throw new Error('not a JSON object');
   } catch {
-    return {};
+    throw new CliError(
+      `${file} exists but is not valid JSON — fix or remove it, then rerun. Refusing to overwrite it (that would lose your existing entries).`,
+      ExitCode.ERROR,
+    );
   }
 }
 

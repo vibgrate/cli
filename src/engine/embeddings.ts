@@ -180,11 +180,20 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
   }
 
   try {
-    const model = await mod.FlagEmbedding.init({
-      model: mapModel(mod, modelId),
-      cacheDir: cache,
-      showDownloadProgress: options.showDownloadProgress ?? false,
-    });
+    // First use fetches the model. A refused connection fails fast, but a
+    // black-holing proxy (common on corporate networks) would hang the first
+    // `vg ask` / MCP query_graph forever — bound the wait and fall back to
+    // lexical instead. Cached loads are local disk and get the same generous
+    // ceiling without ever hitting it.
+    const model: any = await withTimeout(
+      mod.FlagEmbedding.init({
+        model: mapModel(mod, modelId),
+        cacheDir: cache,
+        showDownloadProgress: options.showDownloadProgress ?? false,
+      }) as Promise<unknown>,
+      embedInitTimeoutMs(),
+      'embedding model init timed out',
+    );
     // Record machine-global readiness so future builds can warm up offline.
     try {
       fs.writeFileSync(modelReadyMarker(modelId), new Date(0).toISOString());
@@ -207,6 +216,28 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
     };
   } catch (e) {
     return fail(isPermissionError(e) ? 'no-permission' : 'download-failed');
+  }
+}
+
+/** Ceiling for the one-time model fetch/init; override via VG_EMBED_TIMEOUT_MS. */
+function embedInitTimeoutMs(): number {
+  const n = Number(process.env.VG_EMBED_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 60_000;
+}
+
+/** Reject `promise` if it hasn't settled within `ms` (the work itself is not cancelled). */
+export async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

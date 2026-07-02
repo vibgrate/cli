@@ -155,7 +155,7 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
     const imported = importedFilesByRel.get(p.rel) ?? new Set<string>();
     for (const call of p.calls) {
       const srcId = enclosingDefId(localDefs, call.byte) ?? fileId;
-      const resolved = resolveCall(call.callee, p.rel, p.lang, imported, defsByName);
+      const resolved = resolveCall(call, p.rel, p.lang, imported, defsByName, srcId);
       if (resolved) {
         edges.add('call', srcId, resolved.id, 'heuristic', resolved.confidence);
         stats.callsResolved++;
@@ -263,20 +263,27 @@ function dirOf(rel: string): string {
  * impact; the SCIP/tsc rungs recover the precise edge where a user needs it.
  */
 function resolveCall(
-  callee: string,
+  call: { callee: string; qualified?: boolean },
   fromRel: string,
   fromLang: string,
   importedRels: Set<string>,
   defsByName: Map<string, DefNodeRef[]>,
+  enclosingId?: string,
 ): { id: string; confidence: number } | null {
-  const candidates = defsByName.get(callee);
+  const candidates = defsByName.get(call.callee);
   if (!candidates || candidates.length === 0) return null;
 
   const callable = candidates.filter((c) => c.kind === 'function' || c.kind === 'method');
   const pool = callable.length ? callable : candidates;
 
-  // 1. Same-file scope (the strongest signal).
-  const sameFile = pool.filter((c) => c.rel === fromRel);
+  // 1. Same-file scope (the strongest signal). A *qualified* call (`crud.foo()`)
+  // must not match the enclosing def itself: the parser drops the receiver, so a
+  // handler `foo` that delegates to `module.foo(...)` would otherwise resolve to
+  // *itself* — on FastAPI/Django-style codebases that false self-loop was the
+  // dominant edge (100% of resolved calls in one corpus repo). A bare `foo()`
+  // inside `foo` is still honest recursion and is kept.
+  let sameFile = pool.filter((c) => c.rel === fromRel);
+  if (call.qualified && enclosingId) sameFile = sameFile.filter((c) => c.id !== enclosingId);
   if (sameFile.length === 1) return { id: sameFile[0].id, confidence: 0.85 };
   if (sameFile.length > 1) {
     // Overloads/redefinitions in one file — pick deterministically, low confidence.

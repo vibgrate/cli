@@ -48,6 +48,20 @@ if (resolvedVg === resolvedOwn) {
   process.exit(0);
 }
 
+// Not a symlink to us — but pnpm/bun/yarn (and every Windows install) generate
+// script *shims*, not symlinks. Treat a shim as ours when its resolved path
+// lives in our package directory or its first bytes reference the package;
+// otherwise every Windows/pnpm user gets a false "vg is taken" warning.
+if (/[\\/]@vibgrate[\\/]cli[\\/]/.test(resolvedVg)) process.exit(0);
+try {
+  const { readFileSync } = await import('node:fs');
+  const head = readFileSync(resolvedVg, 'utf8').slice(0, 2048);
+  if (head.includes('@vibgrate/cli')) process.exit(0);
+} catch {
+  // Unreadable → cannot verify; keep the (possibly false) warning below rather
+  // than staying silent about a real conflict.
+}
+
 // Something else owns `vg` on this machine.
 console.log('');
 console.log(

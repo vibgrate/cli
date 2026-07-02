@@ -14,5 +14,8 @@
   "checkver": {
     "url": "https://registry.npmjs.org/@vibgrate/cli/latest",
     "jsonpath": "$.version"
+  },
+  "autoupdate": {
+    "notes": "Installs @vibgrate/cli@$version globally via npm."
   }
 }
