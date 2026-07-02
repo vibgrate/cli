@@ -546,6 +546,14 @@ export interface VcsInfo {
   shortSha?: string;
   branch?: string;
   remoteUrl?: string;
+  /**
+   * Whether the working tree had uncommitted changes relative to `sha` at scan
+   * time. `true` = the scanned files may differ from the commit; `false` = clean
+   * (scan corresponds to the commit); omitted/`undefined` = could not determine
+   * (git unavailable). Consumed by server-side commit-signature verification so a
+   * dirty tree is never reported as "verified". See utils/git-history.ts.
+   */
+  dirty?: boolean;
 }
 
 export interface RepositoryInfo {

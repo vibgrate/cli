@@ -44,8 +44,11 @@ If the \`vg\` MCP server is registered, call its read-only tools directly:
 
 ## Keep it fresh
 
-Run \`vg\` after pulling or making structural changes. The map lives at
-\`.vibgrate/graph.json\` and is deterministic (byte-identical across machines).
+The map keeps itself fresh: \`vg ask\` and the MCP tools detect changed files
+and rebuild it incrementally before answering — you can edit code and query
+immediately. Running \`vg\` after a large pull still warms everything in one go.
+The map lives at \`.vibgrate/graph.json\` and is deterministic (byte-identical
+across machines).
 `;
 }
 
@@ -75,6 +78,16 @@ ${NUDGE_END}`;
 }
 
 /** The MCP server entry registered for local stdio use. */
-export function mcpServerEntry(): { command: string; args: string[] } {
-  return { command: 'vg', args: ['serve'] };
+export function mcpServerEntry(launch: ServeLaunch = { command: 'vg', args: ['serve'] }): {
+  command: string;
+  args: string[];
+} {
+  return { command: launch.command, args: launch.args };
+}
+
+export interface ServeLaunch {
+  command: string;
+  args: string[];
+  /** Human-readable explanation when the launch is not the plain `vg serve`. */
+  note?: string;
 }

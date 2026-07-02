@@ -72,7 +72,10 @@ npx vg scan                     # vg is the primary command; vibgrate is an alia
 gives any MCP-compatible assistant (Claude, Cursor, Windsurf, Copilot, Gemini
 CLI, …) your code map, **offline drift**, local models, and **version-correct
 library docs**, all from your machine (no account, nothing uploaded). No
-context-window stuffing, no hallucinated APIs.
+context-window stuffing, no hallucinated APIs. The map **keeps itself fresh**:
+when files change — including edits the assistant itself just made — the next
+tool call rebuilds it incrementally before answering, with no watcher or
+daemon involved.
 
 Wire it up in one command:
 

@@ -155,7 +155,7 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
     const imported = importedFilesByRel.get(p.rel) ?? new Set<string>();
     for (const call of p.calls) {
       const srcId = enclosingDefId(localDefs, call.byte) ?? fileId;
-      const resolved = resolveCall(call.callee, p.rel, p.lang, imported, defsByName);
+      const resolved = resolveCall(call, p.rel, p.lang, imported, defsByName, srcId);
       if (resolved) {
         edges.add('call', srcId, resolved.id, 'heuristic', resolved.confidence);
         stats.callsResolved++;
@@ -242,10 +242,13 @@ function enclosingDefId(defs: DefNodeRef[], byte: number): string | undefined {
  *   - Go: a package IS a directory; all files in it see each other's identifiers.
  *   - Java: same-package classes (package == directory by convention).
  *   - C#: file-scoped/co-located namespaces commonly align with the directory.
- * TS/JS, Python and Ruby require an explicit import path for cross-file refs, so
- * they get NO directory rung — a same-name def elsewhere is not reachable.
+ *   - Kotlin/Scala: Java-style package visibility (package == directory by convention).
+ *   - Swift: module-wide visibility; files in one target see each other un-imported.
+ * TS/JS, Python, Ruby, PHP, Dart, Lua, Elixir, Shell, Zig, C and C++ require an
+ * explicit import/include for cross-file refs, so they get NO directory rung —
+ * a same-name def elsewhere is not reachable.
  */
-const PACKAGE_SCOPED_LANGS = new Set(['go', 'java', 'cs']);
+const PACKAGE_SCOPED_LANGS = new Set(['go', 'java', 'cs', 'kotlin', 'scala', 'swift']);
 
 function dirOf(rel: string): string {
   const i = rel.lastIndexOf('/');
@@ -263,20 +266,27 @@ function dirOf(rel: string): string {
  * impact; the SCIP/tsc rungs recover the precise edge where a user needs it.
  */
 function resolveCall(
-  callee: string,
+  call: { callee: string; qualified?: boolean },
   fromRel: string,
   fromLang: string,
   importedRels: Set<string>,
   defsByName: Map<string, DefNodeRef[]>,
+  enclosingId?: string,
 ): { id: string; confidence: number } | null {
-  const candidates = defsByName.get(callee);
+  const candidates = defsByName.get(call.callee);
   if (!candidates || candidates.length === 0) return null;
 
   const callable = candidates.filter((c) => c.kind === 'function' || c.kind === 'method');
   const pool = callable.length ? callable : candidates;
 
-  // 1. Same-file scope (the strongest signal).
-  const sameFile = pool.filter((c) => c.rel === fromRel);
+  // 1. Same-file scope (the strongest signal). A *qualified* call (`crud.foo()`)
+  // must not match the enclosing def itself: the parser drops the receiver, so a
+  // handler `foo` that delegates to `module.foo(...)` would otherwise resolve to
+  // *itself* — on FastAPI/Django-style codebases that false self-loop was the
+  // dominant edge (100% of resolved calls in one corpus repo). A bare `foo()`
+  // inside `foo` is still honest recursion and is kept.
+  let sameFile = pool.filter((c) => c.rel === fromRel);
+  if (call.qualified && enclosingId) sameFile = sameFile.filter((c) => c.id !== enclosingId);
   if (sameFile.length === 1) return { id: sameFile[0].id, confidence: 0.85 };
   if (sameFile.length > 1) {
     // Overloads/redefinitions in one file — pick deterministically, low confidence.
@@ -289,10 +299,13 @@ function resolveCall(
   if (imported.length === 1) return { id: imported[0].id, confidence: 0.75 };
   if (imported.length > 1) return null; // ambiguous across imports — let a precise rung decide
 
-  // 3. Same package directory (Go/Java/C#: visible without an import).
+  // 3. Same package directory (Go/Java/C#/Kotlin/Scala/Swift: visible without an
+  // import). Same self-loop rule as rung 1: a *qualified* call never resolves to
+  // the enclosing def itself.
   if (PACKAGE_SCOPED_LANGS.has(fromLang)) {
     const dir = dirOf(fromRel);
-    const samePkg = pool.filter((c) => c.lang === fromLang && dirOf(c.rel) === dir);
+    let samePkg = pool.filter((c) => c.lang === fromLang && dirOf(c.rel) === dir);
+    if (call.qualified && enclosingId) samePkg = samePkg.filter((c) => c.id !== enclosingId);
     if (samePkg.length === 1) return { id: samePkg[0].id, confidence: 0.7 };
   }
 

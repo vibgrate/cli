@@ -10,12 +10,14 @@ class Vg < Formula
   depends_on "node"
 
   def install
-    system "npm", "install", "-g", "--prefix=#{libexec}", "@vibgrate/cli@#{version}"
+    # Install from the tarball Homebrew already downloaded and checksum-verified
+    # (staged into buildpath) — never a second, unverified registry fetch.
+    system "npm", "install", *std_npm_args
     bin.install_symlink Dir["#{libexec}/bin/vg"]
     bin.install_symlink Dir["#{libexec}/bin/vibgrate"]
   end
 
   test do
-    assert_match "vg", shell_output("#{bin}/vg --version")
+    assert_match version.to_s, shell_output("#{bin}/vg --version")
   end
 end

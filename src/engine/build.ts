@@ -59,12 +59,22 @@ export interface BuildOptions {
   grammarsDir?: string;
 }
 
+/** Stat + content hash of one corpus file at build time. */
+export interface FileStat {
+  rel: string;
+  size: number;
+  mtimeMs: number;
+  hash: string;
+}
+
 export interface BuildResult {
   graph: VgGraph;
   timing: { totalMs: number };
   reparsed: number;
   reused: number;
   totalFiles: number;
+  /** Stat+hash of every file in the corpus — input for the freshness snapshot. */
+  fileStats: FileStat[];
   resolveStats: ResolveResult['stats'];
   /** Present when the TypeScript Compiler API resolver ran (TS/JS files). */
   tsc?: { files: number; calls: number; jsx: number; heritage: number; resolved: number };
@@ -90,19 +100,25 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     disabled: options.noCache,
   });
 
-  // Hash every discovered file (cheap) and split into reuse vs reparse.
+  // Hash every discovered file (cheap) and split into reuse vs reparse. The
+  // stat is taken *before* the read so a mid-read edit shows up as a stat
+  // mismatch on the next freshness probe (never a silently-missed change).
   const hashes = new Map<string, string>();
+  const fileStats: FileStat[] = [];
   const toParse: DiscoveredFile[] = [];
   const reused: FileParse[] = [];
   for (const file of files) {
     let hash = '';
+    let stat: fs.Stats;
     try {
+      stat = fs.statSync(file.abs);
       hash = hashBytes(fs.readFileSync(file.abs));
     } catch {
       // Unreadable now (race/permissions) — skip; it just won't be in the graph.
       continue;
     }
     hashes.set(file.rel, hash);
+    fileStats.push({ rel: file.rel, size: stat.size, mtimeMs: stat.mtimeMs, hash });
     const cached = cache.get(file.rel, hash);
     if (cached) reused.push(cached);
     else toParse.push(file);
@@ -234,6 +250,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     reparsed: parsedNew.length,
     reused: reused.length,
     totalFiles: files.length,
+    fileStats,
     resolveStats: resolved.stats,
     tsc: tscStats,
     scip: scipStats,

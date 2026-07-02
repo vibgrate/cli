@@ -46,7 +46,12 @@ export type { AnalyzeResult, AnalyzeOptions, ClusterMode } from './engine/analyz
 export { GraphIndex } from './engine/relations.js';
 export { TOOLS } from './mcp/tools.js';
 export type { VgTool } from './mcp/tools.js';
-export { createServer, serveStdio } from './mcp/server.js';
+export { createServer, serveStdio, GraphSource } from './mcp/server.js';
+export type { ServeOptions } from './mcp/server.js';
+export { probeFreshness, writeSnapshot, loadSnapshot, driftCount, hasDrift } from './engine/freshness.js';
+export type { BuildScope, Drift, ProbeResult } from './engine/freshness.js';
+export { refreshIfStale } from './engine/refresh.js';
+export type { RefreshOutcome, RefreshOptions } from './engine/refresh.js';
 
 // Phase 2 — the moat (tests, facts, grounding, drift) + savings.
 export { isTestFile, applyStaticTestLinkage } from './engine/tests.js';
@@ -63,7 +68,7 @@ export type { LocalModel } from './engine/models.js';
 export { readSavings, recordSaving, savingsRecorded } from './engine/savings.js';
 export type { SavingsReport } from './engine/savings.js';
 
-// Phase 3 — library currency (Context7 parity) + install breadth.
+// Phase 3 — library currency + install breadth.
 export { loadCatalog, saveCatalog, resolveLib, addLibrary, readDoc, driftFor, libId } from './engine/lib.js';
 export type { LibCatalog, LibEntry, LibSource, DriftNote } from './engine/lib.js';
 export { ASSISTANTS, assistantById, installAssistant, uninstallAssistant } from './install/registry.js';

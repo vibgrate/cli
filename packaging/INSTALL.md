@@ -8,16 +8,16 @@ path below lands the same `vg` command.
 
 ```bash
 # npx (no install)
-npx @vibgrate/cli vg
+npx @vibgrate/cli scan
 
 # npm (global)
 npm install -g @vibgrate/cli
 
 # curl | sh   (POSIX)
-curl -fsSL https://vibgrate.com/vg/install.sh | sh
+curl -fsSL https://vibgrate.com/install.sh | sh
 
 # irm | iex   (Windows PowerShell)
-irm https://vibgrate.com/vg/install.ps1 | iex
+irm https://vibgrate.com/install.ps1 | iex
 ```
 
 ## Package managers
@@ -26,11 +26,12 @@ irm https://vibgrate.com/vg/install.ps1 | iex
 # Homebrew (tap)
 brew install vibgrate/tap/vg
 
-# Scoop (bucket)
+# Scoop (add the bucket once, then install)
+scoop bucket add vibgrate https://github.com/vibgrate/scoop-bucket
 scoop install vibgrate/vg
 
-# Docker / GHCR
-docker run --rm -v "$PWD":/repo ghcr.io/vibgrate/vg vg -C /repo
+# Docker / GHCR (the image entrypoint is `vg`; default command scans /work)
+docker run --rm -v "$PWD":/work -w /work ghcr.io/vibgrate/cli scan
 ```
 
 ## Templates in this directory

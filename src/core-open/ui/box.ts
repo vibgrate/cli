@@ -32,3 +32,39 @@ export function titleBox(
     color('│') + ' '.repeat(indent) + chalk.bold.white(title) + ' '.repeat(fill) + color('│');
   return [rule('╭', '╮'), mid, rule('╰', '╯')];
 }
+
+// Matches the ANSI SGR escapes chalk emits, so panel padding is computed on the
+// *visible* width of a line rather than its raw length (which includes colour codes).
+const ANSI_SGR = /\[[0-9;]*m/g;
+
+/** Visible (printable) length of a string, ignoring ANSI colour escapes. */
+function visibleLength(s: string): number {
+  return s.replace(ANSI_SGR, '').length;
+}
+
+/**
+ * A rounded, multi-line panel with the title embedded in the top border
+ * (`╭─ TITLE ──…──╮`) and each body line boxed to `width` interior cells.
+ * Body lines may contain ANSI colour (chalk) — padding is computed on their
+ * visible width. Content wider than `width` is left unpadded rather than
+ * truncated, so callers should keep lines within `width`. Use this for
+ * call-out panels (e.g. the free-plan upsell) that need more than a title.
+ */
+export function panelBox(
+  title: string,
+  body: string[],
+  color: ChalkInstance = chalk.cyan,
+  width = BOX_WIDTH,
+): string[] {
+  const out: string[] = [];
+  const titleSegment = ` ${title} `;
+  const dashes = Math.max(width - 1 - titleSegment.length, 0);
+  out.push(color('╭─') + chalk.bold.white(titleSegment) + color('─'.repeat(dashes) + '╮'));
+  const indent = 1;
+  for (const line of body) {
+    const pad = Math.max(width - indent - visibleLength(line), 0);
+    out.push(color('│') + ' '.repeat(indent) + line + ' '.repeat(pad) + color('│'));
+  }
+  out.push(color('╰' + '─'.repeat(width) + '╯'));
+  return out;
+}

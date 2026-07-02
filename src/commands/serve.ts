@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import { Command } from 'commander';
 import { defaultGraphPath } from '../engine/artifacts.js';
-import { serveStdio, createServer } from '../mcp/server.js';
+import { serveStdio, createServer, GraphSource, type ServeOptions } from '../mcp/server.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode } from '../util/exit.js';
@@ -12,6 +12,11 @@ import { c, info } from '../util/output.js';
  * transport is stdio (what assistants spawn); `--http` exposes a stateless
  * streamable-HTTP endpoint for local browser/shared hosts. Fully offline,
  * read-only tools only. Independent of Vibgrate's hosted cloud MCP.
+ *
+ * The map auto-refreshes: tool calls run a cheap freshness probe and trigger
+ * an incremental in-process rebuild when the working tree drifted, so the AI
+ * always queries an up-to-date graph (see mcp/server.ts). `--no-refresh`
+ * pins serving to the map as built; a custom `--graph` implies it.
  */
 export function registerServe(program: Command): void {
   const cmd = program
@@ -22,13 +27,19 @@ export function registerServe(program: Command): void {
     .option('--host <h>', 'host for --http', '127.0.0.1')
     .option('--savings', 'record local, counts-only usage savings (opt-in; off by default)')
     .option('--dedup', "collapse a node's heavy relation lists on repeat reads within a session (opt-in; saves tokens)")
-    .action(async function (this: Command, opts: { http?: boolean; port?: string; host?: string; savings?: boolean; dedup?: boolean }) {
+    .option('--no-refresh', 'serve the map as built — skip the auto-rebuild when files change')
+    .action(async function (this: Command, opts: { http?: boolean; port?: string; host?: string; savings?: boolean; dedup?: boolean; refresh?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
       const graphPath = global.graph ?? defaultGraphPath(root);
-      const savings = opts.savings === true;
-      const dedup = opts.dedup === true;
-      const local = global.local === true;
+      // A custom --graph is an explicit artifact — never rebuild over it.
+      const refresh = opts.refresh !== false && !global.graph;
+      const serveOpts: ServeOptions = {
+        savings: opts.savings === true,
+        local: global.local === true,
+        dedup: opts.dedup === true,
+        refresh,
+      };
 
       if (!fs.existsSync(graphPath)) {
         throw new CliError(
@@ -37,22 +48,28 @@ export function registerServe(program: Command): void {
         );
       }
 
+      const freshness = refresh ? 'auto-refresh' : 'as built';
       if (opts.http) {
-        await serveHttp(graphPath, opts.host ?? '127.0.0.1', Number(opts.port) || 7437, savings, local, dedup);
+        await serveHttp(graphPath, opts.host ?? '127.0.0.1', Number(opts.port) || 7437, serveOpts, freshness);
       } else {
         // stdio: NOTHING may go to stdout except the protocol stream.
-        info(c.dim('vg · MCP server on stdio (read-only). Connect your assistant to this process.'));
-        await serveStdio(graphPath, savings, local, dedup);
+        info(c.dim(`vg · MCP server on stdio (read-only, ${freshness}). Connect your assistant to this process.`));
+        await serveStdio(graphPath, serveOpts);
       }
     });
   applyGlobalOptions(cmd);
 }
 
-async function serveHttp(graphPath: string, host: string, port: number, savings: boolean, local: boolean, dedup: boolean): Promise<void> {
+async function serveHttp(graphPath: string, host: string, port: number, opts: ServeOptions, freshness: string): Promise<void> {
   const { createServer: createHttp } = await import('node:http');
   const { StreamableHTTPServerTransport } = await import(
     '@modelcontextprotocol/sdk/server/streamableHttp.js'
   );
+
+  // One graph source for the whole process: the parsed graph, hot-reload state,
+  // and refresh debounce live across requests (re-parsing per request would be
+  // wasteful and would probe freshness on every call).
+  const source = new GraphSource(graphPath, opts.refresh !== false);
 
   const httpServer = createHttp(async (req, res) => {
     if (req.url !== '/mcp') {
@@ -64,7 +81,7 @@ async function serveHttp(graphPath: string, host: string, port: number, savings:
       // simple and robust for a local single-user endpoint. (Per-request, so
       // `--dedup` only accumulates within stdio sessions, not across HTTP calls.)
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      const server = createServer(graphPath, savings, local, dedup);
+      const server = createServer(source, opts);
       res.on('close', () => {
         void transport.close();
         void server.close();
@@ -78,7 +95,7 @@ async function serveHttp(graphPath: string, host: string, port: number, savings:
   });
 
   await new Promise<void>((resolve) => httpServer.listen(port, host, resolve));
-  info(c.dim(`vg · MCP server on http://${host}:${port}/mcp (read-only, local)`));
+  info(c.dim(`vg · MCP server on http://${host}:${port}/mcp (read-only, local, ${freshness})`));
   // Keep the process alive until killed.
   await new Promise<never>(() => {});
 }

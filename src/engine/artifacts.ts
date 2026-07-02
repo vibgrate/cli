@@ -39,7 +39,17 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
 
   const graphPath = options.graphPath ?? defaultGraphPath(options.root);
   fs.mkdirSync(path.dirname(graphPath), { recursive: true });
-  fs.writeFileSync(graphPath, serializeGraph(graph));
+  // Atomic write (temp + rename): `vg serve` hot-reloads graph.json on mtime
+  // change, so a rebuild — including its own in-process auto-refresh — must
+  // never expose a half-written file to a concurrent reader.
+  const tmp = `${graphPath}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, serializeGraph(graph));
+    fs.renameSync(tmp, graphPath);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
 
   const written: WrittenArtifacts = { graphPath };
 
