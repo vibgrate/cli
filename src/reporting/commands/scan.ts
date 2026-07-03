@@ -52,30 +52,6 @@ export function shouldBuildCodeMap(opts: {
   return opts.graph !== false && !opts.maxPrivacy && !opts.noLocalArtifacts;
 }
 
-/**
- * Whether `scan` should build the local code map after scoring drift.
- *
- * The code map is a *local artifact* — it writes `.vibgrate/graph.json`, the
- * graph report/html, and a freshness snapshot, and building it runs the
- * memory-heavy in-process TypeScript program. It is therefore skipped whenever
- * the caller has opted out of local artifacts:
- *
- * - `--no-graph`  (`opts.graph === false`) — explicit opt-out.
- * - `--max-privacy` — strongest privacy mode, which means "no local artifacts".
- * - `--no-local-artifacts` — "Do not write .vibgrate JSON artifacts to disk";
- *   graph.json is one of those artifacts, so building it violated the flag's
- *   contract *and* let the optional map build OOM-kill baseline scans (e.g. the
- *   migration `scan --push --no-local-artifacts` path), taking `--push` down
- *   with it even though drift and findings were already computed.
- */
-export function shouldBuildCodeMap(opts: {
-  graph?: boolean;
-  maxPrivacy?: boolean;
-  noLocalArtifacts?: boolean;
-}): boolean {
-  return opts.graph !== false && !opts.maxPrivacy && !opts.noLocalArtifacts;
-}
-
 /** Auto-push scan artifact to Vibgrate API */
 async function autoPush(
   artifact: ScanArtifact,
