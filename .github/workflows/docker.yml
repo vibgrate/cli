@@ -100,13 +100,23 @@ jobs:
             fi
           elif [ "$EVENT" = "push" ]; then
             # Release on a push to main ONLY when the committed version changed —
-            # that is the signal that a sync/release PR landed. Publish exactly the
-            # committed version (the monorepo already stamped it); don't recompute.
+            # that is the signal that a sync/release PR landed. Publish the
+            # committed version unless npm has already moved past it (manual
+            # releases landed while the sync PR sat unmerged, or it merged on a
+            # later day) — then recompute today's next calendar version, the SAME
+            # guard release.yml applies, so the image tag always matches the npm
+            # version. Both gates resolve at push time, minutes before release.yml
+            # actually publishes to npm, so they recompute the same value.
             NEW="$(jq -r .version package.json)"
             OLD="$(git show "${BEFORE}:package.json" 2>/dev/null | jq -r .version || echo "")"
             if [ "$NEW" != "$OLD" ] && [ -n "$NEW" ] && [ "$NEW" != "null" ]; then
               release=true
               version="$NEW"
+              LATEST="$(npm view @vibgrate/cli version 2>/dev/null || true)"
+              if [ -n "$LATEST" ] && [ "$(printf '%s\n' "$LATEST" "$version" | sort -V | tail -n1)" = "$LATEST" ]; then
+                version="$(node scripts/stamp-version.mjs --dry-run)"
+                echo "Committed version \`${NEW}\` is not above npm latest (\`${LATEST}\`) — tagging image as \`${version}\` instead, matching the npm release." >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
           fi
           echo "release=${release}" >> "$GITHUB_OUTPUT"

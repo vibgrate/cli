@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { hashString } from './hash.js';
 import { cacheDir } from './cache.js';
+import { acquireLock, releaseLock } from './lock.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
 /**
@@ -304,8 +305,6 @@ export type EmbedProgress = (done: number, total: number) => void;
 const EMBED_CHUNK = 256;
 /** Min gap between incremental cache writes (ms) — caps IO on big repos. */
 const CACHE_WRITE_INTERVAL_MS = 1500;
-/** A lock older than this is presumed dead (crashed process). */
-const LOCK_STALE_MS = 15 * 60 * 1000;
 
 function vectorCachePath(root: string, modelId: string): string {
   return path.join(cacheDir(root), `embeddings-${safe(modelId)}.json`);
@@ -340,61 +339,9 @@ function readCacheEntries(file: string, modelId: string): EmbedCache['entries'] 
   return {};
 }
 
-// ── Single-writer lock so a foreground `ask` and a background `embed` never both
-//    embed the same repo at once (which would race on the cache file). ──
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'EPERM'; // exists, just not ours to signal
-  }
-}
-
-function lockIsStale(file: string): boolean {
-  try {
-    const { pid, at } = JSON.parse(fs.readFileSync(file, 'utf8')) as { pid?: number; at?: number };
-    if (typeof at === 'number' && Date.now() - at > LOCK_STALE_MS) return true;
-    if (typeof pid === 'number' && !isProcessAlive(pid)) return true;
-    return false;
-  } catch {
-    return true; // unreadable/corrupt → reclaim it
-  }
-}
-
-/** Take the embed lock (O_EXCL), reclaiming a stale/dead one. Returns success. */
-function acquireLock(file: string): boolean {
-  const write = (): boolean => {
-    try {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      const fd = fs.openSync(file, 'wx');
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
-      fs.closeSync(fd);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (write()) return true;
-  if (lockIsStale(file)) {
-    try {
-      fs.rmSync(file, { force: true });
-    } catch {
-      /* another process may have reclaimed it */
-    }
-    return write();
-  }
-  return false;
-}
-
-function releaseLock(file: string): void {
-  try {
-    fs.rmSync(file, { force: true });
-  } catch {
-    /* best-effort */
-  }
-}
+// Single-writer lock (shared helper — see ./lock.ts) so a foreground `ask`
+// and a background `embed` never both embed the same repo at once (which
+// would race on the cache file).
 
 /**
  * Node embeddings for the searchable (non-file/external) nodes, cache-backed:

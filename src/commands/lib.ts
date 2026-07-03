@@ -24,8 +24,8 @@ import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { c, info, json, out } from '../util/output.js';
 
 /**
- * `vg lib` (VG-CLI-SPEC §5 / VG-VS-CONTEXT7) — library currency, the Context7
- * superset. Family:
+ * `vg lib` (VG-CLI-SPEC §5) — library currency: version-correct, drift-annotated
+ * usage docs. Family:
  *   vg lib                  list the catalog
  *   vg lib <name>           version-correct, drift-annotated docs for <name>
  *   vg lib add <source>     ingest docs (local path; --online for a URL/llms.txt/git repo)

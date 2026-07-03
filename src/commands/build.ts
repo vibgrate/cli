@@ -6,6 +6,7 @@ import { buildGraph } from '../engine/build.js';
 import { isModelReady, countPending, resolveEmbedModel } from '../engine/embeddings.js';
 import type { VgGraph } from '../schema.js';
 import { writeArtifacts } from '../engine/artifacts.js';
+import { writeSnapshot } from '../engine/freshness.js';
 import { serializeGraph } from '../engine/serialize.js';
 import { renderReport } from '../engine/report.js';
 import { renderHtml } from '../engine/html.js';
@@ -70,12 +71,13 @@ export async function runBuild(
     throw usageError(`--jobs must be a positive integer (got "${opts.jobs}")`);
   }
 
+  const only = opts.only ? opts.only.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
   let result;
   try {
     result = await buildGraph({
       root,
       paths: paths.length ? paths : undefined,
-      only: opts.only ? opts.only.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      only,
       exclude: opts.exclude,
       jobs,
       noCache: global.noCache,
@@ -101,6 +103,24 @@ export async function runBuild(
     report: opts.report,
     graphPath: global.graph,
   });
+
+  // Record the freshness snapshot (stat+hash per corpus file, plus this build's
+  // scope) so `vg serve`/`vg ask` can auto-refresh the map when the tree drifts.
+  // Skipped for a custom --graph target: that is an explicit artifact the
+  // auto-refresh machinery must not manage.
+  if (!global.graph) {
+    writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats, {
+      only,
+      exclude: opts.exclude,
+      paths: paths.length ? paths : undefined,
+      deep: global.deep,
+      noGround: opts.ground === false,
+      scip: typeof opts.scip === 'string' ? opts.scip : undefined,
+      noScip: opts.scip === false,
+      noTsc: opts.tsc === false,
+      grammarsDir: opts.grammars,
+    });
+  }
 
   if (opts.export) writeExport(result.graph, opts.export);
 

@@ -68,11 +68,15 @@ npx vg scan                     # vg is the primary command; vibgrate is an alia
 
 ## Use it with your AI assistant
 
-`vg serve` starts **Vibgrate AI Context** — a local, offline MCP server that
+`vg serve` starts **Vibgrate AI Context** — a local-first MCP server that
 gives any MCP-compatible assistant (Claude, Cursor, Windsurf, Copilot, Gemini
 CLI, …) your code map, **offline drift**, local models, and **version-correct
-library docs**, all from your machine (no account, nothing uploaded). No
-context-window stuffing, no hallucinated APIs.
+library docs**, all from your machine (no account, nothing uploaded; thin
+local docs fall through to the hosted catalog unless you pass `--local`). No
+context-window stuffing, no hallucinated APIs. The map **keeps itself fresh**:
+when files change — including edits the assistant itself just made — the next
+tool call rebuilds it incrementally before answering, with no watcher or
+daemon involved.
 
 Wire it up in one command:
 
@@ -105,7 +109,7 @@ The graph is byte-deterministic and reproducible — the same repo always produc
 
 ```bash
 vg share                        # make the graph committable + auto-updating for the team
-vg serve                        # start Vibgrate AI Context (local, offline MCP: code map + drift + version-correct docs)
+vg serve                        # start Vibgrate AI Context (local-first MCP: code map + drift + version-correct docs)
 ```
 
 ---
@@ -273,7 +277,7 @@ See [docs/QUICKSTART-PROMPT.md](./docs/QUICKSTART-PROMPT.md) for the full prompt
 | `vg tree <file>` | Call tree rooted at a node |
 | `vg insights` | Overview: hubs, hotspots, untested paths |
 | `vg lib <package>` | Version-correct, drift-annotated library docs |
-| `vg serve` | Start **Vibgrate AI Context** (local, offline MCP: code map + drift + version-correct docs) |
+| `vg serve` | Start **Vibgrate AI Context** (local-first MCP: code map + drift + version-correct docs) |
 | `vg install` | Wire **Vibgrate AI Context** + skill into your AI assistant |
 | `vg share` | Make the graph committable + auto-updating for your team |
 | `vg status` | Cache/freshness, counts, staleness |

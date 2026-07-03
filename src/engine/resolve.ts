@@ -242,10 +242,13 @@ function enclosingDefId(defs: DefNodeRef[], byte: number): string | undefined {
  *   - Go: a package IS a directory; all files in it see each other's identifiers.
  *   - Java: same-package classes (package == directory by convention).
  *   - C#: file-scoped/co-located namespaces commonly align with the directory.
- * TS/JS, Python and Ruby require an explicit import path for cross-file refs, so
- * they get NO directory rung — a same-name def elsewhere is not reachable.
+ *   - Kotlin/Scala: Java-style package visibility (package == directory by convention).
+ *   - Swift: module-wide visibility; files in one target see each other un-imported.
+ * TS/JS, Python, Ruby, PHP, Dart, Lua, Elixir, Shell, Zig, C and C++ require an
+ * explicit import/include for cross-file refs, so they get NO directory rung —
+ * a same-name def elsewhere is not reachable.
  */
-const PACKAGE_SCOPED_LANGS = new Set(['go', 'java', 'cs']);
+const PACKAGE_SCOPED_LANGS = new Set(['go', 'java', 'cs', 'kotlin', 'scala', 'swift']);
 
 function dirOf(rel: string): string {
   const i = rel.lastIndexOf('/');
@@ -296,10 +299,13 @@ function resolveCall(
   if (imported.length === 1) return { id: imported[0].id, confidence: 0.75 };
   if (imported.length > 1) return null; // ambiguous across imports — let a precise rung decide
 
-  // 3. Same package directory (Go/Java/C#: visible without an import).
+  // 3. Same package directory (Go/Java/C#/Kotlin/Scala/Swift: visible without an
+  // import). Same self-loop rule as rung 1: a *qualified* call never resolves to
+  // the enclosing def itself.
   if (PACKAGE_SCOPED_LANGS.has(fromLang)) {
     const dir = dirOf(fromRel);
-    const samePkg = pool.filter((c) => c.lang === fromLang && dirOf(c.rel) === dir);
+    let samePkg = pool.filter((c) => c.lang === fromLang && dirOf(c.rel) === dir);
+    if (call.qualified && enclosingId) samePkg = samePkg.filter((c) => c.id !== enclosingId);
     if (samePkg.length === 1) return { id: samePkg[0].id, confidence: 0.7 };
   }
 

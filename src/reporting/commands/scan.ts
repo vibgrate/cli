@@ -24,6 +24,7 @@ import { emitIngestIdLine, emitDriftScoreLine } from '../utils/ingest-id-output.
 import { uploadScanArtifact } from '../utils/upload.js';
 import { buildGraph } from '../../engine/build.js';
 import { writeArtifacts } from '../../engine/artifacts.js';
+import { writeSnapshot } from '../../engine/freshness.js';
 import { detectAiAssistant, printAiContextPrompt } from '../ai-context-prompt.js';
 
 /** Auto-push scan artifact to Vibgrate API */
@@ -376,6 +377,11 @@ export const scanCommand = new Command('scan')
           onParseProgress: (done, total) => report(done, total, 'parsing'),
         });
         writeArtifacts(result.graph, { root: rootDir });
+        // Freshness snapshot → lets `vg serve`/`vg ask` auto-refresh this map
+        // when the working tree drifts (see engine/freshness.ts).
+        writeSnapshot(rootDir, result.graph.provenance.corpusHash, result.fileStats, {
+          exclude: opts.exclude,
+        });
         const { counts } = result.graph.meta;
         return `${counts.nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} edges`;
       };
