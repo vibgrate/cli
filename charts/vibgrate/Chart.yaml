@@ -7,7 +7,7 @@ type: application
 # stamped to the released @vibgrate/cli calendar version by
 # scripts/stamp-release-pins.mjs (via the marker on the appVersion line below).
 version: 0.1.1
-appVersion: "2026.703.5" # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
+appVersion: "2026.703.6" # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
 home: https://vibgrate.com
 icon: https://vibgrate.com/web-app-manifest-512x512.png
 sources:
