@@ -201,6 +201,16 @@ jobs:
           if gh release view "${TAG}" >/dev/null 2>&1; then
             echo "GitHub Release \`${TAG}\` already exists — skipping." >> "$GITHUB_STEP_SUMMARY"
           else
-            gh release create "${TAG}" --title "${TAG}" --generate-notes
-            echo "Created GitHub Release \`${TAG}\`." >> "$GITHUB_STEP_SUMMARY"
+            # The sync from the monorepo ships curated notes for each release
+            # (changeset summary + benchmark numbers + link to the full report)
+            # as releases/v<version>.md — use them as the release body when
+            # present, fall back to auto-generated notes when not.
+            NOTES_FILE="releases/v${VERSION}.md"
+            if [ -f "$NOTES_FILE" ]; then
+              gh release create "${TAG}" --title "${TAG}" --notes-file "$NOTES_FILE"
+              echo "Created GitHub Release \`${TAG}\` from \`${NOTES_FILE}\`." >> "$GITHUB_STEP_SUMMARY"
+            else
+              gh release create "${TAG}" --title "${TAG}" --generate-notes
+              echo "Created GitHub Release \`${TAG}\` (auto-generated notes — no \`${NOTES_FILE}\` in the tree)." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
