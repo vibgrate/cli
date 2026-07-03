@@ -132,7 +132,7 @@ runs:
     # are visible. Needs `permissions: security-events: write` on the workflow.
     - name: Upload SARIF to code scanning
       if: ${{ always() && inputs.upload-sarif == 'true' && inputs.format == 'sarif' }}
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: ${{ inputs.output }}
         category: ${{ inputs.category }}
