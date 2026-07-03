@@ -4,12 +4,31 @@ name: Publish Action
 # the root (mirrored from the monorepo's packages/vibgrate-cli-public/). It tags a
 # release of the composite GitHub Action and moves the floating major tag (v1) per
 # Marketplace convention, so `uses: vibgrate/cli@v1` resolves. The actual "Publish
-# to Marketplace" toggle is a one-time manual step on the GitHub Release UI; this
-# workflow creates the Release that enables it. The Action runs the already-signed
-# scanner image, so it inherits the provenance chain.
-# See docs/ARTIFACT-DISTRIBUTION-STRATEGY.md §3.5.
+# to Marketplace" toggle is a one-time manual step on the GitHub Release UI; once
+# an Action is listed, GitHub automatically surfaces every subsequent Release as a
+# new Marketplace version — so this workflow just has to cut a Release per release.
+# The Action runs the already-signed scanner image, so it inherits the provenance
+# chain. See docs/ARTIFACT-DISTRIBUTION-STRATEGY.md §3.5.
+#
+# Triggers (mirrors docker.yml so the Action ships in lockstep with the image):
+#   - push to main        → release ONLY when package.json's version changed in the
+#                           push (i.e. a merged "Sync from monorepo" PR). Ordinary
+#                           doc/community merges don't bump the version, so they're
+#                           skipped. THIS is the automated per-release trigger: a
+#                           bare `push: tags: v*` would never fire on a real release
+#                           because release.yml pushes that tag with GITHUB_TOKEN,
+#                           and GitHub does not start workflow runs for GITHUB_TOKEN
+#                           pushes. The version bump on main is the signal that does.
+#   - push tag v*.*.*     → release that calendar-versioned tag (a manual/human tag
+#                           push; the shape excludes the floating `v1` major tag and
+#                           the Action's own `vibgrate-action/v*` tags).
+#   - workflow_dispatch   → release (optional dry-run; version from package.json).
 
 on:
+  push:
+    branches: [main]
+    tags:
+      - "v*.*.*"
   workflow_dispatch:
     inputs:
       dry-run:
@@ -31,8 +50,89 @@ permissions:
   contents: write # tags + release
 
 jobs:
+  # Decide whether this event should release the Action, and at what version.
+  # Keeps a release off every commit to main — only a version bump (a merged sync
+  # PR), an explicit calendar tag, or a manual dispatch cuts a Release.
+  gate:
+    name: Decide release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      version: ${{ steps.decide.outputs.version }}
+      dry_run: ${{ steps.decide.outputs.dry_run }}
+      major_tag: ${{ steps.decide.outputs.major_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Need the parent commit so a push to main can diff package.json.
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry-run }}
+          INPUT_MAJOR: ${{ github.event.inputs.major-tag }}
+        run: |
+          set -euo pipefail
+          release=false
+          version=""
+          dry_run=false
+          # Floating major tag to move; only workflow_dispatch can override it.
+          major_tag="${INPUT_MAJOR:-v1}"
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # Manual/human push of a calendar tag (v2026.703.3). The tag IS the version.
+            release=true
+            version="${GITHUB_REF_NAME#v}"
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
+            release=true
+            [ "$INPUT_DRY_RUN" = "true" ] && dry_run=true
+            # The Action version tracks the published @vibgrate/cli version it wraps.
+            version="$(jq -r .version package.json)"
+          elif [ "$EVENT" = "push" ]; then
+            # Release on a push to main ONLY when the committed version changed —
+            # the signal that a sync/release PR landed. Match npm/image versioning:
+            # publish the committed version unless npm has already moved past it
+            # (a manual release landed while the sync PR sat unmerged, or it merged
+            # on a later day), in which case recompute today's next calendar version
+            # the SAME way release.yml and docker.yml do, so the Action tag always
+            # equals the npm/image version it wraps.
+            NEW="$(jq -r .version package.json)"
+            OLD="$(git show "${BEFORE}:package.json" 2>/dev/null | jq -r .version || echo "")"
+            if [ "$NEW" != "$OLD" ] && [ -n "$NEW" ] && [ "$NEW" != "null" ]; then
+              release=true
+              version="$NEW"
+              LATEST="$(npm view @vibgrate/cli version 2>/dev/null || true)"
+              if [ -n "$LATEST" ] && [ "$(printf '%s\n' "$LATEST" "$version" | sort -V | tail -n1)" = "$LATEST" ]; then
+                version="$(node scripts/stamp-version.mjs --dry-run)"
+                echo "Committed version \`${NEW}\` is not above npm latest (\`${LATEST}\`) — releasing the Action as \`${version}\`, matching the npm release." >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+          fi
+
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
+          echo "major_tag=${major_tag}" >> "$GITHUB_OUTPUT"
+          if [ "$release" = "true" ]; then
+            echo "### Vibgrate Action \`v${version}\` — will release" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No version change on this push — Action release skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   publish:
     name: Tag & release the Action
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -49,22 +149,17 @@ jobs:
           grep -q 'ghcr.io/vibgrate/cli' action.yml || { echo "::error::action.yml does not reference the scanner image"; exit 1; }
           python3 -c "import yaml,sys; yaml.safe_load(open('action.yml'))"
 
-      - name: Determine Action version
-        id: version
+      - name: Report Action version
         run: |
           set -euo pipefail
-          # The Action version tracks the published @vibgrate/cli version it wraps.
-          ver=$(jq -r .version package.json)
-          test -n "${ver}" && [ "${ver}" != "null" ] || { echo "::error::could not read version from package.json"; exit 1; }
-          echo "version=${ver}" >> "$GITHUB_OUTPUT"
-          echo "### Action version: \`${ver}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Action version: \`${{ needs.gate.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Tag & release
-        if: inputs.dry-run == false
+        if: needs.gate.outputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
-          MAJOR: ${{ inputs.major-tag }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          MAJOR: ${{ needs.gate.outputs.major_tag }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -82,22 +177,23 @@ jobs:
           git tag -f "$MAJOR"
           git push origin -f "$MAJOR"
 
-          # A GitHub Release is what enables the Marketplace "Publish" toggle.
+          # A GitHub Release is what enables — and, for an already-listed Action,
+          # auto-publishes — the Marketplace version. Idempotent: skip if present.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --title "Vibgrate Action v${VERSION}" \
-              --notes "Composite GitHub Action that runs the signed Vibgrate scanner image (\`ghcr.io/vibgrate/cli\`). Reference it as \`vibgrate/cli@${MAJOR}\`. Publish to the Marketplace from this Release's page (one-time)."
+              --notes "Composite GitHub Action that runs the signed Vibgrate scanner image (\`ghcr.io/vibgrate/cli\`). Reference it as \`vibgrate/cli@${MAJOR}\`. The first release must be published to the Marketplace by hand (one-time); every release after that is listed automatically."
           fi
 
       - name: Summary
         run: |
           {
             echo "### Vibgrate Action"
-            if [ "${{ inputs.dry-run }}" = "true" ]; then
+            if [ "${{ needs.gate.outputs.dry_run }}" = "true" ]; then
               echo "> **Dry run** — validated only, no tag/release created."
             else
-              echo "- Tag: \`vibgrate-action/v${{ steps.version.outputs.version }}\`"
-              echo "- Floating: \`${{ inputs.major-tag }}\` → this commit"
-              echo "- Publish to Marketplace from the new Release page (one-time toggle)."
+              echo "- Tag: \`vibgrate-action/v${{ needs.gate.outputs.version }}\`"
+              echo "- Floating: \`${{ needs.gate.outputs.major_tag }}\` → this commit"
+              echo "- Already listed on the Marketplace? This Release is published there automatically. First time only: enable the Marketplace toggle on the Release page."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

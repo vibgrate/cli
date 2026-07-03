@@ -262,6 +262,18 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      # cosign / gh attestation must PULL the signature + attestation manifests
+      # from GHCR to verify them. The package is private, so an anonymous token
+      # request is rejected (UNAUTHORIZED). `packages: read` grants GITHUB_TOKEN
+      # access, but cosign still needs the registry login to use it — mirror the
+      # "Log in to GHCR" step the mirror-dockerhub job already relies on.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Verify cosign signature
         run: |
           set -euo pipefail

@@ -686,6 +686,10 @@ export interface ScanOptions {
    *  the preflight short-circuit and the ingest upload. Used by scheduled and
    *  dashboard-triggered scans, which should always produce a new report. */
   force?: boolean;
+  /** Suppress promotional output (the free-plan "Keep tracking your DriftScore"
+   *  panel) from the text report. The scan results themselves are unaffected.
+   *  Used by non-interactive consumers such as the web-simulator recorder. */
+  quiet?: boolean;
   /**
    * Optional post-scoring step run inside the scan's progress bar, after findings
    * (e.g. building the local code map). Receives a progress reporter

@@ -1,5 +1,5 @@
 name: 'Vibgrate Scan'
-description: 'Scan a repository for upgrade drift & supply-chain risk with the signed Vibgrate scanner. Emits SARIF and a DriftScore.'
+description: 'Score how far a repo has drifted and catch supply-chain risk in CI. Emits SARIF to the Security tab and a 0-100 DriftScore. Runs the signed, provenance-verified scanner.'
 author: 'Vibgrate'
 
 branding:

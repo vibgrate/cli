@@ -206,6 +206,7 @@ export const scanCommand = new Command('scan')
   .option('--repository-name <name>', 'Override the repository name recorded for this scan (defaults to the directory or package.json name)')
   .option('--force', 'Always create a fresh scan ingest, even if the repository is unchanged since the last scan (skips the unchanged/reuse optimization). Used by scheduled and dashboard-triggered scans.')
   .option('--no-graph', 'Skip building the local code map (the AI/docs index) that scan produces after scoring drift')
+  .option('--quiet', 'Suppress promotional output (the free-plan tracking panel and the AI Context install prompt); scan results are unaffected')
   .action(async (targetPath: string, opts: {
     out?: string;
     format: string;
@@ -231,6 +232,7 @@ export const scanCommand = new Command('scan')
     repositoryName?: string;
     force?: boolean;
     graph?: boolean;
+    quiet?: boolean;
   }) => {
     const rootDir = path.resolve(targetPath);
     if (!(await pathExists(rootDir))) {
@@ -361,6 +363,7 @@ export const scanCommand = new Command('scan')
       projectScanTimeout: opts.projectScanTimeout ? parseInt(opts.projectScanTimeout, 10) || undefined : undefined,
       repositoryName: opts.repositoryName?.trim() || undefined,
       force: opts.force,
+      quiet: opts.quiet,
     };
 
     // `scan` also builds the local code map (the AI/docs index) so one command
@@ -450,6 +453,7 @@ export const scanCommand = new Command('scan')
     // to wire Vibgrate AI Context into their AI assistant.
     const showAiPrompt =
       scanOpts.format === 'text' &&
+      !opts.quiet &&
       !hasDsn &&
       !opts.offline &&
       !opts.noLocalArtifacts &&

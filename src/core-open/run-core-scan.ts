@@ -861,7 +861,9 @@ export async function runCoreScan(
       await writeTextFile(path.resolve(opts.out), markdown);
     }
   } else {
-    const text = formatText(artifact, { free: !parsedDsn });
+    // `--quiet` suppresses the free-plan upsell panel (promotional output only —
+    // the report itself is unchanged).
+    const text = formatText(artifact, { free: !parsedDsn && !opts.quiet });
     console.log(text);
     if (opts.out) {
       await writeTextFile(path.resolve(opts.out), text);
