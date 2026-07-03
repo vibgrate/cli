@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Command } from 'commander';
-import { grammarsSourceDir, grammarSetVersion } from '../engine/grammars.js';
+import { resolvedGrammarFiles, grammarSetVersion } from '../engine/grammars.js';
 import { defaultGraphPath } from '../engine/artifacts.js';
 import { catalogPath, libDir } from '../engine/lib.js';
 import { stableStringify } from '../engine/serialize.js';
@@ -28,14 +28,19 @@ export function registerBundle(program: Command): void {
       const root = rootOf(global);
       const outDir = path.resolve(root, opts.out ?? 'vg-bundle');
 
-      const grammars = grammarsSourceDir();
-      if (!grammars) throw new CliError('no grammars found to bundle (run a build first)', ExitCode.ERROR);
-
+      // Per-language resolution (not a directory copy) so the bundle carries
+      // the exact grammar files a scan would load — including any vendored
+      // overlay that replaces a defective prebuilt.
+      let grammarFiles;
+      try {
+        grammarFiles = resolvedGrammarFiles();
+      } catch {
+        throw new CliError('no grammars found to bundle (run a build first)', ExitCode.ERROR);
+      }
       fs.mkdirSync(path.join(outDir, 'grammars'), { recursive: true });
       let grammarCount = 0;
-      for (const f of fs.readdirSync(grammars).sort()) {
-        if (!f.endsWith('.wasm')) continue;
-        fs.copyFileSync(path.join(grammars, f), path.join(outDir, 'grammars', f));
+      for (const { fileName, absPath } of grammarFiles) {
+        fs.copyFileSync(absPath, path.join(outDir, 'grammars', fileName));
         grammarCount++;
       }
 

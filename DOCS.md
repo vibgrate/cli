@@ -471,11 +471,14 @@ vg ask "<question>"
 
 A local ONNX embedding model is downloaded once on first use, then cached and fully offline. Degrades gracefully to lexical-only under `--local` or `--no-semantic`.
 
+Before answering, `ask` checks whether files changed since the map was last built and, if so, rebuilds it incrementally first (only the changed files re-parse) — so answers always reflect the code as it is now. The check is stat-based and costs almost nothing when nothing changed; `--no-refresh` opts out.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `<question...>` | — | Your question |
 | `-b, --budget <n>` | `2000` | Approx token budget for returned context |
 | `--no-semantic` | — | Lexical only; skip the local embedding pass |
+| `--no-refresh` | — | Answer from the map as built; skip the auto-rebuild when files changed |
 
 ---
 
@@ -582,7 +585,7 @@ vg lib refresh          # Re-ingest all local sources
 
 ### vg serve
 
-Start Vibgrate AI Context — local, offline MCP serving your code map, drift, and version-correct docs to your AI assistant.
+Start Vibgrate AI Context — a local-first MCP serving your code map, drift, and version-correct docs to your AI assistant (fully offline under `--local`).
 
 ```bash
 vg serve
@@ -595,8 +598,11 @@ vg serve
 | `--host <h>` | `127.0.0.1` | Host for `--http` |
 | `--savings` | — | Record local, counts-only usage savings (opt-in) |
 | `--dedup` | — | Collapse a node's heavy relation lists on repeat reads within a session, to save tokens (opt-in) |
+| `--no-refresh` | — | Serve the map as built; skip the auto-rebuild when files change |
 
 Via stdio (default), your AI assistant spawns the server. Via `--http`, it runs as a local HTTP endpoint for browser or shared access.
+
+**The map stays fresh while you (or your AI) edit code.** Each tool call runs a cheap stat-only freshness check against the last build; when files really changed, the server rebuilds the map incrementally in-process — only changed files re-parse — and answers from the updated graph. Probes are debounced with a self-tuning cadence (2s floor, scaling with measured probe cost so probing never exceeds a few percent of serve time even on very large repos), rebuilds are single-flight and cross-process locked, and touch-only changes (a `git checkout`, a re-save with identical content) are recognized by content hash and never trigger a rebuild. There is no filesystem watcher and no daemon: freshness is checked exactly when it matters — at query time. The server also hot-reloads `graph.json` whenever it changes on disk, so an external `vg` build is picked up on the next call too.
 
 The server exposes read-only tools your assistant can call over the code map and dependency data, including:
 
@@ -606,7 +612,7 @@ The server exposes read-only tools your assistant can call over the code map and
 - `upgrade_impact` — what an upgrade will cost: version distance, how many files import the package, the vulnerabilities it fixes, and — with `changelog: true` — online breaking-change notes between your version and the latest.
 - `resolve_library`, `library_docs` — version-correct, drift-annotated library docs.
 
-All tools are read-only. The server is offline by default; the only network access is explicit opt-in (the embedder's one-time model fetch and `upgrade_impact`'s `changelog`), and both are disabled under `--local`.
+All tools are read-only. The server is local-first: it always answers from your machine when it can, and its only network touches are the embedder's one-time model fetch, `upgrade_impact`'s `changelog`, and `library_docs`' fall-through to the hosted catalog when the local docs for a library are thin or missing. `--local` is the hard airgap — it disables all three.
 
 ---
 
@@ -664,7 +670,7 @@ Graph freshness, counts, and staleness — compared against the working tree.
 vg status
 ```
 
-Outputs: map path, generation timestamp, node/edge/area counts, languages, cluster method, resolver rungs used, cache status, and stale file count.
+Outputs: map path, generation timestamp, node/edge/area counts, languages, cluster method, resolver rungs used, cache status, and stale file count. When a build has run on this machine, staleness is exact (per-file stat + content hash against the last build's snapshot — edits, adds, and removes); otherwise it falls back to comparing the file set.
 
 ---
 

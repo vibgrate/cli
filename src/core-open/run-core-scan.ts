@@ -46,7 +46,7 @@ import { generateWorkspaceRelationshipMermaid, generateProjectRelationshipMermai
 import { classifyProject, summarizeBilling } from './scanners/project-classification.js';
 import { collectVulnTargets, scanVulnerabilities, generateVulnerabilityFindings } from './scanners/vulnerability-scanner.js';
 import { attributeVulnerabilities } from './scoring/vuln-attribution.js';
-import { gitHistoryAvailable } from './utils/git-history.js';
+import { gitHistoryAvailable, workingTreeDirty } from './utils/git-history.js';
 import { buildVersionTimelines } from './utils/version-timeline.js';
 import type {
   ScanArtifact, ScanOptions, ProjectScan, ExtendedScanResults, RepositoryInfo, SolutionScan,
@@ -241,8 +241,14 @@ export async function runCoreScan(
   // ── Step: VCS ──
   progress.startStep('vcs');
   const vcs = await detectVcs(rootDir);
+  // Record whether the working tree matches HEAD, so downstream commit-signature
+  // verification can only report "verified" when the scanned code IS the signed
+  // commit (a signature attests to the committed tree, not local edits).
+  if (vcs.type === 'git' && vcs.sha) {
+    vcs.dirty = await workingTreeDirty(rootDir);
+  }
   const vcsDetail = vcs.type !== 'unknown'
-    ? `${vcs.type}${vcs.branch ? ` ${vcs.branch}` : ''}${vcs.shortSha ? ` @ ${vcs.shortSha}` : ''}`
+    ? `${vcs.type}${vcs.branch ? ` ${vcs.branch}` : ''}${vcs.shortSha ? ` @ ${vcs.shortSha}` : ''}${vcs.dirty ? ' (dirty)' : ''}`
     : 'none detected';
   progress.completeStep('vcs', vcsDetail);
 
@@ -763,7 +769,11 @@ export async function runCoreScan(
     if (await pathExists(baselinePath)) {
       try {
         const baseline = await readJsonFile<ScanArtifact>(baselinePath);
-        artifact.baseline = baselinePath;
+        // Only a repo-relative reference may enter the artifact: the absolute
+        // path leaks the local username/home layout to the ingest server. A
+        // baseline outside the repo degrades to its basename for the same reason.
+        const relBaseline = path.relative(rootDir, baselinePath);
+        artifact.baseline = !relBaseline || relBaseline.startsWith('..') ? path.basename(baselinePath) : relBaseline;
         artifact.delta = artifact.drift.score - baseline.drift.score;
       } catch {
         console.error(chalk.yellow(`Warning: Could not read baseline file: ${baselinePath}`));
@@ -851,7 +861,7 @@ export async function runCoreScan(
       await writeTextFile(path.resolve(opts.out), markdown);
     }
   } else {
-    const text = formatText(artifact);
+    const text = formatText(artifact, { free: !parsedDsn });
     console.log(text);
     if (opts.out) {
       await writeTextFile(path.resolve(opts.out), text);

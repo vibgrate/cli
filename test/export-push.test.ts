@@ -56,7 +56,8 @@ describe('push envelope + redaction', () => {
       ),
     };
     const red = redactGraph(tainted);
-    expect(red.nodes.some((n) => n.signature === '[redacted]')).toBe(true);
+    // The shared detector replaces the credential substring in place.
+    expect(red.nodes.some((n) => n.signature?.includes('[REDACTED]'))).toBe(true);
     expect(JSON.stringify(red)).not.toContain('sk-abcdefghijklmnop');
   });
 

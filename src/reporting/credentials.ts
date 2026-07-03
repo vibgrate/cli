@@ -58,7 +58,9 @@ export function writeStoredCredentials(creds: StoredCredentials): void {
   const dir = credentialsDir();
   fs.mkdirSync(dir, { recursive: true });
   const file = credentialsPath();
-  fs.writeFileSync(file, JSON.stringify(creds, null, 2) + '\n', 'utf8');
+  // Created 0600 from the first byte — a default-umask write would leave the
+  // token world-readable until the later chmod lands.
+  fs.writeFileSync(file, JSON.stringify(creds, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
   // Best-effort: restrict to the owner (no-op on platforms without POSIX perms).
   try {
     fs.chmodSync(file, 0o600);

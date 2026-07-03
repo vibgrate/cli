@@ -50,6 +50,16 @@ describe('sbom helpers', () => {
     expect(sbom.packages[0].name).toBe('chalk');
   });
 
+  it('produces a deterministic serialNumber for identical content', () => {
+    const a = toCycloneDx(makeArtifact('5.3.0', 90)) as { serialNumber: string };
+    const b = toCycloneDx(makeArtifact('5.3.0', 90)) as { serialNumber: string };
+    expect(a.serialNumber).toBe(b.serialNumber);
+    expect(a.serialNumber).toMatch(/^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    // Different dependency version ⇒ different id.
+    const c = toCycloneDx(makeArtifact('5.2.0', 90)) as { serialNumber: string };
+    expect(c.serialNumber).not.toBe(a.serialNumber);
+  });
+
   it('formats dependency deltas', () => {
     const base = makeArtifact('5.2.0', 80);
     const current = makeArtifact('5.3.0', 76);

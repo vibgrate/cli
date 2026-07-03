@@ -2,9 +2,9 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import chalk from 'chalk';
-import type { ScanArtifact, ExtendedScanResults, InventoryItem, ServiceDependencyItem, ArchitectureResult } from '../types.js';
+import type { ScanArtifact, BillingSummary, ExtendedScanResults, InventoryItem, ServiceDependencyItem, ArchitectureResult } from '../types.js';
 import { driftBar } from '../ui/bar.js';
-import { titleBox } from '../ui/box.js';
+import { titleBox, panelBox } from '../ui/box.js';
 
 /**
  * Format a billable project-equivalent figure to at most 2 decimal places,
@@ -15,7 +15,16 @@ function formatBillable(value: number): string {
   return String(Number(value.toFixed(2)));
 }
 
-export function formatText(artifact: ScanArtifact): string {
+export interface FormatTextOptions {
+  /**
+   * True when the scan ran without a Vibgrate workspace DSN (the free, local
+   * path). Drives the "Keep tracking your DriftScore" upsell panel. Defaults
+   * to false so callers that don't know the auth state never surface it.
+   */
+  free?: boolean;
+}
+
+export function formatText(artifact: ScanArtifact, opts: FormatTextOptions = {}): string {
   const lines: string[] = [];
 
   lines.push('');
@@ -214,7 +223,74 @@ export function formatText(artifact: ScanArtifact): string {
   lines.push(chalk.dim(`  ${scannedParts.join(' · ')}`));
   lines.push('');
 
+  // Free-plan upsell: only when the user has no workspace DSN (they scanned
+  // locally) and this scan produced a billing roll-up to price against.
+  if (opts.free && artifact.billing) {
+    lines.push(...renderUpsellPanel(artifact.billing));
+    lines.push('');
+  }
+
   return lines.join('\n');
+}
+
+// ── Free-plan upsell ("Keep tracking your DriftScore") ──
+
+// Banded, per-billable-project monthly rates, mirrored from the public pricing
+// page (packages/vibgrate-website/components/PricingPage.tsx). The marginal
+// rate drops as an estate grows; a single repo's billable projects sit in the
+// first band. Keep these in sync with the pricing page and llms.txt.
+const PRICE_EDGES = [0, 25, 100, 300, 500];
+const PRICE_RATES = {
+  team: [6, 5, 4, 3.5],
+  business: [15, 12, 10, 8],
+};
+
+/** Monthly cost for `billableProjects` under a banded rate table. */
+function estimateMonthly(billableProjects: number, rates: number[]): number {
+  let total = 0;
+  for (let i = 0; i < 4; i++) {
+    const lo = PRICE_EDGES[i];
+    const hi = i === 3 ? Infinity : PRICE_EDGES[i + 1];
+    if (billableProjects > lo) {
+      total += (Math.min(billableProjects, hi) - lo) * rates[i];
+    }
+  }
+  // Round to whole cents to avoid binary-float noise (e.g. 0.1 * 3 = 0.30000004).
+  return Math.round(total * 100) / 100;
+}
+
+/** Whole dollars when integral, otherwise two decimal places. */
+function formatMoney(value: number): string {
+  return value === Math.floor(value) ? `$${value}` : `$${value.toFixed(2)}`;
+}
+
+/** The teal call-out panel shown to free (no-DSN) users after a scan. */
+function renderUpsellPanel(billing: BillingSummary): string[] {
+  const raw = billing.billableProjectsRaw;
+  const team = estimateMonthly(raw, PRICE_RATES.team);
+  const business = estimateMonthly(raw, PRICE_RATES.business);
+  const rawLabel = formatBillable(raw);
+
+  const body = [
+    `You're on Vibgrate Free — this scan ran locally and`,
+    `isn't tracked over time.`,
+    ``,
+    chalk.bold(`Tracked monthly on Vibgrate Cloud, this repo would cost:`),
+    `  ${chalk.bold('Team')}       ${chalk.bold.white(formatMoney(team))} / mo`,
+    `  ${chalk.bold('Business')}   ${chalk.bold.white(formatMoney(business))} / mo`,
+    chalk.dim(`  (${rawLabel} billable project${raw === 1 ? '' : 's'}, banded per-project pricing)`),
+    ``,
+    chalk.bold(`Vibgrate Cloud adds:`),
+    `  ${chalk.cyan('•')} DriftScore tracked over time — trends, not snapshots`,
+    `  ${chalk.cyan('•')} Scheduled scans that run automatically — no CI wiring`,
+    `  ${chalk.cyan('•')} Alerts when drift crosses the budget you set`,
+    ``,
+    chalk.dim(`Free forever: 1 repository, 5 pushed scans / month.`),
+    `${chalk.bold('Start tracking:')}  ${chalk.cyan('vg login')}  →  ${chalk.cyan('vg push')}`,
+  ];
+
+  // Brand teal (#3FB0A4) border so the panel stands out from the cyan report boxes.
+  return panelBox('KEEP TRACKING YOUR DRIFTSCORE', body, chalk.hex('#3FB0A4'), 60);
 }
 
 function riskBadge(level: string): string {

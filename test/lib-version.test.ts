@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { resolveVersion, localPackageDocs, extractDtsApi, localApiSurface } from '../src/engine/lib.js';
 import { TOOLS } from '../src/mcp/tools.js';
 import { lockfileVersion } from '../src/engine/lockfile.js';
@@ -358,6 +358,73 @@ describe('§4 MCP tool migration (resolve_library / library_docs)', () => {
   it('library_docs returns not_found for an unknown, uninstalled library', () => {
     const root = project({ 'package.json': JSON.stringify({ dependencies: {} }) });
     expect(call('library_docs', { query: 'nope' }, root).error).toBe('not_found');
+  });
+});
+
+describe('library_docs hosted escalation (S2 seam, wired)', () => {
+  // The fixture README has no code fence, so the quality gate judges it insufficient —
+  // exactly the case that should consult the hosted catalog when not air-gapped.
+  const libTool = (n: string) => TOOLS.find((t) => t.name === n)!;
+  const callOnline = (args: Record<string, unknown>, root: string, fetchImpl: typeof fetch): Promise<any> => {
+    vi.stubGlobal('fetch', fetchImpl);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return Promise.resolve(libTool('library_docs').handler(null as any, args, { root, local: false } as any));
+  };
+  const savedDsn = process.env.VIBGRATE_DSN;
+  beforeEach(() => {
+    delete process.env.VIBGRATE_DSN;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (savedDsn === undefined) delete process.env.VIBGRATE_DSN;
+    else process.env.VIBGRATE_DSN = savedDsn;
+  });
+
+  function thinFixture(): string {
+    return project({
+      'package.json': JSON.stringify({ dependencies: { react: '^18.0.0' } }),
+      'node_modules/react/package.json': JSON.stringify({ name: 'react', version: '18.2.0' }),
+      'node_modules/react/README.md': '# react\nA thin readme with no example.',
+    });
+  }
+
+  it('serves hosted docs when the local doc is thin and the server is online', async () => {
+    const hostedFetch = vi.fn(async () =>
+      new Response(JSON.stringify({ content: '# hosted react docs\n```js\nuseEffect(() => {}, [])\n```', version: '18.2.0' }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    const r = await callOnline({ query: 'react' }, thinFixture(), hostedFetch);
+    expect(hostedFetch).toHaveBeenCalledOnce();
+    expect(r.source).toBe('hosted');
+    expect(r.content).toContain('hosted react docs');
+    expect(r.docs).toBe(r.content);
+    expect(r.metadata.escalated).toBe(true);
+  });
+
+  it('never touches the network under --local (hard airgap)', async () => {
+    const spy = vi.fn() as unknown as typeof fetch;
+    vi.stubGlobal('fetch', spy);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const r = (await libTool('library_docs').handler(null as any, { query: 'react' }, { root: thinFixture(), local: true } as any)) as any;
+    expect(spy).not.toHaveBeenCalled();
+    expect(r.source).toContain('node_modules/react'); // local answer, thin but served
+    expect(r.metadata.escalate).toBe('hosted');
+  });
+
+  it('fails closed to the local answer when the hosted catalog is unreachable', async () => {
+    const failing = vi.fn(async () => {
+      throw new Error('offline');
+    }) as unknown as typeof fetch;
+    const r = await callOnline({ query: 'react' }, thinFixture(), failing);
+    expect(r.source).toContain('node_modules/react');
+    expect(r.content).toContain('thin readme');
+  });
+
+  it('consults hosted for a total local miss, and reports not_found when hosted has nothing', async () => {
+    const root = project({ 'package.json': JSON.stringify({ dependencies: {} }) });
+    const empty = vi.fn(async () => new Response('{}', { status: 404 })) as unknown as typeof fetch;
+    const r = await callOnline({ query: 'nope' }, root, empty);
+    expect(empty).toHaveBeenCalledOnce();
+    expect(r.error).toBe('not_found');
   });
 });
 

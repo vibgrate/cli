@@ -15,6 +15,12 @@
 #                          monorepo" PR). Ordinary doc/community merges don't bump
 #                          the version, so they're skipped. This is what makes a
 #                          merged sync PR publish to npm with no tag to manage.
+#                          If npm has already moved past the committed version
+#                          (manual releases landed while the sync PR sat unmerged,
+#                          or it merged on a later day), the next calendar version
+#                          is recomputed from npm instead — npm refuses to tag a
+#                          lower version as `latest`, and the merged code is the
+#                          newest code, so it must ship as a fresh higher version.
 # The resolved version is stamped into package.json AND src/version.ts before the
 # build.
 #
@@ -85,13 +91,24 @@ jobs:
             version="$(node scripts/stamp-version.mjs --dry-run)"
           elif [ "$EVENT" = "push" ]; then
             # Release on a push to main ONLY when the committed version changed —
-            # the signal that a sync/release PR landed. Publish exactly that
-            # version (the monorepo already stamped it); don't recompute.
+            # the signal that a sync/release PR landed. Publish that version as
+            # long as it can still take the `latest` dist-tag. If the registry
+            # has moved past it (a manual release ran while the sync PR sat
+            # unmerged, or the PR merged on a later day), recompute today's next
+            # calendar version from npm — publishing the stale, lower version
+            # would be rejected ("previously published version ... is higher"),
+            # and the merged code is the newest code, so it ships as a fresh
+            # higher version instead.
             NEW="$(jq -r .version package.json)"
             OLD="$(git show "${BEFORE}:package.json" 2>/dev/null | jq -r .version || echo "")"
             if [ "$NEW" != "$OLD" ] && [ -n "$NEW" ] && [ "$NEW" != "null" ]; then
               release=true
               version="$NEW"
+              LATEST="$(npm view @vibgrate/cli version 2>/dev/null || true)"
+              if [ -n "$LATEST" ] && [ "$(printf '%s\n' "$LATEST" "$version" | sort -V | tail -n1)" = "$LATEST" ]; then
+                version="$(node scripts/stamp-version.mjs --dry-run)"
+                echo "Committed version \`${NEW}\` is not above npm latest (\`${LATEST}\`) — releasing as \`${version}\` instead." >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
           fi
           echo "release=${release}" >> "$GITHUB_OUTPUT"

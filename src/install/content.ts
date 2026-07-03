@@ -44,8 +44,11 @@ If the \`vg\` MCP server is registered, call its read-only tools directly:
 
 ## Keep it fresh
 
-Run \`vg\` after pulling or making structural changes. The map lives at
-\`.vibgrate/graph.json\` and is deterministic (byte-identical across machines).
+The map keeps itself fresh: \`vg ask\` and the MCP tools detect changed files
+and rebuild it incrementally before answering — you can edit code and query
+immediately. Running \`vg\` after a large pull still warms everything in one go.
+The map lives at \`.vibgrate/graph.json\` and is deterministic (byte-identical
+across machines).
 `;
 }
 

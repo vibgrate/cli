@@ -13,15 +13,19 @@ import { FREE_PACK } from '../grounding/pack.js';
 import { loadCatalog, resolveLib, readDoc, driftFor, resolveVersion, localPackageDocs, localApiSurface } from '../engine/lib.js';
 import { selectForBudget, symbolsFromApi } from '../engine/select.js';
 import { assessDocQuality } from '../engine/quality.js';
+import { fetchHostedDocs } from '../engine/hosted.js';
+import { resolveDsn } from '../reporting/credentials.js';
+import { parseDsn } from '../reporting/commands/push.js';
 import { boundList, NODE_EDGE_CAP } from './response.js';
 import type { VgGraph } from '../schema.js';
 
 /**
  * The read-only tool set for the LOCAL `vg serve` MCP. Every tool is
  * side-effect-free and `readOnlyHint: true` (auto-approvable), and independent of
- * Vibgrate's hosted cloud MCP. The server is offline by default; the only network
- * access is explicit opt-in — the embedder's one-time model fetch and
- * `upgrade_impact`'s `changelog` option — and both are disabled under `--local`.
+ * Vibgrate's hosted cloud MCP. The server is local-first; network access is
+ * limited to the embedder's one-time model fetch, `upgrade_impact`'s `changelog`
+ * option, and `library_docs`' hosted-catalog fall-through on a thin/missing local
+ * doc — all disabled under `--local` (the hard airgap).
  *
  * Phase 2/3 add `tests_for`, `get_facts`, `guide_node`, `check_drift`,
  * `list_models`, `resolve_library`, `library_docs`.
@@ -403,7 +407,7 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'resolve_library',
-    description: 'Resolve a library name/query to its canonical id + the version for YOUR project (the Context7 resolve_library swap-in, version-correct + drift-annotated).',
+    description: 'Resolve a library name/query to its canonical id + the version for YOUR project (version-correct + drift-annotated).',
     // Canonical §4: `query` (+ optional `context_project`). `name` kept as a back-compat alias.
     inputSchema: obj(
       {
@@ -450,7 +454,7 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'library_docs',
-    description: 'Version-correct, drift-annotated usage docs for a library — from the committed catalog or the installed package on disk (the Context7 library_docs swap-in).',
+    description: 'Version-correct, drift-annotated usage docs for a library — from the committed catalog or the installed package on disk.',
     // Canonical §4: `targetId`/`query`, `verbosity`, `max_tokens`. `name`/`tokens` kept as aliases.
     inputSchema: obj(
       {
@@ -493,7 +497,6 @@ export const TOOLS: VgTool[] = [
           query,
           symbols: symbolsFromApi(apiSurface),
         });
-        // ESCALATION SEAM: if (!quality.sufficient && hostedAvailable(ctx)) return hostedDocs(...); // S2
         return {
           content: sel.text,
           metadata: {
@@ -508,9 +511,12 @@ export const TOOLS: VgTool[] = [
 
       // 1. Committed catalog (drift-annotated). 2. Local-first: installed package docs on disk.
       const entry = resolveLib(loadCatalog(ctx.root), id);
+      let answer: Record<string, unknown> | null = null;
+      let sufficient = false;
       if (entry) {
         const r = render(readDoc(ctx.root, entry), entry.name);
-        return {
+        sufficient = r.metadata.quality.sufficient;
+        answer = {
           targetId: entry.id,
           name: entry.name,
           version: entry.version,
@@ -521,22 +527,52 @@ export const TOOLS: VgTool[] = [
           docs: r.content, // back-compat
           metadata: r.metadata,
         };
+      } else {
+        const local = localPackageDocs(ctx.root, id);
+        if (local) {
+          const r = render(local.docs, id);
+          sufficient = r.metadata.quality.sufficient;
+          answer = {
+            targetId: id,
+            name: id,
+            version: local.version ?? ver.served,
+            source: local.source,
+            version_mismatch: ver.mismatch ?? null,
+            content: r.content,
+            docs: r.content, // back-compat
+            metadata: r.metadata,
+          };
+        }
       }
-      const local = localPackageDocs(ctx.root, id);
-      if (local) {
-        const r = render(local.docs, id);
-        return {
-          targetId: id,
-          name: id,
-          version: local.version ?? ver.served,
-          source: local.source,
-          version_mismatch: ver.mismatch ?? null,
-          content: r.content,
-          docs: r.content, // back-compat
-          metadata: r.metadata,
-        };
+
+      // Hosted escalation (S2, wired): consulted only when the local answer is missing or
+      // insufficient AND the server isn't air-gapped (`--local`). fetchHostedDocs fails
+      // closed to null, so the best local answer (or not_found) is never broken by the
+      // network. The escalation branch is the only async path — the local path stays sync.
+      if (!sufficient && !ctx.local) {
+        return (async () => {
+          const dsn = resolveDsn();
+          const parsed = dsn ? parseDsn(dsn) : null;
+          const hosted = await fetchHostedDocs(
+            { name: entry?.name ?? id, targetId: entry?.id, query: query || undefined, maxTokens: budget },
+            { auth: parsed ? { keyId: parsed.keyId, secret: parsed.secret } : undefined },
+          );
+          if (hosted) {
+            return {
+              targetId: entry?.id ?? id,
+              name: entry?.name ?? id,
+              version: hosted.version ?? ver.served ?? null,
+              source: 'hosted',
+              version_mismatch: ver.mismatch ?? null,
+              content: hosted.content,
+              docs: hosted.content, // back-compat
+              metadata: { verbosity, escalated: true, ...(hosted.metadata ?? {}) },
+            };
+          }
+          return answer ?? { error: 'not_found' };
+        })();
       }
-      return { error: 'not_found' };
+      return answer ?? { error: 'not_found' };
     },
   },
 ];

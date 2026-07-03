@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { detectVcs, redactUrlCredentials } from '../src/core-open/utils/vcs.js';
+import { detectVcs } from '../src/core-open/utils/vcs.js';
+import { redactUrlCredentials } from '../src/core-open/utils/redact.js';
 import { makeProject, cleanup } from './helpers.js';
 
 /**
@@ -47,5 +48,19 @@ describe('redactUrlCredentials', () => {
     expect(redactUrlCredentials('https://u@h/p')).toBe('https://h/p');
     expect(redactUrlCredentials('https://u:t@h/p')).toBe('https://h/p');
     expect(redactUrlCredentials('https://h/p')).toBe('https://h/p');
+  });
+
+  it('strips credential-bearing query params from remote URLs (GUARDRAILS §1.1)', () => {
+    expect(redactUrlCredentials('https://h/r.git?access_token=tok123&ref=main')).toBe('https://h/r.git?ref=main');
+    expect(redactUrlCredentials('https://h/r.git?private_token=tok&x-token=t2')).toBe('https://h/r.git');
+  });
+});
+
+describe('scan VCS capture strips query-string credentials', () => {
+  it('drops ?access_token from the captured origin URL', async () => {
+    const root = gitProject('https://github.com/acme/private.git?access_token=QUERYTOKEN123&ref=main');
+    const vcs = await detectVcs(root);
+    expect(vcs.remoteUrl).toBe('https://github.com/acme/private.git?ref=main');
+    expect(JSON.stringify(vcs)).not.toContain('QUERYTOKEN123');
   });
 });

@@ -8,9 +8,9 @@ import { inventory, installedTreeVersion } from './drift.js';
 import { lockfileVersion } from './lockfile.js';
 
 /**
- * `vg lib` — the Context7 superset (VG-VS-CONTEXT7). A deterministic, on-disk
- * library-currency catalog: version-correct usage docs for the **exact version
- * in your lockfile**, drift-annotated, from on-disk sources (no key).
+ * `vg lib` — a deterministic, on-disk library-currency catalog: version-correct
+ * usage docs for the **exact version in your lockfile**, drift-annotated, from
+ * on-disk sources (no key).
  *
  * The catalog (`vibgrate.lib.json`) is small and committable; doc bodies live in
  * `.vibgrate/lib/<id>.md` so the team shares them on pull. Ingestion is
@@ -103,7 +103,7 @@ const stripRange = (v?: string): string | undefined => v?.replace(/^[v^~>=<\s]+/
  * lockfile↔installed disagreement (VG-LIB-SUPERSET-PLAN D13 / G8). Precedence:
  * lockfile pin → installed tree → declared range. When both a lockfile pin and an
  * installed version are readable and differ, surface a mismatch the dev should fix —
- * a signal Context7 can't produce (it has no view of your installed tree).
+ * a signal a hosted docs service can't produce (it has no view of your installed tree).
  */
 export function resolveVersion(root: string, name: string): VersionResolution {
   const rec = inventory(root).records.find((r) => r.name === name);
@@ -260,8 +260,8 @@ function npmPackageDir(root: string, name: string): string | undefined {
 }
 
 /**
- * Local-first resolution ladder (VG-CONTEXT7-AND-MOAT §10.2 / VG-LIB-SUPERSET-PLAN
- * A.2.3): when a library isn't in the committed catalog, read its docs **from the
+ * Local-first resolution ladder (VG-LIB-SUPERSET-PLAN A.2.3): when a library isn't
+ * in the committed catalog, read its docs **from the
  * installed package on disk**, version-correct by construction and offline. Prefers
  * `llms.txt`, then the README, then the package.json description. First slice: npm
  * (`node_modules`); other ecosystems (site-packages, …) follow the same shape.

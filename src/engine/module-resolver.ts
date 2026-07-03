@@ -19,7 +19,11 @@ export interface ModuleResolver {
 }
 
 const JS_TS_EXT = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
-const OTHER_EXT = ['.py', '.pyi', '.go', '.rs', '.rb', '.java', '.cs'];
+const OTHER_EXT = [
+  '.py', '.pyi', '.go', '.rs', '.rb', '.java', '.cs',
+  '.php', '.kt', '.kts', '.swift', '.scala', '.sc', '.dart', '.lua',
+  '.ex', '.exs', '.sh', '.bash', '.zig', '.c', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h',
+];
 
 // Which target extensions a dotted import from a given file may resolve to.
 // Keeps Python imports matching Python files, Java matching Java, etc. — a
@@ -34,6 +38,30 @@ const EXT_GROUPS: Record<string, string[]> = {
   '.rb': ['.rb'],
 };
 for (const e of JS_TS_EXT) EXT_GROUPS[e] = JS_TS_EXT;
+const CPP_EXT = ['.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h'];
+Object.assign(EXT_GROUPS, {
+  '.php': ['.php'],
+  '.kt': ['.kt', '.kts'],
+  '.kts': ['.kt', '.kts'],
+  '.swift': ['.swift'],
+  '.scala': ['.scala', '.sc'],
+  '.sc': ['.scala', '.sc'],
+  '.dart': ['.dart'],
+  '.lua': ['.lua'],
+  '.ex': ['.ex', '.exs'],
+  '.exs': ['.ex', '.exs'],
+  '.sh': ['.sh', '.bash'],
+  '.bash': ['.sh', '.bash'],
+  '.zig': ['.zig'],
+  '.c': ['.c', '.h'],
+  '.cpp': CPP_EXT,
+  '.cc': CPP_EXT,
+  '.cxx': CPP_EXT,
+  '.hpp': CPP_EXT,
+  '.hh': CPP_EXT,
+  '.hxx': CPP_EXT,
+  '.h': [...CPP_EXT, '.c'],
+});
 
 export function buildModuleResolver(root: string, relSet: Set<string>): ModuleResolver {
   const probe = makeProbe(relSet);
@@ -73,9 +101,19 @@ export function buildModuleResolver(root: string, relSet: Set<string>): ModuleRe
 
   return {
     resolve(fromRel, source) {
+      // PHP namespaces (`App\\Models\\User`) — treat as a dotted module path so
+      // the PSR-4-style suffix machinery can match `src/Models/User.php`.
+      if (source.includes('\\')) source = source.split('\\').join('.');
       // JS/TS relative (`./x`, `../x`) — join against the importer's directory.
       if (source.startsWith('./') || source.startsWith('../')) {
         return probe(posixJoin(path.posix.dirname(fromRel), source));
+      }
+      // Bare relative FILE references: `require 'helpers.php'` (PHP),
+      // `import 'util.dart'`, `@import("util.zig")`, `#include "util.h"` — an
+      // extension-bearing name resolves against the importer's directory first.
+      if (/\.[A-Za-z0-9]+$/.test(source) && !source.startsWith('<')) {
+        const hit = probe(posixJoin(path.posix.dirname(fromRel), source));
+        if (hit) return hit;
       }
       // Python-style relative (`.models`, `..core.utils`, `.`) — leading dots are
       // package levels, not a filename. One dot = the file's package (its dir),
