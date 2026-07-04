@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { assistantById, detectServeLaunch, installAssistant, uninstallAssistant } from '../src/install/registry.js';
+import { assistantById, detectServeLaunch, installAssistant, uninstallAssistant, writeNavigationConfig } from '../src/install/registry.js';
+import { HOT_TOOLS, deferredToolNames, navigationToolsetConfig, TOOLS } from '../src/mcp/tools.js';
 import { CliError } from '../src/util/exit.js';
 import { makeProject, cleanup } from './helpers.js';
 
@@ -109,5 +110,39 @@ describe('detectServeLaunch', () => {
     installAssistant(assistantById('claude')!, { root, smallRepo: false, launch: detectServeLaunch(() => null) });
     const mcp = JSON.parse(fs.readFileSync(path.join(root, '.mcp.json'), 'utf8'));
     expect(mcp.mcpServers.vg.command).toBe('npx');
+  });
+});
+
+describe('P3 navigation deferral config', () => {
+  it('hot core is a subset of the real tool set, deferred is the exact complement', () => {
+    const names = new Set(TOOLS.map((t) => t.name));
+    for (const h of HOT_TOOLS) expect(names.has(h)).toBe(true);
+    const deferred = deferredToolNames();
+    // hot + deferred partitions the whole set with no overlap.
+    expect(new Set([...HOT_TOOLS, ...deferred]).size).toBe(TOOLS.length);
+    for (const h of HOT_TOOLS) expect(deferred).not.toContain(h);
+  });
+
+  it('mcp_toolset block defers everything by default, loads only the hot core', () => {
+    const cfg = navigationToolsetConfig() as {
+      type: string;
+      default_config: { defer_loading: boolean };
+      configs: Record<string, { defer_loading: boolean }>;
+    };
+    expect(cfg.type).toBe('mcp_toolset');
+    expect(cfg.default_config.defer_loading).toBe(true);
+    for (const h of HOT_TOOLS) expect(cfg.configs[h].defer_loading).toBe(false);
+    expect(Object.keys(cfg.configs)).toEqual([...HOT_TOOLS]);
+  });
+
+  it('vg install writes .vibgrate/mcp-navigation.json with hot core + deferred + toolset', () => {
+    const root = project();
+    const rel = writeNavigationConfig(root);
+    expect(rel).toBe(path.join('.vibgrate', 'mcp-navigation.json'));
+    const doc = JSON.parse(fs.readFileSync(path.join(root, rel), 'utf8'));
+    expect(doc.hot_core).toEqual([...HOT_TOOLS]);
+    expect(doc.deferred).toEqual(deferredToolNames());
+    expect(doc.toolset.type).toBe('mcp_toolset');
+    expect(typeof doc._readme).toBe('string');
   });
 });

@@ -190,29 +190,39 @@ export async function runBuild(
 }
 
 /**
- * After an interactive build, warm the semantic index in the background so the
- * first `vg ask` is instant — but only when it won't surprise-download: the model
- * must already be cached on this machine (downloaded once, centrally, by an
- * earlier `vg ask`/`vg embed`). Disabled with `--no-warm`; skipped under
- * --json/--quiet/--local and when not at a TTY (so CI, which has no TTY, never
- * warms). The detached child runs `vg embed --bg` (no download, silent) and a
- * lock prevents it racing a foreground `ask`.
+ * After an interactive build we have just committed to a code graph, so the
+ * user is likely to run `vg ask`/`vg serve` next — start warming the semantic
+ * index in the background now so that first semantic call is instant instead of
+ * paying a cold model load. If the model isn't downloaded yet, the background
+ * warm fetches it (once, centrally) rather than deferring the whole cost to the
+ * first `ask`. Disabled with `--no-warm`; skipped under --json/--quiet/--local
+ * and when not at a TTY (so CI never auto-downloads). The detached child runs
+ * `vg embed --bg [--download]`; a lock prevents it racing a foreground `ask`.
  */
 function maybeWarmEmbeddings(root: string, graph: VgGraph, global: GlobalOpts, warm: boolean): void {
   if (!warm || global.json || global.quiet || global.local) return;
   if (!process.stdout.isTTY && !process.stderr.isTTY) return;
-  const modelId = resolveEmbedModel();
-  if (!isModelReady(modelId)) return; // model not downloaded yet → leave it to the first `ask`
-  if (countPending(graph, root, modelId) === 0) return; // already warm
   const cli = process.argv[1];
   if (!cli) return;
+  const modelId = resolveEmbedModel();
+  const ready = isModelReady(modelId);
+  // Already fully warm: model present and every node embedded → nothing to do.
+  if (ready && countPending(graph, root, modelId) === 0) return;
+  // When the model isn't on this machine yet, start the one-time download now
+  // (the graph is built; the next semantic call shouldn't wait for it).
+  const args = ready
+    ? [cli, 'embed', '-C', root, '--bg']
+    : [cli, 'embed', '-C', root, '--bg', '--download'];
   try {
-    const child = spawn(process.execPath, [cli, 'embed', '-C', root, '--bg'], {
-      detached: true,
-      stdio: 'ignore',
-    });
+    const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore' });
     child.unref();
-    info(c.dim('  warming the semantic index in the background — `vg ask` will be instant'));
+    info(
+      c.dim(
+        ready
+          ? '  warming the semantic index in the background — `vg ask` will be instant'
+          : '  downloading the semantic model in the background (once) — `vg ask`/`vg serve` will be instant; disable with --no-warm',
+      ),
+    );
   } catch {
     /* warm-up is best-effort */
   }

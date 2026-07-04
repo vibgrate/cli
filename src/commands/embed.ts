@@ -36,9 +36,13 @@ export function registerEmbed(program: Command): void {
     .description('precompute the semantic index for instant `vg ask` (or --where / --clear)')
     .option('--where', 'show where the model is cached, and its size')
     .option('--clear', 'remove the downloaded model from the shared cache')
-    // --bg: the silent, no-download background warm-up spawned by `vg build`.
+    // --bg: the silent background warm-up spawned by `vg build`. It skips the
+    // model download by default; `--download` lets that background warm fetch
+    // the model too, so a graph build starts the one-time download immediately
+    // and the next `vg serve`/`vg ask` is instant instead of paying a cold load.
     .addOption(new Option('--bg').hideHelp())
-    .action(async function (this: Command, opts: { where?: boolean; clear?: boolean; bg?: boolean }) {
+    .addOption(new Option('--download').hideHelp())
+    .action(async function (this: Command, opts: { where?: boolean; clear?: boolean; bg?: boolean; download?: boolean }) {
       const global = readGlobal(this);
       const modelId = resolveEmbedModel();
 
@@ -64,7 +68,10 @@ export function registerEmbed(program: Command): void {
       let reason: EmbedUnavailable | undefined;
       const embedder = await loadEmbedder({
         local: global.local,
-        noDownload: bg, // background warm-up never downloads
+        // Background warm-ups skip the download unless explicitly asked to fetch
+        // (`--bg --download`, spawned by `vg build` so the model is ready by the
+        // time `vg serve`/`vg ask` needs it).
+        noDownload: bg && opts.download !== true,
         showDownloadProgress: !bg,
         onUnavailable: (r) => (reason = r),
       });

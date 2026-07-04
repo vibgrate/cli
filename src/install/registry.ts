@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { skillMarkdown, nudgeMarkdown, mcpServerEntry, NUDGE_BEGIN, NUDGE_END, type ServeLaunch } from './content.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { whichOnPath, isInstalledOwnBinary } from '../util/cli-invocation.js';
+import { navigationToolsetConfig, HOT_TOOLS, deferredToolNames } from '../mcp/tools.js';
 
 /**
  * Per-assistant install registry (a focused subset of VG-ASSISTANT-INSTALL §2;
@@ -191,6 +192,33 @@ export function uninstallAssistant(a: Assistant, root: string, purge: boolean): 
 function writeFileEnsured(file: string, content: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, content);
+}
+
+/**
+ * Write the deferred-loading navigation config once per project (plan P3,
+ * VG-NAVIGATION-PROFILE.md). `vg serve` always exposes the one optimized tool
+ * set; this file is the CLIENT loading configuration for agents built on the
+ * Claude API that support `defer_loading` + tool-search — it keeps the hot
+ * navigation core in context and defers the rest, cutting the per-step schema
+ * bill to ~350–450 tokens (vs ~1,881 for the full set). Hosts that don't
+ * support deferral ignore it and serve the whole optimized set. Returns the
+ * repo-relative path written.
+ */
+export function writeNavigationConfig(root: string): string {
+  const rel = path.join('.vibgrate', 'mcp-navigation.json');
+  const doc = {
+    _readme:
+      'Deferred-loading config for agents embedding `vg serve` via the Claude API ' +
+      '(defer_loading + tool-search). The hot navigation core stays in context; the rest ' +
+      'load on demand — ~350-450 schema tokens/step vs ~1,881 for the full set. Hosts without ' +
+      'defer_loading ignore this and serve the whole (already optimized) tool set. See ' +
+      'docs/graph/VG-NAVIGATION-PROFILE.md.',
+    hot_core: [...HOT_TOOLS],
+    deferred: deferredToolNames(),
+    toolset: navigationToolsetConfig(),
+  };
+  writeFileEnsured(path.join(root, rel), `${JSON.stringify(doc, null, 2)}\n`);
+  return rel;
 }
 
 function upsertMcp(file: string, target: McpTarget, launch: ServeLaunch): void {

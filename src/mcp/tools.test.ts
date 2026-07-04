@@ -64,9 +64,9 @@ function tool(name: string) {
 const ctx = (over: Partial<ToolContext> = {}): ToolContext => ({ root: '/tmp/vg-nonexistent', local: true, ...over });
 
 describe('orient (one-shot orientation)', () => {
-  it('bundles summary + matches + top blast radius in a single call', async () => {
+  it('bundles summary + matches + top blast radius under detailed', async () => {
     const g = makeGraph();
-    const r = (await tool('orient').handler(g, { question: 'foo' }, ctx())) as Record<string, any>;
+    const r = (await tool('orient').handler(g, { question: 'foo', response_format: 'detailed' }, ctx())) as Record<string, any>;
     expect(r.summary.counts.nodes).toBe(3);
     expect(r.mode).toBe('lexical'); // local:true → no embedder
     expect(typeof r.context).toBe('string');
@@ -76,6 +76,32 @@ describe('orient (one-shot orientation)', () => {
     expect(r.topImpact.direct).toBe(2);
     // impact items carry no internal content-hash id.
     expect(r.topImpact.affected.every((a: any) => !('id' in a))).toBe(true);
+  });
+
+  it('concise returns the location only — no blast radius (find→edit path)', async () => {
+    const g = makeGraph();
+    // Default (concise): the caller needs where the code is, not what a change
+    // there would touch. Surfacing blast radius invited impact-exploration the
+    // task didn't need, so topImpact is a detailed-only concern now.
+    const r = (await tool('orient').handler(g, { question: 'foo' }, ctx())) as Record<string, any>;
+    expect(r.matches.map((m: any) => m.name)).toContain('src/a.ts:foo');
+    expect('topImpact' in r).toBe(false);
+    expect('context' in r).toBe(false);
+  });
+
+  it('treats scope "." / "./" as the whole repo, not a literal path filter', async () => {
+    const g = makeGraph();
+    // Files are repo-relative ("src/a.ts"); a literal startsWith(".") matched
+    // nothing and silently zeroed orient. An agent passing "." for "here" must
+    // still get results (trace: this wasted the first step and forced a grep
+    // fallback on the C wander task).
+    for (const scope of ['.', './']) {
+      const r = (await tool('orient').handler(g, { question: 'foo', scope }, ctx())) as Record<string, any>;
+      expect(r.matches.map((m: any) => m.name)).toContain('src/a.ts:foo');
+    }
+    // A real subdir prefix still filters (and tolerates a leading "./").
+    const scoped = (await tool('orient').handler(g, { question: 'foo', scope: './src/b.ts' }, ctx())) as Record<string, any>;
+    expect(scoped.matches.every((m: any) => m.file.startsWith('src/b.ts'))).toBe(true);
   });
 });
 
@@ -113,8 +139,8 @@ describe('get_node --dedup', () => {
 describe('impact_of', () => {
   it('omits the internal content-hash id from affected items', async () => {
     const g = makeGraph();
-    const r = (await tool('impact_of').handler(g, { name: 'foo' }, ctx())) as Record<string, any>;
-    expect(r.direct).toBe(2);
+    const r = (await tool('impact_of').handler(g, { name: 'foo', response_format: 'detailed' }, ctx())) as Record<string, any>;
+    expect(r.directCallers).toBe(2);
     expect(r.affected.length).toBeGreaterThan(0);
     for (const item of r.affected) {
       expect('id' in item).toBe(false);

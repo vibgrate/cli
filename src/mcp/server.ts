@@ -5,7 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { parseGraph } from '../engine/serialize.js';
 import { refreshIfStale } from '../engine/refresh.js';
-import { TOOLS } from './tools.js';
+import { TOOLS, warmEmbedderInBackground } from './tools.js';
 import { renderToolResult } from './response.js';
 import { recordSaving, PER_FILE_TOKENS } from '../engine/savings.js';
 import { VERSION } from '../version.js';
@@ -132,7 +132,22 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
   const seen = new Set<string>();
   const server = new Server(
     { name: 'vg', version: VERSION },
-    { capabilities: { tools: {} } },
+    {
+      capabilities: { tools: {} },
+      // Routing guidance once at the server level (hosts that surface
+      // `instructions` get it at zero per-step schema cost): the flashlight
+      // vs the map.
+      instructions:
+        'vg is a code map. Use search_symbols to find a known name or literal string fast. ' +
+        'Use orient/query_graph for meaning: symptoms, relationships, and what-breaks-if. ' +
+        'Responses are concise by default; pass response_format:"detailed" only when a node proves load-bearing. ' +
+        // Stop-discipline: the failure mode on a focused task is over-navigation
+        // — one more query, one more get_node — which re-bills the whole context
+        // every step. One good navigation call usually locates the code.
+        'Navigate as little as possible: one good search/query usually locates the code. ' +
+        'As soon as you have the file and line, read that file and make the edit — ' +
+        'do not call further graph tools unless the edit fails or the match was wrong.',
+    },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -177,6 +192,10 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
 export async function serveStdio(graphPath: string, opts: ServeOptions = {}): Promise<void> {
   const source = new GraphSource(graphPath, opts.refresh !== false);
   const server = createServer(source, opts);
+  // Start the semantic-model warm-up as soon as the server boots, so the first
+  // orient/query_graph doesn't pay a cold download. Non-blocking: navigation
+  // answers lexically until the model is ready, then upgrades to semantic.
+  warmEmbedderInBackground(opts.local);
   await server.connect(new StdioServerTransport());
 }
 

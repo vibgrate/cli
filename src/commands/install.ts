@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { loadGraph } from '../engine/load.js';
-import { ASSISTANTS, assistantById, detectServeLaunch, installAssistant, uninstallAssistant } from '../install/registry.js';
+import { ASSISTANTS, assistantById, detectServeLaunch, installAssistant, uninstallAssistant, writeNavigationConfig } from '../install/registry.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
@@ -49,9 +49,13 @@ export function registerInstall(program: Command): void {
       // Detect once — every target registers the same launch command.
       const launch = detectServeLaunch();
       const results = targets.map((a) => ({ id: a.id, ...installAssistant(a, { root, hook: opts.hook, smallRepo, launch }) }));
+      // Write the deferred-loading navigation config once (P3): a client-side
+      // loading config for Claude-API agents that support defer_loading — the
+      // server tool set is unchanged.
+      const navConfig = writeNavigationConfig(root);
 
       if (global.json) {
-        json({ root, smallRepo, launch: { command: launch.command, args: launch.args, note: launch.note ?? null }, results });
+        json({ root, smallRepo, navConfig, launch: { command: launch.command, args: launch.args, note: launch.note ?? null }, results });
         return;
       }
       for (const r of results) {
@@ -59,6 +63,7 @@ export function registerInstall(program: Command): void {
       }
       if (launch.note && results.some((r) => r.note)) info(`${c.yellow('!')} ${launch.note}`);
       if (smallRepo) info(c.dim(`  note: small repo (${fileCount} files) — nudge says searching is fine; vg is still used for impact/tests`));
+      info(c.dim(`  wrote ${navConfig} — deferred-loading config for Claude-API agents (lower per-step token cost)`));
       info(c.dim('  run `vg serve` is wired via MCP; build the map with `vg` if you have not yet'));
     });
   applyGlobalOptions(install);

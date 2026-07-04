@@ -1,5 +1,5 @@
 import { queryGraph, queryGraphSemantic } from '../engine/query.js';
-import { loadEmbedder, getNodeEmbeddings, type Embedder } from '../engine/embeddings.js';
+import { loadEmbedder, getNodeEmbeddings, isModelReady, withTimeout, type Embedder } from '../engine/embeddings.js';
 import { resolveOne } from '../engine/lookup.js';
 import { GraphIndex } from '../engine/relations.js';
 import { shortestPath } from '../engine/paths.js';
@@ -17,6 +17,7 @@ import { fetchHostedDocs } from '../engine/hosted.js';
 import { resolveDsn } from '../reporting/credentials.js';
 import { parseDsn } from '../reporting/commands/push.js';
 import { boundList, NODE_EDGE_CAP } from './response.js';
+import { searchSymbols } from '../engine/search.js';
 import type { VgGraph } from '../schema.js';
 
 /**
@@ -55,34 +56,127 @@ export interface VgTool {
  * re-init the model per request. `null` once we know the backend is unavailable
  * (unsupported platform / no model) so we stop retrying and use lexical.
  */
-let embedderPromise: Promise<Embedder | null> | undefined;
-function sharedEmbedder(local?: boolean): Promise<Embedder | null> {
-  if (!embedderPromise) embedderPromise = loadEmbedder({ local });
-  return embedderPromise;
+/**
+ * In-memory embedder, loaded from the on-disk cache only (never a network
+ * download on the request path). Resolved once and reused; `null` while the
+ * model is not yet available.
+ */
+let warmEmbedder: Promise<Embedder | null> | null = null;
+let bgWarmStarted = false;
+
+/**
+ * Kick a one-time background model download so future navigation calls can go
+ * semantic — without ever blocking the current call on it. Safe to call
+ * repeatedly (single-flight) and from server startup. No-op under `--local`.
+ */
+export function warmEmbedderInBackground(local?: boolean): void {
+  if (local || bgWarmStarted || isModelReady()) return;
+  bgWarmStarted = true;
+  // Allows the network fetch; populates the shared disk cache + the machine
+  // readiness marker. Failure just leaves us on the lexical floor.
+  loadEmbedder({})
+    .then((e) => {
+      if (e) warmEmbedder = Promise.resolve(e);
+    })
+    .catch(() => {
+      bgWarmStarted = false; // let a later call retry the warm
+    });
 }
 
+/**
+ * The embedder IF it can be had without a network download — cached in memory,
+ * or loadable from the on-disk model cache. When the model isn't ready, returns
+ * `null` immediately and starts a background warm. A cold model download can
+ * take tens of seconds; blocking a navigation call on it is what made `orient`
+ * hang and return nothing in CI, so the request path never waits for it.
+ */
+function readyEmbedder(local?: boolean): Promise<Embedder | null> {
+  if (warmEmbedder) return warmEmbedder;
+  if (local) return (warmEmbedder = loadEmbedder({ local, noDownload: true }));
+  if (isModelReady()) return (warmEmbedder = loadEmbedder({ noDownload: true }));
+  warmEmbedderInBackground(local);
+  return Promise.resolve(null);
+}
+
+/**
+ * Resolve a question to ranked matches: semantic when the embedder is warm, else
+ * the deterministic lexical floor.
+ *
+ * Two guarantees keep this from ever hard-failing a navigation call — the
+ * failure mode that made the agent abandon the graph and re-discover by grep
+ * (observed in CI: `orient` returned nothing, so the model paid for both):
+ *   1. it never waits on a cold model download (readyEmbedder is non-blocking);
+ *   2. any fault in the semantic path (embedding, vector I/O) degrades to lexical.
+ * Lexical always answers, so orient/query_graph always return content.
+ */
+async function retrieve(graph: VgGraph, question: string, budget: number, ctx: ToolContext) {
+  let mode = 'lexical';
+  try {
+    const q = await withTimeout(
+      (async () => {
+        const embedder = await readyEmbedder(ctx.local);
+        if (!embedder) return null;
+        // First call on a fresh repo embeds every node here; withTimeout does not
+        // cancel it, so the work continues in the background and caches to disk —
+        // this call answers lexically, the next hits the warm cache and is fast.
+        const nodeVectors = await getNodeEmbeddings(graph, embedder, ctx.root);
+        const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors });
+        mode = `semantic (${embedder.id})`;
+        return r;
+      })(),
+      SEMANTIC_BUDGET_MS,
+      'semantic path over budget',
+    );
+    if (q) return { q, mode };
+  } catch {
+    // Over the latency budget or a semantic fault — answer from the lexical floor.
+  }
+  return { q: queryGraph(graph, question, { budget }), mode: 'lexical' };
+}
+
+/**
+ * Hard latency ceiling for the semantic path on a navigation call. If loading
+ * the model into memory + embedding the corpus + the query doesn't finish inside
+ * this, we answer lexically now and let the (uncancelled) embedding warm the
+ * on-disk cache for the next call. Prevents the first `orient` on a fresh,
+ * un-embedded repo from blocking past the MCP client timeout (which surfaced as
+ * a zero-length result and made the agent fall back to grep). Override via
+ * VG_SEMANTIC_BUDGET_MS.
+ */
+const SEMANTIC_BUDGET_MS = (() => {
+  const n = Number(process.env.VG_SEMANTIC_BUDGET_MS);
+  return Number.isFinite(n) && n > 0 ? n : 4000;
+})();
+
+// Schema bytes are billed to the agent on EVERY model step, so this surface is
+// kept deliberately lean: short descriptions, param notes only where they
+// disambiguate, and no empty `required` arrays. Back-compat alias keys stay in
+// the schemas (additionalProperties is false) but carry no descriptions.
 const obj = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: 'object',
   properties,
-  required,
+  ...(required.length ? { required } : {}),
   additionalProperties: false,
 });
 
+/** Concise-by-default response shaping (plan P2): ids/names/counts first;
+ * bodies, full context blocks and long relation lists are opt-in per call. */
+const RESPONSE_FORMAT = { type: 'string', enum: ['concise', 'detailed'] };
+const isDetailed = (args: Record<string, unknown>): boolean => args.response_format === 'detailed';
+/** Top-N default for ranked lists under concise (opt up via limit). */
+const CONCISE_MATCHES = 5;
+
 export const TOOLS: VgTool[] = [
-  {
-    name: 'get_graph_summary',
-    description: 'High-level summary of the code map: counts, languages, clustering, top areas and hubs.',
-    inputSchema: obj({}),
-    handler: (graph) => summarize(graph),
-  },
   {
     name: 'orient',
     description:
-      'ONE-SHOT orientation before changing code: the map summary + the most relevant nodes for your question + the blast radius of the top hit, in a single call. Prefer this over separate get_graph_summary + query_graph + impact_of — same answer, far fewer round-trips (each round-trip re-bills the whole conversation).',
+      'Start here: one call returns the map overview, ranked matches for your question, and the top hit’s blast radius — replaces summary+query+impact round-trips.',
     inputSchema: obj(
       {
-        question: { type: 'string', description: 'what you are about to do or look for' },
-        budget: { type: 'number', description: 'approx token budget for the context block (default 1500)' },
+        question: { type: 'string', maxLength: 300 },
+        scope: { type: 'string', description: 'path prefix to orient within' },
+        budget: { type: 'number', description: 'token budget in detailed mode (default 1500)' },
+        response_format: RESPONSE_FORMAT,
       },
       ['question'],
     ),
@@ -90,41 +184,68 @@ export const TOOLS: VgTool[] = [
       const question = String(args.question ?? '');
       if (!question) return { error: 'bad_request', message: 'question is required' };
       const budget = numOr(args.budget, 1500);
-      // Same retrieval path as query_graph: semantic when available, else lexical.
-      const embedder = await sharedEmbedder(ctx.local);
-      let q;
-      let mode = 'lexical';
-      if (embedder) {
-        const nodeVectors = await getNodeEmbeddings(graph, embedder, ctx.root);
-        q = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors });
-        mode = `semantic (${embedder.id})`;
-      } else {
-        q = queryGraph(graph, question, { budget });
-      }
-      // Blast radius of the single most relevant hit, so the model sees what a
-      // change there would touch without spending a second round-trip on it.
+      // Semantic when available, else lexical — and never throws (see retrieve).
+      const { q, mode } = await retrieve(graph, question, budget, ctx);
+      // Normalise scope. An agent naturally passes "." (or "./") for "here" —
+      // but file paths are repo-relative ("src/…"), so a literal startsWith(".")
+      // matched nothing and silently zeroed the whole result. Treat ".", "./"
+      // and "" as the whole graph; strip a leading "./" from a real subdir.
+      const rawScope = String(args.scope ?? '').trim();
+      const scope = rawScope === '.' || rawScope === './' ? '' : rawScope.replace(/^\.\//, '');
+      const scoped = scope ? q.matches.filter((m) => m.node.file.startsWith(scope)) : q.matches;
+      const detailed = isDetailed(args);
+      // Blast radius is a `detailed` concern. On the common "find it → read →
+      // edit" path the concise caller needs the location, not what a change
+      // there would touch — surfacing the ripple invites impact-exploration the
+      // task doesn't need. Computing impactOf only when asked also skips the
+      // traversal per call.
       let topImpact = null;
-      const top = q.matches[0]?.node;
-      if (top) {
+      const top = scoped[0]?.node;
+      if (detailed && top) {
         const r = impactOf(graph, top.id, { depth: 3 });
         topImpact = { node: top.qualifiedName, direct: r.direct, transitive: r.transitive, affected: r.affected.slice(0, 10).map(stripId) };
       }
+      const shown = detailed ? scoped : scoped.slice(0, CONCISE_MATCHES);
       return {
-        summary: summarize(graph),
+        summary: summarize(graph, detailed ? 10 : CONCISE_MATCHES),
         mode,
-        context: q.context,
-        matches: q.matches.map((m) => ({ name: m.node.qualifiedName, kind: m.node.kind, file: m.node.file, line: m.node.span.start, score: m.score })),
-        topImpact,
+        // The fact-annotated context block is detail: concise callers navigate
+        // by the ranked matches and fetch nodes on demand (plan P2).
+        ...(detailed ? { context: q.context } : {}),
+        matches: shown.map((m) => ({ name: m.node.qualifiedName, kind: m.node.kind, file: m.node.file, line: m.node.span.start, score: m.score })),
+        // A neutral availability flag, not a directive to keep querying: a
+        // retrieval tool that coaches "narrow the question / see more" nudges the
+        // over-navigation that re-bills the whole context on every extra step.
+        ...(scoped.length > shown.length ? { moreAvailable: true } : {}),
+        ...(detailed ? { topImpact } : {}),
       };
     },
   },
   {
-    name: 'query_graph',
-    description: 'Ask the map a natural-language question; returns a budget-bounded, fact-annotated context block plus ranked matches.',
+    name: 'search_symbols',
+    description: 'Find a known name or string fast: ranked symbol lookup with literal file-search fallthrough. Use first for most discovery; use query_graph for meaning.',
     inputSchema: obj(
       {
-        question: { type: 'string', description: 'the question' },
-        budget: { type: 'number', description: 'approx token budget (default 2000)' },
+        query: { type: 'string', maxLength: 120 },
+        limit: { type: 'number', description: 'default 8, max 20' },
+      },
+      ['query'],
+    ),
+    handler: (graph, args, ctx) => {
+      const limit = Math.min(20, numOr(args.limit, 8));
+      return searchSymbols(graph, ctx.root, String(args.query ?? ''), limit);
+    },
+  },
+  {
+    name: 'query_graph',
+    description: 'Find code by meaning when you don’t know the name: symptoms, relationships, what-breaks-if. For a known name or literal string use search_symbols.',
+    inputSchema: obj(
+      {
+        question: { type: 'string', maxLength: 300 },
+        limit: { type: 'number', description: 'ranked matches to return (default 5)' },
+        offset: { type: 'number' },
+        budget: { type: 'number', description: 'context-block token budget in detailed mode (default 2000)' },
+        response_format: RESPONSE_FORMAT,
       },
       ['question'],
     ),
@@ -132,30 +253,39 @@ export const TOOLS: VgTool[] = [
       const question = String(args.question ?? '');
       const budget = numOr(args.budget, 2000);
       // Semantic by default (local model, cached/offline after first use); falls
-      // back to the deterministic lexical floor if the backend is unavailable.
-      let r;
-      let mode = 'lexical';
-      const embedder = await sharedEmbedder(ctx.local);
-      if (embedder) {
-        const nodeVectors = await getNodeEmbeddings(graph, embedder, ctx.root);
-        r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors });
-        mode = `semantic (${embedder.id})`;
-      } else {
-        r = queryGraph(graph, question, { budget });
+      // back to the deterministic lexical floor if the backend is unavailable or
+      // faults — retrieve() never throws, so the tool never hard-fails.
+      const { q: r, mode } = await retrieve(graph, question, budget, ctx);
+      // Structured pivot instead of an empty result (plan P2): the model should
+      // switch tools, not retry the same query harder.
+      if (r.matches.length === 0) {
+        return { mode, matches: [], hint: 'no semantic match — for a known name or literal string use search_symbols; otherwise rephrase around the behaviour you observe' };
       }
+      const limit = numOr(args.limit, CONCISE_MATCHES);
+      const offset = Math.max(0, numOrU(args.offset) ?? 0);
+      const page = r.matches.slice(offset, offset + limit);
       return {
         mode,
-        context: r.context,
-        tokensEstimate: r.tokensEstimate,
-        matches: r.matches.map((m) => ({ name: m.node.qualifiedName, kind: m.node.kind, file: m.node.file, line: m.node.span.start, score: m.score })),
+        summary: `${r.matches.length} match${r.matches.length === 1 ? '' : 'es'}; top: ${r.matches[0]!.node.qualifiedName}`,
+        // The fact-annotated context block is detail (plan P2): ranked matches
+        // first, fetch nodes on demand.
+        ...(isDetailed(args) ? { context: r.context, tokensEstimate: r.tokensEstimate } : {}),
+        matches: page.map((m) => ({ name: m.node.qualifiedName, kind: m.node.kind, file: m.node.file, line: m.node.span.start, score: m.score })),
+        // Neutral pagination fact (nextOffset if the model genuinely needs more),
+        // not a "narrow the question" nudge that invites another discovery round.
+        ...(offset + page.length < r.matches.length ? { moreAvailable: true, nextOffset: offset + page.length } : {}),
       };
     },
   },
   {
     name: 'get_node',
-    description: 'Explain a node: kind, signature, callers, callees, area, importance. Resolves by qualified/short name, file:line, glob, or id.',
+    description: 'Inspect one symbol: signature, callers, callees, area. Accepts name, file:line, glob or id.',
     inputSchema: obj(
-      { name: { type: 'string' }, pick: { type: 'number', description: 'choose nth candidate when ambiguous' } },
+      {
+        name: { type: 'string' },
+        pick: { type: 'number', description: 'nth candidate if ambiguous' },
+        response_format: RESPONSE_FORMAT,
+      },
       ['name'],
     ),
     handler: (graph, args, ctx) => {
@@ -180,11 +310,12 @@ export const TOOLS: VgTool[] = [
         return { ...base, repeat: true, callsTotal: uniqueNames(index.callees(node.id).map((x) => x.node.qualifiedName)).length, calledByTotal: uniqueNames(index.callers(node.id).map((x) => x.node.qualifiedName)).length };
       }
       // Bound the relationship arrays: a hub can have hundreds of callers, and
-      // every one is paid for on every subsequent turn. Cap to the first ranked
-      // NODE_EDGE_CAP and report the true totals so nothing is silently dropped
-      // (the model can widen the blast radius with `impact_of`).
-      const calls = boundList(uniqueNames(index.callees(node.id).map((x) => x.node.qualifiedName)), NODE_EDGE_CAP);
-      const calledBy = boundList(uniqueNames(index.callers(node.id).map((x) => x.node.qualifiedName)), NODE_EDGE_CAP);
+      // every one is paid for on every subsequent turn. Concise shows the top
+      // CONCISE_MATCHES with true totals; detailed widens to NODE_EDGE_CAP
+      // (the model can widen the blast radius further with `impact_of`).
+      const edgeCap = isDetailed(args) ? NODE_EDGE_CAP : CONCISE_MATCHES;
+      const calls = boundList(uniqueNames(index.callees(node.id).map((x) => x.node.qualifiedName)), edgeCap);
+      const calledBy = boundList(uniqueNames(index.callers(node.id).map((x) => x.node.qualifiedName)), edgeCap);
       ctx?.seen?.add(node.id);
       return {
         ...base,
@@ -197,13 +328,13 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'find_path',
-    description: 'Shortest connection between two nodes (how A reaches B).',
+    description: 'Shortest connection from a to b.',
     inputSchema: obj(
       {
         a: { type: 'string' },
         b: { type: 'string' },
-        pick_a: { type: 'number', description: 'choose nth candidate for a when ambiguous' },
-        pick_b: { type: 'number', description: 'choose nth candidate for b when ambiguous' },
+        pick_a: { type: 'number' },
+        pick_b: { type: 'number' },
       },
       ['a', 'b'],
     ),
@@ -220,27 +351,92 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'impact_of',
-    description: 'What breaks if a node changes: the reverse-reachability blast radius with per-result depth and confidence.',
+    description: 'Blast radius of a change: what breaks if this symbol changes — dependents, files, covering tests, risk.',
     inputSchema: obj(
       {
         name: { type: 'string' },
-        depth: { type: 'number', description: 'max depth (default 4)' },
-        pick: { type: 'number', description: 'choose nth candidate when ambiguous' },
+        change_type: { type: 'string', enum: ['modify', 'delete', 'rename', 'add_dependency'] },
+        depth: { type: 'number', description: 'default 4' },
+        pick: { type: 'number', description: 'nth candidate if ambiguous' },
+        response_format: RESPONSE_FORMAT,
       },
       ['name'],
     ),
     handler: (graph, args) => {
       const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
       if (!node) return unresolved(candidates);
+      const changeType = ['modify', 'delete', 'rename', 'add_dependency'].includes(String(args.change_type))
+        ? String(args.change_type)
+        : 'modify';
       const r = impactOf(graph, node.id, { depth: numOr(args.depth, 4) });
-      // Drop the internal content-hash `id` from each item — the model reasons
-      // over name/file/line, and a 32-char blake3 per row is pure overhead.
-      return { root: r.root.name, direct: r.direct, transitive: r.transitive, affected: r.affected.slice(0, 100).map(stripId) };
+      const tests = coveringTests(graph, node);
+      const filesAffected = [...new Set(r.affected.map((a) => a.file))];
+      // Decision-shaped contract (plan P2): a rename/delete makes every
+      // dependent a compile-break risk; a modify is weighted by fan-in.
+      const heavyChange = changeType === 'delete' || changeType === 'rename';
+      const riskLevel =
+        node.isHub || r.direct >= 10 || r.transitive >= 50 || (heavyChange && r.direct >= 3)
+          ? 'high'
+          : r.direct >= 3 || r.transitive >= 10
+            ? 'medium'
+            : 'low';
+      const summary =
+        `${changeType} ${r.root.name}: ${r.direct} direct dependent${r.direct === 1 ? '' : 's'}, ` +
+        `${r.transitive} transitive across ${filesAffected.length} file${filesAffected.length === 1 ? '' : 's'}; ` +
+        `${tests.length} covering test${tests.length === 1 ? '' : 's'} — ${riskLevel} risk.`;
+      return {
+        root: r.root.name,
+        changeType,
+        directCallers: r.direct,
+        transitiveCount: r.transitive,
+        filesAffected: filesAffected.slice(0, 20),
+        testsAffected: tests.length,
+        riskLevel,
+        summary,
+        // The full row set is detail; concise callers act on the contract above.
+        ...(isDetailed(args)
+          ? { affected: r.affected.slice(0, 100).map(stripId) }
+          : r.affected.length > 0
+            ? { hint: 'response_format:"detailed" lists the affected nodes' }
+            : {}),
+      };
     },
   },
   {
+    name: 'tests_for',
+    description: 'Which tests cover this symbol — is a change here tested?',
+    inputSchema: obj(
+      {
+        name: { type: 'string' },
+        pick: { type: 'number', description: 'nth candidate if ambiguous' },
+        response_format: RESPONSE_FORMAT,
+      },
+      ['name'],
+    ),
+    handler: (graph, args) => {
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
+      if (!node) return unresolved(candidates);
+      const covers = coveringTests(graph, node);
+      return {
+        node: node.qualifiedName,
+        tested: node.tested,
+        coverage: node.coverage ?? null,
+        testCount: covers.length,
+        covers: isDetailed(args) ? covers : covers.slice(0, 10),
+        ...(covers.length > 10 && !isDetailed(args) ? { moreAvailable: true } : {}),
+        ...(covers.length === 0 ? { hint: 'no covering tests found — a change here lands untested' } : {}),
+      };
+    },
+  },
+  {
+    name: 'get_graph_summary',
+    description: 'Code map overview: counts, languages, top areas and hubs.',
+    inputSchema: obj({}),
+    handler: (graph) => summarize(graph),
+  },
+  {
     name: 'list_areas',
-    description: 'The natural code groupings (communities), each labelled, sized, with cohesion.',
+    description: 'Code areas (communities) by size.',
     inputSchema: obj({ limit: { type: 'number' } }),
     // Strip `members` (raw content-hash id arrays): a model cannot use them and
     // on a large repo they ballooned this result past 20k tokens.
@@ -252,7 +448,7 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'list_hubs',
-    description: 'The most-depended-on code (centrality outliers).',
+    description: 'Most-depended-on symbols.',
     inputSchema: obj({ limit: { type: 'number' } }),
     handler: (graph, args) =>
       graph.nodes
@@ -262,18 +458,8 @@ export const TOOLS: VgTool[] = [
         .map((n) => ({ name: n.qualifiedName, kind: n.kind, file: n.file, line: n.span.start, importance: n.importance, isHub: n.isHub })),
   },
   {
-    name: 'tests_for',
-    description: 'Which tests cover a node (static call linkage + runtime coverage), with the linkage basis.',
-    inputSchema: obj({ name: { type: 'string' }, pick: { type: 'number', description: 'choose nth candidate when ambiguous' } }, ['name']),
-    handler: (graph, args) => {
-      const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
-      if (!node) return unresolved(candidates);
-      return { node: node.qualifiedName, tested: node.tested, coverage: node.coverage ?? null, covers: coveringTests(graph, node) };
-    },
-  },
-  {
     name: 'get_facts',
-    description: 'The deterministic open facts for a node (contract/invariant/characterization). Requires a --deep build.',
+    description: 'Deterministic facts for a node (contract/invariant); needs a --deep build.',
     inputSchema: obj({ name: { type: 'string' } }, ['name']),
     handler: (graph, args) => {
       const { node, candidates } = resolveOne(graph, String(args.name ?? ''));
@@ -284,7 +470,7 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'guide_node',
-    description: 'Cited relevant standards/practices for a node (OWASP/CWE), honest about recommended vs conjectured.',
+    description: 'Cited standards/practices for a node (OWASP/CWE).',
     inputSchema: obj({ name: { type: 'string' } }, ['name']),
     handler: (graph, args) => {
       const { node, candidates } = resolveOne(graph, String(args.name ?? ''));
@@ -300,17 +486,17 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'check_drift',
-    description: 'Offline dependency inventory across npm/pypi/go (currency enrichment is the CLI’s --online opt-in). Pass attribute:true to add git "who added this / who set the version" attribution for npm deps.',
+    description: 'Offline dependency inventory (npm/pypi/go); attribute:true adds git who-added attribution.',
     inputSchema: obj(
-      { attribute: { type: 'boolean', description: 'enrich npm deps with git introduction attribution (requires git; slower)' } },
+      { attribute: { type: 'boolean' } },
       [],
     ),
     handler: (_graph, args, ctx) => attributedInventory(ctx.root, { attribute: args.attribute === true }),
   },
   {
     name: 'vuln_attribution',
-    description: 'Who introduced each open vulnerability and how long you have been exposed, plus CRA remediation metrics: open exposure windows, SLA breaches, and real remediation time (MTTR) reconstructed from vulnerable versions that were later bumped out or removed in git history. Offline read of the last `vg scan --vulns`.',
-    inputSchema: obj({ package: { type: 'string', description: 'optional: restrict to one package' } }, []),
+    description: 'Who introduced each open vulnerability, exposure windows, and CRA remediation metrics (MTTR, SLA breaches). Reads the last `vg scan --vulns`.',
+    inputSchema: obj({ package: { type: 'string', description: 'restrict to one package' } }, []),
     handler: (_graph, args, ctx) => {
       const data = loadVulnerabilities(ctx.root);
       if (!data) {
@@ -339,9 +525,9 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'list_vulnerabilities',
-    description: 'Known vulnerabilities for installed dependencies, from the last `vg scan --vulns`. Offline read of the local scan artifact (no network); reports advisory id/CVE, severity, CVSS, and the fixed version.',
+    description: 'Known vulnerabilities from the last `vg scan --vulns`: id/CVE, severity, CVSS, fixed version.',
     inputSchema: obj(
-      { severity: { type: 'string', enum: ['low', 'moderate', 'high', 'critical'], description: 'optional minimum severity to include' } },
+      { severity: { type: 'string', enum: ['low', 'moderate', 'high', 'critical'], description: 'minimum severity' } },
       [],
     ),
     handler: (_graph, args, ctx) => {
@@ -377,11 +563,11 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'upgrade_impact',
-    description: 'A local "what breaks if I upgrade this" brief for a package: major-version distance + interim majors to step through, source blast radius (how many files import it), open vulnerabilities the upgrade would fix, and a recommended posture. Offline; richest after `vg scan`. Pass changelog:true to also fetch breaking-change signals from the package\'s GitHub releases (online; ignored under --local).',
+    description: 'What breaks if you upgrade a package: major distance, import blast radius, vulns fixed, recommended posture. changelog:true adds GitHub breaking-change signals (online).',
     inputSchema: obj(
       {
-        package: { type: 'string', description: 'package name to assess' },
-        changelog: { type: 'boolean', description: 'also fetch breaking-change signals from GitHub releases between your version and latest (online; ignored under --local)' },
+        package: { type: 'string' },
+        changelog: { type: 'boolean' },
       },
       ['package'],
     ),
@@ -401,19 +587,19 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'list_models',
-    description: 'The local model fleet discovered on disk (Ollama / LM Studio / gguf). Offline, no launch.',
+    description: 'Local models on disk (Ollama / LM Studio / gguf).',
     inputSchema: obj({}),
     handler: () => ({ models: discoverModels() }),
   },
   {
     name: 'resolve_library',
-    description: 'Resolve a library name/query to its canonical id + the version for YOUR project (version-correct + drift-annotated).',
+    description: 'Resolve a library to its canonical id and the version YOUR project uses (drift-annotated).',
     // Canonical §4: `query` (+ optional `context_project`). `name` kept as a back-compat alias.
     inputSchema: obj(
       {
-        query: { type: 'string', description: 'library name or natural-language query' },
-        name: { type: 'string', description: 'alias for query (back-compat)' },
-        context_project: { type: 'string', description: 'optional lockfile/manifest context (informational; the local server uses the project root)' },
+        query: { type: 'string', description: 'library name or query' },
+        name: { type: 'string' },
+        context_project: { type: 'string' },
       },
       [],
     ),
@@ -454,19 +640,19 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'library_docs',
-    description: 'Version-correct, drift-annotated usage docs for a library — from the committed catalog or the installed package on disk.',
+    description: 'Version-correct usage docs for a library, sliced to a token budget.',
     // Canonical §4: `targetId`/`query`, `verbosity`, `max_tokens`. `name`/`tokens` kept as aliases.
     inputSchema: obj(
       {
-        targetId: { type: 'string', description: 'canonical id from resolve_library' },
+        targetId: { type: 'string', description: 'id from resolve_library' },
         query: { type: 'string', description: 'library name or query' },
-        name: { type: 'string', description: 'alias for query (back-compat)' },
-        context_project: { type: 'string', description: 'optional project context (informational)' },
-        verbosity: { type: 'string', enum: ['concise', 'balanced', 'exhaustive'], description: 'detail level (sets the default token budget)' },
-        max_tokens: { type: 'number', description: 'explicit token budget (overrides verbosity)' },
-        tokens: { type: 'number', description: 'alias for max_tokens (back-compat)' },
-        enterprise_strict: { type: 'boolean', description: 'reserved (enterprise policy enforcement — hosted surface)' },
-        follow_up: { type: 'boolean', description: 'reserved (next slice — hosted surface)' },
+        name: { type: 'string' },
+        context_project: { type: 'string' },
+        verbosity: { type: 'string', enum: ['concise', 'balanced', 'exhaustive'] },
+        max_tokens: { type: 'number', description: 'token budget' },
+        tokens: { type: 'number' },
+        enterprise_strict: { type: 'boolean' },
+        follow_up: { type: 'boolean' },
       },
       [],
     ),
@@ -581,18 +767,18 @@ export const TOOLS: VgTool[] = [
 const VERBOSITY_BUDGET = { concise: 1500, balanced: 4000, exhaustive: 12000 } as const;
 
 /** Shared map overview used by both `get_graph_summary` and `orient`. */
-function summarize(graph: VgGraph) {
+function summarize(graph: VgGraph, top = 10) {
   return {
     counts: graph.meta.counts,
     languages: graph.meta.languages,
     cluster: graph.meta.cluster,
     resolver: graph.provenance.resolver,
     generatedAt: graph.generatedAt,
-    topAreas: [...graph.areas].sort((a, b) => b.size - a.size).slice(0, 10).map((a) => ({ id: a.id, label: a.label, size: a.size })),
+    topAreas: [...graph.areas].sort((a, b) => b.size - a.size).slice(0, top).map((a) => ({ id: a.id, label: a.label, size: a.size })),
     topHubs: graph.nodes
       .filter((n) => n.isHub)
       .sort((a, b) => b.importance - a.importance)
-      .slice(0, 10)
+      .slice(0, top)
       .map((n) => ({ name: n.qualifiedName, file: n.file, importance: n.importance })),
   };
 }
@@ -634,4 +820,37 @@ function numOrU(v: unknown): number | undefined {
 }
 function uniqueNames(xs: string[]): string[] {
   return [...new Set(xs)];
+}
+
+/**
+ * The hot navigation core (plan P3, VG-NAVIGATION-PROFILE.md): the tools an
+ * agent needs on the common path, kept in model context up front. Everything
+ * else is discovered on demand via tool-search, so the per-step schema bill
+ * drops to the core only. This is a CLIENT loading configuration over the one
+ * server tool set — the server always exposes all of `TOOLS`; deferral-capable
+ * hosts load the core and defer the tail. Ordered to match the TOOLS array.
+ */
+export const HOT_TOOLS = ['orient', 'search_symbols', 'query_graph', 'get_node'] as const;
+
+/** Tools deferred until a task discovers them (everything not in the hot core). */
+export function deferredToolNames(): string[] {
+  const hot = new Set<string>(HOT_TOOLS);
+  return TOOLS.map((t) => t.name).filter((n) => !hot.has(n));
+}
+
+/**
+ * The Anthropic `mcp_toolset` deferral block for embedding `vg serve` in an
+ * agent built on the Claude API: the hot core stays loaded, the rest defer and
+ * are found via tool-search. Real, measured lever on hosts that support
+ * `defer_loading` (~350–450 schema tokens/step vs 1,881 for the full set);
+ * hosts that don't support it simply serve the whole optimized set. The server
+ * is unchanged either way — one tool set, no modes.
+ */
+export function navigationToolsetConfig(serverName = 'vibgrate'): Record<string, unknown> {
+  return {
+    type: 'mcp_toolset',
+    mcp_server_name: serverName,
+    default_config: { defer_loading: true },
+    configs: Object.fromEntries(HOT_TOOLS.map((n) => [n, { defer_loading: false }])),
+  };
 }
