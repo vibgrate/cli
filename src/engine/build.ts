@@ -12,6 +12,13 @@ import { loadCoverage, applyCoverage } from './coverage.js';
 import { buildFacts } from './facts.js';
 import { groundGraph } from './grounding.js';
 import { loadCache } from './cache.js';
+import {
+  resolveLimits,
+  checkMemoryBudget,
+  formatBytes,
+  ResourceLimitError,
+  type ResourceLimits,
+} from './limits.js';
 import { hashString, hashBytes, canonicalize } from './hash.js';
 import { grammarSetVersion } from './grammars.js';
 import { VERSION } from '../version.js';
@@ -57,6 +64,9 @@ export interface BuildOptions {
   onParseProgress?: (done: number, total: number) => void;
   /** Override directory for grammar .wasm files (offline / air-gapped). */
   grammarsDir?: string;
+  /** Resource-safeguard overrides (else VG_MAX_FILE_BYTES / VG_MAX_FILES /
+   * VG_TSC_MAX_FILES / VG_MEMORY_BUDGET_MB env vars, else defaults). */
+  limits?: Partial<ResourceLimits>;
 }
 
 /** Stat + content hash of one corpus file at build time. */
@@ -93,6 +103,19 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     paths: options.paths,
   });
 
+  // Resource safeguards (see limits.ts): stop a pathological corpus before it
+  // OOM-kills the process. Skips are deterministic functions of the input.
+  const limits = resolveLimits(options.limits);
+  if (limits.maxFiles > 0 && files.length > limits.maxFiles) {
+    throw new ResourceLimitError(
+      `graph build stopped: ${files.length.toLocaleString()} files exceed the ` +
+        `${limits.maxFiles.toLocaleString()}-file limit. Scope the build (pass sub-paths, add ` +
+        `--exclude globs, or --only <langs>), or set VG_MAX_FILES to raise the limit ` +
+        `(0 disables it).`,
+    );
+  }
+  checkMemoryBudget('discovery', limits.memoryBudgetMb);
+
   const grammars = grammarSetVersion();
   const cache = loadCache(root, {
     toolVersion: VERSION,
@@ -107,14 +130,37 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const fileStats: FileStat[] = [];
   const toParse: DiscoveredFile[] = [];
   const reused: FileParse[] = [];
+  const buildWarnings: string[] = [];
   for (const file of files) {
-    let hash = '';
     let stat: fs.Stats;
     try {
       stat = fs.statSync(file.abs);
-      hash = hashBytes(fs.readFileSync(file.abs));
     } catch {
       // Unreadable now (race/permissions) — skip; it just won't be in the graph.
+      continue;
+    }
+    if (limits.maxFileBytes > 0 && stat.size > limits.maxFileBytes) {
+      // Too large to parse (almost always generated/minified). It stays in
+      // fileStats — under a size-derived sentinel hash, so the file is never
+      // read into memory — because the freshness probe re-discovers it; were
+      // it absent from the snapshot every probe would report phantom "added"
+      // drift and auto-refresh would rebuild in a loop.
+      fileStats.push({
+        rel: file.rel,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        hash: hashString(`vg:oversize:${stat.size}`),
+      });
+      buildWarnings.push(
+        `${file.rel}: skipped — ${formatBytes(stat.size)} exceeds the ` +
+          `${formatBytes(limits.maxFileBytes)} per-file limit (set VG_MAX_FILE_BYTES to raise it, 0 to disable)`,
+      );
+      continue;
+    }
+    let hash = '';
+    try {
+      hash = hashBytes(fs.readFileSync(file.abs));
+    } catch {
       continue;
     }
     hashes.set(file.rel, hash);
@@ -129,7 +175,9 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     inline: options.inline,
     onProgress: options.onParseProgress,
     grammarsDir: options.grammarsDir,
+    memoryBudgetMb: limits.memoryBudgetMb,
   });
+  checkMemoryBudget('parse', limits.memoryBudgetMb);
   for (const p of parsedNew) cache.set(p.rel, p);
 
   // Persist the cache for the next incremental build.
@@ -141,13 +189,14 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0,
   );
 
-  const warnings = parses.flatMap((p) => p.warnings ?? []);
+  const warnings = [...buildWarnings, ...parses.flatMap((p) => p.warnings ?? [])];
 
   // Resolve → nodes/edges. The module resolver follows relative imports plus
   // tsconfig path aliases and workspace-package names (so monorepo cross-package
   // imports resolve, not just relative ones).
   const moduleResolver = buildModuleResolver(root, new Set(parses.map((p) => p.rel)));
   const resolved = resolve(parses, moduleResolver);
+  checkMemoryBudget('resolve', limits.memoryBudgetMb);
 
   // Precise resolution rungs sit above the heuristic floor and are authoritative
   // for the files they cover (their relational edges replace the heuristic ones,
@@ -161,11 +210,24 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   // external tool). The type checker resolves member/`this`/imported/aliased
   // calls and heritage that the heuristic structurally cannot.
   let tscStats: BuildResult['tsc'];
-  const tsFiles = options.noTsc
+  // `hashes` holds exactly the parsed corpus — oversized (size-capped) files
+  // are excluded here too, so the TS program never loads them.
+  let tsFiles = options.noTsc
     ? []
     : files
-        .filter((f) => f.lang.id === 'ts' || f.lang.id === 'tsx' || f.lang.id === 'js')
+        .filter((f) => (f.lang.id === 'ts' || f.lang.id === 'tsx' || f.lang.id === 'js') && hashes.has(f.rel))
         .map((f) => ({ rel: f.rel, abs: f.abs }));
+  if (limits.tscMaxFiles > 0 && tsFiles.length > limits.tscMaxFiles) {
+    // A ts.Program over the whole corpus is the largest single memory consumer
+    // in the build. Past the cap, fall back to the heuristic floor (still a
+    // complete graph, just less precise call resolution).
+    warnings.push(
+      `typescript resolver skipped — ${tsFiles.length.toLocaleString()} TS/JS files exceed the ` +
+        `${limits.tscMaxFiles.toLocaleString()}-file limit; calls use the heuristic resolver ` +
+        `(set VG_TSC_MAX_FILES to raise it, 0 to disable)`,
+    );
+    tsFiles = [];
+  }
   if (tsFiles.length) {
     const res = tsResolveEdges(root, tsFiles, resolved.nodes);
     if (res.stats.files > 0) {
@@ -173,6 +235,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
       if (!resolvers.includes('tsc')) resolvers.unshift('tsc');
       tscStats = res.stats;
     }
+    checkMemoryBudget('typescript resolution', limits.memoryBudgetMb);
   }
 
   // Rung 2 — a real SCIP index (if present), the most precise rung for any
@@ -194,6 +257,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
 
   // Analyse → centrality/areas/surprise (test/coverage edges excluded from these).
   const analysis = analyze(nodes, linked.edges, { cluster: options.cluster });
+  checkMemoryBudget('analysis', limits.memoryBudgetMb);
 
   const languages = [...new Set(parses.map((p) => p.lang))].sort();
   const edgeKinds = [...new Set(analysis.edges.map((e) => e.kind))].sort() as EdgeKind[];

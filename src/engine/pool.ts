@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseSource } from './parse.js';
 import { setGrammarsOverride } from './grammars.js';
+import { checkMemoryBudget, envJobs, envWorkerHeapMb, ResourceLimitError } from './limits.js';
 import type { DiscoveredFile } from './discover.js';
 import type { FileParse } from './types.js';
 import type { ParseTask } from './parse-worker.js';
@@ -33,6 +34,8 @@ export interface ParseOptions {
   onProgress?: (done: number, total: number) => void;
   /** `--grammars <dir>` override for the grammar .wasm files (offline/air-gapped). */
   grammarsDir?: string;
+  /** Heap budget (MiB) checked as parse results accumulate; 0/unset skips. */
+  memoryBudgetMb?: number;
 }
 
 const DEFAULT_INLINE_THRESHOLD = 24;
@@ -43,7 +46,9 @@ export async function parseFiles(
 ): Promise<FileParse[]> {
   const threshold = options.inlineThreshold ?? DEFAULT_INLINE_THRESHOLD;
   const cores = Math.max(1, os.cpus()?.length ?? 1);
-  const jobs = Math.max(1, options.jobs ?? (Math.min(cores - 1, files.length) || 1));
+  // Precedence: explicit option (--jobs) → VG_JOBS env → cores - 1. Capping
+  // workers caps peak memory too (each worker holds its own grammar set).
+  const jobs = Math.max(1, options.jobs ?? envJobs() ?? (Math.min(cores - 1, files.length) || 1));
 
   const workerFile = resolveWorkerFile();
   const useInline =
@@ -55,16 +60,17 @@ export async function parseFiles(
   if (useInline) {
     // Inline runs in this process — apply the override directly.
     if (options.grammarsDir) setGrammarsOverride(options.grammarsDir);
-    return sortByRel(await parseInline(files, options.onProgress));
+    return sortByRel(await parseInline(files, options));
   }
-  return sortByRel(
-    await parsePooled(files, jobs, workerFile, options.onProgress, options.grammarsDir),
-  );
+  return sortByRel(await parsePooled(files, jobs, workerFile, options));
 }
 
-type ProgressFn = (done: number, total: number) => void;
+/** Check the accumulating heap every this-many completed files — frequent
+ * enough to abort before a crash, cheap enough to be free. */
+const MEM_CHECK_EVERY = 64;
 
-async function parseInline(files: DiscoveredFile[], onProgress?: ProgressFn): Promise<FileParse[]> {
+async function parseInline(files: DiscoveredFile[], options: ParseOptions): Promise<FileParse[]> {
+  const { onProgress, memoryBudgetMb = 0 } = options;
   const out: FileParse[] = [];
   onProgress?.(0, files.length);
   for (const file of files) {
@@ -75,6 +81,7 @@ async function parseInline(files: DiscoveredFile[], onProgress?: ProgressFn): Pr
       out.push(emptyParse(file, `parse failed: ${(err as Error).message}`));
     }
     onProgress?.(out.length, files.length);
+    if (out.length % MEM_CHECK_EVERY === 0) checkMemoryBudget('parse', memoryBudgetMb);
   }
   return out;
 }
@@ -83,12 +90,20 @@ async function parsePooled(
   files: DiscoveredFile[],
   jobs: number,
   workerFile: string,
-  onProgress?: ProgressFn,
-  grammarsDir?: string,
+  options: ParseOptions,
 ): Promise<FileParse[]> {
+  const { onProgress, grammarsDir, memoryBudgetMb = 0 } = options;
   // Dynamic import so tinypool isn't loaded for inline-only runs.
   const { default: Tinypool } = await import('tinypool');
-  const pool = new Tinypool({ filename: workerFile, maxThreads: jobs, minThreads: 1 });
+  // VG_WORKER_HEAP_MB caps each worker's old-generation heap so one runaway
+  // parse cannot swallow the whole machine; unset = platform default.
+  const workerHeapMb = envWorkerHeapMb();
+  const pool = new Tinypool({
+    filename: workerFile,
+    maxThreads: jobs,
+    minThreads: 1,
+    ...(workerHeapMb ? { resourceLimits: { maxOldGenerationSizeMb: workerHeapMb } } : {}),
+  });
   try {
     // More, smaller buckets than threads → finer live progress + better load
     // balancing. Round-robin keeps shards balanced; the final sort makes the
@@ -105,14 +120,30 @@ async function parsePooled(
         (pool.run({ tasks: b, grammarsDir }) as Promise<FileParse[]>).then((r) => {
           done += b.length;
           onProgress?.(done, total);
+          // Results accumulate in *this* process; guard its heap as they land.
+          checkMemoryBudget('parse', memoryBudgetMb);
           return r;
         }),
       ),
     );
     return results.flat();
+  } catch (err) {
+    if (isWorkerOom(err)) {
+      throw new ResourceLimitError(
+        `graph build stopped: a parse worker exceeded its ${workerHeapMb ?? '?'} MiB heap cap ` +
+          `(VG_WORKER_HEAP_MB). Raise the cap, exclude the offending files (--exclude), or ` +
+          `run single-threaded with --jobs 1.`,
+      );
+    }
+    throw err;
   } finally {
     await pool.destroy();
   }
+}
+
+function isWorkerOom(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null;
+  return e?.code === 'ERR_WORKER_OUT_OF_MEMORY' || /out of memory/i.test(e?.message ?? '');
 }
 
 function resolveWorkerFile(): string | null {

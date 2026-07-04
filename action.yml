@@ -46,7 +46,7 @@ inputs:
   image-tag:
     description: 'Scanner image tag to run (defaults to a pinned, tested release).'
     required: false
-    default: '2026.703.7' # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
+    default: '2026.704.1' # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
   verify:
     description: 'Verify the image cosign signature + provenance before running (requires cosign on the runner).'
     required: false
@@ -116,6 +116,11 @@ runs:
         # Declare the output before the scan: `fail-on` exits non-zero on
         # findings, and downstream consumers still need the artifact path.
         echo "output-file=${INPUT_OUTPUT}" >> "$GITHUB_OUTPUT"
+        # `--no-graph`: this Action's job is the CI scan result — the DriftScore
+        # and findings it emits as SARIF. The code map (`.vibgrate/graph.json`) is a
+        # separate local artifact most CI runs don't consume, so it stays off by
+        # default here to keep the run lean and leave the workspace clean. Opt in
+        # any time with `args: --graph` (appended after, last wins).
         docker run --rm \
           --user "$(id -u):$(id -g)" \
           -e HOME=/tmp \
@@ -125,6 +130,7 @@ runs:
           scan "${INPUT_PATH}" \
           --format "${INPUT_FORMAT}" \
           --out "${INPUT_OUTPUT}" \
+          --no-graph \
           "${extra[@]}"
 
     # Surface findings in the Security tab. `always()` so the SARIF still uploads
