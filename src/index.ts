@@ -10,6 +10,8 @@ export { VERSION } from './version.js';
 
 export { buildGraph } from './engine/build.js';
 export type { BuildOptions, BuildResult } from './engine/build.js';
+export { resolveLimits, ResourceLimitError } from './engine/limits.js';
+export type { ResourceLimits } from './engine/limits.js';
 
 export { loadGraph } from './engine/load.js';
 export { serializeGraph, parseGraph, stableStringify } from './engine/serialize.js';
@@ -24,7 +26,7 @@ export { buildModuleResolver, relativeResolver, parseJsonc } from './engine/modu
 export type { ModuleResolver } from './engine/module-resolver.js';
 export { decodeScipIndex, scipEdges } from './engine/scip.js';
 export type { ScipIndex, ScipDocument, ScipOccurrence } from './engine/scip.js';
-export { discover, SKIP_DIRS, UsageError } from './engine/discover.js';
+export { discover, SKIP_DIRS, SKIP_FILES, UsageError } from './engine/discover.js';
 export type { DiscoveredFile, DiscoverOptions } from './engine/discover.js';
 export { LANGUAGES, allLanguageIds, langById, langForExtension } from './engine/languages.js';
 export type { LanguageDef } from './engine/languages.js';

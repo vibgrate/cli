@@ -25,8 +25,13 @@ const execFileAsync = promisify(execFile);
  * while a *wrong* entry silently drops real source (under-billing). Every name
  * here must be one that is effectively never hand-written source in its
  * ecosystem. Keep in sync with `docs/DEPENDENCY-EXCLUSIONS.md`.
+ *
+ * Exported so other walkers (e.g. the graph engine's discovery, which keeps
+ * its own self-contained copy) can assert in tests that they cover at least
+ * this set — the scanner and the graph must never disagree on what is a
+ * dependency/build tree.
  */
-const SKIP_DIRS = new Set([
+export const SKIP_DIRS = new Set([
   // ── Version control, IDE & tool metadata (never billable source) ──
   '.git', '.svn', '.hg',
   '.idea', '.vscode', '.vs',
@@ -120,7 +125,7 @@ const EXTRA_SKIP_DIRS = new Set<string>([]);
  * case-insensitively against the basename, so every entry must be lowercase.
  * Keep in sync with `docs/DEPENDENCY-EXCLUSIONS.md`.
  */
-const SOURCE_EXCLUDE_FILES = new Set([
+export const SOURCE_EXCLUDE_FILES = new Set([
   // JavaScript / Node
   'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock',
   'pnpm-lock.yaml', 'bun.lockb', 'bun.lock', 'deno.lock',

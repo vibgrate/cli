@@ -14,6 +14,39 @@ backward compatible.
 
 ### Added
 
+- **Memory safeguards for the graph build** — a pathological corpus (a
+  vendored 200 MB bundle, a million-file tree, a giant TypeScript program) can
+  no longer OOM-kill `vg build` / `vg scan`. Files over a per-file size cap
+  are skipped with a warning (they stay freshness-tracked, so auto-refresh
+  never loops on them); a corpus file-count ceiling stops the build early with
+  guidance instead of grinding toward a crash; the in-process TypeScript
+  resolver — the largest single memory consumer — falls back to the heuristic
+  rung past a TS/JS file cap; and a heap budget checked at phase boundaries
+  turns an imminent, uncatchable V8 OOM into a catchable, actionable error
+  (so a `scan --push` degrades to "map skipped" instead of dying). All limits
+  are tunable via environment variables (`VG_MAX_FILE_BYTES`, `VG_MAX_FILES`,
+  `VG_TSC_MAX_FILES`, `VG_MEMORY_BUDGET_MB`, `VG_JOBS`, `VG_WORKER_HEAP_MB`;
+  `0` disables), documented under *Configuration → Resource safeguards* in
+  DOCS.md. Skips are deterministic functions of the input, never of observed
+  memory — identical input still yields a byte-identical `graph.json`.
+- **Graph discovery now skips every package and lockfile surface the scanner
+  skips** — the engine's walk previously pruned a much smaller directory set
+  than the drift scanner, so dependency trees like `Pods/`, `deps/`,
+  `bower_components/`, `.yarn/`, `DerivedData/` (and ~20 more) could be
+  indexed as if they were first-party code. The graph's `SKIP_DIRS` is now a
+  superset of the scanner's list, and a new `SKIP_FILES` set excludes
+  lockfiles and generated dependency manifests (notably Yarn PnP's `.pnp.cjs`,
+  which is JavaScript and could previously be parsed as a huge phantom
+  module). A test asserts the graph's lists cover the scanner's, so the two
+  walkers can never silently disagree about what is third-party.
+- **`vg benchmark` now measures memory and throughput** — alongside the
+  existing cold/incremental build times, determinism check, and token
+  estimates, the benchmark reports peak RSS and peak heap sampled across the
+  cold build, the heap retained by the loaded graph, serialized `graph.json`
+  size and bytes-per-node, files/s and MB/s throughput, and the effective
+  resource limits (`VG_MAX_FILE_BYTES` etc.) the run built under — all
+  labelled approximate where GC timing makes them so. The graph artifact
+  itself stays byte-deterministic; only the measurements of producing it vary.
 - **The code map now keeps itself fresh** — `vg serve` (Vibgrate AI Context)
   and `vg ask` detect files that changed since the last build and rebuild the
   map incrementally before answering, so your AI always queries the code as it

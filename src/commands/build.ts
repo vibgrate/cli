@@ -11,6 +11,7 @@ import { serializeGraph } from '../engine/serialize.js';
 import { renderReport } from '../engine/report.js';
 import { renderHtml } from '../engine/html.js';
 import { UsageError } from '../engine/discover.js';
+import { ResourceLimitError } from '../engine/limits.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { c, info, out, json } from '../util/output.js';
 import { printLogo } from '../util/logo.js';
@@ -93,6 +94,9 @@ export async function runBuild(
   } catch (err) {
     bar?.done();
     if (err instanceof UsageError) throw usageError(err.message);
+    // A resource safeguard fired (file-count cap, heap budget, worker OOM) —
+    // the message already carries the remedy; surface it without a stack.
+    if (err instanceof ResourceLimitError) throw new CliError(err.message, ExitCode.ERROR);
     throw err;
   }
   bar?.done();
@@ -138,6 +142,7 @@ export async function runBuild(
       artifacts: written,
       corpusHash: result.graph.provenance.corpusHash,
       timingMs: result.timing.totalMs,
+      warnings: result.warnings,
     });
     return;
   }

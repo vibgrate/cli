@@ -4,17 +4,25 @@ import { execFileSync } from 'node:child_process';
 /**
  * How the user should re-invoke this CLI in a "next step" hint.
  *
- * A user who ran `npx @vibgrate/cli scan` has no `vg` (or `vibgrate`) on PATH,
- * so a hint like `vg install` or `vg login` would fail for them — the command
- * simply isn't there. We answer the practical question "what will actually run
- * this CLI for this user?" by checking whether our binary is reachable on PATH:
+ * A user who ran `npx @vibgrate/cli scan` has no *persistent* `vg` (or
+ * `vibgrate`) on PATH, so a hint like `vg install` or `vg login` would fail for
+ * them once the run ends. We answer the practical question "what will actually
+ * run this CLI for this user again?" by checking whether an *installed* copy of
+ * our binary is reachable on PATH:
  *
- *   ours-on-PATH `vg`       → `vg`                 (the normal installed case)
- *   ours-on-PATH `vibgrate` → `vibgrate`           (alias present, `vg` shadowed)
- *   neither                 → `npx @vibgrate/cli`  (npx / not installed globally)
+ *   installed `vg`       → `vg`                 (the normal installed case)
+ *   installed `vibgrate` → `vibgrate`           (alias present, `vg` shadowed)
+ *   neither              → `npx @vibgrate/cli`  (npx / not installed globally)
+ *
+ * "Installed" is the key qualifier: `npx` prepends its own throwaway
+ * `_npx/<hash>/node_modules/.bin` to PATH for the run, so `which vg` finds a `vg`
+ * that is genuinely ours yet gone the moment the process exits. That ephemeral
+ * binary is excluded (see {@link isEphemeralNpxBinary}) so npx users get the npx
+ * form, not a `vg` they can't call again.
  *
  * This is deliberately the same ladder `detectServeLaunch` uses for the MCP
- * launch command — the underlying question ("is `vg` on PATH ours?") is identical.
+ * launch command — the underlying question ("is an installed `vg` ours?") is
+ * identical.
  */
 
 /** The npx form that always works without a global install. */
@@ -56,6 +64,37 @@ export function isOwnBinary(binPath: string): boolean {
   }
 }
 
+/**
+ * Is this resolved binary an *ephemeral* npx-cache entry rather than a persistent
+ * install? `npx @vibgrate/cli …` unpacks the package into an npm `_npx/<hash>/`
+ * cache directory and prepends its `node_modules/.bin` to PATH for the duration
+ * of the run — so `which vg` finds a `vg` that is *ours* yet vanishes the instant
+ * the process exits. Treating that as an installed `vg` is exactly what made the
+ * post-scan hints tell npx users to run `vg login`/`vg push`, commands they have
+ * no `vg` on PATH for. npm's cache segment is `_npx` on every platform; we test
+ * the raw PATH entry and its realpath (symlink shims resolve into the same tree).
+ */
+export function isEphemeralNpxBinary(binPath: string): boolean {
+  const NPX_SEGMENT = /[\\/]_npx[\\/]/;
+  if (NPX_SEGMENT.test(binPath)) return true;
+  try {
+    return NPX_SEGMENT.test(fs.realpathSync(binPath));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does this PATH entry launch *this* CLI in a way that will still work after the
+ * current process exits? True only for a persistent install of our package — an
+ * ephemeral npx-cache binary does not count, because the user cannot re-invoke it
+ * by name. This is the predicate "next step" hints and the MCP launch command
+ * must use, not {@link isOwnBinary} alone.
+ */
+export function isInstalledOwnBinary(binPath: string): boolean {
+  return isOwnBinary(binPath) && !isEphemeralNpxBinary(binPath);
+}
+
 let cached: string | undefined;
 
 /**
@@ -70,11 +109,11 @@ export function resolveCliInvocation(which?: (cmd: string) => string | null): st
 
   const vg = lookup('vg');
   let result: string;
-  if (vg && isOwnBinary(vg)) {
+  if (vg && isInstalledOwnBinary(vg)) {
     result = 'vg';
   } else {
     const vibgrate = lookup('vibgrate');
-    result = vibgrate && isOwnBinary(vibgrate) ? 'vibgrate' : NPX_INVOCATION;
+    result = vibgrate && isInstalledOwnBinary(vibgrate) ? 'vibgrate' : NPX_INVOCATION;
   }
 
   if (!which) cached = result;

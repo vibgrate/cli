@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { skillMarkdown, nudgeMarkdown, mcpServerEntry, NUDGE_BEGIN, NUDGE_END, type ServeLaunch } from './content.js';
 import { CliError, ExitCode } from '../util/exit.js';
-import { whichOnPath, isOwnBinary } from '../util/cli-invocation.js';
+import { whichOnPath, isInstalledOwnBinary } from '../util/cli-invocation.js';
 
 /**
  * Per-assistant install registry (a focused subset of VG-ASSISTANT-INSTALL §2;
@@ -106,17 +106,19 @@ export interface InstallAction {
 
 /**
  * Resolve how the assistant host should launch the MCP server. `command: "vg"`
- * only works when `vg` on PATH is *this* CLI — a user who ran via npx, or whose
- * `vg` belongs to another tool (see scripts/postinstall.mjs), would get a server
- * that silently fails to start or, worse, launches the wrong binary. Detection
- * is best-effort and never throws; the fallbacks keep the entry working:
- * ours-on-PATH `vg` → ours-on-PATH `vibgrate` → `npx -y -p @vibgrate/cli vg`.
+ * only works when `vg` on PATH is a *persistent install* of this CLI — a user
+ * who ran via npx (whose `vg` is a throwaway npx-cache binary that disappears
+ * after the run), or whose `vg` belongs to another tool (see
+ * scripts/postinstall.mjs), would get a server that silently fails to start or,
+ * worse, launches the wrong binary. Detection is best-effort and never throws;
+ * the fallbacks keep the entry working: installed `vg` → installed `vibgrate` →
+ * `npx -y -p @vibgrate/cli vg`.
  */
 export function detectServeLaunch(which: (cmd: string) => string | null = whichOnPath): ServeLaunch {
   const vg = which('vg');
-  if (vg && isOwnBinary(vg)) return { command: 'vg', args: ['serve'] };
+  if (vg && isInstalledOwnBinary(vg)) return { command: 'vg', args: ['serve'] };
   const vibgrate = which('vibgrate');
-  if (vibgrate && isOwnBinary(vibgrate)) {
+  if (vibgrate && isInstalledOwnBinary(vibgrate)) {
     return {
       command: 'vibgrate',
       args: ['serve'],

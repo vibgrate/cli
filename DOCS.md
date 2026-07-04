@@ -889,6 +889,28 @@ Control when findings are raised and when the CLI should fail.
 
 Each extended scanner can be individually disabled. Set `scanners: false` to disable all extended scanners (the core drift scan always runs).
 
+### Resource safeguards (environment variables)
+
+Building the code map holds every parse table, node, and edge in memory, so on
+a pathological corpus (a vendored 200 MB bundle, a million-file tree) an
+unguarded build could exhaust memory and crash the process. The build ships
+with safeguards on by default; each is tunable via an environment variable,
+and `0` always means "disabled".
+
+| Variable              | Default                     | What it does                                                                                                                          |
+| --------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `VG_MAX_FILE_BYTES`   | `2097152` (2 MiB)           | Per-file source cap. Larger files (almost always generated/minified) are skipped with a warning; they stay freshness-tracked.          |
+| `VG_MAX_FILES`        | `100000`                    | Corpus file-count ceiling. Exceeding it stops the build with guidance (scope with paths, `--exclude`, or `--only`) instead of an OOM.   |
+| `VG_TSC_MAX_FILES`    | `10000`                     | Max TS/JS files handed to the in-process TypeScript resolver (the largest single memory consumer). Above it, the heuristic rung is used. |
+| `VG_MEMORY_BUDGET_MB` | 90% of the Node heap ceiling | Heap budget checked at phase boundaries. Exceeding it stops the build with a clear, catchable error before V8 hard-crashes.             |
+| `VG_JOBS`             | CPU cores − 1               | Default parse worker count when `--jobs` isn't passed. Fewer workers = lower peak memory (each worker loads its own grammar set).       |
+| `VG_WORKER_HEAP_MB`   | platform default            | Per-worker old-generation heap cap, so one runaway parse can't take the whole machine.                                                  |
+
+Skips are deterministic functions of the input (file size, file count) — never
+of observed memory — so identical input still produces an identical
+`graph.json`. To give the build more room instead of limiting it, raise the
+Node heap: `NODE_OPTIONS=--max-old-space-size=8192`.
+
 ---
 
 ## Extended Scanners
