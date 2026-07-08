@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { PlannedUpgrade } from './types.js';
 
 /**
@@ -26,11 +28,14 @@ export function pmCommandFor(
   pkg: string,
   version: string,
   pm: NpmPackageManager = 'npm',
+  opts: { workspaceRoot?: boolean } = {},
 ): UpgradeCommand | null {
   switch (ecosystem) {
     case 'npm':
-      if (pm === 'pnpm') return { cmd: 'pnpm', args: ['add', `${pkg}@${version}`] };
-      if (pm === 'yarn') return { cmd: 'yarn', args: ['add', `${pkg}@${version}`] };
+      // At a pnpm/yarn workspace ROOT the add must be explicit, or pnpm aborts
+      // with ERR_PNPM_ADDING_TO_ROOT and yarn refuses the root add.
+      if (pm === 'pnpm') return { cmd: 'pnpm', args: opts.workspaceRoot ? ['add', '-w', `${pkg}@${version}`] : ['add', `${pkg}@${version}`] };
+      if (pm === 'yarn') return { cmd: 'yarn', args: opts.workspaceRoot ? ['add', '-W', `${pkg}@${version}`] : ['add', `${pkg}@${version}`] };
       if (pm === 'bun') return { cmd: 'bun', args: ['add', `${pkg}@${version}`] };
       return { cmd: 'npm', args: ['install', `${pkg}@${version}`] };
     case 'pypi':
@@ -65,31 +70,61 @@ export interface AppliedUpgrade {
   detail?: string;
 }
 
+export interface RunResult {
+  ok: boolean;
+  detail?: string;
+  /** The package-manager binary was not found on PATH (report as manual, not failed). */
+  toolMissing?: boolean;
+}
+
 export interface ApplyOptions {
   dryRun?: boolean;
   /** npm-family package manager for npm upgrades (from the scan). */
   packageManager?: NpmPackageManager;
   /** Runner override for tests. */
-  run?: (cmd: UpgradeCommand, cwd: string) => { ok: boolean; detail?: string };
+  run?: (cmd: UpgradeCommand, cwd: string) => RunResult;
 }
 
-function defaultRun(cmd: UpgradeCommand, cwd: string): { ok: boolean; detail?: string } {
+function defaultRun(cmd: UpgradeCommand, cwd: string): RunResult {
   const res = spawnSync(cmd.cmd, cmd.args, { cwd, stdio: 'inherit', shell: false });
-  if (res.error) return { ok: false, detail: res.error.message };
+  if (res.error) {
+    // ENOENT = the toolchain (cargo, pip, go, …) isn't installed here. That's an
+    // environment gap the user must resolve, not an upgrade that "failed".
+    if ((res.error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: false, toolMissing: true, detail: `${cmd.cmd} is not installed or not on PATH` };
+    }
+    return { ok: false, detail: res.error.message };
+  }
   if (res.status !== 0) return { ok: false, detail: `exit ${res.status ?? 'signal'}` };
   return { ok: true };
+}
+
+/** Is `dir` a package-manager workspace root (so an `add` there needs -w/-W)? */
+function isWorkspaceRoot(dir: string): boolean {
+  try {
+    if (existsSync(join(dir, 'pnpm-workspace.yaml'))) return true;
+    const pkgPath = join(dir, 'package.json');
+    if (existsSync(pkgPath)) {
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { workspaces?: unknown };
+      if (pkg?.workspaces) return true;
+    }
+  } catch {
+    /* best-effort: treat as non-workspace */
+  }
+  return false;
 }
 
 /** Apply a plan's upgrades. Returns per-package outcomes (nothing is silently dropped). */
 export function applyPlan(rootDir: string, upgrades: PlannedUpgrade[], opts: ApplyOptions = {}): AppliedUpgrade[] {
   const run = opts.run ?? defaultRun;
+  const workspaceRoot = isWorkspaceRoot(rootDir);
   const results: AppliedUpgrade[] = [];
   for (const u of upgrades) {
     if (!u.to) {
       results.push({ package: u.package, to: u.to, status: 'skipped', detail: 'no target version' });
       continue;
     }
-    const command = pmCommandFor(u.ecosystem, u.package, u.to, opts.packageManager);
+    const command = pmCommandFor(u.ecosystem, u.package, u.to, opts.packageManager, { workspaceRoot });
     if (!command) {
       results.push({ package: u.package, to: u.to, status: 'manual', detail: `${u.ecosystem}: update the manifest to ${u.to} manually` });
       continue;
@@ -102,8 +137,8 @@ export function applyPlan(rootDir: string, upgrades: PlannedUpgrade[], opts: App
     results.push({
       package: u.package,
       to: u.to,
-      status: outcome.ok ? 'applied' : 'failed',
-      detail: outcome.detail,
+      status: outcome.ok ? 'applied' : outcome.toolMissing ? 'manual' : 'failed',
+      detail: outcome.toolMissing && outcome.detail ? `${outcome.detail} — upgrade manually` : outcome.detail,
     });
   }
   return results;

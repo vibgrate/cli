@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fixCommand } from './fix.js';
-import type { FixPlanRequest, FixPlanResponse, VulnDelta } from '../planning/types.js';
+import { fixCommand, applyChosenPlan } from './fix.js';
+import type { FixPlanRequest, FixPlanResponse, PlannedUpgrade, VulnDelta } from '../planning/types.js';
+import type { ScanArtifact } from '../../core-open/index.js';
 
 /**
  * `vg fix` is a thin, DSN-gated client. These tests mock the hosted planner and
@@ -164,5 +165,54 @@ describe('vg fix', () => {
     });
     await expect(fixCommand.parseAsync([dir, '--fail-on-vulns', 'high', '--no-apply'], { from: 'user' })).rejects.toThrow('exit:2');
     exitSpy.mockRestore();
+  });
+});
+
+describe('applyChosenPlan — monorepo routing', () => {
+  function upgrade(pkg: string, to: string): PlannedUpgrade {
+    return { package: pkg, ecosystem: 'npm', from: '1.0.0', to, kind: 'minor', blastRadius: 'low', fixes: emptyDelta(), reason: 'test' };
+  }
+
+  it('routes each upgrade to the sub-project that declares it, with -w only at the workspace root', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-fix-mono-'));
+    // Root is a pnpm workspace; a root devDep (typescript) and a sub-package dep (hono).
+    fs.writeFileSync(path.join(root, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'root', private: true }));
+
+    const artifact = {
+      projects: [
+        { type: 'typescript', path: '.', packageManager: 'pnpm', dependencies: [{ package: 'typescript' }] },
+        { type: 'node', path: 'packages/api', packageManager: 'pnpm', dependencies: [{ package: 'hono' }] },
+      ],
+    } as unknown as ScanArtifact;
+
+    const results = applyChosenPlan(
+      root,
+      artifact,
+      [upgrade('typescript', '6.0.3'), upgrade('hono', '4.12.28')],
+      { dryRun: true },
+    );
+
+    const ts = results.find((r) => r.package === 'typescript');
+    const hono = results.find((r) => r.package === 'hono');
+    // Root workspace dep → -w, no path tag.
+    expect(ts?.detail).toContain('would run: pnpm add -w typescript@6.0.3');
+    expect(ts?.detail).not.toContain(' in ');
+    // Sub-package dep → no -w, tagged with the project path.
+    expect(hono?.detail).toContain('would run: pnpm add hono@4.12.28');
+    expect(hono?.detail).toContain('in packages/api');
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('falls back to the repo root for a package no scanned project declares', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-fix-mono-'));
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'solo', private: true }));
+    const artifact = { projects: [] } as unknown as ScanArtifact;
+
+    const results = applyChosenPlan(root, artifact, [upgrade('lodash', '4.17.21')], { dryRun: true });
+    expect(results[0].detail).toContain('would run: npm install lodash@4.17.21');
+
+    fs.rmSync(root, { recursive: true, force: true });
   });
 });
