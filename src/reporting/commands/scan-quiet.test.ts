@@ -46,6 +46,51 @@ describe('scan --quiet promotional-output suppression', () => {
     await runCoreScan(dir, textOpts({ quiet: true }));
     const out = printed();
     expect(out).not.toContain('KEEP TRACKING YOUR DRIFTSCORE');
-    expect(out).toContain('Drift Score Summary');
+    expect(out).toContain('DriftScore Summary');
+  });
+
+  // Regression: a user logged in via the stored credential (no `--dsn`, no
+  // `VIBGRATE_DSN`) resolves a workspace DSN in the CLI, which passes
+  // `authenticated: true` into the scan. The scanner's own dsn/env check can't
+  // see the stored login, so without these signals a paid-plan bare scan was
+  // mislabelled "Vibgrate Free" and shown the login upsell panel — even while
+  // the same run pushed to the workspace.
+  it('suppresses the panel for an authenticated paid-plan scan', async () => {
+    await runCoreScan(dir, textOpts({ authenticated: true, planTier: 'team' }));
+    const out = printed();
+    expect(out).not.toContain('KEEP TRACKING YOUR DRIFTSCORE');
+    expect(out).not.toContain("You're on Vibgrate Free");
+    // The real report is unaffected.
+    expect(out).toContain('DriftScore Summary');
+  });
+
+  it('suppresses the panel when authenticated but the plan is unknown', async () => {
+    // Preflight did not run (offline / no push): never risk telling a paying
+    // customer they are on the free plan.
+    await runCoreScan(dir, textOpts({ authenticated: true }));
+    expect(printed()).not.toContain('KEEP TRACKING YOUR DRIFTSCORE');
+  });
+
+  it('shows the panel with an upgrade CTA (not login) for an authenticated free-plan scan', async () => {
+    await runCoreScan(
+      dir,
+      textOpts({ authenticated: true, planTier: 'free', upgradeUrl: 'https://dash.vibgrate.com/ws123' }),
+    );
+    const out = printed();
+    expect(out).toContain('KEEP TRACKING YOUR DRIFTSCORE');
+    // Upgrade CTA, not the login flow.
+    expect(out).toContain('More on Team or Business');
+    expect(out).toContain('https://dash.vibgrate.com/ws123');
+    expect(out).not.toContain('Start tracking');
+    expect(out).not.toContain('vg login');
+    expect(out).not.toContain('ran locally');
+  });
+
+  it('shows the login panel when unauthenticated', async () => {
+    await runCoreScan(dir, textOpts({ authenticated: false }));
+    const out = printed();
+    expect(out).toContain('KEEP TRACKING YOUR DRIFTSCORE');
+    expect(out).toContain('Start tracking');
+    expect(out).toContain('vg login');
   });
 });

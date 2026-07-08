@@ -26,8 +26,8 @@ function node(id: string, name: string, file: string, opts: Partial<GraphNode> =
   };
 }
 
-function callEdge(src: string, dst: string): GraphEdge {
-  return { id: `e_${src}_${dst}`, kind: 'call', src, dst, resolution: 'heuristic', confidence: 1 };
+function callEdge(src: string, dst: string, opts: Partial<GraphEdge> = {}): GraphEdge {
+  return { id: `e_${src}_${dst}`, kind: 'call', src, dst, resolution: 'heuristic', confidence: 1, ...opts };
 }
 
 // foo is a hub called by both bar and baz.
@@ -133,6 +133,37 @@ describe('get_node --dedup', () => {
     const second = (await tool('get_node').handler(g, { name: 'foo' }, c)) as Record<string, any>;
     expect(second.repeat).toBeUndefined();
     expect(second.calledBy).toEqual(first.calledBy);
+  });
+});
+
+describe('get_node edge filters', () => {
+  // bar → foo is an observed, high-confidence call; baz → foo is a name-matched,
+  // low-confidence one. An agent asking for only high-assurance edges should see bar.
+  function graphWithTiers(): VgGraph {
+    const g = makeGraph();
+    g.edges = [
+      callEdge('n_bar', 'n_foo', { epistemic: 'observed', confidence: 0.95 }),
+      callEdge('n_baz', 'n_foo', { epistemic: 'name-matched', confidence: 0.4 }),
+    ];
+    return g;
+  }
+
+  it('filters calledBy by epistemic tier', async () => {
+    const r = (await tool('get_node').handler(graphWithTiers(), { name: 'foo', epistemic: 'observed' }, ctx())) as Record<string, any>;
+    expect(r.calledBy).toEqual(['src/b.ts:bar']);
+    expect(r.calledByTotal).toBe(1);
+  });
+
+  it('filters calledBy by min_edge_confidence', async () => {
+    const r = (await tool('get_node').handler(graphWithTiers(), { name: 'foo', min_edge_confidence: 0.9 }, ctx())) as Record<string, any>;
+    expect(r.calledBy).toEqual(['src/b.ts:bar']);
+    expect(r.calledByTotal).toBe(1);
+  });
+
+  it('no filter → all callers (unchanged behaviour)', async () => {
+    const r = (await tool('get_node').handler(graphWithTiers(), { name: 'foo' }, ctx())) as Record<string, any>;
+    expect(r.calledBy).toEqual(['src/b.ts:bar', 'src/c.ts:baz']);
+    expect(r.calledByTotal).toBe(2);
   });
 });
 

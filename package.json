@@ -1,6 +1,6 @@
 {
   "name": "@vibgrate/cli",
-  "version": "2026.704.3",
+  "version": "2026.708.1",
   "description": "vg — local codebase intelligence CLI + MCP server for AI coding agents: deterministic code graph, drift reporting, and version-correct library docs (Apache-2.0)",
   "type": "module",
   "license": "Apache-2.0",
@@ -90,12 +90,12 @@
   "devDependencies": {
     "@types/node": "^26.1.0",
     "@types/semver": "^7.5.0",
-    "@typescript-eslint/eslint-plugin": "^8.61.0",
+    "@typescript-eslint/eslint-plugin": "^8.62.1",
     "@typescript-eslint/parser": "^8.62.1",
     "eslint": "^10.6.0",
     "graphology-types": "^0.24.8",
     "tsup": "^8.0.0",
-    "tsx": "^4.22.4",
+    "tsx": "^4.23.0",
     "vitest": "^4.0.0"
   },
   "engines": {

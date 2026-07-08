@@ -18,6 +18,7 @@ export type ExportFormat =
   | 'graphml'
   | 'dot'
   | 'cypher'
+  | 'sql'
   | 'md'
   | 'html'
   | 'cyclonedx'
@@ -36,6 +37,8 @@ export function formatForExt(ext: string): ExportFormat | null {
       return 'dot';
     case '.cypher':
       return 'cypher';
+    case '.sql':
+      return 'sql';
     case '.md':
       return 'md';
     case '.html':
@@ -68,6 +71,8 @@ export function exportGraph(format: ExportFormat, ctx: ExportContext): string {
       return dot(ctx.graph);
     case 'cypher':
       return cypher(ctx.graph);
+    case 'sql':
+      return sql(ctx);
     case 'cyclonedx':
       return cyclonedx(ctx);
     case 'spdx':
@@ -135,6 +140,93 @@ function cypherLabel(s: string): string {
 }
 function q(s: string): string {
   return JSON.stringify(s);
+}
+
+/**
+ * Portable SQL fact-DB (VG-CLI-SPEC §4.2, agent-consumption). Emits deterministic
+ * DDL + INSERT text — NOT a native driver — that loads identically into BOTH
+ * sqlite3 and duckdb (`sqlite3 map.db < map.sql` / `duckdb map.db < map.sql`).
+ * Text keeps the CLI dependency-free, offline, and byte-diffable; an identical
+ * graph yields identical bytes. An agent can then run e.g.
+ *   SELECT src, dst FROM edges WHERE epistemic = 'observed' AND confidence >= 0.9;
+ * Determinism: single transaction, `CREATE TABLE IF NOT EXISTS`, rows emitted in
+ * the graph's own (already-sorted) array order, single quotes doubled, NULL for
+ * absent optionals, booleans as 0/1, and no timestamp but the graph's generatedAt.
+ */
+function sql(ctx: ExportContext): string {
+  const graph = ctx.graph;
+  const lines: string[] = [];
+  lines.push('BEGIN;');
+
+  // meta — provenance / toolchain fingerprint (key/value; agent can read the corpus hash).
+  lines.push('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);');
+  const meta: [string, string | null][] = [
+    ['schemaVersion', graph.schemaVersion],
+    ['generatedAt', ctx.generatedAt],
+    ['corpusHash', graph.provenance.corpusHash],
+    ['tool', graph.provenance.tool],
+    ['toolVersion', graph.provenance.version],
+    ['resolver', graph.provenance.resolver.join(',')],
+    ['fingerprint', graph.provenance.toolchain?.fingerprint ?? null],
+  ];
+  for (const [k, v] of meta) lines.push(`INSERT INTO meta VALUES (${sqlStr(k)}, ${sqlStr(v)});`);
+
+  // nodes
+  lines.push(
+    'CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file TEXT, span_start INTEGER, span_end INTEGER, lang TEXT, visibility TEXT, signature TEXT, importance REAL, area INTEGER, is_hub INTEGER, tested INTEGER, coverage REAL);',
+  );
+  for (const n of graph.nodes) {
+    lines.push(
+      `INSERT INTO nodes VALUES (${sqlStr(n.id)}, ${sqlStr(n.kind)}, ${sqlStr(n.name)}, ${sqlStr(n.qualifiedName)}, ${sqlStr(n.file)}, ${sqlNum(n.span.start)}, ${sqlNum(n.span.end)}, ${sqlStr(n.lang)}, ${sqlStr(n.visibility)}, ${sqlStr(n.signature)}, ${sqlNum(n.importance)}, ${sqlNum(n.area)}, ${sqlBool(n.isHub)}, ${sqlBool(n.tested)}, ${sqlNum(n.coverage)});`,
+    );
+  }
+
+  // edges — the epistemic column is the point: SELECT ... WHERE epistemic='observed'.
+  lines.push(
+    'CREATE TABLE IF NOT EXISTS edges (id TEXT PRIMARY KEY, kind TEXT, src TEXT, dst TEXT, resolution TEXT, confidence REAL, epistemic TEXT, surprise REAL, "count" INTEGER);',
+  );
+  for (const e of graph.edges) {
+    lines.push(
+      `INSERT INTO edges VALUES (${sqlStr(e.id)}, ${sqlStr(e.kind)}, ${sqlStr(e.src)}, ${sqlStr(e.dst)}, ${sqlStr(e.resolution)}, ${sqlNum(e.confidence)}, ${sqlStr(e.epistemic)}, ${sqlNum(e.surprise)}, ${sqlNum(e.count)});`,
+    );
+  }
+
+  // areas (+ members)
+  lines.push('CREATE TABLE IF NOT EXISTS areas (id INTEGER PRIMARY KEY, label TEXT, size INTEGER, cohesion REAL, external_edges INTEGER);');
+  lines.push('CREATE TABLE IF NOT EXISTS area_members (area_id INTEGER, node_id TEXT);');
+  for (const a of graph.areas) {
+    lines.push(`INSERT INTO areas VALUES (${sqlNum(a.id)}, ${sqlStr(a.label)}, ${sqlNum(a.size)}, ${sqlNum(a.cohesion)}, ${sqlNum(a.externalEdges)});`);
+    for (const m of a.members) lines.push(`INSERT INTO area_members VALUES (${sqlNum(a.id)}, ${sqlStr(m)});`);
+  }
+
+  // facts (+ subjects, evidence) — only with a --deep build.
+  if (graph.facts && graph.facts.length) {
+    lines.push('CREATE TABLE IF NOT EXISTS facts (id TEXT PRIMARY KEY, kind TEXT, predicate_json TEXT, derived_by TEXT, confidence TEXT);');
+    lines.push('CREATE TABLE IF NOT EXISTS fact_subjects (fact_id TEXT, node_id TEXT);');
+    lines.push('CREATE TABLE IF NOT EXISTS fact_evidence (fact_id TEXT, file TEXT, span_start INTEGER, span_end INTEGER);');
+    for (const f of graph.facts) {
+      lines.push(`INSERT INTO facts VALUES (${sqlStr(f.id)}, ${sqlStr(f.kind)}, ${sqlStr(JSON.stringify(f.predicate))}, ${sqlStr(f.derivedBy)}, ${sqlStr(f.confidence)});`);
+      for (const s of f.subjectIds) lines.push(`INSERT INTO fact_subjects VALUES (${sqlStr(f.id)}, ${sqlStr(s)});`);
+      for (const ev of f.evidence) lines.push(`INSERT INTO fact_evidence VALUES (${sqlStr(f.id)}, ${sqlStr(ev.file)}, ${sqlNum(ev.span.start)}, ${sqlNum(ev.span.end)});`);
+    }
+  }
+
+  lines.push('COMMIT;');
+  return lines.join('\n') + '\n';
+}
+
+/** SQL string literal (single quotes doubled) or NULL for absent values. */
+function sqlStr(v: string | null | undefined): string {
+  if (v == null) return 'NULL';
+  return `'${v.replace(/'/g, "''")}'`;
+}
+/** Numeric literal or NULL for absent values. */
+function sqlNum(v: number | null | undefined): string {
+  return v == null || !Number.isFinite(v) ? 'NULL' : String(v);
+}
+/** Boolean as 0/1, NULL when unknown (e.g. an unanalyzable node's `tested`). */
+function sqlBool(v: boolean | null | undefined): string {
+  return v == null ? 'NULL' : v ? '1' : '0';
 }
 
 function cyclonedx(ctx: ExportContext): string {

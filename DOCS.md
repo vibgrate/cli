@@ -16,6 +16,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
   - [vg why](#vg-why)
   - [vg bisect](#vg-bisect)
+  - [vg fix](#vg-fix)
   - [vg baseline](#vg-baseline)
   - [vg report](#vg-report)
   - [vg sbom](#vg-sbom)
@@ -39,7 +40,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg tests](#vg-tests)
   - [vg embed](#vg-embed)
   - [vg export](#vg-export)
-- [Upgrade Drift Score](#upgrade-drift-score)
+- [DriftScore](#driftscore)
 - [Drift Baselines & Fitness Functions](#drift-baselines--fitness-functions)
   - [How the Score Is Calculated](#how-the-score-is-calculated)
   - [Risk Levels](#risk-levels)
@@ -90,7 +91,7 @@ Vibgrate recursively scans your repository for `package.json` (Node/TypeScript),
 1. **Detects** the runtime version, target framework, and all dependencies
 2. **Queries** the npm/NuGet registry for latest stable versions (with built-in caching and concurrency control)
 3. **Computes** how far behind each component is — major version lag, EOL proximity, dependency age distribution
-4. **Generates** a deterministic Upgrade Drift Score (0–100)
+4. **Generates** a deterministic DriftScore (0–100)
 5. **Produces** findings, a full JSON artifact, and optional SARIF output
 
 Core drift analysis does not execute source code. Optional security scanners can run lightweight secret heuristics and local toolchain checks. Vibgrate Cloud upload remains optional.
@@ -291,6 +292,91 @@ vg bisect lodash 4.17.21 --assert    # fails the build until lodash is patched t
 ```
 
 Exit codes: `0` when the query resolves, `2` when `--assert` finds the constraint unsatisfied, `3` when the package has no version history, `5` for an invalid version or range.
+
+---
+
+### vg fix
+
+Turn a drift scan into ranked, risk-tiered upgrade plans and **apply** the one
+you choose — bringing packages up to date with confidence.
+
+`vg fix` uses the hosted Vibgrate planner, so it needs a login: run `vg login`
+(or set `VIBGRATE_DSN`). The CLI only measures your project locally — your source
+never leaves your machine; only dependency versions and the aggregate usage
+signals the planner needs are sent.
+
+```bash
+vg login                     # once, to authenticate
+vg fix                       # analyse, then choose/apply a plan
+vg fix --dry-run             # show exactly what would change, apply nothing
+vg fix --plan safe --yes     # apply a specific plan non-interactively (CI)
+vg fix --no-apply            # only print the plans
+vg fix --format json         # machine-readable report for CI or an agent (no apply)
+```
+
+**Applying.** When there's more than one plan, `vg fix` shows them and asks which
+to apply; with a single plan it applies it directly. Applying runs your project's
+own package manager (pnpm/npm/yarn/bun, pip, cargo, go, composer, dotnet, dart, …)
+to pin each target version — editing the manifest and installing in one step.
+Ecosystems without a clean one-shot pin (e.g. Maven/Gradle) are reported for a
+manual edit rather than skipped silently. Changes are local and git-reversible;
+use `--dry-run` to preview, `--no-apply` to never touch the project, `--yes`/
+`--plan` for non-interactive runs. `--format json`/`md` are report-only.
+
+It reads the last scan artifact (`.vibgrate/scan_result.json`); if there isn't
+one it runs a drift scan first, skipping the code map. Every drifted dependency —
+across all supported ecosystems (npm, PyPI, Go, Cargo, Maven/Gradle, NuGet,
+Composer, RubyGems, pub, Hex, …) — is sent to the planner, which builds three
+plans and names the categorical best one:
+
+- **Low-risk** — patch and minor updates only, limited to lightly-used packages
+  with no breaking-change signals and no dependency conflicts.
+- **Balanced** — the low-risk set plus single, clean major upgrades.
+- **Full** — everything to latest stable, except upgrades that are mutually
+  incompatible at those versions.
+
+The analysis runs in two phases. A fast pass classifies every upgrade
+(patch / minor / major) and measures its blast radius from how heavily the
+package is used in your source. When major upgrades are involved it goes deeper:
+it checks npm peer dependencies to find packages that **cannot** upgrade together
+(e.g. `react-dom@18` needs `react@18`), scans the intervening releases for
+breaking-change signals, and considers the API surface — the classes and
+functions your code imports — that a new version must preserve.
+
+Security is folded in with **real-world exploitability**. Each upgrade is checked
+against OSV in both directions (advisories **remediated** vs. **introduced**), and
+current-version advisories are cross-referenced with the **CISA KEV** (known-
+exploited) list and **FIRST EPSS** (exploit-probability) scores. A package with a
+known-exploited advisory is treated as must-fix, so the recommendation prioritises
+"fix these few" over churning everything. Advisories with no upgrade path in any
+plan are called out as unresolved.
+
+Each plan also shows an **expected DriftScore** — the estimated score after the
+plan lands — so you can weigh drift-reduction payoff against risk (e.g. *Low-risk:
+58 → 54; Full: 58 → 31*). Where a package has a known upgrade **playbook**, the
+plan surfaces its codemod (e.g. `ng update`).
+
+The recommendation is deterministic. When known-exploited or high/critical
+advisories are open, `vg fix` recommends the lowest-risk plan that clears them —
+so if a patch closes a critical CVE, that's the plan it points you to rather than
+a sweeping major bump. With nothing severe outstanding, it prefers the least
+disruptive plan.
+
+| Flag | Meaning |
+|---|---|
+| `--format <text\|json\|md>` | Output format (default `text`; `json`/`md` are report-only, no apply). |
+| `--in <file>` | Scan artifact to read (default `.vibgrate/scan_result.json`, resolved against the analysed path). |
+| `--dsn <dsn>` | DSN token (or use `VIBGRATE_DSN` / `vg login`). |
+| `--region <region>` | Override data residency region (`us`, `eu`). |
+| `--plan <tier>` | Apply a specific plan non-interactively (`safe`/`balanced`/`aggressive`). |
+| `--yes` | Apply the recommended plan without prompting. |
+| `--dry-run` | Show what would change without applying. |
+| `--no-apply` | Only print the plans; never modify the project. |
+| `--repository-name <name>` | Override the repository name recorded for this plan. |
+| `--fail-on-vulns <severity>` | Exit non-zero if the recommended plan leaves an advisory at or above this severity unresolved. |
+
+Exit codes: `0` on success, `2` when `--fail-on-vulns` finds an unresolved
+advisory at or above the threshold or an apply step fails.
 
 ---
 
@@ -777,11 +863,11 @@ Recommended workflow:
 
 This makes drift a formal quality gate (fitness function), not just reporting.
 
-## Upgrade Drift Score
+## DriftScore
 
 ### How the Score Is Calculated
 
-The Upgrade Drift Score is a deterministic, versioned metric (0–100) that represents how far behind your codebase is relative to the current stable ecosystem baseline.
+The DriftScore is a deterministic, versioned metric (0–100) that represents how far behind your codebase is relative to the current stable ecosystem baseline.
 
 **Lower score = healthier upgrade posture.** 0 means no drift (fully current); 100 means maximum drift. Higher is worse.
 

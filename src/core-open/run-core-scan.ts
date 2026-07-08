@@ -688,7 +688,7 @@ export async function runCoreScan(
   progress.completeStep('findings', findingParts.join(', ') || 'none');
 
   // ── Step: Code map (optional post-scan hook) ──
-  // Runs inside the same progress bar so one command yields the Drift Score plus
+  // Runs inside the same progress bar so one command yields the DriftScore plus
   // a ready code map. Fail-soft: a map error never fails the scan.
   if (opts.postScan) {
     progress.startStep('map');
@@ -861,9 +861,27 @@ export async function runCoreScan(
       await writeTextFile(path.resolve(opts.out), markdown);
     }
   } else {
-    // `--quiet` suppresses the free-plan upsell panel (promotional output only —
-    // the report itself is unchanged).
-    const text = formatText(artifact, { free: !parsedDsn && !opts.quiet, invocation: opts.invocation });
+    // Upsell-panel audience. The CLI passes the authoritative `authenticated`
+    // signal, which honours the stored login credential
+    // (`~/.vibgrate/credentials.json`) that `parsedDsn` above cannot see, plus
+    // the workspace `planTier` learned from preflight. Three cases:
+    //   • signed out            → show the panel with the `login → push` CTA
+    //   • signed in, free plan   → show the panel with an *upgrade* CTA (telling
+    //                              them to log in again would be wrong)
+    //   • signed in, paid plan   → suppress it
+    // When signed in but the plan is unknown (offline, no push, or preflight
+    // failed) we suppress rather than risk telling a paying customer they are on
+    // the free plan. `--quiet` suppresses the panel in every case (promotional
+    // output only — the report itself is unchanged).
+    const authenticated = opts.authenticated ?? !!parsedDsn;
+    const freePlan = opts.planTier === 'free';
+    const showUpsell = !opts.quiet && (!authenticated || freePlan);
+    const text = formatText(artifact, {
+      free: showUpsell,
+      authenticated,
+      invocation: opts.invocation,
+      upgradeUrl: opts.upgradeUrl,
+    });
     console.log(text);
     if (opts.out) {
       await writeTextFile(path.resolve(opts.out), text);

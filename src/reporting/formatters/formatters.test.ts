@@ -149,7 +149,7 @@ describe('formatMarkdown', () => {
 
   it('includes summary table', () => {
     const md = formatMarkdown(makeArtifact());
-    expect(md).toContain('**Drift Score**');
+    expect(md).toContain('**DriftScore**');
     expect(md).toContain('65/100');
     expect(md).toContain('HIGH');
   });

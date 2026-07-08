@@ -11,6 +11,25 @@ export const SCHEMA_VERSION = 'vg-graph/1.0' as const;
 
 export type ResolverKind = 'scip' | 'stackgraph' | 'tsc' | 'heuristic';
 
+/** Coarse, honest resolution tier for an edge (see engine/epistemic.ts). */
+export type EpistemicTier = 'observed' | 'name-matched' | 'declared';
+
+/**
+ * The toolchain that produced this graph — the reproducibility fingerprint.
+ * Everything here deterministically affects graph *content* (parse trees change
+ * between grammar releases; resolvers change which edges resolve), so a CI run
+ * and a laptop run that disagree can be caught by comparing `fingerprint`.
+ * Deliberately excludes the Node/OS version so the graph stays byte-stable
+ * across host runtimes; `fingerprint` pins the parse/resolve toolchain only.
+ */
+export interface Toolchain {
+  schema: string; // SCHEMA_VERSION
+  tool: string; // vg calendar version
+  grammars: string; // tree-sitter grammar set version string
+  resolvers: ResolverKind[]; // resolver kinds available, sorted
+  fingerprint: string; // shortId over the fields above — the value `vg attest` signs
+}
+
 export interface Provenance {
   tool: 'vg';
   version: string; // calendar version
@@ -19,6 +38,7 @@ export interface Provenance {
   deep: boolean; // did the heavier open passes run
   semanticModel?: string; // embedding model id+version if --deep semantic links
   corpusHash: string; // blake3 over the included file set + hashes
+  toolchain?: Toolchain; // reproducibility fingerprint (checked by `vg verify`)
 }
 
 export interface GraphMeta {
@@ -98,6 +118,7 @@ export interface GraphEdge {
   dst: string; // node id
   resolution: ResolverKind; // how the edge was resolved
   confidence: number; // 0..1 (1.0 for scip/declared; lower for heuristic/dynamic)
+  epistemic?: EpistemicTier; // coarse honesty tier derived from resolution+kind
   surprise?: number; // 0..1 improbability under the area model (`vg oddities`)
   count?: number; // call-site multiplicity
 }
@@ -125,6 +146,19 @@ export interface Fact {
   evidence: { file: string; span: Span }[];
 }
 
+/**
+ * A reference the graph could not resolve — surfaced by `vg unknowns`. Reporting
+ * what it *cannot* connect (ranked by blast radius) is the honest inverse of a
+ * scanner that hides its unknowns. Only unknowns the precise rungs (tsc/scip)
+ * did not supersede are recorded, so a compiler-resolved file never shows here.
+ */
+export interface Unknown {
+  from: string; // node id where the unresolved reference occurs
+  name: string; // the callee/type name that could not be resolved
+  kind: 'call' | 'extends' | 'implements';
+  count: number; // occurrences at this site
+}
+
 export type GroundingKind = 'should_follow' | 'smells_like' | 'relevant_to';
 
 export interface GroundingEdge {
@@ -146,4 +180,5 @@ export interface VgGraph {
   areas: Area[]; // sorted by id
   facts?: Fact[]; // present with --deep; sorted by id
   grounding?: GroundingEdge[]; // free-pack grounding (default on; omit with --no-ground)
+  unknowns?: Unknown[]; // heuristic references left unresolved; sorted by (from, kind, name)
 }

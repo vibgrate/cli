@@ -8,7 +8,6 @@ import { VERSION } from './version.js';
 import { resolveCliInvocation, NPX_INVOCATION } from './util/cli-invocation.js';
 import { registerBuild, runBuild } from './commands/build.js';
 import { registerStatus } from './commands/status.js';
-import { registerVerify } from './commands/verify.js';
 import { registerAsk } from './commands/ask.js';
 import { registerEmbed } from './commands/embed.js';
 import { registerShow } from './commands/show.js';
@@ -16,6 +15,7 @@ import { registerPath } from './commands/path.js';
 import { registerTree } from './commands/tree.js';
 import { registerInsights } from './commands/insights.js';
 import { registerImpact } from './commands/impact.js';
+import { registerUnknowns } from './commands/unknowns.js';
 import { registerServe } from './commands/serve.js';
 import { registerInstall } from './commands/install.js';
 import { registerShare } from './commands/share.js';
@@ -38,6 +38,7 @@ import { c, info, disableColor } from './util/output.js';
 // open base engine (`@vibgrate/core-open`) — no proprietary kernel.
 import { initCommand } from './reporting/commands/init.js';
 import { scanCommand } from './reporting/commands/scan.js';
+import { fixCommand } from './reporting/commands/fix.js';
 import { baselineCommand } from './reporting/commands/baseline.js';
 import { reportCommand } from './reporting/commands/report.js';
 import { dsnCommand } from './reporting/commands/dsn.js';
@@ -51,13 +52,13 @@ import { sbomCommand } from './reporting/commands/sbom.js';
 export const KNOWN_COMMANDS = new Set([
   'build',
   'status',
-  'verify',
   'ask',
   'embed',
   'show',
   'path',
   'tree',
   'impact',
+  'unknowns',
   'tests',
   'facts',
   'guide',
@@ -83,6 +84,7 @@ export const KNOWN_COMMANDS = new Set([
   // Drift-reporting verbs (merged from the Vibgrate CLI).
   'init',
   'scan',
+  'fix',
   'baseline',
   'report',
   'login',
@@ -124,7 +126,6 @@ export function buildProgram(): Command {
   // so the dispatch can place the command token first and let flags follow.
   registerBuild(program);
   registerStatus(program);
-  registerVerify(program);
   registerAsk(program);
   registerEmbed(program);
   registerShow(program);
@@ -132,6 +133,7 @@ export function buildProgram(): Command {
   registerTree(program);
   registerInsights(program);
   registerImpact(program);
+  registerUnknowns(program);
   registerServe(program);
   registerInstall(program);
   registerShare(program);
@@ -152,6 +154,7 @@ export function buildProgram(): Command {
   // real scan-artifact upload, so it replaces the graph engine's no-op `push`.
   program.addCommand(initCommand);
   program.addCommand(scanCommand);
+  program.addCommand(fixCommand);
   program.addCommand(baselineCommand);
   program.addCommand(reportCommand);
   program.addCommand(loginCommand);
@@ -228,7 +231,7 @@ export function dispatch(argv: string[], cwd: string): string[] {
   const firstPositionalIdx = findFirstPositional(args);
 
   // No positional at all (e.g. `vg`, `vg --quiet`): default to scan, which also
-  // builds the map (one command → Drift Score + AI/docs index). A terminal flag
+  // builds the map (one command → DriftScore + AI/docs index). A terminal flag
   // like --help/--version is left for commander; a build-only flag keeps `build`.
   if (firstPositionalIdx === -1) {
     if (args.includes('--help') || args.includes('-h') || args.includes('--version')) {
@@ -255,9 +258,21 @@ export function dispatch(argv: string[], cwd: string): string[] {
     return [hasBuildOnlyFlag(args) ? 'build' : 'scan', ...args];
   }
 
+  // Recently-moved verbs: a migration hint beats a confusing search fall-through.
+  const moved = MOVED_COMMANDS[first];
+  if (moved) {
+    throw new CliError(`\`vg ${first}\` has moved to \`${moved}\``, ExitCode.USAGE_ERROR);
+  }
+
   // Bare word that is neither a command nor a path → treat as a search query.
   return ['ask', ...args];
 }
+
+/** Verbs folded into the build lifecycle — guide the user to the new form. */
+const MOVED_COMMANDS: Record<string, string> = {
+  verify: 'vg build --verify',
+  attest: 'vg build --attest',
+};
 
 /** The first real positional, skipping value-taking global flags and their values. */
 function findFirstPositional(args: string[]): number {
@@ -281,7 +296,6 @@ export async function main(argv = process.argv): Promise<void> {
 
   // We need cwd for path-based dispatch; read -C/--cwd from the raw args.
   const cwd = readCwd(raw);
-  const dispatched = dispatch(raw, cwd);
 
   const program = buildProgram();
   program.exitOverride((err) => {
@@ -294,6 +308,9 @@ export async function main(argv = process.argv): Promise<void> {
   });
 
   try {
+    // dispatch() can throw (e.g. a moved-command hint) — keep it inside the
+    // handler so those surface as a clean `error:` line, not a raw stack.
+    const dispatched = dispatch(raw, cwd);
     await program.parseAsync(dispatched, { from: 'user' });
   } catch (err) {
     handleError(err);

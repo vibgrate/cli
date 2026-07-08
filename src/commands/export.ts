@@ -11,13 +11,13 @@ import { c, info, out } from '../util/output.js';
 
 /**
  * `vg export <file>` (VG-CLI-SPEC §4.2) — one verb, format inferred from the
- * extension: json · ndjson · graphml · dot · cypher · md · html · cdx.json
+ * extension: json · ndjson · graphml · dot · cypher · sql · md · html · cdx.json
  * (CycloneDX SBOM/AI-BOM) · spdx.json. `-` writes to stdout.
  */
 export function registerExport(program: Command): void {
   const cmd = program
     .command('export')
-    .description('export the map (format inferred: json|ndjson|graphml|dot|cypher|md|html|cdx.json|spdx.json)')
+    .description('export the map (format inferred: json|ndjson|graphml|dot|cypher|sql|md|html|cdx.json|spdx.json)')
     .argument('[file]', 'target file (or - for stdout)', 'map.json')
     .action(function (this: Command, file: string) {
       const global = readGlobal(this);

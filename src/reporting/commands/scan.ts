@@ -285,6 +285,13 @@ export const scanCommand = new Command('scan')
     // the upload to the correct ingest host up front (the push path also
     // self-heals on a 409 REGION_MISMATCH if preflight didn't run).
     let pinnedRegion: string | undefined;
+    // Workspace billing tier + upgrade link, learned from preflight. They select
+    // the free-plan upsell panel's audience: a free-tier workspace shows the
+    // panel with an upgrade CTA; any paid tier suppresses it. Left undefined when
+    // preflight does not run (offline / no push), which keeps the panel hidden
+    // for authenticated users rather than risk mislabelling a paid plan.
+    let planTier: string | undefined;
+    let upgradeUrl: string | undefined;
 
     if (willPush && hasDsn) {
       const dsn = resolveDsn(opts.dsn)!;
@@ -300,6 +307,12 @@ export const scanCommand = new Command('scan')
             vcsSha: fingerprint.vcsSha,
           });
           pinnedRegion = preflight.region;
+          planTier = preflight.plan?.tier;
+          // Prefer the server's canonical upgrade link; otherwise point at the
+          // workspace dashboard on the (possibly region-pinned) ingest host.
+          upgradeUrl =
+            preflight.upgradeUrl ??
+            `https://${dashHostForIngestHost(preflight.ingestHost ?? ingestHost)}/${parsed.workspaceId}`;
           if (preflight.vm && !preflight.vm.allowed) {
             console.error(chalk.red(preflight.error ?? 'VM meter usage exhausted'));
             console.error(
@@ -399,13 +412,24 @@ export const scanCommand = new Command('scan')
       repositoryName: opts.repositoryName?.trim() || undefined,
       force: opts.force,
       quiet: opts.quiet,
+      // Auth + plan signals for the free-plan upsell panel. `hasDsn` resolves the
+      // full credential precedence — `--dsn`, `VIBGRATE_DSN`, and the stored login
+      // credential (`~/.vibgrate/credentials.json`) — which the scanner's own
+      // dsn/env-only check cannot see. `planTier`/`upgradeUrl` come from preflight.
+      // Together they pick the panel audience: signed out → login CTA; signed in
+      // on free → upgrade CTA; signed in on a paid plan → no panel. Without the
+      // auth signal, a logged-in user running a bare scan was mislabelled
+      // "Vibgrate Free" and shown the login panel even as the run pushed.
+      authenticated: hasDsn,
+      planTier,
+      upgradeUrl,
       // Prefix for the upsell panel's `login → push` hint — `vg` when installed,
       // `npx @vibgrate/cli` when the user ran via npx (where bare `vg` fails).
       invocation: resolveCliInvocation(),
     };
 
     // `scan` also builds the local code map (the AI/docs index) so one command
-    // yields both the Drift Score and a ready graph for `vg ask`/`guide`/`lib`
+    // yields both the DriftScore and a ready graph for `vg ask`/`guide`/`lib`
     // and MCP. We run it as the scan's final `postScan` step so it shares the
     // *single* progress bar (no second bar/logo). Fail-soft — a map problem
     // never fails the scan. Skipped under --no-graph, --max-privacy, and

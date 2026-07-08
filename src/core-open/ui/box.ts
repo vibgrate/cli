@@ -44,23 +44,30 @@ function visibleLength(s: string): number {
 
 /**
  * A rounded, multi-line panel with the title embedded in the top border
- * (`╭─ TITLE ──…──╮`) and each body line boxed to `width` interior cells.
+ * (`╭─ TITLE ──…──╮`) and each body line boxed to a shared interior width.
  * Body lines may contain ANSI colour (chalk) — padding is computed on their
- * visible width. Content wider than `width` is left unpadded rather than
- * truncated, so callers should keep lines within `width`. Use this for
- * call-out panels (e.g. the free-plan upsell) that need more than a title.
+ * visible width. `minWidth` is a floor, not a ceiling: the interior grows to
+ * fit the widest visible body line (plus its indent) so the right border stays
+ * aligned even when content overflows — e.g. a long `npx @vibgrate/cli login →
+ * npx @vibgrate/cli push` hint in the free-plan upsell. Nothing is truncated.
  */
 export function panelBox(
   title: string,
   body: string[],
   color: ChalkInstance = chalk.cyan,
-  width = BOX_WIDTH,
+  minWidth = BOX_WIDTH,
 ): string[] {
   const out: string[] = [];
+  const indent = 1;
   const titleSegment = ` ${title} `;
+  // Interior cell count between the corners: the floor, the title (with at
+  // least two trailing dashes), and every body line's indented visible width.
+  const width = body.reduce(
+    (w, line) => Math.max(w, visibleLength(line) + indent),
+    Math.max(minWidth, titleSegment.length + 2),
+  );
   const dashes = Math.max(width - 1 - titleSegment.length, 0);
   out.push(color('╭─') + chalk.bold.white(titleSegment) + color('─'.repeat(dashes) + '╮'));
-  const indent = 1;
   for (const line of body) {
     const pad = Math.max(width - indent - visibleLength(line), 0);
     out.push(color('│') + ' '.repeat(indent) + line + ' '.repeat(pad) + color('│'));

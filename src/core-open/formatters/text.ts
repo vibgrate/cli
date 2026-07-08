@@ -23,11 +23,23 @@ export interface FormatTextOptions {
    */
   free?: boolean;
   /**
+   * Whether the user is signed in to a workspace. Selects the upsell panel's
+   * call to action: signed-out users get the `login → push` hint; a signed-in
+   * free-plan user (the only signed-in case where `free` is true) gets an
+   * upgrade hint instead — telling them to log in again would be wrong.
+   */
+  authenticated?: boolean;
+  /**
    * Command prefix for the upsell panel's `login → push` hint. `vg` when the
    * CLI is installed on PATH, `npx @vibgrate/cli` when the user ran via npx.
    * Defaults to `vg`.
    */
   invocation?: string;
+  /**
+   * Destination for the signed-in free-plan panel's upgrade link. Defaults to
+   * the public dashboard host.
+   */
+  upgradeUrl?: string;
 }
 
 export function formatText(artifact: ScanArtifact, opts: FormatTextOptions = {}): string {
@@ -148,9 +160,9 @@ export function formatText(artifact: ScanArtifact, opts: FormatTextOptions = {})
   const scoreColor = artifact.drift.score <= 30 ? chalk.green :
     artifact.drift.score <= 60 ? chalk.yellow : chalk.red;
 
-  lines.push(...titleBox('Drift Score Summary'));
+  lines.push(...titleBox('DriftScore Summary'));
   lines.push('');
-  lines.push(chalk.bold('  Drift Score:  ') + scoreColor.bold(`${artifact.drift.score}/100`));
+  lines.push(chalk.bold('  DriftScore:   ') + scoreColor.bold(`${artifact.drift.score}/100`));
   lines.push(chalk.bold('  Risk Level:   ') + riskBadge(artifact.drift.riskLevel));
   lines.push(chalk.bold('  Projects:     ') + `${artifact.projects.length}`);
 
@@ -232,7 +244,11 @@ export function formatText(artifact: ScanArtifact, opts: FormatTextOptions = {})
   // Free-plan upsell: only when the user has no workspace DSN (they scanned
   // locally) and this scan produced a billing roll-up to price against.
   if (opts.free && artifact.billing) {
-    lines.push(...renderUpsellPanel(artifact.billing, opts.invocation ?? 'vg'));
+    lines.push(...renderUpsellPanel(artifact.billing, {
+      authenticated: opts.authenticated === true,
+      invocation: opts.invocation ?? 'vg',
+      upgradeUrl: opts.upgradeUrl ?? 'https://dash.vibgrate.com',
+    }));
     lines.push('');
   }
 
@@ -270,29 +286,80 @@ function formatMoney(value: number): string {
   return value === Math.floor(value) ? `$${value}` : `$${value.toFixed(2)}`;
 }
 
-/** The teal call-out panel shown to free (no-DSN) users after a scan. */
-function renderUpsellPanel(billing: BillingSummary, invocation: string): string[] {
+interface UpsellPanelOptions {
+  /** Signed in on the free plan (upgrade CTA) vs signed out (login CTA). */
+  authenticated: boolean;
+  /** Command prefix for the signed-out `login → push` hint. */
+  invocation: string;
+  /** Destination for the signed-in upgrade link. */
+  upgradeUrl: string;
+}
+
+/**
+ * The teal call-out panel shown after a free-plan scan. Two audiences share the
+ * pricing and Cloud-value block but differ in the top line and the call to
+ * action: a signed-out user is told their scan is local and pointed at
+ * `login → push`; a signed-in free-plan user (already pushing, just capped) is
+ * pointed at an upgrade instead — telling them to log in again would be wrong.
+ */
+function renderUpsellPanel(billing: BillingSummary, opts: UpsellPanelOptions): string[] {
   const raw = billing.billableProjectsRaw;
   const team = estimateMonthly(raw, PRICE_RATES.team);
   const business = estimateMonthly(raw, PRICE_RATES.business);
   const rawLabel = formatBillable(raw);
 
+  const intro = opts.authenticated
+    ? [
+        `You're on Vibgrate Free — your scans are tracked on`,
+        `Vibgrate Cloud, capped at the free plan's limits.`,
+      ]
+    : [
+        `You're on Vibgrate Free — this scan ran locally and`,
+        `isn't tracked over time.`,
+      ];
+
+  const costLead = opts.authenticated
+    ? `On Team or Business, this repo would cost:`
+    : `Tracked monthly on Vibgrate Cloud, this repo would cost:`;
+
+  // Signed-in free users already have the tracking basics; the panel sells the
+  // paid-only capacity and automation. Signed-out users are sold on Cloud itself.
+  const addsLead = opts.authenticated ? `Upgrading adds:` : `Vibgrate Cloud adds:`;
+  const adds = opts.authenticated
+    ? [
+        `  ${chalk.cyan('•')} More repositories and pushed scans`,
+        `  ${chalk.cyan('•')} Scheduled scans that run automatically — no CI wiring`,
+        `  ${chalk.cyan('•')} Alerts when drift crosses the budget you set`,
+      ]
+    : [
+        `  ${chalk.cyan('•')} DriftScore tracked over time — trends, not snapshots`,
+        `  ${chalk.cyan('•')} Scheduled scans that run automatically — no CI wiring`,
+        `  ${chalk.cyan('•')} Alerts when drift crosses the budget you set`,
+      ];
+
+  // Signed-out users keep the original "Free forever" framing; signed-in free
+  // users see "Free plan" (they're already on it). Both end identically.
+  const capacityLine = opts.authenticated
+    ? `Free plan: 1 repository, 5 pushed scans / month.`
+    : `Free forever: 1 repository, 5 pushed scans / month.`;
+
+  const cta = opts.authenticated
+    ? `${chalk.bold('More on Team or Business:')}  ${chalk.cyan(opts.upgradeUrl)}`
+    : `${chalk.bold('Start tracking:')}  ${chalk.cyan(`${opts.invocation} login`)}  →  ${chalk.cyan(`${opts.invocation} push`)}`;
+
   const body = [
-    `You're on Vibgrate Free — this scan ran locally and`,
-    `isn't tracked over time.`,
+    ...intro,
     ``,
-    chalk.bold(`Tracked monthly on Vibgrate Cloud, this repo would cost:`),
+    chalk.bold(costLead),
     `  ${chalk.bold('Team')}       ${chalk.bold.white(formatMoney(team))} / mo`,
     `  ${chalk.bold('Business')}   ${chalk.bold.white(formatMoney(business))} / mo`,
     chalk.dim(`  (${rawLabel} billable project${raw === 1 ? '' : 's'}, banded per-project pricing)`),
     ``,
-    chalk.bold(`Vibgrate Cloud adds:`),
-    `  ${chalk.cyan('•')} DriftScore tracked over time — trends, not snapshots`,
-    `  ${chalk.cyan('•')} Scheduled scans that run automatically — no CI wiring`,
-    `  ${chalk.cyan('•')} Alerts when drift crosses the budget you set`,
+    chalk.bold(addsLead),
+    ...adds,
     ``,
-    chalk.dim(`Free forever: 1 repository, 5 pushed scans / month.`),
-    `${chalk.bold('Start tracking:')}  ${chalk.cyan(`${invocation} login`)}  →  ${chalk.cyan(`${invocation} push`)}`,
+    chalk.dim(capacityLine),
+    cta,
   ];
 
   // Brand teal (#3FB0A4) border so the panel stands out from the cyan report boxes.

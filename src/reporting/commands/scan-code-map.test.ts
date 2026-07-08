@@ -86,7 +86,7 @@ describe('scan --no-local-artifacts (end-to-end flag wiring)', () => {
     // .vibgrate artifact) was never built.
     expect(fs.existsSync(path.join(dir, '.vibgrate'))).toBe(false);
     // Drift still runs (the baseline the migration needs); the map step does not.
-    expect(out).toContain('Drift Score');
+    expect(out).toContain('DriftScore');
     expect(out).not.toContain('Building code map');
   });
 

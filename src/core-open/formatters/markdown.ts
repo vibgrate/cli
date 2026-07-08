@@ -24,7 +24,7 @@ export function formatMarkdown(artifact: ScanArtifact): string {
   lines.push('');
   lines.push(`| Metric | Value |`);
   lines.push(`|--------|-------|`);
-  lines.push(`| **Drift Score** | ${artifact.drift.score}/100 |`);
+  lines.push(`| **DriftScore** | ${artifact.drift.score}/100 |`);
   lines.push(`| **Risk Level** | ${artifact.drift.riskLevel.toUpperCase()} |`);
   lines.push(`| **Projects** | ${artifact.projects.length} |`);
   if (billing) {

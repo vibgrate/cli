@@ -690,6 +690,27 @@ export interface ScanOptions {
    *  panel) from the text report. The scan results themselves are unaffected.
    *  Used by non-interactive consumers such as the web-simulator recorder. */
   quiet?: boolean;
+  /** Whether the caller has a resolved workspace credential (a stored login
+   *  token, `--dsn`, or `VIBGRATE_DSN`). Combined with {@link planTier} it
+   *  drives the "Keep tracking your DriftScore" upsell panel and its call to
+   *  action. The CLI sets this from its full credential resolution — including
+   *  the stored login credential (`~/.vibgrate/credentials.json`), which the
+   *  scanner's own `dsn`/env check cannot see. When unset, the scanner falls
+   *  back to the DSN flag/env heuristic. */
+  authenticated?: boolean;
+  /** The workspace's billing tier (`free` | `team` | `business` | `enterprise`),
+   *  learned from the scan preflight. Selects the upsell panel's audience:
+   *  a `free` tier shows the panel with an *upgrade* call to action (they are
+   *  already signed in); any paid tier suppresses it. Undefined when the plan
+   *  could not be determined (offline, no push, or preflight failed) — in which
+   *  case an authenticated caller suppresses the panel rather than risk telling a
+   *  paying customer they are on the free plan. */
+  planTier?: string;
+  /** Destination for the upsell panel's upgrade call to action shown to
+   *  authenticated free-plan users. The CLI passes the preflight's `upgradeUrl`
+   *  when the API returns one, otherwise the workspace dashboard. Defaults to the
+   *  public dashboard host when unset. */
+  upgradeUrl?: string;
   /** Command prefix to use in "next step" hints (e.g. the upsell panel's
    *  `login → push`). `vg` when installed on PATH, `npx @vibgrate/cli` when the
    *  user ran via npx. Defaults to `vg` when unset. */

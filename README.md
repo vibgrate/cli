@@ -20,7 +20,7 @@
 `vg` answers two questions for any repo:
 
 1. **What is this codebase?** — A deterministic code graph: call trees, import paths, impact surfaces, dependency facts.
-2. **How far behind is it?** — A ranked **Upgrade Drift Score** (0–100) with runtime/framework lag, dependency age and EOL proximity, and a prioritised fix list.
+2. **How far behind is it?** — A ranked **DriftScore** (0–100) with runtime/framework lag, dependency age and EOL proximity, and a prioritised fix list.
 
 Everything runs **on your machine**. No API key, no network call, no data leaving your repo unless you explicitly push. The `vibgrate` command is an alias for `vg` — they are interchangeable.
 

@@ -3,6 +3,9 @@ import * as fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
 import { buildGraph } from '../engine/build.js';
+import { verifyDeterminism } from '../engine/verify.js';
+import { epistemicBreakdown } from '../engine/epistemic.js';
+import { signGraphAttestation, verifyGraphAttestation, type SignSummary } from './attest-actions.js';
 import { isModelReady, countPending, resolveEmbedModel } from '../engine/embeddings.js';
 import type { VgGraph } from '../schema.js';
 import { writeArtifacts } from '../engine/artifacts.js';
@@ -30,6 +33,11 @@ interface BuildCmdOpts {
   export?: string;
   warm?: boolean;
   grammars?: string;
+  attest?: boolean;
+  verify?: boolean;
+  attestKey?: string;
+  attestation?: string;
+  pub?: string;
 }
 
 export function registerBuild(program: Command): void {
@@ -49,6 +57,11 @@ export function registerBuild(program: Command): void {
     .option('--no-warm', 'do not warm the semantic index in the background after building')
     .option('--grammars <dir>', 'directory of grammar .wasm files (offline / air-gapped)')
     .option('-o, --export <file>', 'also write the map to a file (format inferred)')
+    .option('--attest', 'sign the built graph → .vibgrate/attestation.intoto.jsonl')
+    .option('--verify', 'verify a committed attestation against the graph (no rebuild)')
+    .option('--attest-key <path>', 'signing key PEM (else $VG_ATTEST_KEY, else .vibgrate/attest-key.pem)')
+    .option('--attestation <file>', 'attestation path (out for --attest, in for --verify)')
+    .option('--pub <path>', 'public key PEM to pin the signer (with --verify)')
     .action(async function (this: Command, paths: string[], opts: BuildCmdOpts) {
       await runBuild(paths, opts, readGlobal(this));
     });
@@ -61,6 +74,14 @@ export async function runBuild(
   global: GlobalOpts,
 ): Promise<void> {
   const root = path.resolve(global.cwd ?? '.');
+
+  // `vg build --verify`: the single verification entry point — determinism
+  // self-check plus (if present) attestation verification.
+  if (opts.verify) {
+    await verifyGraph(root, opts, global);
+    return;
+  }
+
   // Brand banner + live parse progress for an interactive human while the index
   // builds (TTY only; both are no-ops under --json/--quiet/pipe so machine output
   // stays clean).
@@ -128,6 +149,18 @@ export async function runBuild(
 
   if (opts.export) writeExport(result.graph, opts.export);
 
+  // `--attest`: sign the freshly-built graph → .vibgrate/attestation.intoto.jsonl.
+  let attestation: SignSummary | undefined;
+  const attestNotices: string[] = [];
+  if (opts.attest) {
+    const signed = await signGraphAttestation(root, result.graph, {
+      key: opts.attestKey,
+      attestation: opts.attestation,
+    });
+    attestation = signed.summary;
+    attestNotices.push(...signed.notices);
+  }
+
   if (global.json) {
     json({
       ok: true,
@@ -139,8 +172,11 @@ export async function runBuild(
       resolve: result.resolveStats,
       tsc: result.tsc,
       scip: result.scip,
+      epistemic: epistemicBreakdown(result.graph.edges),
       artifacts: written,
       corpusHash: result.graph.provenance.corpusHash,
+      toolchain: result.graph.provenance.toolchain,
+      attestation,
       timingMs: result.timing.totalMs,
       warnings: result.warnings,
     });
@@ -177,6 +213,12 @@ export async function runBuild(
   if (result.scip) {
     info(c.dim(`  scip: ${result.scip.resolved} precise edges from ${result.scip.tool ?? 'index'} (${result.scip.documents} docs)`));
   }
+  const ep = epistemicBreakdown(result.graph.edges);
+  info(
+    c.dim(
+      `  edges by evidence · observed ${ep.observed} · name-matched ${ep['name-matched']} · declared ${ep.declared}`,
+    ),
+  );
   const artifactList = [written.graphPath, written.htmlPath, written.reportPath]
     .filter(Boolean)
     .map((p) => path.relative(root, p as string))
@@ -185,8 +227,72 @@ export async function runBuild(
   if (result.warnings.length) {
     info(c.yellow(`  ${result.warnings.length} parse warning(s) — run with --json for detail`));
   }
+  if (attestation) {
+    for (const n of attestNotices) info(c.yellow(`  ${n}`));
+    info(
+      c.dim(
+        `  attested · keyid ${attestation.keyid} · digest ${attestation.graphDigest.slice(0, 16)}… → ${attestation.out}`,
+      ),
+    );
+  }
 
   maybeWarmEmbeddings(root, result.graph, global, opts.warm !== false);
+}
+
+/**
+ * `vg build --verify` — the single verification entry point. Runs the determinism
+ * self-check (byte-identical rebuilds + toolchain fingerprint) and, when an
+ * attestation is present, verifies it against the on-disk graph. Exit 4 on a
+ * determinism failure, exit 2 on an attestation failure.
+ */
+async function verifyGraph(root: string, opts: BuildCmdOpts, global: GlobalOpts): Promise<void> {
+  const only = opts.only ? opts.only.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+  const jobs = opts.jobs ? Number(opts.jobs) : undefined;
+  const det = await verifyDeterminism({ root, only, exclude: opts.exclude, jobs });
+  const attest = verifyGraphAttestation(root, { attestation: opts.attestation, pub: opts.pub });
+  const attestFailed = !attest.missing && attest.result?.status === 'failed';
+
+  if (global.json) {
+    json({
+      ok: det.ok && !attestFailed,
+      determinism: { ok: det.ok, checks: det.checks, digest: det.digest },
+      attestation: attest.missing
+        ? null
+        : {
+            status: attest.result?.status,
+            signatureValid: attest.result?.signatureValid,
+            signerPinned: attest.result?.signerPinned,
+            digestMatches: attest.result?.digestMatches,
+            dirty: attest.result?.dirty,
+            keyid: attest.result?.keyid,
+            reason: attest.result?.reason,
+          },
+    });
+  } else {
+    info(`${c.cyan('vg build --verify')} · ${path.relative(process.cwd(), root) || '.'}`);
+    for (const check of det.checks) {
+      const mark = check.ok ? c.green('✔') : c.red('✘');
+      const detail = check.detail ? c.dim(` (${check.detail})`) : '';
+      info(`  ${mark} ${check.name}${detail}`);
+    }
+    info(det.ok ? c.green(`  deterministic · digest ${det.digest.slice(0, 16)}…`) : c.red('  NON-DETERMINISTIC'));
+    if (attest.missing) {
+      info(c.dim(`  attestation: none (sign one with \`vg build --attest\`)`));
+    } else {
+      const r = attest.result;
+      const badge =
+        r?.status === 'verified'
+          ? c.green('✔ attestation verified')
+          : r?.status === 'signature-valid'
+            ? c.yellow('~ attestation signature valid')
+            : c.red('✘ attestation failed');
+      info(`  ${badge}${r?.keyid ? c.dim(` · keyid ${r.keyid}`) : ''}`);
+      info(c.dim(`    ${r?.reason ?? ''}`));
+    }
+  }
+
+  if (!det.ok) throw new CliError('determinism self-check failed', ExitCode.NON_DETERMINISTIC);
+  if (attestFailed) throw new CliError('attestation verification failed', ExitCode.GATE_FAILED);
 }
 
 /**

@@ -19,10 +19,18 @@ import {
   ResourceLimitError,
   type ResourceLimits,
 } from './limits.js';
-import { hashString, hashBytes, canonicalize } from './hash.js';
+import { hashString, hashBytes, canonicalize, shortId } from './hash.js';
 import { grammarSetVersion } from './grammars.js';
+import { classifyEpistemic } from './epistemic.js';
 import { VERSION } from '../version.js';
-import { SCHEMA_VERSION, type EdgeKind, type GraphEdge, type ResolverKind, type VgGraph } from '../schema.js';
+import {
+  SCHEMA_VERSION,
+  type EdgeKind,
+  type GraphEdge,
+  type ResolverKind,
+  type Toolchain,
+  type VgGraph,
+} from '../schema.js';
 import type { ScipIndex } from './scip.js';
 import type { FileParse } from './types.js';
 import type { ResolveResult } from './resolve.js';
@@ -205,6 +213,9 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const nodeFileById = new Map(resolved.nodes.map((n) => [n.id, n.file]));
   let edges = resolved.edges;
   const resolvers: ResolverKind[] = [...resolved.stats.resolvers];
+  // Files a precise rung (tsc/scip) covered — their heuristic unknowns are
+  // superseded by the authoritative resolver and must not be reported as unknown.
+  const preciseCoveredFiles = new Set<string>();
 
   // Rung 1 — TypeScript Compiler API for TS/JS (default-on, in-process, no
   // external tool). The type checker resolves member/`this`/imported/aliased
@@ -232,6 +243,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     const res = tsResolveEdges(root, tsFiles, resolved.nodes);
     if (res.stats.files > 0) {
       edges = mergePreciseEdges(edges, res.edges, res.coveredFiles, nodeFileById);
+      for (const f of res.coveredFiles) preciseCoveredFiles.add(f);
       if (!resolvers.includes('tsc')) resolvers.unshift('tsc');
       tscStats = res.stats;
     }
@@ -245,6 +257,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   if (scip) {
     const res = scipEdges(scip.index, resolved.nodes, toRepoRel);
     edges = mergePreciseEdges(edges, res.edges, res.coveredFiles, nodeFileById);
+    for (const f of res.coveredFiles) preciseCoveredFiles.add(f);
     if (!resolvers.includes('scip')) resolvers.unshift('scip');
     scipStats = { ...res.stats, tool: scip.tool };
   }
@@ -263,6 +276,16 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const edgeKinds = [...new Set(analysis.edges.map((e) => e.kind))].sort() as EdgeKind[];
   const corpusHash = computeCorpusHash(parses, hashes);
 
+  // Edge-level epistemic tier: stamp every edge with how it was resolved
+  // (observed / name-matched / declared) so consumers can filter by assurance.
+  // Pure function of the edge's fields + its destination node kind → deterministic.
+  const nodeKindById = new Map(analysis.nodes.map((n) => [n.id, n.kind]));
+  for (const e of analysis.edges) {
+    e.epistemic = classifyEpistemic(e, nodeKindById.get(e.dst));
+  }
+
+  const toolchain = computeToolchain(grammars, resolvers);
+
   const generatedAt = options.generatedAt ?? new Date().toISOString();
   const testsCount = linked.testFiles.length;
   const untestedCount = analysis.nodes.filter(
@@ -279,6 +302,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
       resolver: resolvers,
       deep: options.deep ?? false,
       corpusHash,
+      toolchain,
     },
     meta: {
       root: path.basename(root) === '' ? '.' : '.',
@@ -297,6 +321,15 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     edges: analysis.edges,
     areas: analysis.areas,
   };
+
+  // Unknowns: heuristic references we could not resolve, minus any site a precise
+  // rung authoritatively covered. Ranked/consumed by `vg unknowns`. Deterministic
+  // (already sorted by resolve()); only ids that survived analysis are kept.
+  const survivingIds = new Set(analysis.nodes.map((n) => n.id));
+  const unknowns = resolved.unresolved
+    .filter((u) => !preciseCoveredFiles.has(u.fromRel) && survivingIds.has(u.from))
+    .map((u) => ({ from: u.from, name: u.name, kind: u.kind, count: u.count }));
+  if (unknowns.length) graph.unknowns = unknowns;
 
   // Facts (--deep) and grounding (default on).
   if (options.deep) {
@@ -381,6 +414,33 @@ function mergePreciseEdges(
     (a, b) =>
       a.kind.localeCompare(b.kind) || a.src.localeCompare(b.src) || a.dst.localeCompare(b.dst),
   );
+}
+
+/**
+ * The reproducibility fingerprint: a short content-address over the parts of the
+ * toolchain that deterministically shape graph *content* — schema, tool version,
+ * tree-sitter grammar set, and the resolver kinds available. Node/OS versions are
+ * deliberately excluded so the graph stays byte-stable across host runtimes; the
+ * fingerprint pins the parse/resolve toolchain, which is what actually changes
+ * edges between a CI run and a laptop run. This is the value `vg attest` signs and
+ * `vg verify` compares against a committed graph.
+ */
+function computeToolchain(grammars: string, resolvers: ResolverKind[]): Toolchain {
+  const sortedResolvers = [...new Set(resolvers)].sort();
+  return {
+    schema: SCHEMA_VERSION,
+    tool: VERSION,
+    grammars,
+    resolvers: sortedResolvers,
+    fingerprint: shortId(
+      canonicalize({
+        schema: SCHEMA_VERSION,
+        tool: VERSION,
+        grammars,
+        resolvers: sortedResolvers,
+      }),
+    ),
+  };
 }
 
 /** blake3 over the sorted (path, content-hash) list — the corpus identity. */

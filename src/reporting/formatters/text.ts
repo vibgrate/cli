@@ -131,9 +131,9 @@ export function formatText(artifact: ScanArtifact): string {
   const scoreColor = artifact.drift.score <= 30 ? chalk.green :
     artifact.drift.score <= 60 ? chalk.yellow : chalk.red;
 
-  lines.push(...titleBox('Drift Score Summary'));
+  lines.push(...titleBox('DriftScore Summary'));
   lines.push('');
-  lines.push(chalk.bold('  Drift Score:  ') + scoreColor.bold(`${artifact.drift.score}/100`));
+  lines.push(chalk.bold('  DriftScore:   ') + scoreColor.bold(`${artifact.drift.score}/100`));
   lines.push(chalk.bold('  Risk Level:   ') + riskBadge(artifact.drift.riskLevel));
   lines.push(chalk.bold('  Projects:     ') + `${artifact.projects.length}`);
 

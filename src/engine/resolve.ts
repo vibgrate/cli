@@ -17,9 +17,26 @@ import type { EdgeKind, GraphEdge, GraphNode, NodeKind, ResolverKind } from '../
  * via `edge.resolution`.
  */
 
+/**
+ * A reference the heuristic resolver could not connect to a definition — the raw
+ * material for `vg unknowns`. `from` is the node id of the enclosing definition
+ * (or file) where the reference occurs; `name` is the callee/type it names. We
+ * keep the source-relative path so a later precise rung that covers this file can
+ * suppress the unknown (the compiler is authoritative there).
+ */
+export interface UnresolvedRef {
+  from: string;
+  name: string;
+  kind: 'call' | 'extends' | 'implements';
+  count: number;
+  fromRel: string;
+}
+
 export interface ResolveResult {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** References the heuristic rung could not resolve (deduped, sorted). */
+  unresolved: UnresolvedRef[];
   /** Diagnostic counts, surfaced by `vg status`. */
   stats: {
     callsResolved: number;
@@ -107,6 +124,7 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
   }
 
   const edges = new EdgeSet();
+  const unresolved = new Map<string, UnresolvedRef>();
   const stats: ResolveResult['stats'] = {
     callsResolved: 0,
     callsUnresolved: 0,
@@ -161,6 +179,7 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
         stats.callsResolved++;
       } else {
         stats.callsUnresolved++;
+        bumpUnresolved(unresolved, srcId, call.callee, 'call', p.rel);
       }
     }
   }
@@ -174,6 +193,7 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
       if (!srcId) continue;
       const target = resolveType(h.superName, p.rel, p.lang, imported, defsByName);
       if (target) edges.add(h.kind as EdgeKind, srcId, target.id, 'heuristic', 0.85);
+      else bumpUnresolved(unresolved, srcId, h.superName, h.kind as 'extends' | 'implements', p.rel);
     }
   }
 
@@ -189,10 +209,29 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
     tested: null,
   }));
 
-  return { nodes, edges: edges.toArray(), stats };
+  const unresolvedList = [...unresolved.values()].sort(
+    (a, b) =>
+      a.from.localeCompare(b.from) || a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name),
+  );
+
+  return { nodes, edges: edges.toArray(), unresolved: unresolvedList, stats };
 }
 
 // --- helpers ---
+
+/** Accumulate an unresolved reference, deduped by (from, kind, name) with a count. */
+function bumpUnresolved(
+  map: Map<string, UnresolvedRef>,
+  from: string,
+  name: string,
+  kind: UnresolvedRef['kind'],
+  fromRel: string,
+): void {
+  const key = `${from} ${kind} ${name}`;
+  const existing = map.get(key);
+  if (existing) existing.count++;
+  else map.set(key, { from, name, kind, count: 1, fromRel });
+}
 
 function addNode(map: Map<string, BaseNode>, n: BaseNode): void {
   if (!map.has(n.id)) map.set(n.id, n);

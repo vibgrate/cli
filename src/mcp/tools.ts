@@ -166,6 +166,26 @@ const isDetailed = (args: Record<string, unknown>): boolean => args.response_for
 /** Top-N default for ranked lists under concise (opt up via limit). */
 const CONCISE_MATCHES = 5;
 
+/** Evidence tiers an agent can filter edges by (schema.ts EpistemicTier). */
+const EPISTEMIC_TIERS = ['observed', 'name-matched', 'declared'] as const;
+/** Shared schema fragment: the two optional edge-assurance filters. */
+const EDGE_FILTER_SCHEMA = {
+  min_edge_confidence: { type: 'number', description: '0..1 — drop edges below this confidence' },
+  epistemic: { type: 'string', enum: EPISTEMIC_TIERS, description: 'keep only edges of this evidence tier' },
+};
+/**
+ * Predicate over `{edge}` records for `get_node`'s call/calledBy filtering. Reads
+ * `min_edge_confidence` / `epistemic` defensively; absent → keep everything
+ * (unchanged behaviour). Lets an agent request only high-assurance edges, e.g.
+ * `epistemic:"observed"` for resolver-confirmed calls only.
+ */
+function edgeRecordFilter(args: Record<string, unknown>): (x: { edge: { confidence: number; epistemic?: string } }) => boolean {
+  const min = numOrU(args.min_edge_confidence);
+  const tier = (EPISTEMIC_TIERS as readonly string[]).includes(String(args.epistemic)) ? String(args.epistemic) : undefined;
+  if (min == null && !tier) return () => true;
+  return (x) => (min == null || x.edge.confidence >= min) && (!tier || x.edge.epistemic === tier);
+}
+
 export const TOOLS: VgTool[] = [
   {
     name: 'orient',
@@ -284,6 +304,7 @@ export const TOOLS: VgTool[] = [
       {
         name: { type: 'string' },
         pick: { type: 'number', description: 'nth candidate if ambiguous' },
+        ...EDGE_FILTER_SCHEMA,
         response_format: RESPONSE_FORMAT,
       },
       ['name'],
@@ -292,6 +313,11 @@ export const TOOLS: VgTool[] = [
       const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
       if (!node) return unresolved(candidates);
       const index = new GraphIndex(graph);
+      // Optional edge-assurance filter: keep only calls/callers at/above a
+      // confidence floor and/or of a given evidence tier, before mapping to names.
+      const edgeOk = edgeRecordFilter(args);
+      const calleeRecs = index.callees(node.id).filter(edgeOk);
+      const callerRecs = index.callers(node.id).filter(edgeOk);
       const base = {
         name: node.qualifiedName,
         kind: node.kind,
@@ -307,15 +333,15 @@ export const TOOLS: VgTool[] = [
       // re-sending them just re-bills the same tokens every turn. Return the
       // lightweight identity plus the totals and a `repeat` flag instead.
       if (ctx?.dedup && ctx.seen?.has(node.id)) {
-        return { ...base, repeat: true, callsTotal: uniqueNames(index.callees(node.id).map((x) => x.node.qualifiedName)).length, calledByTotal: uniqueNames(index.callers(node.id).map((x) => x.node.qualifiedName)).length };
+        return { ...base, repeat: true, callsTotal: uniqueNames(calleeRecs.map((x) => x.node.qualifiedName)).length, calledByTotal: uniqueNames(callerRecs.map((x) => x.node.qualifiedName)).length };
       }
       // Bound the relationship arrays: a hub can have hundreds of callers, and
       // every one is paid for on every subsequent turn. Concise shows the top
       // CONCISE_MATCHES with true totals; detailed widens to NODE_EDGE_CAP
       // (the model can widen the blast radius further with `impact_of`).
       const edgeCap = isDetailed(args) ? NODE_EDGE_CAP : CONCISE_MATCHES;
-      const calls = boundList(uniqueNames(index.callees(node.id).map((x) => x.node.qualifiedName)), edgeCap);
-      const calledBy = boundList(uniqueNames(index.callers(node.id).map((x) => x.node.qualifiedName)), edgeCap);
+      const calls = boundList(uniqueNames(calleeRecs.map((x) => x.node.qualifiedName)), edgeCap);
+      const calledBy = boundList(uniqueNames(callerRecs.map((x) => x.node.qualifiedName)), edgeCap);
       ctx?.seen?.add(node.id);
       return {
         ...base,
@@ -358,6 +384,7 @@ export const TOOLS: VgTool[] = [
         change_type: { type: 'string', enum: ['modify', 'delete', 'rename', 'add_dependency'] },
         depth: { type: 'number', description: 'default 4' },
         pick: { type: 'number', description: 'nth candidate if ambiguous' },
+        min_edge_confidence: { type: 'number', description: '0..1 — drop dependents below this (decayed) confidence' },
         response_format: RESPONSE_FORMAT,
       },
       ['name'],
@@ -369,6 +396,20 @@ export const TOOLS: VgTool[] = [
         ? String(args.change_type)
         : 'modify';
       const r = impactOf(graph, node.id, { depth: numOr(args.depth, 4) });
+      // Optional assurance floor: drop dependents whose (distance-decayed) edge
+      // confidence is below the requested threshold. Filtered in the handler —
+      // impact.ts is unchanged. Recompute the direct/transitive tallies so the
+      // decision contract (riskLevel, summary) reflects only the kept rows.
+      const minConf = numOrU(args.min_edge_confidence);
+      if (minConf != null) {
+        const kept = r.affected.filter((a) => a.confidence >= minConf);
+        r.affected = kept;
+        r.direct = kept.filter((i) => i.depth === 1).length;
+        r.transitive = kept.filter((i) => i.depth > 1).length;
+        // Keep minEdgeConfidence consistent with the kept rows (never report a
+        // confidence below the applied floor).
+        r.minEdgeConfidence = kept.length ? Math.min(...kept.map((i) => i.confidence)) : 1;
+      }
       const tests = coveringTests(graph, node);
       const filesAffected = [...new Set(r.affected.map((a) => a.file))];
       // Decision-shaped contract (plan P2): a rename/delete makes every
