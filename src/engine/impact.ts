@@ -1,4 +1,4 @@
-import { GraphIndex } from './relations.js';
+import { indexFor } from './relations.js';
 import type { EdgeKind, VgGraph } from '../schema.js';
 
 /**
@@ -36,7 +36,7 @@ export interface ImpactResult {
 
 export function impactOf(graph: VgGraph, rootId: string, opts: { depth?: number } = {}): ImpactResult {
   const maxDepth = Math.max(1, opts.depth ?? 4);
-  const index = new GraphIndex(graph);
+  const index = indexFor(graph);
   const root = index.node(rootId);
 
   const affected = new Map<string, ImpactItem>();

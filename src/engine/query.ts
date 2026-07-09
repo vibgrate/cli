@@ -1,4 +1,4 @@
-import { GraphIndex } from './relations.js';
+import { indexFor, type GraphIndex } from './relations.js';
 import { cosine, type Embedder } from './embeddings.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
@@ -42,7 +42,7 @@ export function queryGraph(graph: VgGraph, question: string, options: QueryOptio
   const limit = options.limit ?? 12;
   const terms = tokenize(question);
   const weightOf = termWeights(graph, terms);
-  const index = new GraphIndex(graph);
+  const index = indexFor(graph);
 
   const scored: QueryMatch[] = [];
   for (const node of graph.nodes) {
@@ -80,7 +80,7 @@ export async function queryGraphSemantic(
   const limit = options.limit ?? 12;
   const terms = tokenize(question);
   const weightOf = termWeights(graph, terms);
-  const index = new GraphIndex(graph);
+  const index = indexFor(graph);
   const queryVec = await options.embedder.embedQuery(question);
 
   // Raw lexical scores (pre-importance) for normalization.

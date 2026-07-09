@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fixCommand, applyChosenPlan } from './fix.js';
+import { fixCommand, buildTargetResolver } from './fix.js';
 import type { FixPlanRequest, FixPlanResponse, PlannedUpgrade, VulnDelta } from '../planning/types.js';
 import type { ScanArtifact } from '../../core-open/index.js';
 
@@ -168,51 +168,78 @@ describe('vg fix', () => {
   });
 });
 
-describe('applyChosenPlan — monorepo routing', () => {
-  function upgrade(pkg: string, to: string): PlannedUpgrade {
-    return { package: pkg, ecosystem: 'npm', from: '1.0.0', to, kind: 'minor', blastRadius: 'low', fixes: emptyDelta(), reason: 'test' };
-  }
-
-  it('routes each upgrade to the sub-project that declares it, with -w only at the workspace root', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-fix-mono-'));
-    // Root is a pnpm workspace; a root devDep (typescript) and a sub-package dep (hono).
-    fs.writeFileSync(path.join(root, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
-    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'root', private: true }));
-
-    const artifact = {
-      projects: [
-        { type: 'typescript', path: '.', packageManager: 'pnpm', dependencies: [{ package: 'typescript' }] },
-        { type: 'node', path: 'packages/api', packageManager: 'pnpm', dependencies: [{ package: 'hono' }] },
-      ],
+describe('buildTargetResolver', () => {
+  /** Minimal artifact carrying only the fields the resolver reads. */
+  function artifact(
+    projects: Array<{ type: string; path: string; deps: string[] }>,
+  ): ScanArtifact {
+    return {
+      projects: projects.map((p) => ({
+        type: p.type,
+        path: p.path,
+        name: p.path,
+        frameworks: [],
+        dependencies: p.deps.map((d) => ({ package: d, section: 'dependencies' })),
+        dependencyAgeBuckets: { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 },
+      })),
     } as unknown as ScanArtifact;
+  }
+  const upgrade = (pkg: string, ecosystem: string) => ({ package: pkg, ecosystem }) as PlannedUpgrade;
 
-    const results = applyChosenPlan(
-      root,
-      artifact,
-      [upgrade('typescript', '6.0.3'), upgrade('hono', '4.12.28')],
-      { dryRun: true },
+  it('resolves a dependency to the workspace package that declares it (not the root)', async () => {
+    fs.writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
+    const resolve = await buildTargetResolver(
+      dir,
+      artifact([
+        { type: 'node', path: '.', deps: ['typescript'] },
+        { type: 'typescript', path: 'packages/dash', deps: ['wrangler'] },
+      ]),
     );
-
-    const ts = results.find((r) => r.package === 'typescript');
-    const hono = results.find((r) => r.package === 'hono');
-    // Root workspace dep → -w, no path tag.
-    expect(ts?.detail).toContain('would run: pnpm add -w typescript@6.0.3');
-    expect(ts?.detail).not.toContain(' in ');
-    // Sub-package dep → no -w, tagged with the project path.
-    expect(hono?.detail).toContain('would run: pnpm add hono@4.12.28');
-    expect(hono?.detail).toContain('in packages/api');
-
-    fs.rmSync(root, { recursive: true, force: true });
+    // wrangler lives only in packages/dash — never the root, so no -w.
+    expect(resolve(upgrade('wrangler', 'npm'))).toEqual([{ dir: 'packages/dash', isWorkspaceRoot: false }]);
   });
 
-  it('falls back to the repo root for a package no scanned project declares', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-fix-mono-'));
-    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'solo', private: true }));
-    const artifact = { projects: [] } as unknown as ScanArtifact;
+  it('tags the root manifest as the workspace root (so pnpm gets -w) only for root-declared deps', async () => {
+    fs.writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
+    const resolve = await buildTargetResolver(dir, artifact([{ type: 'node', path: '.', deps: ['typescript'] }]));
+    expect(resolve(upgrade('typescript', 'npm'))).toEqual([{ dir: '.', isWorkspaceRoot: true }]);
+  });
 
-    const results = applyChosenPlan(root, artifact, [upgrade('lodash', '4.17.21')], { dryRun: true });
-    expect(results[0].detail).toContain('would run: npm install lodash@4.17.21');
+  it('returns every owning package, sorted, for a dependency shared across packages', async () => {
+    fs.writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
+    const resolve = await buildTargetResolver(
+      dir,
+      artifact([
+        { type: 'node', path: 'packages/b', deps: ['typescript'] },
+        { type: 'node', path: 'packages/a', deps: ['typescript'] },
+      ]),
+    );
+    expect(resolve(upgrade('typescript', 'npm'))).toEqual([
+      { dir: 'packages/a', isWorkspaceRoot: false },
+      { dir: 'packages/b', isWorkspaceRoot: false },
+    ]);
+  });
 
-    fs.rmSync(root, { recursive: true, force: true });
+  it('disambiguates identically-named packages by ecosystem', async () => {
+    const resolve = await buildTargetResolver(
+      dir,
+      artifact([
+        { type: 'node', path: 'js', deps: ['sha2'] },
+        { type: 'rust', path: 'crate', deps: ['sha2'] },
+      ]),
+    );
+    expect(resolve(upgrade('sha2', 'cargo'))).toEqual([{ dir: 'crate', isWorkspaceRoot: false }]);
+    expect(resolve(upgrade('sha2', 'npm'))).toEqual([{ dir: 'js', isWorkspaceRoot: false }]);
+  });
+
+  it('falls back to the root manifest (with -w in a pnpm workspace) for an unlocated dependency', async () => {
+    fs.writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
+    const resolve = await buildTargetResolver(dir, artifact([{ type: 'node', path: 'packages/a', deps: ['react'] }]));
+    expect(resolve(upgrade('left-pad', 'npm'))).toEqual([{ dir: '.', isWorkspaceRoot: true }]);
+  });
+
+  it('does not tag the root when the repo is not a workspace', async () => {
+    const resolve = await buildTargetResolver(dir, artifact([{ type: 'node', path: '.', deps: ['react'] }]));
+    expect(resolve(upgrade('react', 'npm'))).toEqual([{ dir: '.', isWorkspaceRoot: false }]);
   });
 });

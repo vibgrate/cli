@@ -27,8 +27,9 @@ import { analyzeTree, type SourceEcosystem } from '../planning/usage.js';
 import { requestFixPlan, parseFixPlanResponse } from '../utils/fix-plan.js';
 import { renderText, renderMarkdown } from '../planning/render.js';
 import { estimateDriftScore } from '../planning/expected-drift.js';
-import { applyPlan, type NpmPackageManager, type AppliedUpgrade } from '../planning/apply.js';
-import type { FixCandidateInput, FixPlanRequest, FixPlanResponse, PlanTier, UpgradePlan } from '../planning/types.js';
+import { applyPlan, type NpmPackageManager, type WorkspaceTarget } from '../planning/apply.js';
+import { detectWorkspaceRoot } from './update.js';
+import type { FixCandidateInput, FixPlanRequest, FixPlanResponse, PlanTier, PlannedUpgrade, UpgradePlan } from '../planning/types.js';
 
 const SEVERITY_RANK: Record<VulnSeverity, number> = { unknown: 0, low: 1, moderate: 2, high: 3, critical: 4 };
 
@@ -351,6 +352,48 @@ function emit(report: FixPlanResponse, format: string): void {
   }
 }
 
+/** Normalise a project's scan path to a directory relative to the repo root. */
+function relProjectDir(rootDir: string, projectPath: string): string {
+  const rel = path.isAbsolute(projectPath) ? path.relative(rootDir, projectPath) : projectPath;
+  return rel === '' ? '.' : rel;
+}
+
+/**
+ * Build a resolver mapping each upgrade to the workspace manifest(s) that
+ * actually declare it, so the pin command edits the right `package.json` (and
+ * a monorepo dep never lands in the root manifest by accident).
+ *
+ * Ownership is keyed by `${ecosystem}\0${package}` — identical to how
+ * {@link collectCandidates} keys candidates — but drawn from *every* project in
+ * the artifact, not deduped, so a dependency declared in several workspace
+ * packages resolves to all of them. Dirs are sorted for deterministic output.
+ * A dependency with no located owner falls back to the root manifest (with
+ * `-w` when the root is a pnpm workspace, so the command no longer crashes).
+ */
+export async function buildTargetResolver(
+  rootDir: string,
+  artifact: ScanArtifact,
+): Promise<(upgrade: PlannedUpgrade) => WorkspaceTarget[]> {
+  const rootIsWorkspace = await detectWorkspaceRoot(rootDir);
+  const owners = new Map<string, Set<string>>();
+  for (const project of artifact.projects ?? []) {
+    const ecosystem = ecosystemId(project.type);
+    const dir = relProjectDir(rootDir, project.path);
+    for (const dep of project.dependencies ?? []) {
+      const key = `${ecosystem}\0${dep.package}`;
+      (owners.get(key) ?? owners.set(key, new Set()).get(key)!).add(dir);
+    }
+  }
+  const rootFallback: WorkspaceTarget[] = [{ dir: '.', isWorkspaceRoot: rootIsWorkspace }];
+  return (upgrade) => {
+    const dirs = owners.get(`${upgrade.ecosystem}\0${upgrade.package}`);
+    if (!dirs || dirs.size === 0) return rootFallback;
+    return [...dirs]
+      .sort((a, b) => a.localeCompare(b))
+      .map((dir) => ({ dir, isWorkspaceRoot: dir === '.' && rootIsWorkspace }));
+  };
+}
+
 /** The npm-family package manager to drive npm upgrades, from the scan. */
 function npmPackageManager(artifact: ScanArtifact): NpmPackageManager {
   for (const p of artifact.projects ?? []) {
@@ -360,72 +403,6 @@ function npmPackageManager(artifact: ScanArtifact): NpmPackageManager {
     }
   }
   return 'npm';
-}
-
-/** Narrow a scanned project's package-manager string to the npm family (default npm). */
-function toNpmPackageManager(pm?: string): NpmPackageManager {
-  return pm === 'pnpm' || pm === 'yarn' || pm === 'bun' ? pm : 'npm';
-}
-
-/**
- * Locate the scanned project directory(ies) that actually declare `pkg` in the
- * given ecosystem, each with the package manager to drive there. In a monorepo a
- * dependency lives in one or more workspace members; upgrading it in the member
- * that declares it is both correct (no root pollution) and avoids pnpm's
- * ERR_PNPM_ADDING_TO_ROOT guard. Empty when we can't place it (caller falls back
- * to the repo root).
- */
-function projectsDeclaring(
-  rootDir: string,
-  artifact: ScanArtifact,
-  pkg: string,
-  ecosystem: string,
-): Array<{ dir: string; pm: NpmPackageManager }> {
-  const out: Array<{ dir: string; pm: NpmPackageManager }> = [];
-  const seen = new Set<string>();
-  for (const project of artifact.projects ?? []) {
-    if (ecosystemId(project.type) !== ecosystem) continue;
-    if (!(project.dependencies ?? []).some((d) => d.package === pkg)) continue;
-    const dir = path.resolve(rootDir, project.path && project.path !== '.' ? project.path : '.');
-    if (seen.has(dir)) continue;
-    seen.add(dir);
-    out.push({ dir, pm: toNpmPackageManager(project.packageManager) });
-  }
-  return out;
-}
-
-/**
- * Apply the chosen plan, routing each upgrade to the sub-project(s) that declare
- * it (falling back to the repo root when a package can't be located). Groups by
- * target directory so each project's package manager runs once, and tags each
- * result with the relative project path so a monorepo run is legible.
- */
-export function applyChosenPlan(
-  rootDir: string,
-  artifact: ScanArtifact,
-  upgrades: UpgradePlan['upgrades'],
-  opts: { dryRun?: boolean },
-): AppliedUpgrade[] {
-  const fallbackPm = npmPackageManager(artifact);
-  const groups = new Map<string, { dir: string; pm: NpmPackageManager; upgrades: UpgradePlan['upgrades'] }>();
-  for (const u of upgrades) {
-    let targets = projectsDeclaring(rootDir, artifact, u.package, u.ecosystem);
-    if (targets.length === 0) targets = [{ dir: rootDir, pm: fallbackPm }];
-    for (const t of targets) {
-      const group = groups.get(t.dir) ?? { dir: t.dir, pm: t.pm, upgrades: [] };
-      group.upgrades.push(u);
-      groups.set(t.dir, group);
-    }
-  }
-  const results: AppliedUpgrade[] = [];
-  for (const group of groups.values()) {
-    const applied = applyPlan(group.dir, group.upgrades, { dryRun: opts.dryRun, packageManager: group.pm });
-    const rel = path.relative(rootDir, group.dir) || '.';
-    for (const r of applied) {
-      results.push(rel === '.' ? r : { ...r, detail: [r.detail, `in ${rel}`].filter(Boolean).join(' · ') });
-    }
-  }
-  return results;
 }
 
 /** Interactive plan picker (TTY). Resolves to the chosen tier, or null to cancel. */
@@ -495,7 +472,9 @@ async function runApplyFlow(
     return;
   }
 
-  const results = applyChosenPlan(rootDir, artifact, chosen.upgrades, { dryRun: opts.dryRun });
+  const pm = npmPackageManager(artifact);
+  const resolveTargets = await buildTargetResolver(rootDir, artifact);
+  const results = applyPlan(rootDir, chosen.upgrades, { dryRun: opts.dryRun, packageManager: pm, resolveTargets });
 
   if (opts.dryRun) {
     console.log(chalk.bold(`\nDry run — ${chosen.label} plan (${chosen.upgrades.length} upgrade(s)):`));

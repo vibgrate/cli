@@ -1,13 +1,17 @@
 import type { AdvancedScanHook } from '../core-open/index.js';
+import { advancedScanHook } from './advanced-analysis.js';
 
 /**
- * Open build: there is no proprietary advanced-analysis hook.
+ * Resolve the advanced-analysis hook that populates the artifact's `extended`
+ * block (tech stack, service integrations, build/deploy, security posture,
+ * dependency graph/risk, TypeScript modernity, file hotspots, breaking-change
+ * exposure, architecture, code quality, UI purpose).
  *
- * In the public, Apache-2.0 distribution every reporting command runs purely on
- * the open base engine (`runCoreScan` from `@vibgrate/core-open`). This shim
- * keeps the call sites in `scan`/`baseline` unchanged while always resolving to
- * `undefined`, so the scan falls back to the open base engine.
+ * These are the structured, deterministic scanners — they emit typed facts
+ * (names, versions, counts, booleans, paths) and never upload raw source text.
+ * See {@link advancedScanHook} for the deliberate exclusion of the former
+ * raw-line `requirements-scanners` family.
  */
 export async function loadAdvancedScanHook(): Promise<AdvancedScanHook | undefined> {
-  return undefined;
+  return advancedScanHook;
 }

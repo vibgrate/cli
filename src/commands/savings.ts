@@ -33,7 +33,7 @@ export function registerSavings(program: Command): void {
           c.dim(
             report.enabled
               ? '  no calls recorded yet in this window'
-              : '  recording is off. Enable with `vg serve --savings`, then query via MCP.',
+              : '  recording is off. Enable it for MCP with `vg serve --savings`, and for CLI calls by passing `--client=<ai>` to vg.',
           ),
         );
         return;
@@ -48,6 +48,8 @@ export function registerSavings(program: Command): void {
 
       // Per-command breakdown — every recorded tool, its outcomes, and success rate.
       printBreakdown(usage);
+      // The command-vs-MCP split and which AI is calling.
+      printSplit(usage);
     });
   applyGlobalOptions(cmd);
 }
@@ -91,4 +93,28 @@ function printBreakdown(usage: UsageReport): void {
       ''.padStart(9),
   );
   info(c.dim(`    avg success across commands: ${usage.avgSuccessPct}%`));
+}
+
+/**
+ * Render the command-vs-MCP split (how calls arrived) and which AI client made
+ * them — the signals that show whether assistants use the MCP tools or shell out
+ * to `vg`, and that feed the opt-in share-stats upload.
+ */
+function printSplit(usage: UsageReport): void {
+  const label = (key: string): string => (key === 'mcp' ? 'MCP tools' : key === 'cli' ? 'vg CLI' : key);
+  if (usage.sources.length) {
+    info('');
+    info(c.bold('  by source') + c.dim('  (how the call arrived)'));
+    for (const s of usage.sources) {
+      const pct = usage.totals.calls ? Math.round((s.calls / usage.totals.calls) * 100) : 0;
+      info(`    ${label(s.key).padEnd(12)} ${String(s.calls).padStart(6)} calls ${c.dim(`(${pct}%)`)}`);
+    }
+  }
+  if (usage.clients.length) {
+    info('');
+    info(c.bold('  by client') + c.dim('  (which AI is calling; pass --client to vg to attribute CLI calls)'));
+    for (const cl of usage.clients) {
+      info(`    ${cl.key.padEnd(12)} ${String(cl.calls).padStart(6)} calls`);
+    }
+  }
 }

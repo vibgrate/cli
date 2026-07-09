@@ -1,0 +1,19 @@
+{
+  "//": "Policy for scripts/check-drift-gate.mjs — the dependency-drift gate that runs the built vg against this package. Tightening or loosening these thresholds is a reviewed action (GUARDRAILS §7): the gate must not be silently weakened.",
+  "driftBudget": 30,
+  "currency": "major",
+  "//allow": "typescript lags a major DELIBERATELY: the CLI consumes the TypeScript compiler API (src/reporting/config.ts — createSourceFile, ScriptKind, isPropertyAssignment, …), which the TS 7 native port removes/reshapes, and @typescript-eslint peers still cap at typescript <6.1.0. Revisit when both our API usage and the lint toolchain support TS 7, then delete this allowance.",
+  "allow": {
+    "typescript": "major"
+  },
+  "worseningPercent": 0,
+  "baseline": "gate/drift-baseline.json",
+  "scanExclude": [
+    "**/test-solutions/**",
+    "**/test/**",
+    "**/fixtures/**",
+    "**/__fixtures__/**",
+    "**/scenarios/**",
+    "**/demo/**"
+  ]
+}

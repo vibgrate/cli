@@ -53,3 +53,32 @@ function push(map: Map<string, GraphEdge[]>, key: string, value: GraphEdge): voi
   if (list) list.push(value);
   else map.set(key, [value]);
 }
+
+/**
+ * Memoized `GraphIndex`, keyed on the graph object's identity.
+ *
+ * The index (node-by-id + in/out adjacency) is a pure function of the graph's
+ * content, and every read path rebuilds it from scratch — an O(nodes + edges)
+ * pass that, on a large map, costs hundreds of milliseconds *per query*. Under
+ * `vg serve` the same parsed graph object is reused across many tool calls
+ * (`GraphSource` caches it by file mtime and only replaces the reference when
+ * `graph.json` actually changes), so rebuilding the index on every call is pure
+ * waste. Keying a `WeakMap` on that object identity builds the index once and
+ * reuses it until the file is rebuilt — at which point `GraphSource` hands back a
+ * *new* object, this map misses, and the stale index is collected with the old
+ * graph. Correct and stale-safe by construction: a different graph is a
+ * different object, so there is no cross-graph reuse and nothing to invalidate.
+ *
+ * `GraphIndex` is read-only (no method mutates its maps), so sharing one
+ * instance across callers is safe.
+ */
+const INDEX_CACHE = new WeakMap<VgGraph, GraphIndex>();
+
+export function indexFor(graph: VgGraph): GraphIndex {
+  let idx = INDEX_CACHE.get(graph);
+  if (!idx) {
+    idx = new GraphIndex(graph);
+    INDEX_CACHE.set(graph, idx);
+  }
+  return idx;
+}

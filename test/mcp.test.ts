@@ -185,4 +185,17 @@ describe('usage breakdown (vg savings per-command)', () => {
     const report = readSavings(root, 30, Date.now());
     expect(report.queries).toBe(3); // 2 query_graph + 1 get_node, not list_hubs
   });
+
+  it('attributes MCP calls to source "mcp" and the detected client', async () => {
+    const r2 = makeProject(SAMPLE_FILES);
+    try {
+      recordUsage(r2, 'query_graph', await tool('query_graph').handler(graph, { question: 'order' }, { root: r2, local: true }), 'Claude Code');
+      const usage = readUsage(r2, 30, Date.now());
+      expect(usage.sources.find((s) => s.key === 'mcp')?.calls).toBe(1);
+      expect(usage.sources.find((s) => s.key === 'cli')).toBeUndefined();
+      expect(usage.clients.find((c) => c.key === 'claude-code')?.calls).toBe(1); // sanitized
+    } finally {
+      cleanup(r2);
+    }
+  });
 });

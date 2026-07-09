@@ -18,6 +18,14 @@ export interface GlobalOpts {
   local?: boolean;
   /** --quiet */
   quiet?: boolean;
+  /**
+   * --client <name> — the AI on the other end (e.g. `claude`, `cursor`). When an
+   * AI host runs `vg`, passing this lets navigation calls be counted in the local
+   * savings ledger with the command-vs-MCP split, so `vg savings` and the opt-in
+   * share-stats upload can attribute usage. Counts only; a coarse label, not
+   * identity (sanitized before it's recorded). Absent for human-run commands.
+   */
+  client?: string;
 }
 
 /**
@@ -35,6 +43,7 @@ export function applyGlobalOptions(cmd: Command): Command {
     .option('--no-cache', 'full rebuild (ignore the incremental cache)')
     .option('--local', 'never touch the network (lexical-only semantic)')
     .option('--quiet', 'suppress progress output')
+    .option('--client <name>', 'identify the AI client (e.g. claude) so navigation calls are counted in vg savings')
     .option('--no-color', 'disable colored output');
 }
 
@@ -50,5 +59,6 @@ export function readGlobal(cmd: Command): GlobalOpts {
     noCache: o.cache === false,
     local: o.local as boolean | undefined,
     quiet: o.quiet as boolean | undefined,
+    client: o.client as string | undefined,
   };
 }

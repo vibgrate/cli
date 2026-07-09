@@ -1,8 +1,9 @@
 import { Command } from 'commander';
 import { resolveOne } from '../engine/lookup.js';
 import { shortestPath } from '../engine/paths.js';
+import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
-import { requireGraph } from './util.js';
+import { requireGraph, rootOf } from './util.js';
 import { ambiguityError } from './ambiguity.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { c, info, json } from '../util/output.js';
@@ -28,6 +29,15 @@ export function registerPath(program: Command): void {
       if (!rb.node) throw ambiguityError(`"${b}" ${rb.candidates.length ? 'is ambiguous' : 'not found'}`, rb.candidates, '--pick-b');
 
       const result = shortestPath(graph, ra.node.id, rb.node.id);
+      // Record the call for the command-vs-MCP split when an AI identified itself
+      // (before the not-found throw, so a no-path attempt is counted as a miss).
+      if (global.client) {
+        recordCliCall(
+          rootOf(global),
+          { tool: CLI_TOOL_ALIASES.path, client: global.client, outcome: result ? 'complete' : 'miss' },
+          Date.now(),
+        );
+      }
       if (!result) {
         throw new CliError(
           `no path between ${ra.node.qualifiedName} and ${rb.node.qualifiedName}`,

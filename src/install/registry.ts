@@ -141,7 +141,9 @@ export function installAssistant(a: Assistant, opts: InstallOptions): InstallAct
   let note: string | undefined;
 
   if (a.skill) {
-    writeFileEnsured(path.join(opts.root, a.skill), skillMarkdown());
+    // Pass the assistant id as the --client value so the installed skill tells
+    // this AI to identify itself on CLI calls (the MCP path detects it itself).
+    writeFileEnsured(path.join(opts.root, a.skill), skillMarkdown(a.id));
     wrote.push(a.skill);
   }
   if (a.mcp) {
@@ -153,7 +155,7 @@ export function installAssistant(a: Assistant, opts: InstallOptions): InstallAct
     skipped.push('mcp (host-specific setup)');
   }
   if (a.nudge && opts.hook !== false) {
-    writeNudge(path.join(opts.root, a.nudge.file), a.nudge, opts.smallRepo);
+    writeNudge(path.join(opts.root, a.nudge.file), a.nudge, opts.smallRepo, a.id);
     wrote.push(a.nudge.file);
   } else if (a.nudge) {
     skipped.push('nudge (--no-hook)');
@@ -243,16 +245,16 @@ function removeMcp(file: string, target: McpTarget): boolean {
   return true;
 }
 
-function writeNudge(file: string, target: NudgeTarget, smallRepo: boolean): void {
+function writeNudge(file: string, target: NudgeTarget, smallRepo: boolean, client?: string): void {
   if (target.kind === 'file') {
     // Dedicated rule file owned by vg (Cursor .mdc needs frontmatter).
     const body = file.endsWith('.mdc')
-      ? `---\ndescription: vg code graph\nalwaysApply: true\n---\n${stripMarkers(nudgeMarkdown(smallRepo))}`
-      : stripMarkers(nudgeMarkdown(smallRepo));
+      ? `---\ndescription: vg code graph\nalwaysApply: true\n---\n${stripMarkers(nudgeMarkdown(smallRepo, client))}`
+      : stripMarkers(nudgeMarkdown(smallRepo, client));
     writeFileEnsured(file, `${body}\n`);
     return;
   }
-  upsertBlock(file, nudgeMarkdown(smallRepo));
+  upsertBlock(file, nudgeMarkdown(smallRepo, client));
 }
 
 function upsertBlock(file: string, block: string): void {

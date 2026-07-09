@@ -1,8 +1,10 @@
 import { Command } from 'commander';
 import { resolveOne } from '../engine/lookup.js';
-import { GraphIndex } from '../engine/relations.js';
+import { indexFor } from '../engine/relations.js';
+import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
+import { countTokens } from '../engine/tokens.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
-import { requireGraph } from './util.js';
+import { requireGraph, rootOf } from './util.js';
 import { ambiguityError } from './ambiguity.js';
 import { c, info, json } from '../util/output.js';
 
@@ -29,12 +31,36 @@ export function registerShow(program: Command): void {
         throw ambiguityError(`"${name}" is ambiguous`, candidates);
       }
 
-      const index = new GraphIndex(graph);
+      const index = indexFor(graph);
       const callees = dedupe(index.callees(node.id).map((x) => x.node));
       const callers = dedupe(index.callers(node.id).map((x) => x.node));
       const extendsEdges = index.out(node.id, 'extends').concat(index.out(node.id, 'implements'));
       const supertypes = extendsEdges.map((e) => index.node(e.dst)?.qualifiedName).filter(Boolean);
       const area = graph.areas.find((a) => a.id === node.area);
+
+      // `show` is the CLI twin of the MCP `get_node` tool — record it under that
+      // shared name (source `cli`) when an AI host identified itself. Baseline =
+      // the node's file plus each caller/callee file a grep/read agent would open.
+      if (global.client) {
+        const files = new Set<string>([node.file]);
+        for (const n of [...callees, ...callers]) if (n.file) files.add(n.file);
+        const shown =
+          node.qualifiedName +
+          (node.signature ?? '') +
+          callees.map((n) => n.qualifiedName).join('') +
+          callers.map((n) => n.qualifiedName).join('');
+        recordCliCall(
+          rootOf(global),
+          {
+            tool: CLI_TOOL_ALIASES.show,
+            client: global.client,
+            outcome: 'complete',
+            vgTokens: countTokens(shown),
+            baselineFiles: files.size,
+          },
+          Date.now(),
+        );
+      }
 
       if (global.json) {
         json({

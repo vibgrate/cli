@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { GraphIndex } from './relations.js';
+import { GraphIndex, indexFor } from './relations.js';
 import { impactOf } from './impact.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
@@ -17,7 +17,7 @@ export interface CoveringTest {
 }
 
 export function coveringTests(graph: VgGraph, node: GraphNode, index?: GraphIndex): CoveringTest[] {
-  const idx = index ?? new GraphIndex(graph);
+  const idx = index ?? indexFor(graph);
   const byId = idx.nodeById;
   const out = new Map<string, CoveringTest>();
   for (const e of idx.in(node.id, 'test')) {
@@ -39,7 +39,7 @@ export interface TestImpact {
 
 /** The test files that exercise any node in the impact set of `rootId`. */
 export function testsToRun(graph: VgGraph, rootId: string, depth = 4): TestImpact {
-  const idx = new GraphIndex(graph);
+  const idx = indexFor(graph);
   const impact = impactOf(graph, rootId, { depth });
   const affectedIds = new Set<string>([rootId, ...impact.affected.map((a) => a.id)]);
 

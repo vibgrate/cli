@@ -4,10 +4,17 @@ import { cacheDir } from './cache.js';
 
 /**
  * Usage-savings tracking (VG-DEVELOPMENT-PLAN §5) — local, privacy-safe, and
- * **opt-in** (no telemetry by default, per GUARDRAILS). We record *counts only*
- * — never code, never the question text — comparing the context tokens vg
- * returned against a grep/read baseline estimate. `vg savings` reports it with
- * the assumptions shown; figures are labelled estimates, never a hero number.
+ * **opt-in**. We record *counts only* — never code, never the question text —
+ * comparing the context tokens vg returned against a grep/read baseline estimate.
+ * `vg savings` reports it with the assumptions shown; figures are labelled
+ * estimates, never a hero number.
+ *
+ * Each entry also carries which path served the call (`source`: an MCP tool call
+ * vs a `vg <subcommand>` CLI invocation) and, when known, a coarse `client` label
+ * (the AI on the other end). That powers the command-vs-MCP split and the
+ * per-client breakdown in `vg savings`, and is the basis for the opt-in
+ * `vg serve --share-stats` upload (see ./stats-share.ts). Nothing here leaves the
+ * machine unless the operator explicitly enables sharing.
  */
 
 const LEDGER = 'savings.jsonl';
@@ -16,6 +23,52 @@ export const PER_FILE_TOKENS = 400;
 
 /** The tools whose grep/read token baseline the savings summary is computed from. */
 export const SAVINGS_TOOLS = new Set(['query_graph', 'get_node']);
+
+/**
+ * How a navigation call reached the map:
+ *  - `mcp` — a tool call over the local `vg serve` MCP server;
+ *  - `cli` — a `vg <subcommand>` invocation that identified itself with `--client`.
+ * Both are recorded into one ledger under a shared tool vocabulary (CLI
+ * subcommands are normalised to their MCP tool names via CLI_TOOL_ALIASES), so
+ * `(tool, source)` is the command-vs-MCP split and the token math stays unified.
+ * Absent on ledger lines written before sources existed → read as `mcp` (the
+ * only path that recorded then).
+ */
+export type Source = 'mcp' | 'cli';
+
+/**
+ * Canonical tool name a CLI navigation subcommand maps to — the same vocabulary
+ * the MCP tools use, so a `vg ask --client=claude` and an MCP `query_graph` call
+ * land on one row distinguished only by `source`. A subcommand with no MCP twin
+ * (e.g. `tree`) keeps its own name.
+ */
+export const CLI_TOOL_ALIASES: Readonly<Record<string, string>> = {
+  ask: 'query_graph',
+  show: 'get_node',
+  impact: 'impact_of',
+  path: 'find_path',
+  hubs: 'list_hubs',
+  areas: 'list_areas',
+  tree: 'tree',
+};
+
+/**
+ * Normalise a free-form client name (from `--client` or the MCP `initialize`
+ * handshake) to a short, bounded, non-PII token: lowercase, `[a-z0-9._-]` only,
+ * ≤ 40 chars. Never carries arbitrary user input into the ledger or an upload —
+ * it is a coarse client label (e.g. `claude`, `cursor`, `cline`), not identity.
+ * Returns `'unknown'` when nothing usable is provided.
+ */
+export function sanitizeClient(name: string | undefined | null): string {
+  if (typeof name !== 'string') return 'unknown';
+  const cleaned = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return cleaned || 'unknown';
+}
 
 /**
  * Outcome of a recorded navigation call:
@@ -33,6 +86,35 @@ export interface SavingEntry {
   outcome?: Outcome;
   vgTokens: number;
   baselineTokens: number;
+  // Optional for back-compat: absent `source` reads as `mcp`. `client` is a
+  // sanitized coarse label (see sanitizeClient) or absent when unidentified.
+  source?: Source;
+  client?: string;
+}
+
+/**
+ * Record a CLI navigation call (`vg <subcommand> --client=<ai>`) into the same
+ * local ledger the MCP path uses. Only ever called when the caller passed
+ * `--client` — i.e. an AI host explicitly identified itself — so a human's bare
+ * `vg ask` still records nothing. Counts only; never the question or code.
+ */
+export function recordCliCall(
+  root: string,
+  entry: { tool: string; client?: string; outcome: Outcome; vgTokens?: number; baselineFiles?: number },
+  now: number,
+): void {
+  recordSaving(
+    root,
+    {
+      tool: entry.tool,
+      source: 'cli',
+      client: sanitizeClient(entry.client),
+      outcome: entry.outcome,
+      vgTokens: entry.vgTokens ?? 0,
+      baselineTokens: (entry.baselineFiles ?? 0) * PER_FILE_TOKENS,
+    },
+    now,
+  );
 }
 
 function ledgerPath(root: string): string {
@@ -126,15 +208,52 @@ export interface CommandStat {
   successPct: number;
 }
 
+/** Calls attributed to one dimension value (a source, or a client). */
+export interface DimensionStat {
+  key: string;
+  calls: number;
+  complete: number;
+  partial: number;
+  miss: number;
+  successPct: number;
+}
+
 export interface UsageReport {
   enabled: boolean;
   days: number;
   /** One row per tool used, ordered by call count (desc), then name. */
   commands: CommandStat[];
+  /** The command-vs-MCP split: calls grouped by `source` (`cli` / `mcp`). */
+  sources: DimensionStat[];
+  /** Which AI is calling: calls grouped by coarse `client` label. */
+  clients: DimensionStat[];
   /** Column sums across all commands. */
   totals: { calls: number; complete: number; partial: number; miss: number };
   /** The mean of the per-command success percentages (each command weighted equally). */
   avgSuccessPct: number;
+}
+
+interface OutcomeCounts {
+  complete: number;
+  partial: number;
+  miss: number;
+}
+
+/** Turn a name→outcome-count map into sorted DimensionStat rows. */
+function toDimensionStats(byKey: Map<string, OutcomeCounts>): DimensionStat[] {
+  return [...byKey.entries()]
+    .map(([key, r]) => {
+      const calls = r.complete + r.partial + r.miss;
+      return {
+        key,
+        calls,
+        complete: r.complete,
+        partial: r.partial,
+        miss: r.miss,
+        successPct: calls ? Math.round(((r.complete + r.partial) / calls) * 100) : 0,
+      };
+    })
+    .sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key));
 }
 
 /**
@@ -146,7 +265,14 @@ export interface UsageReport {
 export function readUsage(root: string, days: number, now: number): UsageReport {
   const file = ledgerPath(root);
   const cutoff = now - days * 24 * 60 * 60 * 1000;
-  const byTool = new Map<string, { complete: number; partial: number; miss: number }>();
+  const byTool = new Map<string, OutcomeCounts>();
+  const bySource = new Map<string, OutcomeCounts>();
+  const byClient = new Map<string, OutcomeCounts>();
+  const bump = (m: Map<string, OutcomeCounts>, key: string, outcome: Outcome): void => {
+    const row = m.get(key) ?? { complete: 0, partial: 0, miss: 0 };
+    row[outcome]++;
+    m.set(key, row);
+  };
   if (fs.existsSync(file)) {
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
       if (!line.trim()) continue;
@@ -154,27 +280,24 @@ export function readUsage(root: string, days: number, now: number): UsageReport 
         const e = JSON.parse(line) as SavingEntry;
         if (e.ts < cutoff) continue;
         const outcome: Outcome = e.outcome ?? 'complete';
-        const row = byTool.get(e.tool) ?? { complete: 0, partial: 0, miss: 0 };
-        row[outcome]++;
-        byTool.set(e.tool, row);
+        // Back-compat: lines written before these dims existed are MCP calls
+        // from an unidentified client.
+        bump(byTool, e.tool, outcome);
+        bump(bySource, e.source ?? 'mcp', outcome);
+        bump(byClient, e.client ?? 'unknown', outcome);
       } catch {
         /* skip corrupt line */
       }
     }
   }
-  const commands: CommandStat[] = [...byTool.entries()]
-    .map(([tool, r]) => {
-      const calls = r.complete + r.partial + r.miss;
-      return {
-        tool,
-        calls,
-        complete: r.complete,
-        partial: r.partial,
-        miss: r.miss,
-        successPct: calls ? Math.round(((r.complete + r.partial) / calls) * 100) : 0,
-      };
-    })
-    .sort((a, b) => b.calls - a.calls || a.tool.localeCompare(b.tool));
+  const commands: CommandStat[] = toDimensionStats(byTool).map((d) => ({
+    tool: d.key,
+    calls: d.calls,
+    complete: d.complete,
+    partial: d.partial,
+    miss: d.miss,
+    successPct: d.successPct,
+  }));
   const totals = commands.reduce(
     (t, c) => ({
       calls: t.calls + c.calls,
@@ -187,5 +310,13 @@ export function readUsage(root: string, days: number, now: number): UsageReport 
   const avgSuccessPct = commands.length
     ? Math.round(commands.reduce((s, c) => s + c.successPct, 0) / commands.length)
     : 0;
-  return { enabled: savingsRecorded(root), days, commands, totals, avgSuccessPct };
+  return {
+    enabled: savingsRecorded(root),
+    days,
+    commands,
+    sources: toDimensionStats(bySource),
+    clients: toDimensionStats(byClient),
+    totals,
+    avgSuccessPct,
+  };
 }

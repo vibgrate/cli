@@ -498,6 +498,7 @@ Vibgrate includes a full code graph engine — call trees, impact surfaces, sema
 | `--json` | Machine-readable JSON output |
 | `--quiet` | Suppress non-error output |
 | `--local` | Offline mode — no network calls or downloads |
+| `--client <name>` | Identify the AI client (e.g. `claude`) so navigation calls are counted in `vg savings` |
 | `--deep` | Enable deep derivation (for `vg facts`, `vg build`) |
 | `--no-cache` | Skip and clear cached data |
 
@@ -556,6 +557,8 @@ vg ask "<question>"
 ```
 
 A local ONNX embedding model is downloaded once on first use, then cached and fully offline. Degrades gracefully to lexical-only under `--local` or `--no-semantic`.
+
+> **Semantic search is opt-in.** The embedding backend (`fastembed`, which pulls a native ONNX runtime) is declared as an **optional dependency**: package managers install it by default, but if it's absent — e.g. you installed with `--omit=optional`, or it failed to build on your platform — `vg ask` and `vg embed` transparently fall back to lexical + structural search. Nothing else in the CLI needs it, so `vg build`, `vg show`, `vg impact`, drift reporting, and MCP serving all run without it. If you never use semantic `ask`, you can install lean: `npm i @vibgrate/cli --omit=optional`.
 
 Before answering, `ask` checks whether files changed since the map was last built and, if so, rebuilds it incrementally first (only the changed files re-parse) — so answers always reflect the code as it is now. The check is stat-based and costs almost nothing when nothing changed; `--no-refresh` opts out.
 
@@ -683,10 +686,15 @@ vg serve
 | `--port <n>` | `7437` | Port for `--http` |
 | `--host <h>` | `127.0.0.1` | Host for `--http` |
 | `--savings` | — | Record local, counts-only usage savings (opt-in) |
+| `--share-stats` | — | Also upload the counts-only usage ledger to Vibgrate to improve the local MCP (opt-in; off by default; implies `--savings`; disabled under `--local`) |
 | `--dedup` | — | Collapse a node's heavy relation lists on repeat reads within a session, to save tokens (opt-in) |
 | `--no-refresh` | — | Serve the map as built; skip the auto-rebuild when files change |
 
 Via stdio (default), your AI assistant spawns the server. Via `--http`, it runs as a local HTTP endpoint for browser or shared access.
+
+**Usage stats — local by default, sharing is opt-in.** `--savings` records a *counts-only* ledger under `.vibgrate/` — per navigation call: which tool, how it resolved (complete/partial/miss), the vg-vs-grep token figures, whether it came over the MCP (`mcp`) or the `vg` CLI (`cli`), and a coarse client label (which AI). `vg savings` reports it locally; nothing leaves your machine. `--share-stats` additionally uploads that same counts-only ledger to Vibgrate periodically, so we can see how the local MCP is used and improve it. It **never** sends code, file paths, question text, repo identity, or any credential — only counts, outcomes, token figures, the vg version, your OS/arch, and a random per-install id. It's off unless you pass the flag, is disabled entirely under `--local`, and the endpoint can be overridden with `VIBGRATE_STATS_ENDPOINT`.
+
+**Attributing CLI calls.** The MCP path detects the calling client automatically from the connection handshake. For CLI calls, pass `--client=<ai>` (e.g. `vg "how does auth work" --client=claude`) so the call is attributed in `vg savings` and any shared stats — this is what `vg install` writes into each assistant's skill. Without `--client`, a bare `vg ask` records nothing.
 
 **The map stays fresh while you (or your AI) edit code.** Each tool call runs a cheap stat-only freshness check against the last build; when files really changed, the server rebuilds the map incrementally in-process — only changed files re-parse — and answers from the updated graph. Probes are debounced with a self-tuning cadence (2s floor, scaling with measured probe cost so probing never exceeds a few percent of serve time even on very large repos), rebuilds are single-flight and cross-process locked, and touch-only changes (a `git checkout`, a re-save with identical content) are recognized by content hash and never trigger a rebuild. There is no filesystem watcher and no daemon: freshness is checked exactly when it matters — at query time. The server also hot-reloads `graph.json` whenever it changes on disk, so an external `vg` build is picked up on the next call too.
 
@@ -1326,7 +1334,7 @@ import type {
 
 ## Requirements
 
-- **Node.js** >= 22.0.0
+- **Node.js** >= 20.0.0
 - Works on macOS, Linux, and Windows
 
 ---

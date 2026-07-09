@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { resolveOne } from '../engine/lookup.js';
 import { impactOf } from '../engine/impact.js';
 import { testsToRun, detectRunner } from '../engine/test-query.js';
+import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
 import { ambiguityError } from './ambiguity.js';
@@ -31,6 +32,14 @@ export function registerImpact(program: Command): void {
 
       const depth = Number(opts.depth) || 4;
       const result = impactOf(graph, node.id, { depth });
+      // Record the call for the command-vs-MCP split when an AI identified itself.
+      if (global.client) {
+        recordCliCall(
+          rootOf(global),
+          { tool: CLI_TOOL_ALIASES.impact, client: global.client, outcome: 'complete' },
+          Date.now(),
+        );
+      }
       const withTests = opts.tests || opts.failOnUntested;
       const ti = withTests ? testsToRun(graph, node.id, depth) : undefined;
       const runner = ti ? detectRunner(rootOf(global), node.lang) : undefined;

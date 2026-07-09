@@ -1,0 +1,11 @@
+{
+  "banned": [
+    { "name": "request", "use": "undici or the native fetch API", "reason": "deprecated and unmaintained since 2020" },
+    { "name": "node-sass", "use": "sass (Dart Sass)", "reason": "deprecated; native bindings break across Node majors" },
+    { "name": "tslint", "use": "eslint with @typescript-eslint", "reason": "deprecated in favour of ESLint" },
+    { "name": "istanbul", "use": "nyc or the built-in vitest coverage", "reason": "unmaintained; superseded by nyc" },
+    { "name": "bower", "use": "npm or pnpm", "reason": "deprecated package manager" },
+    { "name": "left-pad", "use": "String.prototype.padStart", "reason": "trivial; native since ES2017" },
+    { "name": "phantomjs", "use": "Playwright or headless Chromium", "reason": "abandoned; unmaintained since 2018" }
+  ]
+}

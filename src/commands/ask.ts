@@ -10,6 +10,7 @@ import {
 } from '../engine/embeddings.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { driftCount } from '../engine/freshness.js';
+import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
 import { c, info, json, out } from '../util/output.js';
@@ -84,6 +85,25 @@ export function registerAsk(program: Command): void {
       } else {
         result = queryGraph(graph, q, { budget });
         if (global.local) note = 'semantic skipped under --local; used lexical';
+      }
+
+      // Count this call in the local ledger when an AI host identified itself
+      // (`--client`). `ask` is the CLI twin of the MCP `query_graph` tool, so it
+      // records under that shared name with source `cli` — that's the
+      // command-vs-MCP split `vg savings` reports.
+      if (global.client) {
+        const files = new Set(result.matches.map((m) => m.node.file).filter(Boolean));
+        recordCliCall(
+          root,
+          {
+            tool: CLI_TOOL_ALIASES.ask,
+            client: global.client,
+            outcome: result.matches.length === 0 ? 'miss' : 'complete',
+            vgTokens: result.tokensEstimate,
+            baselineFiles: files.size,
+          },
+          Date.now(),
+        );
       }
 
       if (global.json) {

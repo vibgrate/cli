@@ -9,7 +9,17 @@ export const SKILL_MARKER = 'vg-graph-skill';
 export const NUDGE_BEGIN = '<!-- vg:begin -->';
 export const NUDGE_END = '<!-- vg:end -->';
 
-export function skillMarkdown(): string {
+/**
+ * The `--client` value the skill/nudge tells the assistant to pass to `vg` so its
+ * CLI calls are attributed. `vg install <assistant>` passes the assistant id
+ * (e.g. `claude`, `cursor`); the canonical reference copy uses a placeholder.
+ */
+function clientFlag(client?: string): string {
+  return client ? `--client=${client}` : '--client=<your-ai>';
+}
+
+export function skillMarkdown(client?: string): string {
+  const cf = clientFlag(client);
   return `---
 name: vg
 description: Query the local code graph (vg) for structure, impact, and navigation instead of grepping/reading many files.
@@ -20,13 +30,26 @@ description: Query the local code graph (vg) for structure, impact, and navigati
 This repo has a deterministic code graph built by \`vg\`. Prefer it over reading or
 grepping many files — it is smaller, more relevant context, and free.
 
-## When to use it
+## Prefer the MCP tools
 
-- **Understand code:** \`vg "<question>"\` returns a budget-bounded, fact-annotated
-  context block. Start here instead of opening files blindly.
-- **Find a symbol:** \`vg show <name>\` — what it is, what it calls, what calls it.
-- **Before changing something:** \`vg impact <name>\` — what breaks if you change it.
-- **Navigate:** \`vg path <A> <B>\`, \`vg tree <name>\`, \`vg hubs\`, \`vg areas\`.
+If the \`vg\` MCP server is registered (it is after \`vg install\`), call its
+read-only tools directly — they are the **fastest** path. The server keeps the
+map parsed, the relation index warm, and the embedding model loaded across calls,
+so each query is cheaper than spawning the CLI fresh. Use:
+\`query_graph\`, \`get_node\`, \`impact_of\`, \`find_path\`, \`list_hubs\`, \`list_areas\`,
+\`get_graph_summary\`, \`search_symbols\`. They are side-effect-free and
+auto-approvable, and the server records which client is calling automatically.
+
+## If you use the \`vg\` CLI instead
+
+When the MCP server isn't available, use the CLI — and **always pass \`${cf}\`**
+so your calls are counted (that's how the CLI-vs-MCP split is measured and the
+tools improved):
+
+- **Understand code:** \`vg "<question>" ${cf}\` — a budget-bounded, fact-annotated context block.
+- **Find a symbol:** \`vg show <name> ${cf}\` — what it is, what it calls, what calls it.
+- **Before changing something:** \`vg impact <name> ${cf}\` — what breaks if you change it.
+- **Navigate:** \`vg path <A> <B> ${cf}\`, \`vg tree <name> ${cf}\`.
 
 ## Dependencies & library docs
 
@@ -35,12 +58,6 @@ grepping many files — it is smaller, more relevant context, and free.
   \`vg report\` renders it (text | json | sarif | md).
 - **Version-correct docs:** \`vg lib <name>\` returns drift-annotated, version-
   specific usage docs for a library — inject these instead of guessing an API.
-
-## Via MCP
-
-If the \`vg\` MCP server is registered, call its read-only tools directly:
-\`query_graph\`, \`get_node\`, \`impact_of\`, \`find_path\`, \`list_hubs\`, \`list_areas\`,
-\`get_graph_summary\`. They are side-effect-free and auto-approvable.
 
 ## Keep it fresh
 
@@ -52,28 +69,33 @@ across machines).
 `;
 }
 
-export function nudgeMarkdown(smallRepo: boolean): string {
+export function nudgeMarkdown(smallRepo: boolean, client?: string): string {
+  const cf = clientFlag(client);
   if (smallRepo) {
     return `${NUDGE_BEGIN}
 ## Code navigation (vg)
 
 This repo is small enough that searching files directly is fine. Still, before a
-change, \`vg impact <name>\` shows what it breaks, and \`vg "<question>"\` gives a
-compact, cited context block when you want one.
+change, \`vg impact <name> ${cf}\` shows what it breaks, and \`vg "<question>" ${cf}\`
+gives a compact, cited context block when you want one. Prefer the \`vg\` MCP tools
+when the server is registered; when you use the CLI, pass \`${cf}\` so the call is
+counted.
 ${NUDGE_END}`;
   }
   return `${NUDGE_BEGIN}
 ## Code navigation (vg) — prefer the map
 
 A deterministic code graph is available. It is usually the faster, cheaper path
-than reading or grepping many files:
+than reading or grepping many files. Prefer the \`vg\` MCP tools when the server is
+registered (fastest — the map and model stay warm across calls). When you use the
+CLI instead, pass \`${cf}\` so the call is counted:
 
-- \`vg "<question>"\` — a compact, fact-annotated context block for a question.
-- \`vg show <name>\` — what a symbol is, its callers and callees.
-- \`vg impact <name>\` — what breaks if you change it.
+- \`vg "<question>" ${cf}\` — a compact, fact-annotated context block for a question.
+- \`vg show <name> ${cf}\` — what a symbol is, its callers and callees.
+- \`vg impact <name> ${cf}\` — what breaks if you change it.
 
-Prefer these (or the \`vg\` MCP tools) before opening many files. This is advisory,
-not mandatory — remove it with \`vg uninstall\` (or delete this block).
+This is advisory, not mandatory — remove it with \`vg uninstall\` (or delete this
+block).
 ${NUDGE_END}`;
 }
 

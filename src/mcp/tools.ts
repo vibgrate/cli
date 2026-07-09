@@ -1,7 +1,7 @@
 import { queryGraph, queryGraphSemantic } from '../engine/query.js';
 import { loadEmbedder, getNodeEmbeddings, isModelReady, withTimeout, type Embedder } from '../engine/embeddings.js';
 import { resolveOne } from '../engine/lookup.js';
-import { GraphIndex } from '../engine/relations.js';
+import { indexFor } from '../engine/relations.js';
 import { shortestPath } from '../engine/paths.js';
 import { impactOf } from '../engine/impact.js';
 import { coveringTests } from '../engine/test-query.js';
@@ -320,7 +320,7 @@ export const TOOLS: VgTool[] = [
     handler: (graph, args, ctx) => {
       const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
       if (!node) return unresolved(candidates);
-      const index = new GraphIndex(graph);
+      const index = indexFor(graph);
       // Optional edge-assurance filter: keep only calls/callers at/above a
       // confidence floor and/or of a given evidence tier, before mapping to names.
       const edgeOk = edgeRecordFilter(args);

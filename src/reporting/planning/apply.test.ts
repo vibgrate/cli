@@ -1,7 +1,4 @@
 import { describe, it, expect, vi } from 'vitest';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import { pmCommandFor, applyPlan, type UpgradeCommand } from './apply.js';
 import type { PlannedUpgrade } from './types.js';
 
@@ -36,12 +33,20 @@ describe('pmCommandFor', () => {
     expect(pmCommandFor('swift', 'nio', '2.0')).toBeNull();
   });
 
-  it('adds the workspace-root flag for pnpm/yarn at a workspace root', () => {
-    expect(pmCommandFor('npm', 'typescript', '6.0.3', 'pnpm', { workspaceRoot: true })).toEqual({ cmd: 'pnpm', args: ['add', '-w', 'typescript@6.0.3'] });
-    expect(pmCommandFor('npm', 'typescript', '6.0.3', 'yarn', { workspaceRoot: true })).toEqual({ cmd: 'yarn', args: ['add', '-W', 'typescript@6.0.3'] });
-    // Not a workspace root → no flag; npm/bun never take one.
-    expect(pmCommandFor('npm', 'typescript', '6.0.3', 'pnpm')).toEqual({ cmd: 'pnpm', args: ['add', 'typescript@6.0.3'] });
-    expect(pmCommandFor('npm', 'typescript', '6.0.3', 'npm', { workspaceRoot: true })).toEqual({ cmd: 'npm', args: ['install', 'typescript@6.0.3'] });
+  it('adds -w for pnpm at a workspace root, but only for pnpm', () => {
+    expect(pmCommandFor('npm', 'lodash', '4.17.21', 'pnpm', { workspaceRoot: true })).toEqual({
+      cmd: 'pnpm',
+      args: ['add', '-w', 'lodash@4.17.21'],
+    });
+    // npm/yarn/bun add to the root package.json without a flag.
+    expect(pmCommandFor('npm', 'lodash', '4.17.21', 'npm', { workspaceRoot: true })).toEqual({
+      cmd: 'npm',
+      args: ['install', 'lodash@4.17.21'],
+    });
+    expect(pmCommandFor('npm', 'lodash', '4.17.21', 'yarn', { workspaceRoot: true })).toEqual({
+      cmd: 'yarn',
+      args: ['add', 'lodash@4.17.21'],
+    });
   });
 });
 
@@ -74,21 +79,65 @@ describe('applyPlan', () => {
     expect(results[0].detail).toMatch(/would run: npm install lodash@4.17.21/);
   });
 
+  it('runs the pin command in the owning workspace package directory (no -w)', () => {
+    const run = vi.fn((_cmd: UpgradeCommand, _cwd: string) => ({ ok: true }));
+    const results = applyPlan('/repo', [upgrade({ package: 'wrangler', ecosystem: 'npm', to: '4.108.0' })], {
+      run,
+      packageManager: 'pnpm',
+      resolveTargets: () => [{ dir: 'packages/dash', isWorkspaceRoot: false }],
+    });
+    expect(run).toHaveBeenCalledWith({ cmd: 'pnpm', args: ['add', 'wrangler@4.108.0'] }, '/repo/packages/dash');
+    expect(results[0].status).toBe('applied');
+  });
+
+  it('adds -w only when the owning manifest is the pnpm workspace root', () => {
+    const run = vi.fn((_cmd: UpgradeCommand, _cwd: string) => ({ ok: true }));
+    applyPlan('/repo', [upgrade({ package: 'typescript', ecosystem: 'npm', to: '6.0.3' })], {
+      run,
+      packageManager: 'pnpm',
+      resolveTargets: () => [{ dir: '.', isWorkspaceRoot: true }],
+    });
+    expect(run).toHaveBeenCalledWith({ cmd: 'pnpm', args: ['add', '-w', 'typescript@6.0.3'] }, '/repo');
+  });
+
+  it('applies to every owning package and lists them in the detail', () => {
+    const run = vi.fn((_cmd: UpgradeCommand, _cwd: string) => ({ ok: true }));
+    const results = applyPlan('/repo', [upgrade({ package: 'typescript', ecosystem: 'npm', to: '6.0.3' })], {
+      run,
+      packageManager: 'pnpm',
+      resolveTargets: () => [
+        { dir: 'packages/a', isWorkspaceRoot: false },
+        { dir: 'packages/b', isWorkspaceRoot: false },
+      ],
+    });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenNthCalledWith(1, { cmd: 'pnpm', args: ['add', 'typescript@6.0.3'] }, '/repo/packages/a');
+    expect(run).toHaveBeenNthCalledWith(2, { cmd: 'pnpm', args: ['add', 'typescript@6.0.3'] }, '/repo/packages/b');
+    expect(results[0].status).toBe('applied');
+    expect(results[0].detail).toBe('applied in packages/a, packages/b');
+  });
+
+  it('reports which package failed when only one owner errors', () => {
+    const run = vi.fn((_cmd: UpgradeCommand, cwd: string) =>
+      cwd.endsWith('packages/b') ? { ok: false, detail: 'exit 1' } : { ok: true },
+    );
+    const results = applyPlan('/repo', [upgrade({ package: 'typescript', ecosystem: 'npm', to: '6.0.3' })], {
+      run,
+      packageManager: 'pnpm',
+      resolveTargets: () => [
+        { dir: 'packages/a', isWorkspaceRoot: false },
+        { dir: 'packages/b', isWorkspaceRoot: false },
+      ],
+    });
+    expect(results[0].status).toBe('failed');
+    expect(results[0].detail).toBe('packages/b: exit 1');
+  });
+
   it('reports a missing toolchain (ENOENT) as manual, not failed', () => {
     const results = applyPlan('/repo', [upgrade({ package: 'sha2', ecosystem: 'cargo', to: '0.11.0' })], {
       run: () => ({ ok: false, toolMissing: true, detail: 'cargo is not installed or not on PATH' }),
     });
     expect(results[0].status).toBe('manual');
     expect(results[0].detail).toMatch(/cargo is not installed.*upgrade manually/);
-  });
-
-  it('passes the workspace-root flag when run at a real pnpm workspace root', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-apply-ws-'));
-    fs.writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), "packages:\n  - 'packages/*'\n");
-    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'root', private: true }));
-    const run = vi.fn((_cmd: UpgradeCommand) => ({ ok: true }));
-    applyPlan(dir, [upgrade({ package: 'typescript', ecosystem: 'npm', to: '6.0.3' })], { run, packageManager: 'pnpm' });
-    expect(run).toHaveBeenCalledWith({ cmd: 'pnpm', args: ['add', '-w', 'typescript@6.0.3'] }, dir);
-    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

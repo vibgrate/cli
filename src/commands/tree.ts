@@ -1,8 +1,9 @@
 import { Command } from 'commander';
 import { resolveOne } from '../engine/lookup.js';
-import { GraphIndex } from '../engine/relations.js';
+import { GraphIndex, indexFor } from '../engine/relations.js';
+import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
-import { requireGraph } from './util.js';
+import { requireGraph, rootOf } from './util.js';
 import { ambiguityError } from './ambiguity.js';
 import { c, info, json } from '../util/output.js';
 import type { GraphNode } from '../schema.js';
@@ -25,9 +26,17 @@ export function registerTree(program: Command): void {
       const { node, candidates } = resolveOne(graph, name, opts.pick ? Number(opts.pick) : undefined);
       if (!node) throw ambiguityError(`"${name}" ${candidates.length ? 'is ambiguous' : 'not found'}`, candidates);
 
-      const index = new GraphIndex(graph);
+      const index = indexFor(graph);
       const maxDepth = Math.max(1, Number(opts.depth) || 3);
       const direction = opts.callers ? 'callers' : 'callees';
+      // Record the call for the command-vs-MCP split when an AI identified itself.
+      if (global.client) {
+        recordCliCall(
+          rootOf(global),
+          { tool: CLI_TOOL_ALIASES.tree, client: global.client, outcome: 'complete' },
+          Date.now(),
+        );
+      }
 
       if (global.json) {
         json(toJsonTree(index, node, direction, maxDepth, new Set()));

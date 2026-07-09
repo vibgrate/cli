@@ -8,7 +8,7 @@ import { parseGraph } from '../engine/serialize.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { TOOLS, warmEmbedderInBackground } from './tools.js';
 import { renderToolResult } from './response.js';
-import { recordSaving, PER_FILE_TOKENS, SAVINGS_TOOLS, type Outcome } from '../engine/savings.js';
+import { recordSaving, sanitizeClient, PER_FILE_TOKENS, SAVINGS_TOOLS, type Outcome } from '../engine/savings.js';
 import { countTokens } from '../engine/tokens.js';
 import { VERSION } from '../version.js';
 import type { VgGraph } from '../schema.js';
@@ -46,6 +46,13 @@ const FAILURE_COOLDOWN_MS = 60_000;
 export interface ServeOptions {
   /** Record local, counts-only usage savings (opt-in). */
   savings?: boolean;
+  /**
+   * Periodically upload the counts-only ledger to Vibgrate (opt-in; off by
+   * default). Implies recording. The upload itself is driven by the serve
+   * command (see commands/serve.ts + engine/stats-share.ts); here it just also
+   * turns recording on so there's something to send.
+   */
+  shareStats?: boolean;
   /** Air-gapped mode (no model downloads). */
   local?: boolean;
   /** Collapse repeat heavy relation lists within a session (opt-in). */
@@ -123,7 +130,10 @@ export class GraphSource {
 }
 
 export function createServer(source: GraphSource, opts: ServeOptions = {}): Server {
-  const { savings = false, local = false, dedup = false } = opts;
+  const { savings = false, shareStats = false, local = false, dedup = false } = opts;
+  // Recording feeds both the local `vg savings` report and the opt-in upload, so
+  // enabling either turns it on. Absent both, `vg serve` records nothing.
+  const record = savings || shareStats;
   // root = the directory containing .vibgrate/ (graphPath = root/.vibgrate/graph.json)
   const root = path.dirname(path.dirname(source.graphPath));
   // Per-session memory of node ids whose full detail was already returned — the
@@ -177,10 +187,11 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
     try {
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;
       const result = await tool.handler(graph, args, { root, local, dedup, seen });
-      // Opt-in, counts-only usage ledger (no telemetry by default): one entry per
-      // navigation call, with its outcome and — for the grep-baseline tools — the
-      // token counts the savings summary is built from.
-      if (savings) recordUsage(root, tool.name, result);
+      // Opt-in, counts-only usage ledger: one entry per navigation call, with its
+      // outcome, the grep-baseline token counts, and — so `vg savings` can show
+      // the command-vs-MCP split and which AI is calling — the source (`mcp`) and
+      // the client detected from the initialize handshake.
+      if (record) recordUsage(root, tool.name, result, detectClient(server));
       // Compact → clamp to the token ceiling → compact-serialise. See ./response.ts.
       return renderToolResult(result);
     } catch (err) {
@@ -220,7 +231,7 @@ function sleep(ms: number): Promise<void> {
  * set that (get_node never did), so the old code recorded nothing under normal
  * concise usage and `vg savings` always reported "recording is off".
  */
-export function recordUsage(root: string, tool: string, result: unknown): void {
+export function recordUsage(root: string, tool: string, result: unknown, client?: string): void {
   const outcome = classifyOutcome(result);
   let vgTokens = 0;
   let baselineTokens = 0;
@@ -234,7 +245,26 @@ export function recordUsage(root: string, tool: string, result: unknown): void {
     // `file` plus the files of the callers/callees it returned in one call.
     baselineTokens = referencedFiles(result).size * PER_FILE_TOKENS;
   }
-  recordSaving(root, { tool, outcome, vgTokens, baselineTokens }, Date.now());
+  recordSaving(
+    root,
+    { tool, outcome, vgTokens, baselineTokens, source: 'mcp', client: sanitizeClient(client) },
+    Date.now(),
+  );
+}
+
+/**
+ * The coarse client label from the MCP `initialize` handshake, if the host sent
+ * `clientInfo`. Read defensively — `getClientVersion()` exists on the SDK Server
+ * once initialized, but we never want telemetry bookkeeping to throw. Returns
+ * undefined when unknown (then sanitized to `'unknown'`).
+ */
+function detectClient(server: Server): string | undefined {
+  try {
+    const info = (server as { getClientVersion?: () => { name?: string } | undefined }).getClientVersion?.();
+    return typeof info?.name === 'string' ? info.name : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

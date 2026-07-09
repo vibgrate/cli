@@ -63,4 +63,25 @@ stop and leave it out.
 - Commit with Conventional Commits (`feat:`/`fix:`/`docs:`/`chore:`) and a DCO
   sign-off (`git commit -s`).
 - Use `vg` (not `vibgrate`) in docs and examples; both run the same binary.
-- Node >= 20, pnpm workspace.
+- Node >= 22, pnpm workspace. (Node 20 reached end-of-life; we stay current on
+  the runtime for the same reason we gate dependency drift — see below.)
+
+## Dependency-drift gate (dogfooding)
+
+Reducing dependency drift is the product, so this package must be an exemplar of
+it. Before the CLI is published, `scripts/check-drift-gate.mjs` runs the
+just-built `vg` against this package itself and blocks the release if our own
+hygiene regresses:
+
+- **standards** — no banned/abandoned dependency (`vibgrate.standards.json`) is
+  in use. Offline + deterministic; also runs on every PR.
+- **currency** — no direct dependency is a whole major behind latest, bar
+  reviewed allowances. Online (publish) only.
+- **budget** — the blended DriftScore stays within `driftBudget`. Online only.
+
+Policy lives in the reviewed `drift-gate.config.json` + `vibgrate.standards.json`.
+Loosening a threshold or adding an `allow` entry is a deliberate, reviewed change
+(GUARDRAILS §7) — record *why* in the config, never weaken the gate to get a
+release out. The gate runs at publish (`publish-cli.yml`, hard) and on every PR
+(`ci.yml` `cli-public` job: offline blocking + online advisory). It exits 2
+(`GATE_FAILED`) on breach; its logic is unit-tested in `test/drift-gate.test.ts`.
