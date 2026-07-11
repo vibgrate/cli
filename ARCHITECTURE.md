@@ -11,10 +11,10 @@ The Vibgrate CLI (`vg`, alias `vibgrate`) turns a codebase into a deterministic
 **code graph** and serves that graph to humans and AI coding agents. There are
 five surfaces:
 
-1. A deterministic, no-API-key **code graph** (`build`/`ask`/`show`/`impact`/
+1. A deterministic, no-API-key **[code graph](https://vibgrate.com/graph)** (`build`/`ask`/`show`/`impact`/
    `path`/`tree`/`hubs`/`areas`/`map`).
-2. A local, read-only **MCP server** (`vg serve`).
-3. **Drift reporting** (`vg scan`/`report`/`baseline`/`sbom`).
+2. A local, read-only **MCP server** (`vg serve`, [Vibgrate AI Context](https://vibgrate.com/library)).
+3. **Drift reporting** (`vg scan`/`report`/`baseline`/`sbom`) — see [DriftScore](https://vibgrate.com/driftscore).
 4. Version-correct **library documentation** injection (`vg lib`/`vg drift`).
 5. One-command **install** into 21+ AI assistants (`vg install`).
 

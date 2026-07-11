@@ -13,7 +13,7 @@ I want to start tracking upgrade drift in this project with Vibgrate. Complete t
 Install the CLI and create a DSN token:
 ```bash
 npm install -g @vibgrate/cli@latest
-npx vibgrate dsn create --workspace new
+npx @vibgrate/cli dsn create --workspace new
 ```
 
 Copy the DSN output (starts with `vibgrate+https://...`)
@@ -24,10 +24,10 @@ Add the DSN to my shell profile:
 echo 'export VIBGRATE_DSN="<dsn-from-step-1>"' >> ~/.zshrc && source ~/.zshrc
 ```
 
-### Step 3: Run Scan with Dashboard Push
-Run a scan and push results to the dashboard:
+### Step 3: Run Scan with Vibgrate Cloud Push
+Run a scan and push results to Vibgrate Cloud:
 ```bash
-npx vibgrate scan --push --no-color
+npx @vibgrate/cli scan --push --no-color
 ```
 
 ### Step 4: Explain My Results
@@ -48,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '20' }
+        with: { node-version: '22' }
       - run: npx @vibgrate/cli scan --format sarif -o drift.sarif
       - uses: github/codeql-action/upload-sarif@v3
         with: { sarif_file: drift.sarif }
@@ -65,7 +65,7 @@ Start with Step 1 now.
 
 1. **Installs CLI & creates DSN** — Uses `dsn create --workspace new` to generate a token
 2. **Configures env** — Adds `VIBGRATE_DSN` to your shell profile
-3. **Scans with push** — Runs drift scan and uploads to dashboard
+3. **Scans with push** — Runs drift scan and uploads to [Vibgrate Cloud](https://vibgrate.com/cloud) ([dash.vibgrate.com](https://dash.vibgrate.com))
 4. **Explains results** — Tells you what's outdated and what to fix first
 5. **Creates CI workflow** — Tracks drift on every commit
 

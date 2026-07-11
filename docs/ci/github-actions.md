@@ -58,3 +58,9 @@ The SARIF template produces and uploads SARIF using GitHub's CodeQL upload actio
 ```bash
 npx @vibgrate/cli scan --format sarif --out vibgrate-results.sarif --fail-on error
 ```
+
+## Related
+
+- Full CI reference (Azure DevOps, GitLab CI, generic pipelines): [DOCS.md](../../DOCS.md#ci-integration)
+- Vibgrate CLI overview and live demo: <https://vibgrate.com/cli>
+- What the gates measure: [DriftScore](https://vibgrate.com/driftscore)

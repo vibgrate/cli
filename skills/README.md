@@ -17,8 +17,8 @@ Each install is idempotent and repo-local (team-shareable). It writes:
 
 1. A **skill file** (`SKILL.md`) — see [`vg/SKILL.md`](./vg/SKILL.md) for the
    canonical content.
-2. A **local MCP server** registration (`vg serve`) where the assistant supports
-   it — read-only, auto-approvable tools.
+2. A **local MCP server** registration (`vg serve`, [Vibgrate AI Context](https://vibgrate.com/library))
+   where the assistant supports it — read-only, auto-approvable tools.
 3. An **advisory nudge** in the assistant's instructions file (opt-out, never
    "mandatory").
 

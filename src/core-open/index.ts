@@ -183,6 +183,13 @@ export { prepareCompressedUpload } from './utils/compact-artifact.js';
 export { parseDsn } from './utils/dsn.js';
 export { fetchScanPreflight } from './utils/scan-preflight.js';
 export type { ScanPreflightResponse } from './utils/scan-preflight.js';
+export { fetchRiskySymbols, PROJECT_TYPE_TO_OSV_ECOSYSTEM } from './utils/symbols-preflight.js';
+export type {
+  SymbolsPreflightDependency,
+  SymbolsPreflightResponse,
+  RiskySymbol,
+  RiskySymbolManifestEntry,
+} from './utils/symbols-preflight.js';
 export { resolveRepositoryName } from './utils/repository-name.js';
 export { computeRepoFingerprint, computeTreeMetadataHash } from './utils/repo-fingerprint.js';
 export type { RepoFingerprint } from './utils/repo-fingerprint.js';

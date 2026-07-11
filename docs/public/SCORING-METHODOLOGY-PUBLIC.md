@@ -5,8 +5,10 @@ evaluating how Vibgrate measures software drift and risk.
 **Posture:** *disclosed factors, disclosed formulas, disclosed bands — proprietary
 calibration.* Everything needed to understand and sanity-check a score is here;
 the tuned constants and breaking-change corpus stay proprietary (the credit-bureau
-model). This is the technical companion to the marketing overview at
-`vibgrate.com/driftscore`, `/riskscore`, and `/driftrisk`.
+model). This is the technical companion to the overview pages at
+[vibgrate.com/driftscore](https://vibgrate.com/driftscore),
+[vibgrate.com/riskscore](https://vibgrate.com/riskscore), and
+[vibgrate.com/driftrisk](https://vibgrate.com/driftrisk).
 
 Vibgrate publishes **three** numbers. Two are independent measurements on
 different axes; the third is a derived headline. Keeping them separate is the
@@ -25,7 +27,7 @@ different problems and get different numbers.
 > only ever compared across matching methodologies.
 >
 > **Availability:** **DriftScore is free** and computed by the CLI (offline).
-> **RiskScore and DriftRisk are premium and Vibgrate Cloud-only** — they require a
+> **RiskScore and DriftRisk are premium and [Vibgrate Cloud](https://vibgrate.com/cloud)-only** — they require a
 > completed scan ingestion (server-side security data + the blend), so they appear
 > in the dashboard, never in the free/offline CLI output.
 
@@ -227,7 +229,7 @@ exploited does.
 
 ## 5. What is published vs proprietary
 
-**Published (this document + `vibgrate.com`):** the axes and their philosophy,
+**Published (this document + [vibgrate.com](https://vibgrate.com)):** the axes and their philosophy,
 every factor and data source, the formulas, the bands, worked examples, the
 methodology versions and changelog, and the coverage/confidence semantics.
 

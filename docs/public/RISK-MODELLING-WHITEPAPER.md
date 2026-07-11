@@ -16,7 +16,7 @@ breaking-change corpus stay proprietary.
 project's lockfiles/manifests** (the packages, versions, runtimes, and known
 vulnerabilities they resolve to) — not application source-code SAST, secrets, or
 infrastructure misconfiguration. **Availability:** DriftScore is free (CLI);
-**RiskScore and DriftRisk are premium, Vibgrate Cloud-only** and require a
+**RiskScore and DriftRisk are premium, [Vibgrate Cloud](https://vibgrate.com/cloud)-only** and require a
 completed scan ingestion (server-side security data + the blend).
 
 ---
@@ -40,11 +40,11 @@ Vibgrate takes a different position, aligned with the current evidence-first
 consensus (CISA KEV → EPSS → SSVC, now extended by NIST's LEV work) [9][11][15].
 We publish **three** numbers, not one:
 
-- **DriftScore** (`driftscore-3.0`) — maintainability and currency. How far the
+- **[DriftScore](https://vibgrate.com/driftscore)** (`driftscore-3.0`) — maintainability and currency. How far the
   stack has drifted from supported, current baselines.
-- **RiskScore** (`riskscore-1.0`) — security and business exposure. The
+- **[RiskScore](https://vibgrate.com/riskscore)** (`riskscore-1.0`) — security and business exposure. The
   probability and consequence of harm right now.
-- **DriftRisk™** (`driftrisk-1.1`) — a derived executive headline, a pure
+- **[DriftRisk™](https://vibgrate.com/driftrisk)** (`driftrisk-1.1`) — a derived executive headline, a pure
   function of the two axes above.
 
 DriftScore and RiskScore measure different things and must stay separate: a
@@ -70,11 +70,11 @@ correct action differs completely. A needs an emergency patch today; B needs a
 planned modernization quarter. Vibgrate keeps them on separate axes so the number
 tells you *which* problem you have.
 
-| Score | Axis | Scale (0 = best) | Trademark | Tag |
-|---|---|---|---|---|
-| **DriftScore** | Maintainability / currency | 0 current → 100 max drift | No | `driftscore-N` |
-| **RiskScore** | Security & business exposure | 0 safe → 100 max risk | No | `riskscore-N` |
-| **DriftRisk™** | Combined executive headline | 0 → 100 (more = more pressure) | **Yes** | `driftrisk-N` |
+| Score | Axis | Scale (0 = best) | Tag |
+|---|---|---|---|
+| **DriftScore** | Maintainability / currency | 0 current → 100 max drift | `driftscore-N` |
+| **RiskScore** | Security & business exposure | 0 safe → 100 max risk | `riskscore-N` |
+| **DriftRisk™** | Combined executive headline | 0 → 100 (more = more pressure) | `driftrisk-N` |
 
 The two axes are deliberately inverted-proof against each other: both run 0 (good)
 to 100 (bad), but they answer different questions, so a reader who sees `Drift 74

@@ -13,7 +13,7 @@ Help me set up Vibgrate to track upgrade drift in this project. Do the following
    npm install -g @vibgrate/cli@latest
 
 2. Create a DSN token for Vibgrate Cloud uploads:
-   npx vibgrate dsn create --workspace new
+   npx @vibgrate/cli dsn create --workspace new
    
    Copy the DSN output (starts with vibgrate+https://...)
 
@@ -22,7 +22,7 @@ Help me set up Vibgrate to track upgrade drift in this project. Do the following
    - Source it: source ~/.zshrc
 
 4. Run a scan with Vibgrate Cloud push:
-   npx vibgrate scan --push
+   npx @vibgrate/cli scan --push
 
 5. After the scan completes, tell me:
    - My overall drift score and risk level
@@ -41,7 +41,7 @@ When you paste this prompt, your AI assistant will:
 1. **Install the CLI** — Gets the latest Vibgrate CLI globally
 2. **Create a DSN** — Generates a token using `dsn create --workspace new`
 3. **Configure your environment** — Adds `VIBGRATE_DSN` to your shell profile
-4. **Run a scan with push** — Scans and uploads results to Vibgrate Cloud
+4. **Run a scan with push** — Scans and uploads results to [Vibgrate Cloud](https://vibgrate.com/cloud) ([dash.vibgrate.com](https://dash.vibgrate.com))
 5. **Explain the results** — Summarizes your drift score and top priorities
 
 ---
@@ -117,7 +117,7 @@ Vibgrate push is failing. Help me debug:
 1. Check if VIBGRATE_DSN is set: echo $VIBGRATE_DSN
 2. Verify the DSN format is correct (starts with vibgrate+https://)
 3. Run push with verbose: npx @vibgrate/cli push --verbose
-4. If the DSN is invalid, create a new one: npx vibgrate dsn create --workspace new
+4. If the DSN is invalid, create a new one: npx @vibgrate/cli dsn create --workspace new
 ```
 
 ### "Scan is slow"

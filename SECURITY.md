@@ -60,3 +60,5 @@ documentation) may make outbound network requests; these are explicit and
 opt-in. If you discover a path where source or sensitive data is transmitted
 unexpectedly in the default workflow, please treat it as a security issue and
 report it via the process above.
+
+More on Vibgrate's security posture: <https://vibgrate.com/security>.

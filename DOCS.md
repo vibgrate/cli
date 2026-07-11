@@ -1,6 +1,6 @@
 # Vibgrate CLI — Full Documentation
 
-> Continuous Drift Intelligence for Node, .NET, Python, and Java (all supported in the CLI today)
+> [Code Drift Intelligence](https://vibgrate.com/code-drift-intelligence) across ~19 ecosystems — Node, .NET, Python, Java, Go, Rust, and more
 
 For a quick overview, see the [README](./README.md). This document covers everything in detail.
 
@@ -100,10 +100,10 @@ Vibgrate recursively scans your repository for `package.json` (Node/TypeScript),
 1. **Detects** the runtime version, target framework, and all dependencies
 2. **Queries** the npm/NuGet registry for latest stable versions (with built-in caching and concurrency control)
 3. **Computes** how far behind each component is — major version lag, EOL proximity, dependency age distribution
-4. **Generates** a deterministic DriftScore (0–100)
+4. **Generates** a deterministic [DriftScore](https://vibgrate.com/driftscore) (0–100)
 5. **Produces** findings, a full JSON artifact, and optional SARIF output
 
-Core drift analysis does not execute source code. Optional security scanners can run lightweight secret heuristics and local toolchain checks. Vibgrate Cloud upload remains optional.
+Core drift analysis does not execute source code. Optional security scanners can run lightweight secret heuristics and local toolchain checks. [Vibgrate Cloud](https://vibgrate.com/cloud) upload remains optional.
 
 ---
 
@@ -291,9 +291,9 @@ breaking-change signals, and considers the API surface — the classes and
 functions your code imports — that a new version must preserve.
 
 Security is folded in with **real-world exploitability**. Each upgrade is checked
-against OSV in both directions (advisories **remediated** vs. **introduced**), and
-current-version advisories are cross-referenced with the **CISA KEV** (known-
-exploited) list and **FIRST EPSS** (exploit-probability) scores. A package with a
+against [OSV](https://vibgrate.com/glossary/osv) in both directions (advisories **remediated** vs. **introduced**), and
+current-version advisories are cross-referenced with the [**CISA KEV**](https://vibgrate.com/glossary/kev) (known-
+exploited) list and [**FIRST EPSS**](https://vibgrate.com/glossary/epss) (exploit-probability) scores. A package with a
 known-exploited advisory is treated as must-fix, so the recommendation prioritises
 "fix these few" over churning everything. Advisories with no upgrade path in any
 plan are called out as unresolved.
@@ -409,7 +409,7 @@ vg report [--in <file>] [--format md|text|json]
 
 ### vg sbom
 
-Export SBOMs from an existing scan artifact or compare two artifacts.
+Export [SBOMs](https://vibgrate.com/glossary/sbom) from an existing scan artifact or compare two artifacts.
 
 ```bash
 vg sbom export [--in <file>] [--format cyclonedx|spdx] [--out <file>]
@@ -491,7 +491,7 @@ Expected results:
 
 `vg scan --vulns` matches your installed dependencies against the public OSV database and records each known vulnerability — advisory id and CVE, severity, CVSS, and the fixing version — in the scan artifact, as findings, and in SARIF. Supply advisories in a `--package-manifest` bundle to run it offline.
 
-In a git repository the scan also attributes each finding: the commit, author, and date that introduced the vulnerable version, and how long you have been exposed. These exposure windows aggregate into remediation metrics framed around the EU Cyber Resilience Act (CRA): open counts by severity, mean and maximum time exposed, and per-severity SLA breaches (defaults: critical 7 days, high 30, moderate 90, low 180). The metrics are descriptive — they show whether remediation keeps pace; they are not a compliance certification.
+In a git repository the scan also attributes each finding: the commit, author, and date that introduced the vulnerable version, and how long you have been exposed. These exposure windows aggregate into remediation metrics framed around the [EU Cyber Resilience Act (CRA)](https://vibgrate.com/compliance/cra): open counts by severity, mean and maximum time exposed, and per-severity SLA breaches (defaults: critical 7 days, high 30, moderate 90, low 180). The metrics are descriptive — they show whether remediation keeps pace; they are not a compliance certification.
 
 The scan also reconstructs **closed** exposure windows from history — a vulnerable version that was later bumped out of the affected range or removed from the lockfile entirely — and reports real remediation time (MTTR) from them: measured, not estimated. Offline, a package-version manifest extends this to advisories that are fully fixed today, so a dependency that is clean now but was once vulnerable still counts toward your remediation record.
 
@@ -855,7 +855,7 @@ Add `--json` for machine-readable output.
 
 ### vg serve
 
-Start Vibgrate AI Context — a local-first MCP serving your code map, drift, and version-correct docs to your AI assistant (fully offline under `--local`).
+Start [Vibgrate AI Context](https://vibgrate.com/library) — a local-first [MCP](https://vibgrate.com/glossary/model-context-protocol) serving your code map, drift, and version-correct docs to your AI assistant (fully offline under `--local`).
 
 ```bash
 vg serve
@@ -1026,6 +1026,8 @@ This makes drift a formal quality gate (fitness function), not just reporting.
 The DriftScore is a deterministic, versioned metric (0–100) that represents how far behind your codebase is relative to the current stable ecosystem baseline.
 
 **Lower score = healthier upgrade posture.** 0 means no drift (fully current); 100 means maximum drift. Higher is worse.
+
+The methodology is published: see the [public scoring specification](./docs/public/SCORING-METHODOLOGY-PUBLIC.md) in this repository and the overview at [vibgrate.com/driftscore](https://vibgrate.com/driftscore).
 
 ### Risk Levels
 
@@ -1482,7 +1484,7 @@ import type {
 
 ## Requirements
 
-- **Node.js** >= 20.0.0
+- **Node.js** >= 22.0.0
 - Works on macOS, Linux, and Windows
 
 ---
@@ -1490,6 +1492,17 @@ import type {
 ## Links
 
 - [Website](https://vibgrate.com)
+- [Vibgrate CLI — live demo and simulator](https://vibgrate.com/cli)
+- [CLI benchmarks](https://vibgrate.com/cli/benchmarks) · [methodology](https://vibgrate.com/cli/benchmarks/methodology) · [token savings](https://vibgrate.com/cli/benchmarks/token-savings)
+- [DriftScore](https://vibgrate.com/driftscore)
+- [Vibgrate AI Context (local-first MCP)](https://vibgrate.com/library)
+- [Vibgrate Graph](https://vibgrate.com/graph)
+- [Vibgrate Cloud](https://vibgrate.com/cloud) · [create a free workspace](https://dash.vibgrate.com)
+- [Vibgrate MCP (hosted)](https://vibgrate.com/mcp)
+- [AI agent skills](https://vibgrate.com/skills)
+- [Glossary](https://vibgrate.com/glossary)
+- [Help center](https://vibgrate.com/help)
+- [Changelog](https://vibgrate.com/changelog)
 - [npm](https://www.npmjs.com/package/@vibgrate/cli)
 
 ---

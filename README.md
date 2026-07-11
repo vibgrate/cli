@@ -19,8 +19,8 @@
 
 `vg` answers two questions for any repo:
 
-1. **What is this codebase?** — A deterministic code graph: call trees, import paths, impact surfaces, dependency facts.
-2. **How far behind is it?** — A ranked **DriftScore** (0–100) with runtime/framework lag, dependency age and EOL proximity, and a prioritised fix list.
+1. **What is this codebase?** — A deterministic [code graph](https://vibgrate.com/graph): call trees, import paths, impact surfaces, dependency facts.
+2. **How far behind is it?** — A ranked **[DriftScore](https://vibgrate.com/driftscore)** (0–100) with runtime/framework lag, dependency age and EOL proximity, and a prioritised fix list.
 
 Everything runs **on your machine**. No API key, no network call, no data leaving your repo unless you explicitly push. The `vibgrate` command is an alias for `vg` — they are interchangeable.
 
@@ -68,7 +68,7 @@ npx vg scan                     # vg is the primary command; vibgrate is an alia
 
 ## Use it with your AI assistant
 
-`vg serve` starts **Vibgrate AI Context** — a local-first MCP server that
+`vg serve` starts **[Vibgrate AI Context](https://vibgrate.com/library)** — a local-first [MCP](https://vibgrate.com/glossary/model-context-protocol) server that
 gives any MCP-compatible assistant (Claude, Cursor, Windsurf, Copilot, Gemini
 CLI, …) your code map, **offline drift**, local models, and **version-correct
 library docs**, all from your machine (no account, nothing uploaded; thin
@@ -85,7 +85,7 @@ vg install                      # interactive: pick your assistant(s) and done
 vg install --all                # install for every detected assistant at once
 ```
 
-This writes the MCP config for your chosen tool(s) and installs a skill that teaches the assistant how to query the graph. After reloading your assistant you get graph-aware answers: call trees, impact analysis, drift findings, version-correct library docs — all from local data.
+This writes the MCP config for your chosen tool(s) and installs a skill that teaches the assistant how to query the graph. After reloading your assistant you get graph-aware answers: call trees, impact analysis, drift findings, version-correct library docs — all from local data. The token savings are measured and published, methodology included, at [vibgrate.com/cli/benchmarks/token-savings](https://vibgrate.com/cli/benchmarks/token-savings).
 
 Browse all 21+ supported assistants and their skill descriptions at **[vibgrate.com/skills](https://vibgrate.com/skills)**.
 
@@ -129,21 +129,21 @@ One scan gives you:
 - **Score breakdown** — runtime, frameworks, dependencies, EOL
 - **Per-project detail** across Node.js/TypeScript, .NET, Python, and Java
 - **Actionable findings** ranked by likely impact
-- **SBOM export** (CycloneDX / SPDX)
+- **[SBOM](https://vibgrate.com/glossary/sbom) export** (CycloneDX / SPDX)
 - **Known vulnerabilities** (opt in with `--vulns`) — severity, CVSS, the fixing version, and, in a git repo, who introduced them
 
 ---
 
 ## Find known vulnerabilities and who introduced them
 
-`vg scan --vulns` checks your installed dependencies against the public OSV database and reports each known vulnerability with its severity, CVSS score, and the version that fixes it — as text, JSON, or SARIF. Add `--package-manifest` to run it fully offline from a local advisory bundle.
+`vg scan --vulns` checks your installed dependencies against the public [OSV](https://vibgrate.com/glossary/osv) database and reports each known vulnerability with its severity, CVSS score, and the version that fixes it — as text, JSON, or SARIF. Add `--package-manifest` to run it fully offline from a local advisory bundle.
 
 ```bash
 vg scan --vulns                 # drift score + known vulnerabilities
 vg scan --full                  # drift + vulnerabilities + a banned-dependency report
 ```
 
-In a git repository, every finding is attributed from history: who introduced the vulnerable version, in which commit, and how long you have been exposed. Those exposure windows roll up into remediation metrics framed around the EU Cyber Resilience Act (CRA) — per-severity time-exposed and SLA breaches — so "are we fixing things fast enough?" has a number.
+In a git repository, every finding is attributed from history: who introduced the vulnerable version, in which commit, and how long you have been exposed. Those exposure windows roll up into remediation metrics framed around the [EU Cyber Resilience Act (CRA)](https://vibgrate.com/compliance/cra) — per-severity time-exposed and SLA breaches — so "are we fixing things fast enough?" has a number.
 
 ```bash
 vg why lodash                   # who added a dependency, every version since, and any open vulnerabilities
@@ -158,7 +158,7 @@ Your AI assistant sees this too: `vg serve` exposes `list_vulnerabilities`, `vul
 
 ## Track drift over time → create a free workspace
 
-The CLI is fully useful offline. When you want **trends across runs and repos** — so drift becomes a metric you manage, not a surprise you discover — push scans to a workspace:
+The CLI is fully useful offline. When you want **trends across runs and repos** — so drift becomes a metric you manage, not a surprise you discover — push scans to a [Vibgrate Cloud](https://vibgrate.com/cloud) workspace:
 
 1. **Create a workspace** at **[dash.vibgrate.com](https://dash.vibgrate.com)** and copy your DSN.
 2. **Connect and push:**
@@ -244,6 +244,8 @@ vg scan --offline --package-manifest ./package-versions.zip --max-privacy --form
 
 Add `.vibgrate/` to your `.gitignore` — those are regenerated local outputs.
 
+More on how Vibgrate handles code and data: [vibgrate.com/security](https://vibgrate.com/security).
+
 ---
 
 ## Quick start with AI assistants
@@ -325,7 +327,7 @@ Full flag and configuration reference: **[DOCS.md](./DOCS.md)** · **[vibgrate.c
 
 ## Why teams adopt Vibgrate
 
-Most systems don't fail all at once — they accumulate upgrade debt and architectural drift silently until migrations become expensive. `vg` makes that debt measurable and repeatable, and gives AI assistants the local context they need to be useful:
+Most systems don't fail all at once — they accumulate upgrade debt and architectural [drift](https://vibgrate.com/glossary/code-drift) silently until migrations become expensive. `vg` makes that debt measurable and repeatable — the practice we call [Code Drift Intelligence](https://vibgrate.com/code-drift-intelligence) — and gives AI assistants the local context they need to be useful:
 
 | Mode | What you get | Best for |
 | --- | --- | --- |
@@ -363,7 +365,9 @@ When `@vibgrate/cli` is installed, it registers **both** bin entries uncondition
   &nbsp;·&nbsp;
   <a href="https://vibgrate.com/cli">Try the live demo</a>
   &nbsp;·&nbsp;
-  <a href="./DOCS.md">Vibgrate AI Context (local MCP)</a>
+  <a href="https://vibgrate.com/cli/benchmarks">Benchmarks</a>
+  &nbsp;·&nbsp;
+  <a href="https://vibgrate.com/library">Vibgrate AI Context (local MCP)</a>
   &nbsp;·&nbsp;
   <a href="https://vibgrate.com/mcp">Vibgrate MCP (hosted)</a>
   &nbsp;·&nbsp;

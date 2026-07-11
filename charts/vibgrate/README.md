@@ -2,7 +2,7 @@
 
 Scheduled upgrade-drift & supply-chain scanning for Kubernetes. The chart deploys
 the **signed Vibgrate scanner image** as a `CronJob` that scans a repository and
-pushes results to your Vibgrate workspace. Built for regulated K8s estates where
+pushes results to your [Vibgrate Cloud](https://vibgrate.com/cloud) workspace. Built for regulated K8s estates where
 the broker/scanner is deployed in-cluster rather than run on a laptop.
 
 ## Install

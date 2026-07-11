@@ -1,7 +1,8 @@
 # Contributing to Vibgrate CLI
 
 Thanks for your interest in improving the Vibgrate CLI (`vg`). This is the
-public, Apache-2.0 home of the tool. Contributions of all sizes are welcome —
+public, Apache-2.0 home of the tool ([product overview](https://vibgrate.com/cli)).
+Contributions of all sizes are welcome —
 bug reports, documentation fixes, new language grammars, and new commands.
 
 By participating you agree to abide by our [Code of Conduct](./CODE_OF_CONDUCT.md).
@@ -10,7 +11,7 @@ By participating you agree to abide by our [Code of Conduct](./CODE_OF_CONDUCT.m
 
 Requirements:
 
-- **Node.js >= 20**
+- **Node.js >= 22**
 - **pnpm** (the repo is a pnpm workspace; use Corepack or install pnpm globally)
 
 ```bash

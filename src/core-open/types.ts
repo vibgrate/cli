@@ -300,6 +300,20 @@ export interface DriftScore {
 
 // ── Risk score (security & business risk — distinct from maintainability drift) ──
 
+/**
+ * Reachability tier for a finding, from the scan's local code-graph query.
+ * `unknown` is inert in scoring — unknown ≠ safe.
+ */
+export type ReachabilityTier = 'reachable' | 'potentially_reachable' | 'not_reached' | 'unknown';
+
+/** Reachability evidence attached to a finding fed into the RiskScore engine. */
+export interface ReachabilityInput {
+  tier: ReachabilityTier;
+  /** Confidence in the graph verdict (0–1). Lower confidence scales the tier's
+   *  effect back toward neutral (×1.0). */
+  graphConfidence?: number | null;
+}
+
 /** A single vulnerability finding fed into the RiskScore engine. */
 export interface RiskVulnerabilityInput {
   /** Advisory / CVE identifier (e.g. "CVE-2024-1234" or "GHSA-xxxx"). */
@@ -312,6 +326,8 @@ export interface RiskVulnerabilityInput {
   kev?: boolean;
   /** Optional package the finding applies to (for explainability). */
   package?: string;
+  /** Reachability evidence for this finding, when the scan supplied it. */
+  reachability?: ReachabilityInput | null;
 }
 
 /** SSVC-style business-criticality weighting for the scope being scored. */
@@ -341,6 +357,16 @@ export interface RiskContribution {
   reason: string;
 }
 
+/** One contextual adjustment (reachability / criticality) that moved the score. */
+export interface RiskContextFactor {
+  /** Finding id the factor applied to, or 'business-criticality' for the scan-wide weight. */
+  id: string;
+  kind: 'reachability' | 'business-criticality';
+  /** The multiplier that was applied (e.g. 0.5 for not_reached at full confidence). */
+  multiplier: number;
+  detail: string;
+}
+
 export interface RiskScore {
   /** 0–100, higher = MORE risk (deliberately inverted vs. DriftScore). */
   score: number;
@@ -351,6 +377,13 @@ export interface RiskScore {
   measured: boolean;
   /** Methodology version of the RiskScore engine that produced this result. */
   methodologyVersion: string;
+  /** Base (pre-reachability) score — what the score would be with every tier
+   *  treated as unknown. Equals `score` when no reachability context existed. */
+  baseScore: number;
+  /** True when reachability evidence adjusted the score ("context-applied"). */
+  contextApplied: boolean;
+  /** The contextual factors that moved the score, for evidence display/logging. */
+  contextFactors: RiskContextFactor[];
 }
 
 // ── Vulnerability detection (open: OSV / air-gap manifest) ──
@@ -632,6 +665,52 @@ export interface ScanArtifact {
   relationshipDiagram?: MermaidDiagram;
   /** Billing roll-up derived from per-project function/project classifications */
   billing?: BillingSummary;
+  /**
+   * Vulnerable-symbol reachability results from the LOCAL code-graph query
+   * (`vg scan` with a DSN): the risky-symbol manifest from the scan symbols
+   * preflight matched against the code map. Source never leaves the machine —
+   * only dependency coordinates go up, only these verdicts come back down with
+   * the push. Absent when no DSN / offline / no code map (absent ≠ zero).
+   */
+  reachability?: ScanReachabilityResult;
+}
+
+// ── Reachability (vulnerable-symbol usage, local graph query) ──
+
+/** One vulnerable-symbol reachability verdict from the local graph query. */
+export interface ScanReachabilityFinding {
+  advisoryId: string;
+  ecosystem: string;
+  package: string;
+  version: string;
+  /** The vulnerable symbol checked. Absent for module-level verdicts. */
+  symbol?: string;
+  tier: ReachabilityTier;
+  /** Bounded evidence chain (importing files / symbols). */
+  callPath?: string[];
+  /** One-line human-readable evidence. */
+  evidence?: string;
+  /** Confidence in the graph verdict (0–1). */
+  graphConfidence: number;
+}
+
+/** The artifact block carrying the local reachability analysis. */
+export interface ScanReachabilityResult {
+  analyzerVersion: string;
+  /** 'none' = no code graph was available; every finding is Unknown. */
+  source: 'graph' | 'none';
+  generatedAt: string;
+  /** How many advisories the preflight manifest contained. */
+  manifestAdvisoryCount: number;
+  /** Module-import evidence per dependency package, so the server can re-assess
+   *  at module level when symbol data lands later (background extraction). */
+  importedModules?: Array<{
+    ecosystem: string;
+    package: string;
+    modules: string[];
+    importingFiles: number;
+  }>;
+  findings: ScanReachabilityFinding[];
 }
 
 // ── CLI option types ──

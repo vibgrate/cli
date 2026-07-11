@@ -7,12 +7,16 @@ import {
   parseDsn,
   prepareCompressedUpload,
   fetchScanPreflight,
+  fetchRiskySymbols,
+  PROJECT_TYPE_TO_OSV_ECOSYSTEM,
   computeRepoFingerprint,
   detectVcs,
   resolveRepositoryName,
   parseExcludePatterns,
 } from '../../core-open/index.js';
 import type { ScanOptions, ScanArtifact } from '../../core-open/index.js';
+import { analyzeReachability, collectPreflightDependencies } from '../reachability.js';
+import type { VgGraph } from '../../schema.js';
 import { inventory } from '../../engine/drift.js';
 import { loadStandards, checkStandards } from '../../engine/standards.js';
 import { loadAdvancedScanHook } from '../advanced-hook.js';
@@ -50,6 +54,65 @@ export function shouldBuildCodeMap(opts: {
   noLocalArtifacts?: boolean;
 }): boolean {
   return opts.graph !== false && !opts.maxPrivacy && !opts.noLocalArtifacts;
+}
+
+/**
+ * Reachability hand-off: post the scan's dependency coordinates to the scan
+ * symbols preflight, run the local graph query against the returned risky-symbol
+ * manifest, and attach the verdicts to the artifact (uploaded with the push).
+ * Best-effort — a failure here never fails or delays the scan.
+ */
+async function attachReachability(
+  artifact: ScanArtifact,
+  rootDir: string,
+  opts: ScanOptions,
+  graph: VgGraph,
+): Promise<void> {
+  try {
+    const dsn = resolveDsn(opts.dsn);
+    if (!dsn) return;
+    const parsed = parseDsn(dsn);
+    if (!parsed) return;
+    const ingestHost = opts.region ? resolveIngestHost(opts.region) : parsed.host;
+
+    const dependencies = collectPreflightDependencies(artifact.projects, PROJECT_TYPE_TO_OSV_ECOSYSTEM);
+    if (dependencies.length === 0) return;
+
+    const manifest = await fetchRiskySymbols(parsed, ingestHost, dependencies);
+    if (manifest.status !== 'ok' || !manifest.advisories) return;
+
+    artifact.reachability = await analyzeReachability({
+      graph,
+      rootDir,
+      manifest: manifest.advisories,
+      dependencies,
+    });
+
+    if (!opts.quiet && manifest.advisories.length > 0) {
+      const tiers = artifact.reachability.findings.reduce<Record<string, number>>((acc, f) => {
+        acc[f.tier] = (acc[f.tier] ?? 0) + 1;
+        return acc;
+      }, {});
+      const parts = [
+        tiers.reachable ? `${tiers.reachable} reachable` : null,
+        tiers.potentially_reachable ? `${tiers.potentially_reachable} potentially reachable` : null,
+        tiers.not_reached ? `${tiers.not_reached} not reached` : null,
+        tiers.unknown ? `${tiers.unknown} unknown` : null,
+      ].filter(Boolean);
+      console.log(
+        chalk.dim(
+          `Reachability: ${manifest.advisories.length} advisor${manifest.advisories.length === 1 ? 'y' : 'ies'} checked against the code map — ${parts.join(', ')}`,
+        ),
+      );
+    }
+  } catch (e: unknown) {
+    // Unknown ≠ safe: the server scores these findings at full weight. Surface
+    // the reason only in strict-less informational form.
+    if (!opts.quiet) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.log(chalk.dim(`Reachability check skipped: ${msg}`));
+    }
+  }
 }
 
 /** Auto-push scan artifact to Vibgrate API */
@@ -437,6 +500,9 @@ export const scanCommand = new Command('scan')
     // shouldBuildCodeMap). An uncatchable OOM in the map build otherwise takes
     // the whole scan — and its --push — down with it.
     const wantGraph = shouldBuildCodeMap({ graph: opts.graph, maxPrivacy: opts.maxPrivacy, noLocalArtifacts });
+    // Retained by the postScan hook so the reachability query below can run
+    // against the freshly built map without a second (memory-heavy) build.
+    let builtGraph: VgGraph | null = null;
     if (wantGraph) {
       scanOpts.postScan = async (report) => {
         const result = await buildGraph({
@@ -444,6 +510,7 @@ export const scanCommand = new Command('scan')
           exclude: opts.exclude,
           onParseProgress: (done, total) => report(done, total, 'parsing'),
         });
+        builtGraph = result.graph;
         writeArtifacts(result.graph, { root: rootDir });
         // Freshness snapshot → lets `vg serve`/`vg ask` auto-refresh this map
         // when the working tree drifts (see engine/freshness.ts).
@@ -508,6 +575,16 @@ export const scanCommand = new Command('scan')
           process.exit(2);
         }
       }
+    }
+
+    // Reachability hand-off (before push): post the dependency coordinates the
+    // scan found in the package manifests to the symbols preflight, then query
+    // the freshly built local code map for vulnerable-symbol usage and attach
+    // the verdicts to the artifact. Coordinates only go up — never source.
+    // Strictly best-effort: any failure leaves reachability absent (Unknown
+    // server-side); it never delays exit codes or blocks the push.
+    if (willPush && hasDsn && builtGraph) {
+      await attachReachability(artifact, rootDir, scanOpts, builtGraph);
     }
 
     if (willPush) {

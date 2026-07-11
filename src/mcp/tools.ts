@@ -13,7 +13,7 @@ import { FREE_PACK } from '../grounding/pack.js';
 import { loadCatalog, resolveLib, readDoc, driftFor, resolveVersion, localPackageDocs, localApiSurface } from '../engine/lib.js';
 import { selectForBudget, symbolsFromApi } from '../engine/select.js';
 import { assessDocQuality } from '../engine/quality.js';
-import { fetchHostedDocs } from '../engine/hosted.js';
+import { fetchHostedDocsCached } from '../engine/hosted-cache.js';
 import { resolveDsn } from '../reporting/credentials.js';
 import { parseDsn } from '../reporting/commands/push.js';
 import { boundList, NODE_EDGE_CAP } from './response.js';
@@ -725,9 +725,8 @@ export const TOOLS: VgTool[] = [
         const sel = selectForBudget({ readme, query, apiSurface, budget });
         // Quality gate (D18): assess the FULL local extraction (README + API surface), not the
         // budget-trimmed slice — this decides whether the local doc can answer at all. When it
-        // can't (no example / stub / query keywords absent), the hosted catalog (S2) should
-        // answer instead. The hosted surface is gated on sign-off and not wired into the open
-        // engine, so we serve the best local doc and flag that an upgrade is available.
+        // can't (no example / stub / query keywords absent), the hosted-catalog escalation
+        // below answers instead (unless the server runs air-gapped with --local).
         const quality = assessDocQuality([readme, apiSurface].filter(Boolean).join('\n\n'), {
           name: libName,
           query,
@@ -782,14 +781,16 @@ export const TOOLS: VgTool[] = [
       }
 
       // Hosted escalation (S2, wired): consulted only when the local answer is missing or
-      // insufficient AND the server isn't air-gapped (`--local`). fetchHostedDocs fails
+      // insufficient AND the server isn't air-gapped (`--local`). Disk-cached (24h TTL under
+      // .vibgrate/cache) so repeat agent lookups answer instantly; fetchHostedDocsCached fails
       // closed to null, so the best local answer (or not_found) is never broken by the
       // network. The escalation branch is the only async path — the local path stays sync.
       if (!sufficient && !ctx.local) {
         return (async () => {
           const dsn = resolveDsn();
           const parsed = dsn ? parseDsn(dsn) : null;
-          const hosted = await fetchHostedDocs(
+          const hosted = await fetchHostedDocsCached(
+            ctx.root,
             { name: entry?.name ?? id, targetId: entry?.id, query: query || undefined, maxTokens: budget },
             { auth: parsed ? { keyId: parsed.keyId, secret: parsed.secret } : undefined },
           );

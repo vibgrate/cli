@@ -15,7 +15,8 @@ import { selectForBudget, symbolsFromApi } from '../engine/select.js';
 import { assessDocQuality } from '../engine/quality.js';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fetchHostedDocs, publishPrivateLibrary, type HostedDocsResult } from '../engine/hosted.js';
+import { publishPrivateLibrary, type HostedDocsResult } from '../engine/hosted.js';
+import { fetchHostedDocsCached } from '../engine/hosted-cache.js';
 import { resolveDsn } from '../reporting/credentials.js';
 import { parseDsn } from '../reporting/commands/push.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
@@ -231,13 +232,15 @@ async function showCmd(root: string, name: string, budget: number | undefined, a
       : { sufficient: false, score: 0, reasons: ['no local docs'] };
 
   // D18 escalation (D7 no-key funnel): only when --online AND local is missing/insufficient.
-  // fetchHostedDocs fails closed to null, so the local path never breaks.
+  // Disk-cached (`.vibgrate/cache/hosted-docs.json`, 24h TTL) so repeat lookups answer instantly;
+  // fetchHostedDocsCached fails closed to null, so the local path never breaks.
   let hosted: HostedDocsResult | null = null;
   if (online && !quality.sufficient) {
     // Identify with the stored DSN (if any) so CLI users get the workspace tier; anon otherwise.
     const dsn = resolveDsn();
     const parsed = dsn ? parseDsn(dsn) : null;
-    hosted = await fetchHostedDocs(
+    hosted = await fetchHostedDocsCached(
+      root,
       { name: displayName, query: name, maxTokens: budget },
       { region: opts.region, ingest: opts.ingest, auth: parsed ? { keyId: parsed.keyId, secret: parsed.secret } : undefined },
     );

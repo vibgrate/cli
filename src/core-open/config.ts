@@ -3,7 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
-import ts from 'typescript';
+import type * as TsModule from 'typescript';
 import type { VibgrateConfig } from './types.js';
 import { pathExists, readTextFile } from './utils/fs.js';
 
@@ -15,15 +15,32 @@ const CONFIG_FILES = [
 
 const TRUSTED_CONFIG_ENV = 'VIBGRATE_TRUST_CONFIG';
 
+// The TypeScript compiler is loaded LAZILY, only when we actually need to parse
+// a user's vibgrate.config.ts. Importing it at module-init would drag the whole
+// ~10 MB compiler into every consumer bundle — including the Cloudflare Worker
+// (@vibgrate/core → @vibgrate/core-open), where TypeScript's Node system probe
+// touches `__filename` and crashes the deploy ("ReferenceError: __filename is
+// not defined"). Deferring the import keeps that code path off the Worker's
+// startup entirely; it runs only on a real filesystem when a .ts config exists.
+let tsPromise: Promise<typeof TsModule> | null = null;
+function loadTypeScript(): Promise<typeof TsModule> {
+  tsPromise ??= import('typescript').then((m) => {
+    const mod = m as unknown as { default?: typeof TsModule };
+    return mod.default ?? (m as unknown as typeof TsModule);
+  });
+  return tsPromise;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function toStaticValue(
-  expr: ts.Expression,
-  constBindings: Map<string, ts.Expression>,
+  expr: TsModule.Expression,
+  constBindings: Map<string, TsModule.Expression>,
+  ts: typeof TsModule,
 ): unknown {
-  if (ts.isParenthesizedExpression(expr)) return toStaticValue(expr.expression, constBindings);
+  if (ts.isParenthesizedExpression(expr)) return toStaticValue(expr.expression, constBindings, ts);
   if (ts.isStringLiteralLike(expr)) return expr.text;
   if (ts.isNumericLiteral(expr)) return Number(expr.text);
   if (expr.kind === ts.SyntaxKind.TrueKeyword) return true;
@@ -33,7 +50,7 @@ function toStaticValue(
   if (ts.isArrayLiteralExpression(expr)) {
     return expr.elements.map((el) => {
       if (ts.isSpreadElement(el)) throw new Error('Spread not supported in static config arrays');
-      return toStaticValue(el as ts.Expression, constBindings);
+      return toStaticValue(el as TsModule.Expression, constBindings, ts);
     });
   }
 
@@ -59,7 +76,7 @@ function toStaticValue(
         throw new Error('Unsupported object key in static config');
       }
 
-      out[key] = toStaticValue(prop.initializer, constBindings);
+      out[key] = toStaticValue(prop.initializer, constBindings, ts);
     }
     return out;
   }
@@ -67,16 +84,17 @@ function toStaticValue(
   if (ts.isIdentifier(expr)) {
     const bound = constBindings.get(expr.text);
     if (!bound) throw new Error(`Unknown identifier in static config: ${expr.text}`);
-    return toStaticValue(bound, constBindings);
+    return toStaticValue(bound, constBindings, ts);
   }
 
   throw new Error('Non-static expression in config');
 }
 
-function tryParseStaticConfig(text: string, configPath: string): VibgrateConfig | null {
+async function tryParseStaticConfig(text: string, configPath: string): Promise<VibgrateConfig | null> {
+  const ts = await loadTypeScript();
   const scriptKind = configPath.endsWith('.ts') ? ts.ScriptKind.TS : ts.ScriptKind.JS;
   const source = ts.createSourceFile(configPath, text, ts.ScriptTarget.ESNext, true, scriptKind);
-  const constBindings = new Map<string, ts.Expression>();
+  const constBindings = new Map<string, TsModule.Expression>();
 
   for (const stmt of source.statements) {
     if (!ts.isVariableStatement(stmt)) continue;
@@ -91,7 +109,7 @@ function tryParseStaticConfig(text: string, configPath: string): VibgrateConfig 
 
   for (const stmt of source.statements) {
     if (!ts.isExportAssignment(stmt)) continue;
-    const parsed = toStaticValue(stmt.expression, constBindings);
+    const parsed = toStaticValue(stmt.expression, constBindings, ts);
     if (!isRecord(parsed)) return null;
     return { ...DEFAULT_CONFIG, ...parsed } as VibgrateConfig;
   }
@@ -136,7 +154,7 @@ export async function loadConfig(rootDir: string): Promise<VibgrateConfig> {
       const txt = await readTextFile(configPath);
       let staticConfig: VibgrateConfig | null = null;
       try {
-        staticConfig = tryParseStaticConfig(txt, configPath);
+        staticConfig = await tryParseStaticConfig(txt, configPath);
       } catch {
         staticConfig = null;
       }
