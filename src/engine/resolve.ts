@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import { nodeId, edgeId } from './ids.js';
 import { relativeResolver, type ModuleResolver } from './module-resolver.js';
+import { isTestFile } from './tests.js';
 import type { FileParse } from './types.js';
 import type { EdgeKind, GraphEdge, GraphNode, NodeKind, ResolverKind } from '../schema.js';
 
@@ -171,9 +172,10 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
     const fileId = fileNodeIdByRel.get(p.rel)!;
     const localDefs = defsByFile.get(p.rel) ?? [];
     const imported = importedFilesByRel.get(p.rel) ?? new Set<string>();
+    const testCaller = isTestFile(p.rel);
     for (const call of p.calls) {
       const srcId = enclosingDefId(localDefs, call.byte) ?? fileId;
-      const resolved = resolveCall(call, p.rel, p.lang, imported, defsByName, srcId);
+      const resolved = resolveCall(call, p.rel, p.lang, imported, defsByName, srcId, testCaller);
       if (resolved) {
         edges.add('call', srcId, resolved.id, 'heuristic', resolved.confidence);
         stats.callsResolved++;
@@ -184,14 +186,33 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
     }
   }
 
+  // --- 4b. type-reference edges (constructor/field DI wiring, not a call) ---
+  // A constructor parameter or field's declared type is a structural
+  // dependency even when it's never invoked directly (Spring-style injection).
+  // Most misses here are JDK/stdlib types (String, List, …) with no local
+  // definition — expected and not actionable, so unlike calls/heritage these
+  // don't get tracked as `unresolved` (it would swamp `vg unknowns`).
+  for (const p of parses) {
+    const fileId = fileNodeIdByRel.get(p.rel)!;
+    const localDefs = defsByFile.get(p.rel) ?? [];
+    const imported = importedFilesByRel.get(p.rel) ?? new Set<string>();
+    const testCaller = isTestFile(p.rel);
+    for (const ref of p.typeRefs) {
+      const srcId = enclosingDefId(localDefs, ref.byte) ?? fileId;
+      const target = resolveType(ref.name, p.rel, p.lang, imported, defsByName, testCaller);
+      if (target) edges.add('references', srcId, target.id, 'heuristic', 0.7);
+    }
+  }
+
   // --- 5. heritage edges (extends / implements) ---
   for (const p of parses) {
     const localDefs = defsByFile.get(p.rel) ?? [];
     const imported = importedFilesByRel.get(p.rel) ?? new Set<string>();
+    const testCaller = isTestFile(p.rel);
     for (const h of p.heritage) {
       const srcId = enclosingDefId(localDefs, h.byte);
       if (!srcId) continue;
-      const target = resolveType(h.superName, p.rel, p.lang, imported, defsByName);
+      const target = resolveType(h.superName, p.rel, p.lang, imported, defsByName, testCaller);
       if (target) edges.add(h.kind as EdgeKind, srcId, target.id, 'heuristic', 0.85);
       else bumpUnresolved(unresolved, srcId, h.superName, h.kind as 'extends' | 'implements', p.rel);
     }
@@ -311,6 +332,7 @@ function resolveCall(
   importedRels: Set<string>,
   defsByName: Map<string, DefNodeRef[]>,
   enclosingId?: string,
+  fromIsTestFile = false,
 ): { id: string; confidence: number } | null {
   const candidates = defsByName.get(call.callee);
   if (!candidates || candidates.length === 0) return null;
@@ -348,17 +370,31 @@ function resolveCall(
     if (samePkg.length === 1) return { id: samePkg[0].id, confidence: 0.7 };
   }
 
-  // 4. No reachability justification → do not guess (precision over recall).
+  // 4. Swift-only test-file fallback. Xcode test targets commonly live in a
+  // sibling `Tests/` tree, not the product code's directory, so rung 3's
+  // same-directory check never reaches them even though the whole module is
+  // visible unimported — the dominant cause of `tests_for` undercounting a
+  // class that a test directly constructs (including via a local helper).
+  // Gated on the *caller* being test code (this only adds test-linkage/call
+  // visibility, never a product-to-product edge) and an unambiguous
+  // repo-wide name match, so it can't reintroduce the "lone global match"
+  // false-positive class rung 4 elsewhere refuses to guess.
+  if (fromLang === 'swift' && fromIsTestFile && pool.length === 1) {
+    return { id: pool[0].id, confidence: 0.5 };
+  }
+
+  // 5. No reachability justification → do not guess (precision over recall).
   return null;
 }
 
-/** Heritage (extends/implements) resolution — same reachability rule as calls. */
+/** Heritage/type-reference resolution — same reachability rule as calls. */
 function resolveType(
   name: string,
   fromRel: string,
   fromLang: string,
   importedRels: Set<string>,
   defsByName: Map<string, DefNodeRef[]>,
+  fromIsTestFile = false,
 ): { id: string } | null {
   const candidates = (defsByName.get(name) ?? []).filter(
     (c) => c.kind === 'class' || c.kind === 'interface',
@@ -376,6 +412,11 @@ function resolveType(
     const dir = dirOf(fromRel);
     const samePkg = candidates.filter((c) => c.lang === fromLang && dirOf(c.rel) === dir);
     if (samePkg.length === 1) return { id: samePkg[0].id };
+  }
+
+  // Swift-only test-file fallback — see the matching rung in resolveCall.
+  if (fromLang === 'swift' && fromIsTestFile && candidates.length === 1) {
+    return { id: candidates[0].id };
   }
   return null; // no global single-match fallback (false-positive source)
 }

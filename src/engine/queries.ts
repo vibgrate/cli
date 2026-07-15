@@ -29,6 +29,13 @@ export interface LangQueries {
   heritage: string[];
   /** Assert/guard expressions captured as @guard → invariant facts (--deep). */
   guards?: string[];
+  /**
+   * Constructor-parameter / field declared types captured as @typeref — a
+   * structural dependency (e.g. Spring constructor/field injection) that never
+   * appears as a `call_expression`/`object_creation_expression`, so it needs its
+   * own capture. Resolved to a `references` edge (not `call`) in resolve.ts.
+   */
+  typeRefs?: string[];
 }
 
 // assert-like call detection, shared by the C-family languages.
@@ -146,6 +153,14 @@ const JAVA: LangQueries = {
   heritage: [
     '(superclass (type_identifier) @extends)',
     '(super_interfaces (type_list (type_identifier) @implements))',
+  ],
+  // Spring-style dependency injection wires a collaborator via a constructor
+  // parameter or a field, never a `new`/method call — so without these, an
+  // injected repository/service shows zero callers even when it is the sole
+  // reason five other classes exist.
+  typeRefs: [
+    '(constructor_declaration parameters: (formal_parameters (formal_parameter type: (type_identifier) @typeref)))',
+    '(field_declaration type: (type_identifier) @typeref)',
   ],
 };
 

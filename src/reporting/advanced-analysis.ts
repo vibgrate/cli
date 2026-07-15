@@ -24,6 +24,7 @@ import {
   aggregateSolutionArchitecture,
 } from './scanners/architecture.js';
 import { scanCodeQuality } from './scanners/code-quality.js';
+import { scanDatabaseSchema } from './scanners/database-schema.js';
 import { scanUiPurpose } from './scanners/ui-purpose.js';
 import { recommendStandards } from './scanners/standards-mapper.js';
 
@@ -44,6 +45,17 @@ import { recommendStandards } from './scanners/standards-mapper.js';
  * excluded: it regex-scraped whole source lines (auth hints, tokens, connection
  * strings, license text) into the artifact, a data-quality and secret-exposure
  * risk. Do not re-introduce raw-line `extract()` scanning here.
+ *
+ * The `databaseSchema` scanner follows the same discipline across all five of
+ * its sources (Prisma, raw SQL migrations, SQL Server Database Projects,
+ * Drizzle, TypeORM): it parses each into structured facts only — model/table
+ * names, field/column names, types, and relation/list/optional/id/unique
+ * flags, plus the Prisma datasource `provider` name. It never captures a
+ * Prisma datasource's `url` line (a connection string/credential), and the
+ * raw-SQL sources additionally strip any line that looks like a URL with
+ * embedded credentials before parsing — belt-and-suspenders, since SQL files
+ * don't normally contain these. No source captures any other raw source
+ * text. See `scanners/database-schema.ts` for the per-source detail.
  */
 export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
   const { rootDir, opts, scanners, maxPrivacyMode, allProjects, solutions, projectsByPath, fileCache, progress, extended } = ctx;
@@ -68,6 +80,7 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
     dependencyRisk: true,
     architecture: !maxPrivacyMode,
     codeQuality: !maxPrivacyMode,
+    databaseSchema: !maxPrivacyMode,
     uiPurpose: !maxPrivacyMode,
   } as const;
 
@@ -86,6 +99,7 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
     ...(scannerPolicy.dependencyRisk && scanners?.dependencyRisk?.enabled !== false ? [{ id: 'deprisk', label: 'Dependency risk' }] : []),
     ...(scannerPolicy.architecture && scanners?.architecture?.enabled !== false ? [{ id: 'architecture', label: 'Architecture layers' }] : []),
     ...(scannerPolicy.codeQuality && scanners?.codeQuality?.enabled !== false ? [{ id: 'codequality', label: 'Code quality metrics' }] : []),
+    ...(scannerPolicy.databaseSchema && scanners?.databaseSchema?.enabled !== false ? [{ id: 'databaseschema', label: 'Database schema' }] : []),
     ...((!maxPrivacyMode && (opts.uiPurpose || scanners?.uiPurpose?.enabled === true)) ? [{ id: 'uipurpose', label: 'UI purpose evidence' }] : []),
   ];
   for (const step of advancedSteps) {
@@ -225,6 +239,21 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
     );
   }
 
+  if (scannerPolicy.databaseSchema && scanners?.databaseSchema?.enabled !== false) {
+    progress.startStep('databaseschema');
+    scannerTasks.push(
+      scanDatabaseSchema(rootDir, allProjects, fileCache).then((result) => {
+        extended.databaseSchema = result;
+        const modelCount = result?.models.length ?? 0;
+        const enumCount = result?.enums.length ?? 0;
+        const dsParts: string[] = [];
+        if (modelCount > 0) dsParts.push(`${modelCount} model${modelCount !== 1 ? 's' : ''}`);
+        if (enumCount > 0) dsParts.push(`${enumCount} enum${enumCount !== 1 ? 's' : ''}`);
+        progress.completeStep('databaseschema', dsParts.join(', ') || 'none found', modelCount);
+      }),
+    );
+  }
+
   if (scannerPolicy.dependencyRisk && scanners?.dependencyRisk?.enabled !== false) {
     progress.startStep('deprisk');
     scannerTasks.push(
@@ -312,6 +341,7 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
     advancedFiles += extended.buildDeploy.ci.length;
   }
   if (extended.codeQuality) advancedFiles += extended.codeQuality.filesAnalyzed;
+  if (extended.databaseSchema) advancedFiles += extended.databaseSchema.filesScanned.length;
   if (extended.uiPurpose) advancedFiles += extended.uiPurpose.topEvidence.length;
   if (advancedFiles > 0) ctx.addFilesScanned(advancedFiles);
 }

@@ -41,6 +41,7 @@ export default async function run(payload: ParsePayload): Promise<FileParse[]> {
         calls: [],
         imports: [],
         heritage: [],
+        typeRefs: [],
         guards: [],
         warnings: [`parse failed: ${(err as Error).message}`],
       });

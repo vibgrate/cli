@@ -43,22 +43,41 @@ flow.
 - **Disclosure:** we coordinate public disclosure with you after a fix is
   released. We are happy to credit reporters who wish to be named.
 
+## Safe harbor
+
+Follow this policy in good faith and we will treat your research as authorized.
+We will work with you to fix the issue. We will not take legal action against
+you. If someone else brings a claim against you for work done under this policy,
+we will say plainly that you were authorized.
+
+Good faith means four things:
+
+- You do not read, change, or delete data that is not yours.
+- You do not degrade the service for other people.
+- You give us time to fix the problem before you tell anyone else.
+- You stop and tell us the moment you find someone else's data.
+
 ## A note on how the CLI handles your code
 
-The Vibgrate CLI is designed to run **locally and offline by default**:
+The Vibgrate CLI runs **locally and offline by default**:
 
 - There is **no telemetry** in the default path.
-- Your source code is parsed and analyzed **on your machine**. In the default
-  workflow, source never leaves the machine — the code graph, drift reports, and
-  MCP server all operate against local artifacts (e.g. `graph.json`).
+- Your code is parsed **on your machine**. It does not leave. The code graph,
+  drift reports, and MCP server all read local files (such as `graph.json`).
 - The local MCP server (`vg serve`) exposes **read-only** tools.
-- The deterministic code graph requires **no API key** and makes no network
-  calls.
+- The code graph needs **no API key** and makes no network calls.
 
-Some optional commands (for example, fetching version-correct library
-documentation) may make outbound network requests; these are explicit and
-opt-in. If you discover a path where source or sensitive data is transmitted
-unexpectedly in the default workflow, please treat it as a security issue and
-report it via the process above.
+Some commands do reach the network — fetching version-correct library docs, for
+one. Those are explicit and opt-in. Push a scan to Vibgrate Cloud and what leaves
+your machine is metadata: package names, versions, findings, a score. A closed
+schema checks it on arrival.
+
+**The remediation agent is the one exception across Vibgrate.** When you ask it
+to write a fix, it clones your repository into an isolated virtual machine we
+control, makes the change, and hands you a pull request. It only runs when you
+ask. See <https://vibgrate.com/subprocessors> for who handles what.
+
+Find a path where code or sensitive data leaves your machine without you asking?
+That is a security issue. Report it through the process above.
 
 More on Vibgrate's security posture: <https://vibgrate.com/security>.

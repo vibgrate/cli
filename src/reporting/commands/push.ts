@@ -8,6 +8,7 @@ import { resolveDsn } from '../credentials.js';
 import { availableRegionIds, dashHostForIngestHost } from '../regions.js';
 import { prepareCompressedUpload } from '../utils/compact-artifact.js';
 import { uploadScanArtifact } from '../utils/upload.js';
+import { loadConfig } from '../../core-open/index.js';
 import type { ScanArtifact } from '../types.js';
 
 interface ParsedDsn {
@@ -73,9 +74,14 @@ export const pushCommand = new Command('push')
       return;
     }
 
-    // Load artifact, compact it, and compress for upload
+    // Load artifact, compact it, and compress for upload. `databaseSchemaCaps`
+    // lets `scanners.databaseSchema` in vibgrate.config.ts (read from the
+    // current directory, same as `vg scan`) raise/lower the default upload
+    // caps (see DOCS.md § Database Schema).
     const artifact = await readJsonFile<ScanArtifact>(filePath);
-    const { body, contentEncoding } = await prepareCompressedUpload(artifact);
+    const config = await loadConfig(process.cwd());
+    const databaseSchemaCaps = config.scanners !== false ? config.scanners?.databaseSchema : undefined;
+    const { body, contentEncoding } = await prepareCompressedUpload(artifact, { databaseSchemaCaps });
     const timestamp = String(Date.now());
 
     // Allow --region to override the host baked into the DSN
@@ -105,6 +111,10 @@ export const pushCommand = new Command('push')
         body,
         contentEncoding,
         timestamp,
+        // Set only by an automated caller running the scan on the workspace's
+        // behalf (e.g. a Vibgrate-hosted remediation run) — never a customer flag.
+        runId: process.env.VIBGRATE_SCAN_RUN_ID,
+        runToken: process.env.VIBGRATE_SCAN_RUN_TOKEN,
       });
       host = uploadedHost;
 

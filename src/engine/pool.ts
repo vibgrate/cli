@@ -176,6 +176,7 @@ function emptyParse(file: DiscoveredFile, warning: string): FileParse {
     calls: [],
     imports: [],
     heritage: [],
+    typeRefs: [],
     guards: [],
     warnings: [warning],
   };

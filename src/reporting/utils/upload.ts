@@ -23,6 +23,16 @@ export interface ScanUploadInput {
   /** Force a fresh ingest server-side even when the repo is unchanged (skips the
    *  duplicate-vcsSha reuse). Set for scheduled and dashboard-triggered scans. */
   force?: boolean;
+  /**
+   * Run-attribution pair for an automated caller acting on the workspace's
+   * behalf (e.g. a Vibgrate-hosted remediation run), read from
+   * `VIBGRATE_SCAN_RUN_ID`/`VIBGRATE_SCAN_RUN_TOKEN`. The server verifies the
+   * token against the run it minted before granting any exemption — sending
+   * an arbitrary or stale value here has no effect, it just fails
+   * verification and the scan is billed normally.
+   */
+  runId?: string;
+  runToken?: string;
 }
 
 export interface ScanUploadResult {
@@ -43,6 +53,9 @@ function postOnce(input: ScanUploadInput, host: string): Promise<Response> {
       'X-Vibgrate-Timestamp': input.timestamp,
       'Authorization': `VibgrateDSN ${input.keyId}:${input.secret}`,
       'Connection': 'close', // Prevent keep-alive delays on exit
+      ...(input.runId && input.runToken
+        ? { 'X-Vibgrate-Run-Id': input.runId, 'X-Vibgrate-Run-Token': input.runToken }
+        : {}),
     },
     body: input.body,
   });

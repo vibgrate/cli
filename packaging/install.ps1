@@ -1,5 +1,5 @@
 # vg installer (irm | iex) for Windows PowerShell.
-# Installs @vibgrate/cli (provides the `vg` command). Requires Node.js >= 20.
+# Installs @vibgrate/cli (provides the `vg` command). Requires Node.js >= 22.
 # Never call `exit` here: under `irm … | iex` the body runs in the caller's
 # session, so `exit` would close the user's terminal. `throw` stops the script
 # and leaves the host open.
@@ -7,11 +7,11 @@ $ErrorActionPreference = 'Stop'
 $pkg = '@vibgrate/cli'
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  throw 'vg: Node.js >= 20 is required (https://nodejs.org).'
+  throw 'vg: Node.js >= 22 is required (https://nodejs.org).'
 }
 $nodeMajor = [int]((node --version).TrimStart('v').Split('.')[0])
-if ($nodeMajor -lt 20) {
-  throw "vg: Node.js >= 20 is required (found $(node --version)). Upgrade at https://nodejs.org."
+if ($nodeMajor -lt 22) {
+  throw "vg: Node.js >= 22 is required (found $(node --version)). Upgrade at https://nodejs.org."
 }
 if (Get-Command npm -ErrorAction SilentlyContinue) {
   Write-Host "vg: installing $pkg globally via npm…"

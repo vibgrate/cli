@@ -76,6 +76,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [Security Posture](#security-posture)
   - [Security Scanners](#security-scanners)
   - [Service Dependencies](#service-dependencies)
+  - [Database Schema](#database-schema)
   - [Architecture Layers](#architecture-layers)
   - [Code Quality Metrics](#code-quality-metrics)
   - [OWASP Category Mapping](#owasp-category-mapping)
@@ -1109,6 +1110,7 @@ const config: VibgrateConfig = {
     securityPosture: { enabled: true },
     securityScanners: { enabled: true },
     serviceDependencies: { enabled: true },
+    databaseSchema: { enabled: true },
   },
 };
 
@@ -1164,7 +1166,34 @@ Beyond the core drift score, Vibgrate runs a suite of extended scanners that col
 - Are **read-only** — they never write files or execute project code
 - Run **in parallel** — failures in one scanner never affect the others
 - Can be **individually toggled** in the config
-- Collect **zero sensitive data** — no source code, no secrets, no PII
+- Collect **zero sensitive data** — no secrets, no PII, and no credentials, even the ones that do open source files (below)
+
+The core drift score is manifest/lockfile-only. Several extended scanners, and
+the code graph (`vg build`/`vg map`/`vg share`/`vg serve`), go further and open
+your source files locally — that is how they work, not an accident:
+
+| Reads source locally | What it extracts | Keeps raw text? |
+|---|---|---|
+| **Code graph** (`vg build`/`vg map`) | Symbol names, call edges, file paths, hubs/areas — the graph itself | No — never a source line, only structural graph facts |
+| **Code Quality** (`codeQuality`) | Cyclomatic complexity, function length, nesting depth, dead code, "god files" | No — computed metrics only |
+| **Breaking Change Exposure** (`breakingChangeExposure`) | Import/usage-pattern hit counts for majorly-outdated packages | No — counts only |
+| **Database Schema** (`databaseSchema`) | Table/model names, column names and types, relation/key flags from SQL/Prisma/Drizzle/TypeORM files | No — never a query, row, or credential |
+| **UI Purpose** (`uiPurpose`) | Route/nav/title/CTA copy, for feature detection | **Yes** — short evidence samples of the literal UI text are kept locally (never business logic, never a full file) |
+
+None of this is executed, and **nothing above leaves your machine** unless you
+run `vg share`/`vg push` or scan with a DSN configured — and even then, what
+uploads is the computed/structural output in the table above, never a raw
+source file. Each of these is individually toggleable; set the matching
+`scanners.<name>.enabled` to `false` (or `scanners: false` for all extended
+scanners, which does not affect the code graph) if you don't want the read to
+happen at all. See [Scanner Toggles](#scanner-toggles) above and each
+scanner's own section below.
+
+The one exception where code truly leaves your machine is the **remediation
+agent**: when you ask it to write a fix, it clones your repository into an
+isolated virtual machine Vibgrate controls, makes the change, and hands you a
+pull request. That only happens when you ask for it. See
+[vibgrate.com/subprocessors](https://vibgrate.com/subprocessors) for who processes what.
 
 ### Platform Matrix
 
@@ -1298,6 +1327,30 @@ Maps external service and platform dependencies by detecting SDK packages:
 | Databases     | PostgreSQL, MongoDB, Redis       |
 | Messaging     | SQS, SNS, Kafka, BullMQ          |
 | Observability | Sentry, DataDog, New Relic       |
+
+### Database Schema
+
+Extracts structural database-schema facts across five sources — Prisma
+(`schema.prisma`), raw SQL migrations (`.sql` files), SQL Server database
+projects (`.sqlproj`), Drizzle (`pgTable`/`mysqlTable`/`sqliteTable`), and
+TypeORM (`@Entity()` classes) — merged into one report:
+
+- Table/model names, per-field name and type, and relation/list/optional/id/unique flags
+- Enum names and values (Prisma)
+- Datasource providers (e.g. `postgresql`, `mysql`) — never the connection-string `url`
+- Files scanned, with a per-project breakdown
+
+Only structural facts are ever extracted — never a raw source line, a query,
+or a connection string/credential (any `scheme://user:pass@host` line is
+stripped as defense in depth even though hand-written SQL rarely embeds one).
+Reading these facts means opening `.sql`/`.prisma`/ORM source files locally —
+see the table at the top of this section for how this compares to the code
+graph and the other scanners that also read source. It's on by default; disable it with
+`scanners.databaseSchema.enabled: false` in `vibgrate.config.ts` (see
+[Scanner Toggles](#scanner-toggles)). Like every extended scanner, results
+only leave your machine when you run `vg push` or scan with a DSN configured
+— and the models/fields/files arrays are capped before upload so a
+large-monorepo schema can't balloon the payload.
 
 ### Architecture Layers
 

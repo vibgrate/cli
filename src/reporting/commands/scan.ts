@@ -13,6 +13,7 @@ import {
   detectVcs,
   resolveRepositoryName,
   parseExcludePatterns,
+  loadConfig,
 } from '../../core-open/index.js';
 import type { ScanOptions, ScanArtifact } from '../../core-open/index.js';
 import { analyzeReachability, collectPreflightDependencies } from '../reachability.js';
@@ -136,8 +137,12 @@ async function autoPush(
     return;
   }
 
-  // Compact and compress artifact for upload
-  const { body, contentEncoding } = await prepareCompressedUpload(artifact);
+  // Compact and compress artifact for upload. `databaseSchemaCaps` lets
+  // `scanners.databaseSchema` in vibgrate.config.ts raise/lower the default
+  // upload caps (see DOCS.md § Database Schema).
+  const config = await loadConfig(rootDir);
+  const databaseSchemaCaps = config.scanners !== false ? config.scanners?.databaseSchema : undefined;
+  const { body, contentEncoding } = await prepareCompressedUpload(artifact, { databaseSchemaCaps });
   const timestamp = String(Date.now());
 
   let host = parsed.host;
@@ -167,6 +172,10 @@ async function autoPush(
       contentEncoding,
       timestamp,
       force: opts.force,
+      // Set only by an automated caller running the scan on the workspace's
+      // behalf (e.g. a Vibgrate-hosted remediation run) — never a customer flag.
+      runId: process.env.VIBGRATE_SCAN_RUN_ID,
+      runToken: process.env.VIBGRATE_SCAN_RUN_TOKEN,
     });
     host = uploadedHost;
 
@@ -289,7 +298,7 @@ export const scanCommand = new Command('scan')
   .option('--vulns', 'Also scan installed dependencies for known vulnerabilities (OSV online, or advisories from --package-manifest when offline)')
   .option('--package-manifest <file>', 'Use local package-version manifest JSON/ZIP (for offline mode)')
   .option('--project-scan-timeout <seconds>', 'Per-project scan timeout in seconds (default: 180)')
-  .option('--drift-budget <score>', 'Fail if drift score is above budget (0-100)')
+  .option('--drift-budget <score>', 'Fail if DriftScore is above budget (0-100)')
   .option('--drift-worsening <percent>', 'Fail if drift worsens by more than % since baseline')
   .option('--repository-name <name>', 'Override the repository name recorded for this scan (defaults to the directory or package.json name)')
   .option('--force', 'Always create a fresh scan ingest, even if the repository is unchanged since the last scan (skips the unchanged/reuse optimization). Used by scheduled and dashboard-triggered scans.')
@@ -555,7 +564,7 @@ export const scanCommand = new Command('scan')
     }
 
     if (scanOpts.driftBudget !== undefined && artifact.drift.score > scanOpts.driftBudget) {
-      console.error(chalk.red(`\nFailing fitness function: drift score ${artifact.drift.score}/100 exceeds budget ${scanOpts.driftBudget}.`));
+      console.error(chalk.red(`\nFailing fitness function: DriftScore ${artifact.drift.score}/100 exceeds budget ${scanOpts.driftBudget}.`));
       process.exit(2);
     }
 

@@ -575,6 +575,27 @@ function formatExtended(ext: ExtendedScanResults): string[] {
     }
     lines.push('');
   }
+  // ── Database Schema (compact) ──
+  if (ext.databaseSchema) {
+    const ds = ext.databaseSchema;
+    lines.push(chalk.bold.underline('  Database Schema'));
+    const dsHead: string[] = [];
+    if (ds.providers.length > 0) dsHead.push(ds.providers.join(', '));
+    dsHead.push(`${ds.models.length} model${ds.models.length !== 1 ? 's' : ''}`);
+    dsHead.push(`${ds.enums.length} enum${ds.enums.length !== 1 ? 's' : ''}`);
+    lines.push(`    ${dsHead.join(' · ')}`);
+    const bySource = new Map<string, number>();
+    for (const m of ds.models) bySource.set(m.source, (bySource.get(m.source) ?? 0) + 1);
+    if (bySource.size > 1) {
+      const sourceSummary = [...bySource.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([s, n]) => `${s}: ${n}`).join(', ');
+      lines.push(`    Sources: ${sourceSummary}`);
+    }
+    if (ds.models.length > 0) {
+      const preview = ds.models.slice(0, 5).map((m) => m.name).join(', ');
+      lines.push(`    Models: ${chalk.white(preview)}${ds.models.length > 5 ? chalk.dim(` (+${ds.models.length - 5} more)`) : ''}`);
+    }
+    lines.push('');
+  }
   // ── Dependency Graph (compact) ──
   if (ext.dependencyGraph) {
     const dg = ext.dependencyGraph;

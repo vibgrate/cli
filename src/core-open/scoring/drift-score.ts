@@ -2,16 +2,28 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import * as crypto from 'node:crypto';
-import type { ProjectScan, DriftScore, Finding, RiskLevel, VibgrateConfig } from '../types.js';
-import { freshnessScoreFromLibyears } from './libyear.js';
+import type { ProjectScan, DriftScore, Finding, RiskLevel, VibgrateConfig, DependencyRow } from '../types.js';
+import { aggregateDependencyDrift } from './dependency-drift-v3.js';
 
 /**
  * Version of the drift-score methodology (weighting + formula). Bump this ONLY
  * when the weighting or calculation changes — never for routine CLI releases —
  * so the dashboard can tell whether two scores are directly comparable and avoid
  * drawing trend lines across a methodology change.
+ *
+ * driftscore-3.0 (DRIFTSCORE-V3-SPEC): the dependency pillar is the
+ * libyear-backbone blend — time-distance primary (0.55·T), semver-distance
+ * fallback (0.45·V) — with the four production data-quality guards and p95 tail
+ * aggregation (0.5·mean + 0.3·p95 + 0.2·unsupported_share). The former
+ * standalone freshness add-on (0.15) is folded into it, so the pillar weighting
+ * returns to the four-pillar shape (runtime .25 / framework .25 / dependency
+ * .30 / EOL .20). See `dependency-drift-v3.ts`.
+ *
+ * Not yet threaded (spec §6.1, follow-up): per-dependency unsupported/EOL and
+ * abandoned signals that fire the ≥70 / ≥50 floors, and transitive weighting
+ * from the lockfile graph — manifest deps default to direct until then.
  */
-export const DRIFT_SCORE_METHODOLOGY_VERSION = 'driftscore-2.0';
+export const DRIFT_SCORE_METHODOLOGY_VERSION = 'driftscore-3.0';
 
 /** Default thresholds per PRD section 15 */
 const DEFAULT_THRESHOLDS: Required<NonNullable<VibgrateConfig['thresholds']>> = {
@@ -69,26 +81,23 @@ function frameworkScore(projects: ProjectScan[]): number | null {
   return clamp(100 - (maxPenalty * 0.6 + avgPenalty * 0.4), 0, 100);
 }
 
+/**
+ * Dependency pillar (driftscore-3.0): the libyear-backbone per-dependency blend
+ * (`dependency-drift-v3.ts`) aggregated with the p95 tail term. Reported here as
+ * a HEALTH score (higher = fresher) so it slots into the health-scale blend
+ * below, which inverts everything to drift at the end. This replaces the
+ * driftscore-2.0 age-bucket distribution formula, which counted minor-behind as
+ * "current" and let one ancient dependency average into invisibility.
+ *
+ * The former standalone freshness pillar is folded in here: the time term (T)
+ * IS the libyear signal, so there is no separate freshness component in v3.
+ *
+ * Returns null when nothing is scoreable (all excluded / no dependencies).
+ */
 function dependencyScore(projects: ProjectScan[]): number | null {
-  let totalCurrent = 0;
-  let totalOne = 0;
-  let totalTwo = 0;
-
-  for (const p of projects) {
-    totalCurrent += p.dependencyAgeBuckets.current;
-    totalOne += p.dependencyAgeBuckets.oneBehind;
-    totalTwo += p.dependencyAgeBuckets.twoPlusBehind;
-  }
-
-  const total = totalCurrent + totalOne + totalTwo;
-  if (total === 0) return null;
-
-  const currentPct = totalCurrent / total;
-  const onePct = totalOne / total;
-  const twoPct = totalTwo / total;
-
-  // Score based on distribution
-  return clamp(Math.round(currentPct * 100 - onePct * 10 - twoPct * 40), 0, 100);
+  const deps: DependencyRow[] = projects.flatMap((p) => p.dependencies);
+  const agg = aggregateDependencyDrift(deps);
+  return agg ? 100 - agg.drift : null;
 }
 
 const MONTH_MS = 1000 * 60 * 60 * 24 * 30;
@@ -150,24 +159,6 @@ function eolScore(projects: ProjectScan[]): number | null {
   return score;
 }
 
-/**
- * Libyear-based dependency-freshness score (0–100, higher = fresher).
- *
- * Reads the optional per-project `libyears` aggregate populated by scanners when
- * release-date data is available. Returns null when no project carried date data
- * — keeping the component fully additive and the scan offline-capable.
- */
-function freshnessScore(projects: ProjectScan[]): number | null {
-  const aggs = projects.map((p) => p.libyears).filter((a): a is NonNullable<typeof a> => !!a);
-  if (aggs.length === 0) return null;
-  // Combine per-project aggregates into a single workspace-level aggregate.
-  const total = aggs.reduce((s, a) => s + a.total, 0);
-  const measured = aggs.reduce((s, a) => s + a.measured, 0);
-  const max = aggs.reduce((m, a) => Math.max(m, a.max), 0);
-  if (measured === 0) return null;
-  return freshnessScoreFromLibyears({ total, max, measured });
-}
-
 /** Fraction of dependencies whose drift could be resolved (known vs unknown). */
 function coverageConfidence(projects: ProjectScan[]): number | null {
   let known = 0;
@@ -195,18 +186,16 @@ export function computeDriftScore(projects: ProjectScan[]): DriftScore {
   const fs = frameworkScore(projects);
   const ds = dependencyScore(projects);
   const es = eolScore(projects);
-  const frs = freshnessScore(projects);
 
   // Weighted combination — redistribute weight from null (no-data) components.
-  // The freshness component is additive (weight 0.15 on top of the original
-  // four): when its data is absent it drops out and the original weighting is
-  // reproduced exactly, preserving backward compatibility.
+  // driftscore-3.0 four-pillar weighting: freshness is no longer a separate
+  // additive component — its libyear signal is the time term inside the
+  // dependency pillar now (see `dependencyScore`).
   const components: { score: number | null; weight: number }[] = [
     { score: rs, weight: 0.25 },
     { score: fs, weight: 0.25 },
     { score: ds, weight: 0.30 },
     { score: es, weight: 0.20 },
-    { score: frs, weight: 0.15 },
   ];
 
   const confidence = coverageConfidence(projects) ?? undefined;
@@ -223,7 +212,6 @@ export function computeDriftScore(projects: ProjectScan[]): DriftScore {
       dependencyScore: toDrift(Math.round(ds ?? 100)),
       eolScore: toDrift(Math.round(es ?? 100)),
     };
-    if (frs !== null) c.freshnessScore = toDrift(Math.round(frs));
     return c;
   };
 
@@ -259,7 +247,6 @@ export function computeDriftScore(projects: ProjectScan[]): DriftScore {
   if (fs !== null) measured.push('framework');
   if (ds !== null) measured.push('dependency');
   if (es !== null) measured.push('eol');
-  if (frs !== null) measured.push('freshness');
 
   return {
     score,

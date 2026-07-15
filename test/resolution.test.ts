@@ -135,6 +135,101 @@ describe('package-scoped resolution (no import needed)', () => {
   });
 });
 
+describe('Java constructor/field DI wiring → references edges', () => {
+  it('links a constructor-injected field to its collaborator class (Spring-style, same package)', async () => {
+    const { graph } = await buildGraph({
+      root: project({
+        'src/com/a/UserPreferencesRepository.java': 'package com.a;\npublic class UserPreferencesRepository {}\n',
+        'src/com/a/PreferencesController.java':
+          'package com.a;\n\npublic class PreferencesController {\n' +
+          '  private final UserPreferencesRepository repo;\n\n' +
+          '  public PreferencesController(UserPreferencesRepository repo) {\n' +
+          '    this.repo = repo;\n' +
+          '  }\n' +
+          '}\n',
+      }),
+      generatedAt: PIN,
+      inline: true,
+    });
+    expect(hasEdge(graph, 'references', 'PreferencesController', 'UserPreferencesRepository')).toBe(true);
+  });
+
+  it('links a constructor-injected field across packages via an import (no `new`, no direct method call)', async () => {
+    const { graph } = await buildGraph({
+      root: project({
+        'src/com/a/UserPreferencesRepository.java': 'package com.a;\npublic class UserPreferencesRepository {}\n',
+        'src/com/b/PreferencesController.java':
+          'package com.b;\n\nimport com.a.UserPreferencesRepository;\n\n' +
+          'public class PreferencesController {\n' +
+          '  private final UserPreferencesRepository repo;\n\n' +
+          '  public PreferencesController(UserPreferencesRepository repo) {\n' +
+          '    this.repo = repo;\n' +
+          '  }\n' +
+          '}\n',
+      }),
+      generatedAt: PIN,
+      inline: true,
+    });
+    expect(hasEdge(graph, 'references', 'PreferencesController', 'UserPreferencesRepository')).toBe(true);
+  });
+
+  it('get_node-style callers reflect DI wiring even with zero direct calls', async () => {
+    const { graph } = await buildGraph({
+      root: project({
+        'src/com/a/UserPreferencesRepository.java': 'package com.a;\npublic class UserPreferencesRepository {}\n',
+        'src/com/a/PreferencesController.java':
+          'package com.a;\n\npublic class PreferencesController {\n' +
+          '  private final UserPreferencesRepository repo;\n\n' +
+          '  public PreferencesController(UserPreferencesRepository repo) {\n' +
+          '    this.repo = repo;\n' +
+          '  }\n' +
+          '}\n',
+      }),
+      generatedAt: PIN,
+      inline: true,
+    });
+    const { indexFor } = await import('../src/engine/relations.js');
+    const repo = graph.nodes.find((n) => n.kind === 'class' && n.name === 'UserPreferencesRepository')!;
+    const callers = indexFor(graph).callers(repo.id);
+    expect(callers.length).toBeGreaterThan(0);
+  });
+});
+
+describe('Swift test-file cross-directory resolution', () => {
+  it('resolves a test-file call into product code living in a sibling directory (Xcode Tests/ layout)', async () => {
+    const { graph } = await buildGraph({
+      root: project({
+        'App/AppleSignInCoordinator.swift': 'class AppleSignInCoordinator {\n  init(submitter: Any, setError: Any) {}\n}\n',
+        'AppTests/AppleSignInCoordinatorTests.swift':
+          'import XCTest\n\n' +
+          'class AppleSignInCoordinatorTests: XCTestCase {\n' +
+          '  private func makeSUT() -> AppleSignInCoordinator {\n' +
+          '    return AppleSignInCoordinator(submitter: 1, setError: 2)\n' +
+          '  }\n' +
+          '}\n',
+      }),
+      generatedAt: PIN,
+      inline: true,
+    });
+    expect(hasEdge(graph, 'call', 'makeSUT', 'AppleSignInCoordinator')).toBe(true);
+  });
+
+  it('does NOT extend the fallback to non-test code (precision guard)', async () => {
+    const { graph } = await buildGraph({
+      root: project({
+        // Two unrelated Swift files in different directories, neither a test —
+        // the Swift test-file fallback must not fire here; without an import or
+        // same-directory reachability this is honest non-resolution.
+        'App/One/Widget.swift': 'class Widget {\n  init() {}\n}\n',
+        'App/Two/Factory.swift': 'class Factory {\n  func make() -> Widget {\n    return Widget()\n  }\n}\n',
+      }),
+      generatedAt: PIN,
+      inline: true,
+    });
+    expect(hasEdge(graph, 'call', 'make', 'Widget')).toBe(false);
+  });
+});
+
 describe('qualified calls do not self-loop (heuristic)', () => {
   it('does NOT resolve `crud.foo()` inside `def foo` to the enclosing def itself (Python)', async () => {
     const { graph } = await buildGraph({

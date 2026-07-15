@@ -831,6 +831,23 @@ export interface ScannerToggle {
   enabled: boolean;
 }
 
+/**
+ * Per-field override of the default upload-compaction caps for the
+ * `databaseSchema` scanner (see `compactDatabaseSchema` in
+ * `utils/compact-artifact.ts` and DOCS.md § Database Schema). Any field left
+ * unset keeps its built-in default. Raising these only affects how much of
+ * the *local* scan result survives compaction before upload — the ingest API
+ * enforces its own fixed hard ceiling on top, regardless of what's configured
+ * here, so a payload can never grow unbounded even from a misconfigured or
+ * non-CLI client.
+ */
+export interface DatabaseSchemaUploadCaps {
+  maxModels?: number;
+  maxFieldsPerModel?: number;
+  maxFilesPerModel?: number;
+  maxFilesScanned?: number;
+}
+
 export interface ScannersConfig {
   platformMatrix?: ScannerToggle;
   dependencyRisk?: ScannerToggle;
@@ -844,6 +861,7 @@ export interface ScannersConfig {
   serviceDependencies?: ScannerToggle;
   architecture?: ScannerToggle;
   codeQuality?: ScannerToggle;
+  databaseSchema?: ScannerToggle & DatabaseSchemaUploadCaps;
   uiPurpose?: ScannerToggle;
   runtimeConfiguration?: ScannerToggle;
   dataStores?: ScannerToggle;
@@ -1153,6 +1171,85 @@ export interface CodeQualityResult {
   deadCodePercent: number;
 }
 
+/**
+ * Which scanner produced a {@link DatabaseModel}. Models are never merged or
+ * deduped by name *across* sources — a `users` table found in a raw SQL
+ * migration and a `User` Prisma model are not assumed to be the same thing,
+ * even when their names coincide. Each source keeps its own dedup pass.
+ */
+export type DatabaseModelSource = 'prisma' | 'sql-migration' | 'sqlproj' | 'drizzle' | 'typeorm';
+
+/** A single field/column on a {@link DatabaseModel}. Never carries attribute
+ * *values* (e.g. Prisma's `@default(...)`, a SQL `DEFAULT ...` value, or a
+ * decorator's non-name arguments) — only structural facts. */
+export interface DatabaseField {
+  name: string;
+  /** Base type name/keyword as detected by the source parser, e.g. `String`,
+   *  `Post` (Prisma), `VARCHAR(255)` (SQL), `text` (Drizzle builder name), or
+   *  the declared TS type (TypeORM). Best-effort, never evaluated. */
+  type: string;
+  /** True when the field type is a list/array (or a `*ToMany` relation). */
+  isList: boolean;
+  /** True when the field type is optional/nullable. */
+  isOptional: boolean;
+  /** True when the type is another model/table, or an explicit relation
+   *  annotation/decorator/`REFERENCES` clause is present. */
+  isRelation: boolean;
+  /** True when the field is (part of) the primary key. */
+  isId: boolean;
+  /** True when the field carries a uniqueness constraint. */
+  isUnique: boolean;
+}
+
+/** A database model — a Prisma `model` block, a SQL `CREATE TABLE`, a Drizzle
+ * `pgTable`/`mysqlTable`/`sqliteTable` call, or a TypeORM `@Entity` class. */
+export interface DatabaseModel {
+  name: string;
+  fields: DatabaseField[];
+  /** Which scanner produced this model — see {@link DatabaseModelSource}. */
+  source: DatabaseModelSource;
+  /** File(s) (relative to rootDir) this model was extracted from. */
+  files: string[];
+}
+
+/** A Prisma `enum` block. */
+export interface DatabaseEnum {
+  name: string;
+  values: string[];
+}
+
+/** Per-project breakdown of database-schema files/models/enums, across all sources. */
+export interface DatabaseSchemaProjectSummary {
+  /** Project path (relative to rootDir), matching `ProjectScan.path`. */
+  project: string;
+  /** Schema/migration/entity files attributed to this project, relative to rootDir. */
+  filesScanned: string[];
+  /** Model names defined within this project's files (any source). */
+  models: string[];
+  /** Enum names defined within this project's files (Prisma only). */
+  enums: string[];
+}
+
+/**
+ * Structured, deterministic database-schema scan result, merged across all
+ * supported sources (Prisma, raw SQL migrations, SQL Server database
+ * projects, Drizzle, TypeORM). Only structural facts — model/table names,
+ * field/column names/types, relation/list/optional/id/unique flags, and enum
+ * names/values. Never a raw source line, connection string, or credential —
+ * see the doc comment at the top of `advanced-analysis.ts` and
+ * `scanners/database-schema.ts` (in the public CLI package) for why.
+ */
+export interface DatabaseSchemaResult {
+  /** Datasource providers detected (e.g. `postgresql`, `mysql`, `sqlite`). Never includes the `url` value. */
+  providers: string[];
+  models: DatabaseModel[];
+  enums: DatabaseEnum[];
+  /** All schema/migration/entity files scanned (any source), relative to rootDir. */
+  filesScanned: string[];
+  /** Per-project breakdown. */
+  projects: DatabaseSchemaProjectSummary[];
+}
+
 export interface UiPurposeEvidenceItem {
   kind: 'route' | 'nav' | 'title' | 'heading' | 'cta' | 'copy' | 'dependency' | 'feature_flag';
   value: string;
@@ -1353,6 +1450,7 @@ export interface ExtendedScanResults {
   serviceDependencies?: ServiceDependenciesResult;
   architecture?: ArchitectureResult;
   codeQuality?: CodeQualityResult;
+  databaseSchema?: DatabaseSchemaResult;
   uiPurpose?: UiPurposeResult;
   runtimeConfiguration?: RuntimeConfigurationResult;
   dataStores?: DataStoresResult;
