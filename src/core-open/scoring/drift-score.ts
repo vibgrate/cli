@@ -2,7 +2,7 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import * as crypto from 'node:crypto';
-import type { ProjectScan, DriftScore, Finding, RiskLevel, VibgrateConfig, DependencyRow } from '../types.js';
+import type { ProjectScan, DriftScore, Finding, RiskLevel, VibgrateConfig } from '../types.js';
 import { aggregateDependencyDrift } from './dependency-drift-v3.js';
 
 /**
@@ -79,25 +79,6 @@ function frameworkScore(projects: ProjectScan[]): number | null {
   const maxPenalty = Math.min(maxLag * 20, 100);
   const avgPenalty = Math.min(avgLag * 15, 100);
   return clamp(100 - (maxPenalty * 0.6 + avgPenalty * 0.4), 0, 100);
-}
-
-/**
- * Dependency pillar (driftscore-3.0): the libyear-backbone per-dependency blend
- * (`dependency-drift-v3.ts`) aggregated with the p95 tail term. Reported here as
- * a HEALTH score (higher = fresher) so it slots into the health-scale blend
- * below, which inverts everything to drift at the end. This replaces the
- * driftscore-2.0 age-bucket distribution formula, which counted minor-behind as
- * "current" and let one ancient dependency average into invisibility.
- *
- * The former standalone freshness pillar is folded in here: the time term (T)
- * IS the libyear signal, so there is no separate freshness component in v3.
- *
- * Returns null when nothing is scoreable (all excluded / no dependencies).
- */
-function dependencyScore(projects: ProjectScan[]): number | null {
-  const deps: DependencyRow[] = projects.flatMap((p) => p.dependencies);
-  const agg = aggregateDependencyDrift(deps);
-  return agg ? 100 - agg.drift : null;
 }
 
 const MONTH_MS = 1000 * 60 * 60 * 24 * 30;
@@ -182,9 +163,27 @@ function coverageConfidence(projects: ProjectScan[]): number | null {
  * pre-2.0 convention where higher meant healthier.
  */
 export function computeDriftScore(projects: ProjectScan[]): DriftScore {
+  // driftscore-3.0 dependency pillar: the libyear-backbone per-dependency blend
+  // (`dependency-drift-v3.ts`) with the p95 tail term. Computed once so its
+  // provenance (`mode`) and detail (`p95`/`top`/…) can also be surfaced on the
+  // score envelope (§6.3). Reported as a HEALTH score here (higher = fresher)
+  // so it slots into the health-scale blend below, which inverts to drift at the
+  // end. Replaces the driftscore-2.0 age-bucket formula, which counted
+  // minor-behind as "current" and let one ancient dep average into invisibility.
+  // The former standalone freshness pillar folds in here — the time term IS the
+  // libyear signal.
+  const depAgg = aggregateDependencyDrift(
+    projects.flatMap((p) => p.dependencies),
+    // Per-dependency context for the v3 floors: an unsupported/deprecated major
+    // floors drift at 70, an abandoned ("no pulse") package at 50. Threaded from
+    // the row where the ecosystem scanner set it; absent → the floor doesn't
+    // fire (spec §6.1). Transitive weighting still awaits the lockfile graph, so
+    // manifest deps default to direct.
+    (dep) => ({ unsupported: dep.unsupported === true, abandoned: dep.abandoned === true }),
+  );
   const rs = runtimeScore(projects);
   const fs = frameworkScore(projects);
-  const ds = dependencyScore(projects);
+  const ds = depAgg ? 100 - depAgg.drift : null;
   const es = eolScore(projects);
 
   // Weighted combination — redistribute weight from null (no-data) components.
@@ -215,6 +214,28 @@ export function computeDriftScore(projects: ProjectScan[]): DriftScore {
     return c;
   };
 
+  // Score envelope (§6.3): the dependency pillar's provenance (`mode`) and its
+  // v3 detail (`p95`/`unsupportedShare`/`coverage`/ranked `top`), for
+  // explainability, the `~` branding, and the per-package breakdown. Present
+  // only when there were scoreable dependencies.
+  const envelope: Pick<DriftScore, 'mode' | 'dependencyDrift'> = depAgg
+    ? {
+        mode: depAgg.mode,
+        dependencyDrift: {
+          p95: depAgg.p95,
+          unsupportedShare: depAgg.unsupportedShare,
+          coverage: depAgg.coverage,
+          top: depAgg.top.map((t) => ({
+            package: t.package,
+            drift: t.drift,
+            mode: t.mode,
+            unsupported: t.unsupported,
+            flags: t.flags,
+          })),
+        },
+      }
+    : {};
+
   const active = components.filter((c) => c.score !== null);
   if (active.length === 0) {
     // No data at all — neutral score (no measurable drift)
@@ -224,6 +245,7 @@ export function computeDriftScore(projects: ProjectScan[]): DriftScore {
       components: buildComponents(),
       methodologyVersion: DRIFT_SCORE_METHODOLOGY_VERSION,
       ...(confidence !== undefined ? { confidence } : {}),
+      ...envelope,
     };
   }
 
@@ -255,6 +277,7 @@ export function computeDriftScore(projects: ProjectScan[]): DriftScore {
     measured,
     methodologyVersion: DRIFT_SCORE_METHODOLOGY_VERSION,
     ...(confidence !== undefined ? { confidence } : {}),
+    ...envelope,
   };
 }
 

@@ -23,6 +23,11 @@ import type {
   ProjectReference,
 } from '../types.js';
 
+const MS_PER_DAY = 86_400_000;
+/** A package whose latest release is older than this is "abandoned" (no pulse) —
+ *  driftscore-3.0 §2.1. ~24 months. */
+const ABANDONED_MAX_DAYS = 730;
+
 /** Well-known frameworks we detect and track */
 const KNOWN_FRAMEWORKS: Record<string, string> = {
   // ── Frontend ──
@@ -384,6 +389,19 @@ async function scanOnePackageJson(
     const ageDays = ageDaysBetween(resolvedVersion, latestStable, meta.releaseDates);
     const libyears = daysToLibyears(ageDays);
 
+    // Abandonment (driftscore-3.0 §6.1): the *latest* release itself is old — the
+    // package has stopped moving ("no pulse"), even if you're on that latest
+    // version. Uses the registry publish dates already fetched for libyears, so
+    // there is no extra request. Fires the abandoned floor (drift ≥ 50).
+    const latestIso = latestStable ? meta.releaseDates?.[latestStable] : undefined;
+    let abandoned = false;
+    if (latestIso) {
+      const publishedMs = Date.parse(latestIso);
+      if (!Number.isNaN(publishedMs)) {
+        abandoned = (Date.now() - publishedMs) / MS_PER_DAY > ABANDONED_MAX_DAYS;
+      }
+    }
+
     dependencies.push({
       package: pkg,
       section,
@@ -395,6 +413,7 @@ async function scanOnePackageJson(
       license: buildDependencyLicense(meta.license, 'registry'),
       ageDays,
       libyears,
+      ...(abandoned ? { abandoned: true } : {}),
     });
 
     // Detect known frameworks

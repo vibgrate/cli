@@ -100,6 +100,46 @@ describe('embedder loading', () => {
   it('returns null under --local (the only air-gapped switch — no download)', async () => {
     expect(await loadEmbedder({ local: true })).toBeNull();
   });
+
+  it('loads the backend from VIBGRATE_EMBEDDER_PATH (host-supplied, wins over own deps)', async () => {
+    // A fake `fastembed` in a host-owned dir — how the VS Code extension
+    // supplies the native backend its bundled engine deliberately omits.
+    const host = makeProject({
+      'node_modules/fastembed/package.json': JSON.stringify({
+        name: 'fastembed',
+        version: '0.0.0-test',
+        main: 'index.cjs',
+      }),
+      'node_modules/fastembed/index.cjs': [
+        'module.exports = {',
+        '  EmbeddingModel: {},',
+        '  FlagEmbedding: {',
+        '    init: async () => ({',
+        '      embed: async function* () {},',
+        '      queryEmbed: async () => [0.25, 0.75],',
+        '    }),',
+        '  },',
+        '};',
+      ].join('\n'),
+    });
+    const cacheHome = path.join(host, 'xdg-cache');
+    const savedPath = process.env.VIBGRATE_EMBEDDER_PATH;
+    const savedCache = process.env.XDG_CACHE_HOME;
+    process.env.VIBGRATE_EMBEDDER_PATH = host;
+    process.env.XDG_CACHE_HOME = cacheHome; // keep the ready-marker out of the real user cache
+    try {
+      const embedder = await loadEmbedder();
+      expect(embedder).not.toBeNull();
+      expect(embedder!.id).toBe(resolveEmbedModel());
+      expect(await embedder!.embedQuery('q')).toEqual([0.25, 0.75]);
+    } finally {
+      if (savedPath === undefined) delete process.env.VIBGRATE_EMBEDDER_PATH;
+      else process.env.VIBGRATE_EMBEDDER_PATH = savedPath;
+      if (savedCache === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = savedCache;
+      cleanup(host);
+    }
+  });
 });
 
 describe('embed model id + cache detection (drives the ask setup note)', () => {

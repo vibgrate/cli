@@ -2,7 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { detectPackageManager, detectWorkspaceRoot, getInstallCommand } from './update.js';
+import {
+  detectGlobalInstall,
+  detectPackageManager,
+  detectWorkspaceRoot,
+  findGlobalInstall,
+  getInstallCommand,
+  getLocalDependencyState,
+} from './update.js';
 
 // The update command is difficult to unit-test end-to-end because it shells out
 // via execSync. Instead we test the exported helper logic (pm detection,
@@ -155,41 +162,140 @@ describe('update command helpers', () => {
     });
   });
 
-  describe('isDevDependency detection', () => {
-    it('returns true when @vibgrate/cli is in devDependencies', async () => {
-      const pkgJson = {
-        name: 'test-project',
-        devDependencies: { '@vibgrate/cli': '^1.0.0' },
-      };
-      await fs.writeFile(path.join(tempDir, 'package.json'), JSON.stringify(pkgJson));
-
-      const raw = await fs.readFile(path.join(tempDir, 'package.json'), 'utf-8');
-      const pkg = JSON.parse(raw) as Record<string, Record<string, string>>;
-      expect(Boolean(pkg.devDependencies?.['@vibgrate/cli'])).toBe(true);
+  describe('getLocalDependencyState', () => {
+    it("returns 'dev' when @vibgrate/cli is in devDependencies", async () => {
+      await fs.writeFile(
+        path.join(tempDir, 'package.json'),
+        JSON.stringify({ name: 'test-project', devDependencies: { '@vibgrate/cli': '^1.0.0' } }),
+      );
+      expect(await getLocalDependencyState(tempDir)).toBe('dev');
     });
 
-    it('returns false when @vibgrate/cli is in dependencies', async () => {
-      const pkgJson = {
-        name: 'test-project',
-        dependencies: { '@vibgrate/cli': '^1.0.0' },
-      };
-      await fs.writeFile(path.join(tempDir, 'package.json'), JSON.stringify(pkgJson));
-
-      const raw = await fs.readFile(path.join(tempDir, 'package.json'), 'utf-8');
-      const pkg = JSON.parse(raw) as Record<string, Record<string, string>>;
-      expect(Boolean(pkg.devDependencies?.['@vibgrate/cli'])).toBe(false);
+    it("returns 'prod' when @vibgrate/cli is in dependencies", async () => {
+      await fs.writeFile(
+        path.join(tempDir, 'package.json'),
+        JSON.stringify({ name: 'test-project', dependencies: { '@vibgrate/cli': '^1.0.0' } }),
+      );
+      expect(await getLocalDependencyState(tempDir)).toBe('prod');
     });
 
-    it('defaults to true when no package.json exists', async () => {
-      // No package.json — should default to devDep
-      try {
-        await fs.readFile(path.join(tempDir, 'package.json'), 'utf-8');
-        // Should not reach here
-        expect(true).toBe(false);
-      } catch {
-        // Expected — default to devDep
-        expect(true).toBe(true);
-      }
+    it("prefers 'dev' when declared in both sections", async () => {
+      await fs.writeFile(
+        path.join(tempDir, 'package.json'),
+        JSON.stringify({
+          name: 'test-project',
+          dependencies: { '@vibgrate/cli': '^1.0.0' },
+          devDependencies: { '@vibgrate/cli': '^1.0.0' },
+        }),
+      );
+      expect(await getLocalDependencyState(tempDir)).toBe('dev');
+    });
+
+    it('returns null when the package is not declared', async () => {
+      await fs.writeFile(
+        path.join(tempDir, 'package.json'),
+        JSON.stringify({ name: 'test-project', dependencies: { lodash: '^4.0.0' } }),
+      );
+      expect(await getLocalDependencyState(tempDir)).toBe(null);
+    });
+
+    it('returns null when no package.json exists', async () => {
+      expect(await getLocalDependencyState(tempDir)).toBe(null);
+    });
+
+    it('returns null when package.json is malformed', async () => {
+      await fs.writeFile(path.join(tempDir, 'package.json'), '{ not valid json');
+      expect(await getLocalDependencyState(tempDir)).toBe(null);
+    });
+  });
+
+  describe('detectGlobalInstall', () => {
+    it('detects an npm global install from a node_modules path outside the project', () => {
+      expect(
+        detectGlobalInstall('/usr/local/lib/node_modules/@vibgrate/cli/dist/cli.js', '/home/me/project'),
+      ).toBe('npm');
+    });
+
+    it('resolves the global bin symlink before inspecting the path', async () => {
+      // Reproduce a real global layout: bin/vg is a symlink into lib/node_modules.
+      const target = path.join(tempDir, 'lib', 'node_modules', '@vibgrate', 'cli', 'dist', 'cli.js');
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, '');
+      const bin = path.join(tempDir, 'bin', 'vg');
+      await fs.mkdir(path.dirname(bin), { recursive: true });
+      await fs.symlink(target, bin);
+      expect(detectGlobalInstall(bin, '/home/me/project')).toBe('npm');
+    });
+
+    it('detects a pnpm global install', () => {
+      expect(
+        detectGlobalInstall(
+          '/home/me/.local/share/pnpm/global/5/node_modules/@vibgrate/cli/dist/cli.js',
+          '/home/me/project',
+        ),
+      ).toBe('pnpm');
+    });
+
+    it('returns null for a local install inside the project node_modules', () => {
+      expect(
+        detectGlobalInstall('/home/me/project/node_modules/@vibgrate/cli/dist/cli.js', '/home/me/project'),
+      ).toBe(null);
+    });
+
+    it('returns null for an npx cache run', () => {
+      expect(
+        detectGlobalInstall('/home/me/.npm/_npx/abc123/node_modules/@vibgrate/cli/dist/cli.js', '/home/me/project'),
+      ).toBe(null);
+    });
+
+    it('returns null for a path with no node_modules segment', () => {
+      expect(detectGlobalInstall('/usr/local/bin/vg-standalone', '/home/me/project')).toBe(null);
+    });
+
+    it('returns null for an empty exec path', () => {
+      expect(detectGlobalInstall('', '/home/me/project')).toBe(null);
+    });
+  });
+
+  describe('findGlobalInstall', () => {
+    it('finds the package in the npm global root', async () => {
+      const npmRoot = path.join(tempDir, 'npm-global', 'node_modules');
+      await fs.mkdir(path.join(npmRoot, '@vibgrate', 'cli'), { recursive: true });
+      const run = (cmd: string): string => {
+        if (cmd === 'npm root -g') return `${npmRoot}\n`;
+        throw new Error(`not installed: ${cmd}`);
+      };
+      expect(await findGlobalInstall('@vibgrate/cli', run)).toBe('npm');
+    });
+
+    it('falls through to pnpm when npm does not have the package', async () => {
+      const npmRoot = path.join(tempDir, 'npm-global', 'node_modules');
+      const pnpmRoot = path.join(tempDir, 'pnpm-global', 'node_modules');
+      await fs.mkdir(npmRoot, { recursive: true });
+      await fs.mkdir(path.join(pnpmRoot, '@vibgrate', 'cli'), { recursive: true });
+      const run = (cmd: string): string => {
+        if (cmd === 'npm root -g') return npmRoot;
+        if (cmd === 'pnpm root -g') return pnpmRoot;
+        throw new Error(`not installed: ${cmd}`);
+      };
+      expect(await findGlobalInstall('@vibgrate/cli', run)).toBe('pnpm');
+    });
+
+    it('checks the yarn global dir under node_modules', async () => {
+      const yarnDir = path.join(tempDir, 'yarn-global');
+      await fs.mkdir(path.join(yarnDir, 'node_modules', '@vibgrate', 'cli'), { recursive: true });
+      const run = (cmd: string): string => {
+        if (cmd === 'yarn global dir') return yarnDir;
+        throw new Error(`not installed: ${cmd}`);
+      };
+      expect(await findGlobalInstall('@vibgrate/cli', run)).toBe('yarn');
+    });
+
+    it('returns null when no package manager has a global copy', async () => {
+      const run = (): string => {
+        throw new Error('not installed');
+      };
+      expect(await findGlobalInstall('@vibgrate/cli', run)).toBe(null);
     });
   });
 });

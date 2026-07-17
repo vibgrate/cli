@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { skillMarkdown, nudgeMarkdown, mcpServerEntry, NUDGE_BEGIN, NUDGE_END, type ServeLaunch } from './content.js';
 import { CliError, ExitCode } from '../util/exit.js';
@@ -26,6 +27,15 @@ export interface Assistant {
   skill?: string; // project-relative SKILL.md path
   mcp?: McpTarget;
   nudge?: NudgeTarget;
+  /**
+   * Signs this assistant is in use, checked by `detectAssistants`:
+   * `markers` are project-relative paths, `homeMarkers` are relative to the
+   * user's home folder, `bin` are executables looked up on PATH. Detection is
+   * best-effort presence-checking only — nothing is read or executed.
+   */
+  markers?: string[];
+  homeMarkers?: string[];
+  bin?: string[];
 }
 
 export const ASSISTANTS: Assistant[] = [
@@ -35,59 +45,121 @@ export const ASSISTANTS: Assistant[] = [
     skill: '.claude/skills/vg/SKILL.md',
     mcp: { file: '.mcp.json', key: 'mcpServers' },
     nudge: { file: 'CLAUDE.md', kind: 'block' },
+    markers: ['CLAUDE.md', '.claude'],
+    homeMarkers: ['.claude', '.claude.json'],
+    bin: ['claude'],
   },
   {
     id: 'cursor',
     label: 'Cursor',
     mcp: { file: '.cursor/mcp.json', key: 'mcpServers' },
     nudge: { file: '.cursor/rules/vg.mdc', kind: 'file' },
+    markers: ['.cursor', '.cursorrules'],
+    homeMarkers: ['.cursor'],
+    bin: ['cursor-agent'],
   },
   {
     id: 'windsurf',
     label: 'Windsurf',
     mcp: { file: '.windsurf/mcp.json', key: 'mcpServers' },
     nudge: { file: '.windsurf/rules/vg.md', kind: 'file' },
+    markers: ['.windsurf', '.windsurfrules'],
+    homeMarkers: ['.codeium/windsurf'],
   },
   {
     id: 'vscode',
     label: 'VS Code (Copilot Chat)',
     mcp: { file: '.vscode/mcp.json', key: 'servers', vscode: true },
     nudge: { file: '.github/copilot-instructions.md', kind: 'block' },
+    markers: ['.github/copilot-instructions.md'],
   },
   {
     id: 'codex',
     label: 'Codex',
     skill: '.codex/skills/vg/SKILL.md',
     nudge: { file: 'AGENTS.md', kind: 'block' },
+    markers: ['.codex'],
+    homeMarkers: ['.codex'],
+    bin: ['codex'],
   },
   {
     id: 'gemini',
     label: 'Gemini CLI',
     skill: '.gemini/skills/vg/SKILL.md',
     nudge: { file: 'GEMINI.md', kind: 'block' },
+    markers: ['GEMINI.md', '.gemini'],
+    homeMarkers: ['.gemini'],
+    bin: ['gemini'],
   },
   // Skill + advisory AGENTS.md nudge (the broad-reach common denominator). MCP
   // registration for these hosts is host-specific and added as their formats
   // stabilise; the skill + nudge work today.
-  { id: 'opencode', label: 'OpenCode', skill: '.opencode/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'kilo', label: 'Kilo Code', skill: '.kilo/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'aider', label: 'Aider', skill: '.aider/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'factory', label: 'Factory Droid', skill: '.factory/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'trae', label: 'Trae', skill: '.trae/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'kiro', label: 'Kiro', skill: '.kiro/skills/vg/SKILL.md', nudge: { file: '.kiro/steering/vg.md', kind: 'file' } },
-  { id: 'amp', label: 'Amp', skill: '.agents/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'kimi', label: 'Kimi Code', skill: '.kimi/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'codebuddy', label: 'CodeBuddy', skill: '.codebuddy/skills/vg/SKILL.md', nudge: { file: 'CODEBUDDY.md', kind: 'block' } },
-  { id: 'copilot-cli', label: 'GitHub Copilot CLI', skill: '.copilot/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'pi', label: 'Pi', skill: '.pi/agent/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'devin', label: 'Devin CLI', skill: '.devin/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'hermes', label: 'Hermes', skill: '.hermes/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'openclaw', label: 'OpenClaw', skill: '.openclaw/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
-  { id: 'agents', label: 'Agent-Skills (generic)', skill: '.agents/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' } },
+  { id: 'grok', label: 'Grok CLI', skill: '.grok/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.grok', 'GROK.md'], homeMarkers: ['.grok'], bin: ['grok'] },
+  { id: 'opencode', label: 'OpenCode', skill: '.opencode/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.opencode', 'opencode.json'], homeMarkers: ['.config/opencode'], bin: ['opencode'] },
+  { id: 'kilo', label: 'Kilo Code', skill: '.kilo/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.kilo', '.kilocode'], homeMarkers: ['.kilocode'] },
+  { id: 'aider', label: 'Aider', skill: '.aider/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.aider', '.aider.conf.yml'], homeMarkers: ['.aider.conf.yml'], bin: ['aider'] },
+  { id: 'factory', label: 'Factory Droid', skill: '.factory/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.factory'], homeMarkers: ['.factory'], bin: ['droid'] },
+  { id: 'trae', label: 'Trae', skill: '.trae/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.trae'], homeMarkers: ['.trae'] },
+  { id: 'kiro', label: 'Kiro', skill: '.kiro/skills/vg/SKILL.md', nudge: { file: '.kiro/steering/vg.md', kind: 'file' }, markers: ['.kiro'], homeMarkers: ['.kiro'] },
+  { id: 'amp', label: 'Amp', skill: '.agents/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, homeMarkers: ['.config/amp'], bin: ['amp'] },
+  { id: 'kimi', label: 'Kimi Code', skill: '.kimi/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.kimi'], homeMarkers: ['.kimi'] },
+  { id: 'codebuddy', label: 'CodeBuddy', skill: '.codebuddy/skills/vg/SKILL.md', nudge: { file: 'CODEBUDDY.md', kind: 'block' }, markers: ['CODEBUDDY.md', '.codebuddy'], homeMarkers: ['.codebuddy'] },
+  { id: 'copilot-cli', label: 'GitHub Copilot CLI', skill: '.copilot/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.copilot'], homeMarkers: ['.copilot'], bin: ['copilot'] },
+  { id: 'pi', label: 'Pi', skill: '.pi/agent/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.pi'], homeMarkers: ['.pi'] },
+  { id: 'devin', label: 'Devin CLI', skill: '.devin/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.devin'], homeMarkers: ['.devin'] },
+  { id: 'hermes', label: 'Hermes', skill: '.hermes/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.hermes'], homeMarkers: ['.hermes'] },
+  { id: 'openclaw', label: 'OpenClaw', skill: '.openclaw/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.openclaw'], homeMarkers: ['.openclaw'], bin: ['openclaw'] },
+  { id: 'agents', label: 'Agent-Skills (generic)', skill: '.agents/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['AGENTS.md', '.agents'] },
 ];
 
 export function assistantById(id: string): Assistant | undefined {
   return ASSISTANTS.find((a) => a.id === id);
+}
+
+// --- detection ---
+
+export interface DetectedAssistant {
+  assistant: Assistant;
+  /** Where the sign was found — in the repo, in the user's home folder, or on PATH. */
+  via: 'repo' | 'home' | 'path';
+  /** The specific marker path or executable name that matched. */
+  marker: string;
+}
+
+export interface DetectOptions {
+  /** Home folder override (tests). Defaults to `os.homedir()`. */
+  home?: string;
+  /** PATH lookup override (tests). Defaults to `whichOnPath`. */
+  which?: (cmd: string) => string | null;
+}
+
+/**
+ * Best-effort detection of which AI assistants are in use — by their footprint
+ * in the repo (rules files, config dirs), their per-user config in the home
+ * folder, or their CLI on PATH. Pure presence checks: nothing is read,
+ * parsed, or executed, and a miss is always safe (it only means "not
+ * auto-selected"). First match per assistant wins, repo before home before
+ * PATH, so the reported marker is the most local evidence.
+ */
+export function detectAssistants(root: string, opts: DetectOptions = {}): DetectedAssistant[] {
+  const home = opts.home ?? os.homedir();
+  const which = opts.which ?? whichOnPath;
+  const found: DetectedAssistant[] = [];
+  for (const assistant of ASSISTANTS) {
+    const repoHit = (assistant.markers ?? []).find((m) => fs.existsSync(path.join(root, m)));
+    if (repoHit) {
+      found.push({ assistant, via: 'repo', marker: repoHit });
+      continue;
+    }
+    const homeHit = (assistant.homeMarkers ?? []).find((m) => fs.existsSync(path.join(home, m)));
+    if (homeHit) {
+      found.push({ assistant, via: 'home', marker: homeHit });
+      continue;
+    }
+    const binHit = (assistant.bin ?? []).find((b) => which(b) !== null);
+    if (binHit) found.push({ assistant, via: 'path', marker: binHit });
+  }
+  return found;
 }
 
 export interface InstallOptions {

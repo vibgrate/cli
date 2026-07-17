@@ -2,13 +2,19 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 /**
- * DriftScore badge thresholds and colours — DriftScore v2 (0 = no drift / best,
- * 100 = maximum drift / worst). Lower is better, so green covers low drift.
- * Aligned with dashboard scoreBarColor (green <= 20, amber <= 50, red > 50).
+ * DriftScore badge thresholds and colours (0 = no drift / best, 100 = maximum
+ * drift / worst — lower is better, so green covers low drift).
+ *
+ * driftscore-3.0 band reconciliation (spec §6.5): the badge now uses the SAME
+ * boundaries as the score's risk bands and DriftRisk (0–30 low/green,
+ * 31–60 moderate/amber, 61–100 high/red). Previously the badge used a stricter
+ * 20/50, which disagreed with `DriftScore.riskLevel` for scores in 21–30 and
+ * 51–60 — one score, two colours. There is now ONE band system across the
+ * score, the badge, the IDE, and DriftRisk.
  */
 
-export const DRIFT_SCORE_GREEN_MAX = 20;
-export const DRIFT_SCORE_AMBER_MAX = 50;
+export const DRIFT_SCORE_GREEN_MAX = 30;
+export const DRIFT_SCORE_AMBER_MAX = 60;
 
 export type DriftBadgeStatus = 'red' | 'amber' | 'green' | 'unknown';
 

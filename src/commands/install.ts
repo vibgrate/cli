@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { loadGraph } from '../engine/load.js';
-import { ASSISTANTS, assistantById, detectServeLaunch, installAssistant, uninstallAssistant, writeNavigationConfig } from '../install/registry.js';
+import { ASSISTANTS, assistantById, detectAssistants, detectServeLaunch, installAssistant, uninstallAssistant, writeNavigationConfig } from '../install/registry.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
@@ -20,13 +20,32 @@ export function registerInstall(program: Command): void {
     .description('add vg to your AI assistant(s): skill + MCP + advisory nudge')
     .argument('[tools...]', `assistant ids: ${ASSISTANTS.map((a) => a.id).join(', ')}`)
     .option('--all', 'install for every supported assistant')
+    .option('--detect', 'detect assistants in use (repo footprint, home config, PATH) and install for those; with --list, only report what was detected')
     .option('--list', 'show the support matrix and exit')
     .option('--no-hook', 'skip the advisory nudge')
-    .action(function (this: Command, tools: string[], opts: { all?: boolean; list?: boolean; hook?: boolean }) {
+    .action(function (this: Command, tools: string[], opts: { all?: boolean; detect?: boolean; list?: boolean; hook?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
 
+      const detected = opts.detect ? detectAssistants(root) : [];
+
       if (opts.list) {
+        if (opts.detect) {
+          // Detection report only — nothing is written. This is what editor
+          // integrations poll before deciding to run an install.
+          if (global.json) {
+            json(detected.map((d) => ({ id: d.assistant.id, label: d.assistant.label, via: d.via, marker: d.marker })));
+          } else if (detected.length === 0) {
+            info(`${c.cyan('vg install')} · no AI assistants detected here`);
+          } else {
+            info(`${c.cyan('vg install')} · detected assistants`);
+            const pad = Math.max(...detected.map((d) => d.assistant.id.length)) + 2;
+            for (const d of detected) {
+              info(`  ${c.bold(d.assistant.id.padEnd(pad))} ${d.assistant.label}  ${c.dim(`via ${d.via}: ${d.marker}`)}`);
+            }
+          }
+          return;
+        }
         if (global.json) {
           json(ASSISTANTS.map((a) => ({ id: a.id, label: a.label, mcp: !!a.mcp, skill: !!a.skill, nudge: !!a.nudge })));
         } else {
@@ -39,8 +58,16 @@ export function registerInstall(program: Command): void {
         return;
       }
 
-      const targets = opts.all ? ASSISTANTS : tools.map(resolve);
-      if (targets.length === 0) throw usageError('name an assistant (e.g. `vg install claude`) or use --all / --list');
+      const targets = opts.all ? ASSISTANTS : opts.detect ? detected.map((d) => d.assistant) : tools.map(resolve);
+      if (targets.length === 0) {
+        if (opts.detect) {
+          // Detecting nothing is a clean no-op, not a usage mistake.
+          if (global.json) json({ root, detected: [], results: [] });
+          else info(`${c.cyan('vg install')} · no AI assistants detected here — name one (e.g. \`vg install claude\`) or use --all`);
+          return;
+        }
+        throw usageError('name an assistant (e.g. `vg install claude`) or use --all / --detect / --list');
+      }
 
       const graph = loadGraph(root, global.graph);
       const fileCount = graph ? graph.nodes.filter((n) => n.kind === 'file').length : 0;
