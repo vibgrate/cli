@@ -1,6 +1,6 @@
 {
   "name": "@vibgrate/cli",
-  "version": "2026.711.2",
+  "version": "2026.715.1",
   "description": "vg — local codebase intelligence CLI + MCP server for AI coding agents: deterministic code graph, drift reporting, and version-correct library docs (Apache-2.0)",
   "type": "module",
   "license": "Apache-2.0",
@@ -76,7 +76,7 @@
     "graphology-metrics": "^2.4.0",
     "graphology-shortest-path": "^2.1.0",
     "graphology-traversal": "^0.3.1",
-    "ignore": "^7.0.0",
+    "ignore": "^7.0.6",
     "semver": "^7.8.5",
     "smol-toml": "^1.7.0",
     "tinypool": "^2.1.0",

@@ -180,6 +180,7 @@ export {
 export { fetchLatestVersion } from './utils/update-check.js';
 export { compactUiPurpose } from './utils/compact-evidence.js';
 export { prepareCompressedUpload } from './utils/compact-artifact.js';
+export type { PrepareArtifactForUploadOptions } from './utils/compact-artifact.js';
 export { parseDsn } from './utils/dsn.js';
 export { fetchScanPreflight } from './utils/scan-preflight.js';
 export type { ScanPreflightResponse } from './utils/scan-preflight.js';

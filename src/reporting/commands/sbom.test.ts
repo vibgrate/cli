@@ -64,7 +64,7 @@ describe('sbom helpers', () => {
     const base = makeArtifact('5.2.0', 80);
     const current = makeArtifact('5.3.0', 76);
     const text = formatDeltaText(base, current);
-    expect(text).toContain('Drift score delta: -4.00 points');
+    expect(text).toContain('DriftScore delta: -4.00 points');
     expect(text).toContain('Changed dependencies (1)');
   });
 });

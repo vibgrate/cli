@@ -277,12 +277,23 @@ function parseTfmMajor(tfm: string): number | null {
 }
 
 
+/**
+ * `.sqlproj` (SQL Server Database Projects — SSDT) are recognized alongside
+ * `.csproj`/`.vbproj` so they are discovered and classified as a project
+ * (name, path) like any other .NET-tooling project, giving them at least
+ * baseline visibility even though they rarely declare NuGet
+ * `<PackageReference>`s the way app projects do (dependency drift naturally
+ * reads as zero/unknown for them, which the scanner already handles for any
+ * project with no package references). The database-schema scanner
+ * separately globs `.sql` table-definition scripts under a `.sqlproj`'s
+ * directory tree and parses them structurally.
+ */
 function isDotnetProjectFile(name: string): boolean {
-  return name.endsWith('.csproj') || name.endsWith('.vbproj');
+  return name.endsWith('.csproj') || name.endsWith('.vbproj') || name.endsWith('.sqlproj');
 }
 
 function stripDotnetProjectExtension(filePath: string): string {
-  return path.basename(filePath).replace(/\.(cs|vb)proj$/i, '');
+  return path.basename(filePath).replace(/\.(cs|vb|sql)proj$/i, '');
 }
 
 interface CsprojData {
@@ -407,8 +418,8 @@ export async function scanDotnetProjects(rootDir: string, nugetCache?: NuGetCach
         ? await cache.readTextFile(slnPath)
         : await readTextFile(slnPath);
       const slnDir = path.dirname(slnPath);
-      // Parse .sln for project entries: Project("...") = "Name", "Path.csproj|vbproj", ...
-      const projectRegex = /Project\("[^"]*"\)\s*=\s*"[^"]*",\s*"([^"]+\.(?:cs|vb)proj)"/g;
+      // Parse .sln for project entries: Project("...") = "Name", "Path.csproj|vbproj|sqlproj", ...
+      const projectRegex = /Project\("[^"]*"\)\s*=\s*"[^"]*",\s*"([^"]+\.(?:cs|vb|sql)proj)"/g;
       let match;
       while ((match = projectRegex.exec(slnContent)) !== null) {
         if (match[1]) {

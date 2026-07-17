@@ -32,6 +32,14 @@ export interface RawHeritage {
   kind: 'extends' | 'implements';
 }
 
+/** A type used as a constructor parameter or field's declared type — a
+ * structural dependency (e.g. Spring constructor/field injection) rather than
+ * an invocation. Resolved to a `references` edge, not a `call` edge. */
+export interface RawTypeRef {
+  name: string; // short type name
+  byte: number; // position (for enclosing-def lookup)
+}
+
 export interface RawGuard {
   expr: string; // the guard/assert expression text (bounded)
   line: number; // 1-based line (mapped to the enclosing def for invariant facts)
@@ -47,6 +55,7 @@ export interface FileParse {
   calls: RawCall[];
   imports: RawImport[];
   heritage: RawHeritage[];
+  typeRefs: RawTypeRef[];
   guards: RawGuard[];
   /** Non-fatal issues (e.g. a query that failed to compile for this grammar). */
   warnings?: string[];

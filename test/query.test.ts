@@ -67,6 +67,66 @@ describe('queryGraph term specificity (IDF)', () => {
   });
 });
 
+describe('queryGraph question-scaffolding stopwords', () => {
+  // "find the code responsible for X" / "explain how X works" are template
+  // FRAMING, not identifier terms. Left unfiltered, "find" alone dragged in
+  // every Find*/FindBy* method ahead of the actual (differently-named) target
+  // — the dominant "locate" failure mode on real CRUD-heavy repos
+  // (VG-LOCATE-FAILURE-ANALYSIS.md).
+  let g: VgGraph;
+  let d: string;
+  beforeAll(async () => {
+    d = makeProject({
+      'src/repo.ts': [
+        'export class AccessPolicyRepository {',
+        '  findByIdAsync(id: string): void {}',
+        '  findAllAsync(): void {}',
+        '}',
+        'export class OrderService {',
+        '  deleteAsync(id: string): void {}',
+        '}',
+      ].join('\n'),
+    });
+    g = (await buildGraph({ root: d, generatedAt: '2020-01-01T00:00:00.000Z', inline: true })).graph;
+  });
+  afterAll(() => cleanup(d));
+
+  it('does not let template scaffolding ("find", "code", "responsible") outrank the real target', () => {
+    const r = queryGraph(g, 'find the code responsible for delete async');
+    expect(r.matches[0].node.name).toBe('deleteAsync');
+  });
+});
+
+describe('queryGraph tokenization edge cases', () => {
+  // Adversarial-fixture-shaped names (single-letter, non-Latin identifiers)
+  // used to tokenize to zero terms and return an empty result unconditionally
+  // (VG-LOCATE-FAILURE-ANALYSIS.md).
+  let g: VgGraph;
+  let d: string;
+  beforeAll(async () => {
+    d = makeProject({
+      'src/short.ts': [
+        'export function h(): void {}',
+        'export function 名前(): void {}',
+      ].join('\n'),
+    });
+    g = (await buildGraph({ root: d, generatedAt: '2020-01-01T00:00:00.000Z', inline: true })).graph;
+  });
+  afterAll(() => cleanup(d));
+
+  it('locates a single-character symbol name', () => {
+    const r = queryGraph(g, 'what does h do?');
+    expect(r.matches.length).toBeGreaterThan(0);
+    expect(r.matches[0].node.name).toBe('h');
+  });
+
+  it('locates a non-Latin (Unicode) symbol name', () => {
+    const r = queryGraph(g, 'where is 名前 defined?');
+    expect(r.matches.length).toBeGreaterThan(0);
+    expect(r.matches[0].node.name).toBe('名前');
+  });
+});
+
 describe('lookup', () => {
   it('resolves by qualified name', () => {
     expect(findNodes(graph, 'OrderService.addItem')[0]?.name).toBe('addItem');

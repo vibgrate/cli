@@ -1,19 +1,19 @@
 #!/usr/bin/env sh
 # vg installer (curl | sh). Installs the @vibgrate/cli package which provides the
-# `vg` command. Requires Node.js >= 20 and npm. Honest: this wraps npm; it does
+# `vg` command. Requires Node.js >= 22 and npm. Honest: this wraps npm; it does
 # not download an unsigned binary.
 set -eu
 
 PKG="@vibgrate/cli"
 
 if ! command -v node >/dev/null 2>&1; then
-  echo "vg: Node.js >= 20 is required (https://nodejs.org). Aborting." >&2
+  echo "vg: Node.js >= 22 is required (https://nodejs.org). Aborting." >&2
   exit 1
 fi
 
 NODE_MAJOR=$(node --version | sed 's/^v//' | cut -d. -f1)
-if [ "${NODE_MAJOR}" -lt 20 ] 2>/dev/null; then
-  echo "vg: Node.js >= 20 is required (found $(node --version)). Upgrade at https://nodejs.org. Aborting." >&2
+if [ "${NODE_MAJOR}" -lt 22 ] 2>/dev/null; then
+  echo "vg: Node.js >= 22 is required (found $(node --version)). Upgrade at https://nodejs.org. Aborting." >&2
   exit 1
 fi
 

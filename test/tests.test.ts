@@ -31,6 +31,10 @@ describe('isTestFile', () => {
     expect(isTestFile('foo_test.go')).toBe(true);
     expect(isTestFile('MyServiceTest.java')).toBe(true);
     expect(isTestFile('foo_spec.rb')).toBe(true);
+    // XCTest CamelCase convention — Xcode test targets commonly live in a
+    // sibling `<Module>Tests/` directory, not a generic `tests/` folder, so
+    // only the filename suffix reliably identifies them.
+    expect(isTestFile('ios/GreekLearn/GreekLearnTests/Views/AppleSignInCoordinatorTests.swift')).toBe(true);
   });
   it('does not misfire on similar names', () => {
     expect(isTestFile('src/latest.java')).toBe(false);
@@ -55,6 +59,28 @@ describe('static test linkage', () => {
     const add = findNodes(graph, 'add').find((n) => n.kind === 'function')!;
     const covers = coveringTests(graph, add);
     expect(covers.map((c) => c.file)).toContain('test/math.test.ts');
+  });
+
+  it('attributes an XCTest that constructs the SUT via a local helper, in a sibling Tests/ directory (Swift)', async () => {
+    const files = {
+      'App/AppleSignInCoordinator.swift':
+        'class AppleSignInCoordinator {\n  init(submitter: Any, setError: Any) {}\n}\n',
+      'AppTests/AppleSignInCoordinatorTests.swift':
+        'import XCTest\n\n' +
+        'class AppleSignInCoordinatorTests: XCTestCase {\n' +
+        '  private func makeSUT() -> AppleSignInCoordinator {\n' +
+        '    return AppleSignInCoordinator(submitter: 1, setError: 2)\n' +
+        '  }\n\n' +
+        '  func testConstruction() {\n' +
+        '    let sut = makeSUT()\n' +
+        '  }\n' +
+        '}\n',
+    };
+    const { graph } = await buildGraph({ root: project(files), generatedAt: PIN, inline: true });
+    const sut = findNodes(graph, 'AppleSignInCoordinator').find((n) => n.kind === 'class')!;
+    expect(sut.tested).toBe(true);
+    const covers = coveringTests(graph, sut);
+    expect(covers.map((c) => c.file)).toContain('AppTests/AppleSignInCoordinatorTests.swift');
   });
 
   it('testsToRun selects tests across the impact set', async () => {

@@ -96,4 +96,43 @@ describe('uploadScanArtifact', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(response.status).toBe(409);
   });
+
+  it('sends run-attribution headers when runId/runToken are set (e.g. the remediation agent)', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse(200, { status: 'ok', ingestId: 'ing_4' }));
+
+    await uploadScanArtifact({ ...baseInput, runId: 'mrun_1', runToken: 'a-run-token' });
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers['X-Vibgrate-Run-Id']).toBe('mrun_1');
+    expect(headers['X-Vibgrate-Run-Token']).toBe('a-run-token');
+  });
+
+  it('omits run-attribution headers for a normal scan (no runId/runToken)', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse(200, { status: 'ok', ingestId: 'ing_5' }));
+
+    await uploadScanArtifact(baseInput);
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers['X-Vibgrate-Run-Id']).toBeUndefined();
+    expect(headers['X-Vibgrate-Run-Token']).toBeUndefined();
+  });
+
+  it('omits the headers when only one of runId/runToken is set (never a partial/malformed pair)', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(jsonResponse(200, { status: 'ok', ingestId: 'ing_6' }));
+
+    await uploadScanArtifact({ ...baseInput, runId: 'mrun_1' });
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers['X-Vibgrate-Run-Id']).toBeUndefined();
+    expect(headers['X-Vibgrate-Run-Token']).toBeUndefined();
+  });
 });

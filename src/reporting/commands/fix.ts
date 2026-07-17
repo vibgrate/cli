@@ -141,7 +141,7 @@ async function repositoryIdentity(rootDir: string, override?: string): Promise<{
 }
 
 export const fixCommand = new Command('fix')
-  .description('Analyse drift and get ranked, risk-tiered upgrade plans from the hosted planner (requires login/DSN; read-only — never edits your project)')
+  .description('Get ranked, risk-tiered upgrade plans from the hosted planner and optionally apply them (prompts before changing files; --yes applies non-interactively, --dry-run previews, --no-apply only prints). Requires login/DSN.')
   .argument('[path]', 'Path to analyse', '.')
   .option('--in <file>', 'Scan artifact to read', '.vibgrate/scan_result.json')
   .option('--format <format>', 'Output format (text|json|md)', 'text')

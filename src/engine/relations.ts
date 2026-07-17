@@ -28,14 +28,20 @@ export class GraphIndex {
     return this.nodeById.get(id);
   }
 
-  /** Resolved nodes called by `id`. */
+  /**
+   * Resolved nodes called by `id` — invocations (`call`) plus structural
+   * dependency references (`references`, e.g. a constructor-injected field's
+   * type), since both represent real usage a caller/impact question cares
+   * about. `references` is otherwise only emitted by the precise SCIP/tsc
+   * rungs and (for Java DI wiring) the heuristic rung — never a guess.
+   */
   callees(id: string): { edge: GraphEdge; node: GraphNode }[] {
-    return this.resolveTargets(this.out(id, 'call'), 'dst');
+    return this.resolveTargets(this.out(id).filter(isUsageEdge), 'dst');
   }
 
-  /** Resolved nodes that call `id`. */
+  /** Resolved nodes that call or structurally reference `id`. */
   callers(id: string): { edge: GraphEdge; node: GraphNode }[] {
-    return this.resolveTargets(this.in(id, 'call'), 'src');
+    return this.resolveTargets(this.in(id).filter(isUsageEdge), 'src');
   }
 
   private resolveTargets(edges: GraphEdge[], end: 'src' | 'dst') {
@@ -46,6 +52,11 @@ export class GraphIndex {
     }
     return out;
   }
+}
+
+const USAGE_KINDS: ReadonlySet<EdgeKind> = new Set(['call', 'references']);
+function isUsageEdge(e: GraphEdge): boolean {
+  return USAGE_KINDS.has(e.kind);
 }
 
 function push(map: Map<string, GraphEdge[]>, key: string, value: GraphEdge): void {

@@ -1,7 +1,7 @@
 # Vibgrate software risk & drift scoring: a methodology whitepaper
 
 **Status:** Published · v1.0 · 2026-07-10 · methodology tags `driftscore-3.0` /
-`riskscore-1.0` / `driftrisk-1.1`. Sources verified against primary references (see §10).
+`riskscore-1.0` / `driftrisk-1.1`. Sources verified against primary references (see §10). **Cite as:** DOI [10.5281/zenodo.21336304](https://doi.org/10.5281/zenodo.21336304) (resolves to the latest version).
 
 **Audience:** security-literate engineering leaders and skeptical evaluators.
 **Posture:** disclosed factors, sources, and rationale; proprietary calibration
@@ -376,7 +376,7 @@ No score is a guarantee, and a respected methodology states its own boundaries.
   rationale; a companion validation appendix (planned) will report back-testing of
   RiskScore's ranking against historical outcomes — e.g. how highly the model
   ranked CVEs *before* they entered CISA KEV, and calibration of the likelihood
-  term against realised EPSS outcomes. Until then, the weightings are honestly
+  term against realised exploitation outcomes. Until then, the weightings are honestly
   labelled expert-and-evidence-informed, not empirically fitted.
 
 ---

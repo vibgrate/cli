@@ -17,6 +17,7 @@ import { registerInsights } from './commands/insights.js';
 import { registerImpact } from './commands/impact.js';
 import { registerUnknowns } from './commands/unknowns.js';
 import { registerServe } from './commands/serve.js';
+import { registerLsp } from './commands/lsp.js';
 import { registerInstall } from './commands/install.js';
 import { registerShare } from './commands/share.js';
 import { registerBenchmark } from './commands/benchmark.js';
@@ -76,6 +77,7 @@ export const KNOWN_COMMANDS = new Set([
   'areas',
   'oddities',
   'serve',
+  'lsp',
   'install',
   'uninstall',
   'share',
@@ -135,6 +137,7 @@ export function buildProgram(): Command {
   registerImpact(program);
   registerUnknowns(program);
   registerServe(program);
+  registerLsp(program);
   registerInstall(program);
   registerShare(program);
   registerBenchmark(program);

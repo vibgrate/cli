@@ -75,6 +75,19 @@ export async function searchSymbols(graph: VgGraph, root: string, query: string,
 
   // Pass 1 — graph name index (already ranked by importance).
   let nodes = findNodes(graph, q).filter((n) => n.kind !== 'file');
+  // Reconstructed-identifier fallthrough: a humanized/spaced query ("get id",
+  // "use team", "f 0304") is frequently a *single* identifier whose original
+  // separators (camelCase boundary, `_`) were lost in humanization, not a
+  // multi-word phrase. Try the two mechanical rejoins — concatenated (recovers
+  // camelCase: "get id" -> "getid" == "getId") and underscore-joined (recovers
+  // snake_case: "f 0304" -> "f_0304") — against the exact/case-insensitive name
+  // index before falling through to the noisy per-token substring union below,
+  // which has no way to re-associate short tokens back into one identifier and
+  // silently drops single-character tokens ("f") that carry real information
+  // (VG-LOCATE-FAILURE-ANALYSIS.md).
+  if (nodes.length === 0 && isPhrase) {
+    nodes = reconstructedIdentifierNodes(graph, q);
+  }
   // Multi-word fallthrough: an agent that types a phrase ("NewScan modal
   // component", "dsn install command") gets nothing from the whole-string name
   // index and nothing from the whole-string literal scan — a dead end. When the
@@ -137,6 +150,23 @@ export async function searchSymbols(graph: VgGraph, root: string, query: string,
 /** Meaningful query words for the multi-word fallthrough (drop tiny tokens). */
 function queryTokens(q: string): string[] {
   return [...new Set(q.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 2))];
+}
+
+/**
+ * Rejoin a humanized query's words back into one identifier and look it up
+ * exactly. Humanization is lossy (both camelCase boundaries and `_`/`-`
+ * collapse to a plain space), so the original separator can't be recovered —
+ * try both mechanical rejoins and let `findNodes`'s case-insensitive exact
+ * match do the rest. Concatenated first (camelCase is the more common source
+ * convention across this engine's languages); underscore-joined second.
+ */
+function reconstructedIdentifierNodes(graph: VgGraph, q: string): GraphNode[] {
+  const words = q.trim().split(/\s+/).filter(Boolean);
+  if (words.length < 2) return [];
+  const concat = findNodes(graph, words.join(''));
+  if (concat.length) return concat.filter((n) => n.kind !== 'file');
+  const snake = findNodes(graph, words.join('_'));
+  return snake.filter((n) => n.kind !== 'file');
 }
 
 /**

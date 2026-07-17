@@ -232,8 +232,8 @@ vg vex                          # generate an OpenVEX document for attestation
 
 ## Privacy & offline-first
 
-- No data leaves your machine unless you run `--push` / `vg push`.
-- Core graph analysis and drift scoring read manifests and configs — **not your source code**.
+- No data leaves your machine unless you run `--push` / `vg push` / `vg share`.
+- Drift scoring reads manifests and configs only. The code graph (`vg build`/`vg map`) and a few extended scanners (code quality, database schema, UI text) read your source **locally** to compute structural facts and metrics — never a raw source line, and never uploaded as-is; see [DOCS.md](./DOCS.md#extended-scanners) for exactly what each one reads.
 - Works without login and without any SaaS dependency.
 - `--offline` disables registry/network lookups; `--package-manifest <file>` feeds drift scoring a local version bundle.
 - `--max-privacy` suppresses local artifact writes and high-context scanners; `--no-local-artifacts` skips writing `.vibgrate/*.json` to disk.

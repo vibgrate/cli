@@ -35,6 +35,15 @@ const STOPWORDS = new Set([
   'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'to', 'of', 'in', 'on', 'for', 'and', 'or',
   'where', 'what', 'which', 'how', 'do', 'does', 'did', 'i', 'we', 'it', 'this', 'that', 'with',
   'when', 'who', 'why', 'can', 'should', 'my', 'our', 'you', 'your', 'from', 'by', 'at', 'as',
+  // Discovery-question scaffolding: words a caller uses to FRAME the ask
+  // ("find the code responsible for X", "I need to modify X, where do I
+  // start?", "explain how X works in this codebase") rather than to name the
+  // target. Left in, these compete on equal footing with the real identifier
+  // terms and can outrank it outright — e.g. "find the code responsible for
+  // deleteAsync" let "find" alone drag in every FindByIdAsync/FindAll method
+  // in the repo, none of them the target (VG-LOCATE-FAILURE-ANALYSIS.md).
+  'find', 'code', 'responsible', 'need', 'modify', 'me',
+  'implementation', 'explain', 'works', 'codebase', 'contains', 'file',
 ]);
 
 export function queryGraph(graph: VgGraph, question: string, options: QueryOptions = {}): QueryResult {
@@ -114,13 +123,24 @@ export async function queryGraphSemantic(
   return { question, matches: seeds, context, tokensEstimate };
 }
 
+/**
+ * Split on anything that isn't a Unicode letter/number (`\p{L}\p{N}`, not the
+ * ASCII-only `[a-z0-9]`) so identifiers in non-Latin scripts (Japanese,
+ * Cyrillic, ...) survive tokenization instead of vanishing entirely — the
+ * ASCII-only split treated every character of e.g. `名前` as a separator,
+ * producing zero terms and a guaranteed empty result for any question about
+ * it (VG-LOCATE-FAILURE-ANALYSIS.md). Length floor is 1, not 2: a single
+ * non-stopword letter/digit is still the whole identifier when that's genuinely
+ * the symbol's name (adversarial fixtures deliberately use bare `f`/`x`/`h`
+ * names to stress this) — STOPWORDS already screens out short function words.
+ */
 function tokenize(q: string): string[] {
   return [
     ...new Set(
       q
         .toLowerCase()
-        .split(/[^a-z0-9]+/)
-        .filter((t) => t.length >= 2 && !STOPWORDS.has(t)),
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter((t) => t.length >= 1 && !STOPWORDS.has(t)),
     ),
   ];
 }
@@ -207,11 +227,19 @@ function termWeights(graph: VgGraph, terms: string[]): (t: string) => number {
   return (t: string) => w.get(t) ?? 1;
 }
 
-/** camelCase / snake_case / kebab split of an identifier → lowercased parts. */
+/**
+ * camelCase / snake_case / kebab split of an identifier → lowercased parts.
+ * The separator alternative is Unicode-letter-aware (`\p{L}\p{N}`, not
+ * ASCII-only `a-zA-Z0-9`) so non-Latin identifiers split on punctuation
+ * without losing every character to it; the camelCase boundary lookaround
+ * stays ASCII-only since upper/lowercase casing is itself an ASCII-script
+ * concept — scripts without case simply never trigger it and fall through to
+ * the separator split.
+ */
 export function identifierParts(name: string): Set<string> {
   return new Set(
     name
-      .split(/[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/)
+      .split(/[^\p{L}\p{N}]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/u)
       .filter(Boolean)
       .map((s) => s.toLowerCase()),
   );

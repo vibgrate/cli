@@ -4,7 +4,7 @@ import { langById } from './languages.js';
 import { queriesFor, type DefRule } from './queries.js';
 import { hashString } from './hash.js';
 import { redactSecrets } from '../core-open/utils/redact.js';
-import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport } from './types.js';
+import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport, RawTypeRef } from './types.js';
 
 /**
  * Parse a single file's source into the raw symbol/edge tables. Pure and
@@ -201,6 +201,7 @@ export async function parseSource(
     calls: [],
     imports: [],
     heritage: [],
+    typeRefs: [],
     guards: [],
   };
   if (!def || !langQueries) return result;
@@ -301,6 +302,18 @@ export async function parseSource(
     (a, b) =>
       a.byte - b.byte || a.kind.localeCompare(b.kind) || a.superName.localeCompare(b.superName),
   );
+
+  // --- type references (constructor-param / field types → DI dependency edges) ---
+  const typeRefs: RawTypeRef[] = [];
+  for (const qsrc of langQueries.typeRefs ?? []) {
+    const q = compile(language, langId, qsrc);
+    if (!q) continue;
+    for (const cap of q.captures(root)) {
+      if (cap.name !== 'typeref') continue;
+      typeRefs.push({ name: cap.node.text, byte: cap.node.startIndex });
+    }
+  }
+  result.typeRefs = typeRefs.sort((a, b) => a.byte - b.byte || a.name.localeCompare(b.name));
 
   // --- guards (assert-like expressions → invariant facts) ---
   const guards: RawGuard[] = [];

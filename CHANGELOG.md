@@ -66,6 +66,19 @@ backward compatible.
   priorities) directly on GitHub, so you can see the product before installing.
   The asset is a deterministic, regenerable SVG (`docs/demo/cli-demo.svg`,
   rebuilt with `pnpm demo:svg`).
+- **`databaseSchema` extended scanner documented, capped, and now actually
+  reaches Vibgrate Cloud** — the scanner (structural facts only, from Prisma/
+  SQL migrations/`.sqlproj`/Drizzle/TypeORM; never a raw source line, query, or
+  credential) is on by default and disabled per the [Database
+  Schema](./DOCS.md#database-schema) docs via
+  `scanners.databaseSchema.enabled: false`, same as any other extended
+  scanner — it just wasn't written down before. Upload compaction now caps its
+  models/fields/files (300 models, 100 fields/model, 5 files/model, 500
+  scanned files) so a schema-heavy monorepo can't dominate the artifact
+  payload the way uncapped scanners could. Separately, the server-side ingest
+  schema was missing this field entirely, so `databaseSchema` was silently
+  stripped on every `vg push` — the Cloud dashboard's database tab only ever
+  had data for locally-viewed scans, never pushed ones. Both are fixed.
 
 ## [Initial public release] - 2026-06-25
 
