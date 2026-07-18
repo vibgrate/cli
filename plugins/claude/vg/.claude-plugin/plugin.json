@@ -1,0 +1,10 @@
+{
+  "name": "vg",
+  "description": "Vibgrate AI Context for Claude Code: a local-first MCP server with a deterministic code map (impact, navigation, search) plus version-correct, drift-annotated library docs. No API key.",
+  "version": "2026.718.1",
+  "author": { "name": "Vibgrate" },
+  "homepage": "https://vibgrate.com/cli",
+  "repository": "https://github.com/vibgrate/cli",
+  "license": "Apache-2.0",
+  "keywords": ["code-map", "mcp", "library-docs", "drift", "dependencies"]
+}

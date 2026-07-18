@@ -160,7 +160,16 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
         // every step. One good navigation call usually locates the code.
         'Navigate as little as possible: one good search/query usually locates the code. ' +
         'As soon as you have the file and line, read that file and make the edit — ' +
-        'do not call further graph tools unless the edit fails or the match was wrong.',
+        'do not call further graph tools unless the edit fails or the match was wrong. ' +
+        // Library docs: position against web search (version-correct beats
+        // SEO results), and give a stopping rule so a thin doc doesn't turn
+        // into an open-ended search loop.
+        'For how-do-I-use-this-library questions call resolve_library once, then library_docs ' +
+        'with the returned targetId and a focused query: the docs are official and matched to ' +
+        'the version THIS project has installed (drift-annotated) — prefer them over web search ' +
+        'or training-data recall when they conflict. Skip them for language built-ins or APIs ' +
+        'already shown in context. If two library_docs calls have not surfaced the section you ' +
+        'need, read the package source under node_modules instead of searching again.',
     },
   );
 

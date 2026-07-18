@@ -89,6 +89,32 @@ This writes the MCP config for your chosen tool(s) and installs a skill that tea
 
 Browse all 21+ supported assistants and their skill descriptions at **[vibgrate.com/skills](https://vibgrate.com/skills)**.
 
+## Tools
+
+`vg serve` exposes 19 MCP tools:
+
+- **orient** — start here: project overview, entry points, where to look first.
+- **search_symbols** — find a symbol by name or literal string.
+- **query_graph** — find code by meaning: symptoms, relationships, what-breaks-if.
+- **get_node** — inspect one symbol: signature, callers, callees, area.
+- **find_path** — shortest connection between two symbols.
+- **impact_of** — blast radius of a change: dependents, files, covering tests, risk.
+- **tests_for** — which tests cover a symbol.
+- **get_graph_summary** — code map overview: counts, languages, top areas and hubs.
+- **list_areas** — code areas (communities) by size.
+- **list_hubs** — most-depended-on symbols.
+- **get_facts** — deterministic facts for a node (contract/invariant; needs a `--deep` build).
+- **guide_node** — cited standards and practices for a node (OWASP/CWE).
+- **check_drift** — offline dependency inventory with optional git who-added attribution.
+- **vuln_attribution** — who introduced each open vulnerability, exposure windows, CRA remediation metrics.
+- **list_vulnerabilities** — known vulnerabilities from the last `vg scan --vulns`: CVE, severity, CVSS, fixed version.
+- **upgrade_impact** — what breaks if you upgrade a package: major distance, import blast radius, vulns fixed.
+- **list_models** — local models on disk (Ollama / LM Studio / gguf).
+- **resolve_library** — resolve a library to its canonical id and the version your project uses.
+- **library_docs** — version-correct usage docs for a library, sliced to a token budget.
+
+Prefer the hosted server over your team's scan data? **[Vibgrate MCP](https://vibgrate.com/mcp)** connects your assistant to Vibgrate Cloud (OAuth 2.1, 51 tools).
+
 ---
 
 ## Understand any codebase

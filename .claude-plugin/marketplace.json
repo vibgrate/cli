@@ -1,0 +1,16 @@
+{
+  "name": "vibgrate",
+  "owner": { "name": "Vibgrate", "url": "https://vibgrate.com" },
+  "metadata": {
+    "description": "Vibgrate plugins: the vg code map + version-correct library docs served to your AI over local MCP",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "vg",
+      "source": "./plugins/claude/vg",
+      "description": "Local-first code map + version-correct, drift-annotated library docs over MCP (no API key)",
+      "category": "development"
+    }
+  ]
+}

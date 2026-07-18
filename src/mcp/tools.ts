@@ -643,11 +643,16 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'resolve_library',
-    description: 'Resolve a library to its canonical id and the version YOUR project uses (drift-annotated).',
+    description:
+      'Resolve a library to its canonical id and the version YOUR project uses (drift-annotated). ' +
+      'Call once per library and reuse the returned targetId for every library_docs follow-up — never guess an id.',
     // Canonical §4: `query` (+ optional `context_project`). `name` kept as a back-compat alias.
     inputSchema: obj(
       {
-        query: { type: 'string', description: 'library name or query' },
+        query: {
+          type: 'string',
+          description: 'the package name as written in the dependency file. Good: "react-hook-form". Bad: "forms"',
+        },
         name: { type: 'string' },
         context_project: { type: 'string' },
       },
@@ -690,17 +695,27 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'library_docs',
-    description: 'Version-correct usage docs for a library, sliced to a token budget.',
+    description:
+      'Version-correct usage docs for a library, sliced to a token budget — official content matched to ' +
+      'the version this project has installed, not web-search results. Ask a focused question via query; ' +
+      'one call usually answers. After 2 calls without the section you need, stop and read the package ' +
+      'source under node_modules instead of searching again.',
     // Canonical §4: `targetId`/`query`, `verbosity`, `max_tokens`. `name`/`tokens` kept as aliases.
     inputSchema: obj(
       {
-        targetId: { type: 'string', description: 'id from resolve_library' },
-        query: { type: 'string', description: 'library name or query' },
+        targetId: { type: 'string', description: 'id from resolve_library (preferred over query)' },
+        query: {
+          type: 'string',
+          description:
+            'the library plus the specific need. Good: "zod refine custom error message". Bad: "zod" or "docs"',
+        },
         name: { type: 'string' },
         context_project: { type: 'string' },
         verbosity: { type: 'string', enum: ['concise', 'balanced', 'exhaustive'] },
-        max_tokens: { type: 'number', description: 'token budget' },
-        tokens: { type: 'number' },
+        // Tolerant on purpose: models often send budgets as strings — the
+        // handler coerces, so don't fail validation over "4000" vs 4000.
+        max_tokens: { type: ['number', 'string'], description: 'token budget (a numeric string is accepted)' },
+        tokens: { type: ['number', 'string'] },
         enterprise_strict: { type: 'boolean' },
         follow_up: { type: 'boolean' },
       },

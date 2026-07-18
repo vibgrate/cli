@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vg": {
+      "command": "npx",
+      "args": ["-y", "-p", "@vibgrate/cli", "vg", "serve"]
+    }
+  }
+}

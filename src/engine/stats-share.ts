@@ -17,6 +17,10 @@ import type { SavingEntry, Source, Outcome } from './savings.js';
  * version, OS/arch, and a random per-install id. We never send code, file paths,
  * question text, repo identity, or any credential. See GUARDRAILS §3.4.
  *
+ * Even when the flag is passed, the universal `DO_NOT_TRACK` opt-out (or
+ * `VIBGRATE_TELEMETRY=0`) wins: nothing is uploaded and no install id is ever
+ * minted or persisted (see `telemetryOptOut` / `installId`).
+ *
  * Design:
  *  - The local ledger (savings.jsonl) is the single source of truth; the flusher
  *    reads only the tail past a persisted byte offset, so a batch is sent once.
@@ -61,13 +65,53 @@ export interface StatsBatch {
 }
 
 /**
+ * The universal opt-out (https://consoledonottrack.com) plus a tool-specific
+ * alias, honoured even when `--share-stats` is passed explicitly. Pure function
+ * of the environment for testability. Returns the name of the variable that
+ * opted out (for the disclosure message), or null when sharing may proceed.
+ */
+export function telemetryOptOut(env: NodeJS.ProcessEnv = process.env): string | null {
+  const dnt = (env.DO_NOT_TRACK ?? '').trim().toLowerCase();
+  if (dnt !== '' && dnt !== '0' && dnt !== 'false') return 'DO_NOT_TRACK';
+  const vt = (env.VIBGRATE_TELEMETRY ?? '').trim().toLowerCase();
+  if (vt === '0' || vt === 'false' || vt === 'off') return 'VIBGRATE_TELEMETRY';
+  return null;
+}
+
+/** Common CI environment markers — a CI runner is never an interactive session. */
+const CI_ENV_VARS = [
+  'CI',
+  'GITHUB_ACTIONS',
+  'GITLAB_CI',
+  'CIRCLECI',
+  'TRAVIS',
+  'BUILDKITE',
+  'JENKINS_URL',
+  'TF_BUILD',
+] as const;
+
+/** True when running under a recognised CI system. Pure function of the env. */
+export function isCI(env: NodeJS.ProcessEnv = process.env): boolean {
+  return CI_ENV_VARS.some((v) => {
+    const val = (env[v] ?? '').trim().toLowerCase();
+    return val !== '' && val !== '0' && val !== 'false';
+  });
+}
+
+/**
  * Read (or lazily create) the anonymous per-install id — a random UUID stored in
  * `~/.vibgrate/install-id`. It is *not* tied to the user, the repo, or any
  * account; it only lets us de-duplicate batches from the same install when
  * aggregating. If the home dir isn't writable we fall back to an ephemeral id
  * so sharing still works (it just can't be de-duplicated across restarts).
+ *
+ * Under an env opt-out no id is ever read or persisted (the sharing path isn't
+ * reached then either — this is defence in depth), and on CI runners the id is
+ * ephemeral: a persisted id on a shared/throwaway runner would be meaningless
+ * for de-duplication and would leave state behind on machines we don't own.
  */
-export function installId(): string {
+export function installId(env: NodeJS.ProcessEnv = process.env): string {
+  if (telemetryOptOut(env) !== null || isCI(env)) return randomUuid();
   try {
     const existing = fs.readFileSync(INSTALL_ID_FILE, 'utf8').trim();
     if (isUuid(existing)) return existing;

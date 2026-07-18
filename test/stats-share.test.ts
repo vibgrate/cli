@@ -9,7 +9,7 @@ import {
   readUsage,
   readSavings,
 } from '../src/engine/savings.js';
-import { buildBatch, statsEndpoint } from '../src/engine/stats-share.js';
+import { buildBatch, statsEndpoint, telemetryOptOut, isCI, installId } from '../src/engine/stats-share.js';
 
 function makeRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'vg-stats-'));
@@ -116,6 +116,54 @@ describe('buildBatch (opt-in share-stats aggregation)', () => {
   it('returns null when there is nothing to send', () => {
     const { batch } = buildBatch(root, 0, 'id');
     expect(batch).toBeNull();
+  });
+});
+
+describe('telemetryOptOut', () => {
+  it('honours DO_NOT_TRACK unless explicitly falsy', () => {
+    expect(telemetryOptOut({ DO_NOT_TRACK: '1' })).toBe('DO_NOT_TRACK');
+    expect(telemetryOptOut({ DO_NOT_TRACK: 'true' })).toBe('DO_NOT_TRACK');
+    expect(telemetryOptOut({ DO_NOT_TRACK: 'yes' })).toBe('DO_NOT_TRACK');
+    expect(telemetryOptOut({ DO_NOT_TRACK: '0' })).toBeNull();
+    expect(telemetryOptOut({ DO_NOT_TRACK: 'false' })).toBeNull();
+    expect(telemetryOptOut({ DO_NOT_TRACK: '' })).toBeNull();
+    expect(telemetryOptOut({})).toBeNull();
+  });
+
+  it('honours the VIBGRATE_TELEMETRY alias only for explicit off values', () => {
+    expect(telemetryOptOut({ VIBGRATE_TELEMETRY: '0' })).toBe('VIBGRATE_TELEMETRY');
+    expect(telemetryOptOut({ VIBGRATE_TELEMETRY: 'off' })).toBe('VIBGRATE_TELEMETRY');
+    expect(telemetryOptOut({ VIBGRATE_TELEMETRY: 'false' })).toBe('VIBGRATE_TELEMETRY');
+    expect(telemetryOptOut({ VIBGRATE_TELEMETRY: '1' })).toBeNull();
+  });
+
+  it('DO_NOT_TRACK is reported first when both are set', () => {
+    expect(telemetryOptOut({ DO_NOT_TRACK: '1', VIBGRATE_TELEMETRY: '0' })).toBe('DO_NOT_TRACK');
+  });
+});
+
+describe('isCI', () => {
+  it('recognises common CI markers and ignores falsy values', () => {
+    expect(isCI({ CI: 'true' })).toBe(true);
+    expect(isCI({ GITHUB_ACTIONS: 'true' })).toBe(true);
+    expect(isCI({ JENKINS_URL: 'https://ci.example.test' })).toBe(true);
+    expect(isCI({ CI: 'false' })).toBe(false);
+    expect(isCI({ CI: '0' })).toBe(false);
+    expect(isCI({})).toBe(false);
+  });
+});
+
+describe('installId under opt-out / CI', () => {
+  it('returns an ephemeral id and persists nothing under DO_NOT_TRACK', () => {
+    const a = installId({ DO_NOT_TRACK: '1' });
+    const b = installId({ DO_NOT_TRACK: '1' });
+    expect(a).not.toBe(b); // ephemeral: never read from or written to disk
+  });
+
+  it('returns an ephemeral id on CI runners', () => {
+    const a = installId({ CI: 'true' });
+    const b = installId({ CI: 'true' });
+    expect(a).not.toBe(b);
   });
 });
 
