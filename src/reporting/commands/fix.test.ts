@@ -152,6 +152,26 @@ describe('vg fix', () => {
     exitSpy.mockRestore();
   });
 
+  it('collapses duplicate plans onto the lowest-risk tier and remaps the recommendation', async () => {
+    writeArtifact([
+      { package: 'wrangler', section: 'devDependencies', currentSpec: '^4.111.0', resolvedVersion: '4.111.0', latestStable: '4.112.0', majorsBehind: 0, drift: 'minor-behind' },
+    ]);
+    const upgrades = [
+      { package: 'wrangler', ecosystem: 'npm', from: '4.111.0', to: '4.112.0', kind: 'minor', blastRadius: 'low', fixes: emptyDelta(), reason: 'minor update' } as PlannedUpgrade,
+    ];
+    const resp = mockResponse({ recommended: 'balanced' });
+    for (const plan of resp.plans) plan.upgrades = [...upgrades];
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(resp)));
+
+    await fixCommand.parseAsync([dir, '--format', 'json'], { from: 'user' });
+
+    const printed = JSON.parse(logSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')) as FixPlanResponse;
+    // All three tiers carried the identical upgrade set → only the lowest-risk survives.
+    expect(printed.plans.map((p) => p.tier)).toEqual(['safe']);
+    // The server's recommendation pointed at a collapsed tier → remapped to the survivor.
+    expect(printed.recommended).toBe('safe');
+  });
+
   it('exits 2 when --fail-on-vulns finds unresolved advisories in the recommended plan', async () => {
     writeArtifact([
       { package: 'lodash', section: 'dependencies', currentSpec: '^4.17.0', resolvedVersion: '4.17.20', latestStable: '4.17.21', majorsBehind: 0, drift: 'minor-behind' },

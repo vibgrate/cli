@@ -26,6 +26,7 @@ import * as readline from 'node:readline';
 import { analyzeTree, type SourceEcosystem } from '../planning/usage.js';
 import { requestFixPlan, parseFixPlanResponse } from '../utils/fix-plan.js';
 import { renderText, renderMarkdown } from '../planning/render.js';
+import { dedupePlans } from '../planning/dedupe.js';
 import { estimateDriftScore } from '../planning/expected-drift.js';
 import { applyPlan, type NpmPackageManager, type WorkspaceTarget } from '../planning/apply.js';
 import { detectWorkspaceRoot } from './update.js';
@@ -272,6 +273,14 @@ export const fixCommand = new Command('fix')
       process.exit(1);
     }
 
+    // Collapse duplicate plans onto the lowest-risk tier before anything is
+    // rendered or selected: a tier whose upgrade set is identical to a
+    // lower-risk tier's adds no real choice. Requests for a collapsed tier
+    // (--plan, the server's recommendation) resolve via the alias map.
+    const { plans: dedupedPlans, canonicalTier } = dedupePlans(response.plans);
+    response.plans = dedupedPlans;
+    response.recommended = canonicalTier.get(response.recommended) ?? response.recommended;
+
     // Augment each plan with an estimated post-upgrade DriftScore (client-side).
     const currentDrift = artifact.drift?.score;
     if (typeof currentDrift === 'number') {
@@ -288,7 +297,7 @@ export const fixCommand = new Command('fix')
 
     // Apply flow (text mode only; --no-apply / json / md are report-only).
     if (opts.format === 'text' && opts.apply !== false) {
-      await runApplyFlow(rootDir, artifact, response, opts);
+      await runApplyFlow(rootDir, artifact, response, opts, canonicalTier);
     }
 
     if (failOn) {
@@ -301,9 +310,10 @@ export const fixCommand = new Command('fix')
         if (SEVERITY_RANK[sev] < threshold) continue;
         const open = response.unresolved.bySeverity[sev] ?? 0;
         // Anything the recommended plan itself does not fix also counts as open.
-        const notFixedByRecommended =
-          (response.plans.find((p) => p.tier === 'aggressive')?.fixes.bySeverity[sev] ?? 0) -
-          (recommended?.fixes.bySeverity[sev] ?? 0);
+        // Measured against the most-fixing plan (not the 'aggressive' tier by
+        // name — that tier may have been collapsed as a duplicate).
+        const maxFixable = Math.max(0, ...response.plans.map((p) => p.fixes.bySeverity[sev] ?? 0));
+        const notFixedByRecommended = maxFixable - (recommended?.fixes.bySeverity[sev] ?? 0);
         stillOpen += open + Math.max(0, notFixedByRecommended);
       }
       if (stillOpen > 0) {
@@ -438,6 +448,7 @@ async function runApplyFlow(
   artifact: ScanArtifact,
   response: FixPlanResponse,
   opts: { plan?: string; yes?: boolean; dryRun?: boolean },
+  canonicalTier?: Map<PlanTier, PlanTier>,
 ): Promise<void> {
   const nonEmpty = response.plans.filter((p) => p.upgrades.length > 0);
   if (nonEmpty.length === 0) {
@@ -447,7 +458,9 @@ async function runApplyFlow(
 
   let chosen: UpgradePlan | undefined;
   if (opts.plan) {
-    chosen = response.plans.find((p) => p.tier === opts.plan);
+    // A tier collapsed as a duplicate resolves to the surviving lower-risk plan.
+    const tier = canonicalTier?.get(opts.plan as PlanTier) ?? opts.plan;
+    chosen = response.plans.find((p) => p.tier === tier);
     if (!chosen) {
       console.error(chalk.red(`Unknown plan '${opts.plan}'. Use safe, balanced, or aggressive.`));
       process.exit(1);

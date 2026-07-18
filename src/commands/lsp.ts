@@ -28,7 +28,9 @@ export function registerLsp(program: Command): void {
       'also publish Problems-panel diagnostics (EOL runtime, unmaintained, license change). Off by default: drift is not a defect, and the Problems panel is not ours to fill',
       false,
     )
-    .action(async function (this: Command, opts: { diagnostics?: boolean }) {
+    .option('--no-graph', 'skip the local Vibgrate Graph entirely: no background build, and graph queries report it as turned off')
+    .option('--no-semantic', 'never use semantic search for graph queries (lexical only; the embedding model is not downloaded)')
+    .action(async function (this: Command, opts: { diagnostics?: boolean; graph?: boolean; semantic?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
 
@@ -38,6 +40,8 @@ export function registerLsp(program: Command): void {
         // here too, so an offline editor session stays offline.
         offline: global.local === true,
         diagnostics: opts.diagnostics === true,
+        graph: opts.graph !== false,
+        semantic: opts.semantic !== false,
       });
 
       // The server owns the process from here: it lives on stdin/stdout until

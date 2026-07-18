@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { hashString } from './hash.js';
 import { cacheDir } from './cache.js';
 import { acquireLock, releaseLock } from './lock.js';
@@ -170,7 +172,7 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
 
   // Lazy, optional dependency (native ONNX): loaded only for `vg ask`/`embed`,
   // never by build/verify, so the graph artifact stays deterministic.
-  const mod: any = await import('fastembed' as string).catch(() => null);
+  const mod: any = await importEmbedBackend();
   if (!mod?.FlagEmbedding) return fail('not-installed');
 
   const cache = modelCacheDir(); // central, shared across all repos
@@ -218,6 +220,31 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
   } catch (e) {
     return fail(isPermissionError(e) ? 'no-permission' : 'download-failed');
   }
+}
+
+/**
+ * Import the optional native backend. A host can supply it out-of-tree via
+ * `VIBGRATE_EMBEDDER_PATH` — a directory whose `node_modules` contains
+ * `fastembed`. Editor integrations use this when their bundled engine ships
+ * without the native optional dependency (the VS Code extension installs it
+ * into its own storage on consent); the host dir wins over this package's own
+ * dependency tree so the copy the user consented to is the one that loads.
+ * Any resolution failure falls through — never throws.
+ */
+async function importEmbedBackend(): Promise<any> {
+  const hostDir = process.env.VIBGRATE_EMBEDDER_PATH;
+  if (hostDir) {
+    try {
+      const req = createRequire(path.join(hostDir, 'package.json'));
+      const mod: any = await import(pathToFileURL(req.resolve('fastembed')).href);
+      // A CJS entry imported over ESM may nest its exports under `default`.
+      const resolved = mod?.FlagEmbedding ? mod : mod?.default;
+      if (resolved?.FlagEmbedding) return resolved;
+    } catch {
+      /* fall through to normal resolution */
+    }
+  }
+  return await import('fastembed' as string).catch(() => null);
 }
 
 /** Ceiling for the one-time model fetch/init; override via VG_EMBED_TIMEOUT_MS. */

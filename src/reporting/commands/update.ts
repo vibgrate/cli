@@ -1,4 +1,6 @@
 import { execSync } from 'node:child_process';
+import * as fsSync from 'node:fs';
+import * as os from 'node:os';
 import * as readline from 'node:readline';
 import * as path from 'node:path';
 import { Command } from 'commander';
@@ -9,23 +11,85 @@ import { pathExists } from '../utils/fs.js';
 
 export type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'bun';
 
+const PACKAGE_NAME = '@vibgrate/cli';
+
 /**
- * Check if the CLI is installed globally by examining where it's running from.
- * Returns the package manager if global, null if local.
+ * Check if the CLI is running from a global install by examining where it's
+ * running from. Returns the package manager if global, null if local.
+ *
+ * Global bins are usually symlinks (`/usr/local/bin/vg` →
+ * `../lib/node_modules/@vibgrate/cli/…`), so the launch path must be
+ * realpath-resolved before inspecting it — the symlink itself contains no
+ * `node_modules` segment and would defeat the check.
  */
-function detectGlobalInstall(): PackageManager | null {
-  const execPath = process.argv[1] || '';
-  // Global npm installs are typically in /usr/local/lib/node_modules or similar
-  // Global pnpm installs are in ~/.local/share/pnpm or similar
-  if (execPath.includes('/lib/node_modules/') || execPath.includes('\\node_modules\\')) {
-    // Could be local or global node_modules - check for project markers
-    if (!execPath.includes(process.cwd())) {
-      // Not in current directory - likely global
-      if (execPath.includes('pnpm')) return 'pnpm';
-      if (execPath.includes('yarn')) return 'yarn';
-      if (execPath.includes('bun')) return 'bun';
-      return 'npm';
+export function detectGlobalInstall(
+  execPath: string = process.argv[1] || '',
+  cwd: string = process.cwd(),
+): PackageManager | null {
+  if (!execPath) return null;
+  let resolved = execPath;
+  try {
+    resolved = fsSync.realpathSync(execPath);
+  } catch {
+    // Path may not exist (tests, unusual launchers) — inspect it as given.
+  }
+  const p = resolved.replace(/\\/g, '/');
+  if (!p.includes('/node_modules/')) return null;
+  // One-off runner caches (npx / pnpm dlx / bunx) live outside the project but
+  // are not installs — nothing to update there.
+  if (p.includes('/_npx/') || p.includes('/dlx-') || p.includes('/.bunx/')) return null;
+  // Inside the current project's own node_modules → a local install.
+  const workdir = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (workdir && (p === workdir || p.startsWith(workdir + '/'))) return null;
+  if (p.includes('/pnpm/')) return 'pnpm';
+  if (p.includes('/yarn/') || p.includes('/.yarn/')) return 'yarn';
+  if (p.includes('/.bun/')) return 'bun';
+  return 'npm';
+}
+
+/** Runs a shell command and returns trimmed stdout; used by the global-root probe. */
+export type CommandRunner = (cmd: string) => string;
+
+const defaultRunner: CommandRunner = (cmd) =>
+  execSync(cmd, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 });
+
+/**
+ * Check whether the package is installed globally under any known package
+ * manager, even when the current process wasn't launched from that install
+ * (e.g. `vg` run via a local dependency while a global copy also exists).
+ * Probes each manager's global root and returns the first that contains the
+ * package, or null when none does. Managers that aren't installed just fail
+ * their probe and are skipped.
+ */
+export async function findGlobalInstall(
+  pkg: string = PACKAGE_NAME,
+  run: CommandRunner = defaultRunner,
+): Promise<PackageManager | null> {
+  const tryRun = (cmd: string): string | null => {
+    try {
+      const out = run(cmd).trim().split('\n')[0]?.trim();
+      return out || null;
+    } catch {
+      return null;
     }
+  };
+
+  const probes: Array<{ pm: PackageManager; root: () => string | null }> = [
+    { pm: 'npm', root: () => tryRun('npm root -g') },
+    { pm: 'pnpm', root: () => tryRun('pnpm root -g') },
+    {
+      pm: 'yarn',
+      root: () => {
+        const dir = tryRun('yarn global dir');
+        return dir ? path.join(dir, 'node_modules') : null;
+      },
+    },
+    { pm: 'bun', root: () => path.join(os.homedir(), '.bun', 'install', 'global', 'node_modules') },
+  ];
+
+  for (const probe of probes) {
+    const root = probe.root();
+    if (root && (await pathExists(path.join(root, pkg)))) return probe.pm;
   }
   return null;
 }
@@ -106,18 +170,30 @@ export function getInstallCommand(
   }
 }
 
+/** How the package is declared in the project's package.json, if at all. */
+export type LocalDependencyState = 'dev' | 'prod' | null;
+
 /**
- * Check if vibgrate is a devDependency (vs dependency) in the project's package.json.
+ * Read how the package is declared in the project's package.json.
+ * Returns null when there is no package.json or the package isn't declared.
  */
-async function isDevDependency(cwd: string): Promise<boolean> {
+export async function getLocalDependencyState(
+  cwd: string,
+  pkg: string = PACKAGE_NAME,
+): Promise<LocalDependencyState> {
   try {
     const pkgPath = path.join(cwd, 'package.json');
     const raw = await (await import('node:fs/promises')).readFile(pkgPath, 'utf-8');
-    const pkg = JSON.parse(raw) as Record<string, Record<string, string>>;
-    return Boolean(pkg.devDependencies?.['@vibgrate/cli']);
+    const parsed = JSON.parse(raw) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    if (parsed.devDependencies?.[pkg]) return 'dev';
+    if (parsed.dependencies?.[pkg]) return 'prod';
   } catch {
-    return true; // default to devDep for CLI tools
+    // No package.json / unreadable — not a declared dependency.
   }
+  return null;
 }
 
 /**
@@ -177,18 +253,39 @@ export const updateCommand = new Command('update')
 
       const cwd = process.cwd();
 
-      // Detect if running from a global install or explicitly requested global update
-      const globalPm = detectGlobalInstall();
-      const isGlobal = opts.global || globalPm !== null;
+      // Decide the update target. A global copy is updated in place — the
+      // project's package.json is only touched when the package is actually
+      // declared there (or when there is no global install to update).
+      const runtimeGlobalPm = detectGlobalInstall();
+      let globalPm: PackageManager | null = runtimeGlobalPm;
+      let isGlobal = Boolean(opts.global) || runtimeGlobalPm !== null;
+      let localState: LocalDependencyState = null;
 
-      const pm: PackageManager = (opts.pm as PackageManager) || (globalPm ?? (await detectPackageManager(cwd)));
+      if (!isGlobal) {
+        localState = await getLocalDependencyState(cwd);
+        if (localState === null) {
+          // Not declared in this project. If a global install exists, update
+          // that instead of adding the CLI to this project's package.json.
+          globalPm = await findGlobalInstall();
+          if (globalPm) {
+            isGlobal = true;
+            console.log(
+              chalk.dim(`Found a global ${globalPm} installation of ${PACKAGE_NAME} — updating it instead of this project.`),
+            );
+          }
+        }
+      }
+
+      const pm: PackageManager = (opts.pm as PackageManager) || globalPm || (await detectPackageManager(cwd));
 
       let cmd: string;
       if (isGlobal) {
-        cmd = getGlobalUpdateCommand(pm, '@vibgrate/cli', latest);
+        cmd = getGlobalUpdateCommand(pm, PACKAGE_NAME, latest);
         console.log(chalk.dim(`Updating global installation with ${pm}: ${cmd}`));
       } else {
-        const isDev = await isDevDependency(cwd);
+        // A CLI belongs in devDependencies: install as a dev dependency unless
+        // the project has explicitly declared it under `dependencies`.
+        const isDev = localState !== 'prod';
 
         // pnpm refuses `pnpm add` at a workspace root without -w. Detect that up
         // front so we can offer to run the workspace-root-aware command instead of
@@ -201,7 +298,7 @@ export const updateCommand = new Command('update')
           );
           const proceed = opts.yes || opts.workspaceRoot || (await confirmWorkspaceRoot(pm));
           if (!proceed) {
-            const rootCmd = getInstallCommand(pm, '@vibgrate/cli', latest, isDev, { workspaceRoot: true });
+            const rootCmd = getInstallCommand(pm, PACKAGE_NAME, latest, isDev, { workspaceRoot: true });
             console.log(chalk.dim(`Skipped. To update the workspace root, run: ${rootCmd}`));
             console.log(chalk.dim('or re-run "vg update --yes" (or --workspace-root) to let vg do it.'));
             return;
@@ -209,13 +306,13 @@ export const updateCommand = new Command('update')
           workspaceRoot = true;
         }
 
-        cmd = getInstallCommand(pm, '@vibgrate/cli', latest, isDev, { workspaceRoot });
+        cmd = getInstallCommand(pm, PACKAGE_NAME, latest, isDev, { workspaceRoot });
         console.log(chalk.dim(`Using ${pm}: ${cmd}`));
       }
 
       try {
         execSync(cmd, { cwd, stdio: 'inherit' });
-        console.log(chalk.green('✔') + ` Updated to @vibgrate/cli@${latest}`);
+        console.log(chalk.green('✔') + ` Updated to ${PACKAGE_NAME}@${latest}`);
       } catch {
         console.error(chalk.red(`Update failed. Run manually: ${cmd}`));
         process.exit(1);

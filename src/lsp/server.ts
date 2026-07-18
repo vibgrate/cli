@@ -23,7 +23,7 @@ import * as fs from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
 import { runCoreScan } from '../core-open/index.js';
-import type { ScanArtifact, ScanOptions, DependencyRow, ProjectScan } from '../core-open/index.js';
+import type { ScanArtifact, ScanOptions, DependencyRow, ProjectScan, DriftScore } from '../core-open/index.js';
 import { loadAdvancedScanHook } from '../reporting/advanced-hook.js';
 import { VERSION } from '../version.js';
 import { Connection } from './protocol.js';
@@ -34,6 +34,15 @@ import {
   isManifest,
   manifestKind,
 } from './manifest-positions.js';
+import { buildGraph } from '../engine/build.js';
+import { loadGraph } from '../engine/load.js';
+import { writeArtifacts } from '../engine/artifacts.js';
+import { writeSnapshot } from '../engine/freshness.js';
+import { refreshIfStale } from '../engine/refresh.js';
+import { manifestHash, loadScanCache, writeScanCache } from './scan-cache.js';
+import { runGraphQuery, type GraphQueryParams, type GraphQueryResult } from './graph-query.js';
+import { enrichVulns, type EnrichResult } from './enrich.js';
+import type { VgGraph } from '../schema.js';
 
 // ── Wire types (the contract every client renders) ─────────────────────────
 
@@ -53,6 +62,41 @@ export interface ScoreNotification {
   counts: { behind: number; eol: number; unmaintained: number; total: number };
   rootPath: string;
   scannedAt: string;
+  /**
+   * Per-package contribution breakdown for the panel accordion — the packages
+   * actually driving the score (drift > 0), ranked worst-first. Built from the
+   * driftscore-3.0 envelope (`drift.dependencyDrift.top`) enriched with the row
+   * detail. Absent when nothing is drifting (e.g. an offline scan that can't
+   * resolve latest versions). Vulnerability + registry enrichment is fetched
+   * lazily on expand, not carried here.
+   */
+  breakdown?: BreakdownItem[];
+}
+
+/** One dependency's contribution to the score, for the panel accordion. */
+export interface BreakdownItem {
+  package: string;
+  section: string;
+  /**
+   * OSV.dev ecosystem slug for this dependency (npm, PyPI, Go, Maven, crates.io,
+   * RubyGems, NuGet, Packagist, Pub, …), from the owning project's type. Null
+   * when the ecosystem has no OSV mapping — the client then skips enrichment.
+   */
+  ecosystem: string | null;
+  /** 0–100 drift contribution for this dependency. */
+  drift: number;
+  /** Band for `drift` — the client maps it to a colour; it never re-derives it. */
+  band: Band;
+  currentSpec: string;
+  resolvedVersion: string | null;
+  latestStable: string | null;
+  majorsBehind: number | null;
+  ageDays: number | null;
+  mode: 'verified' | 'estimated';
+  unsupported: boolean;
+  abandoned: boolean;
+  /** Data-quality guards that fired (canary-latest, scheme-jump, high-cadence…). */
+  flags: string[];
 }
 
 /** One coloured end-of-line decoration. `vibgrate/inline`, pushed per open manifest. */
@@ -77,6 +121,17 @@ export interface InlineNotification {
  */
 export interface StatusNotification {
   state: 'error';
+}
+
+/**
+ * `vibgrate/graph/status` — mirrors `vibgrate/status` but for the code map:
+ * lets a client show a "building the map…" placeholder for the Graph section
+ * the first time it runs on a repo, without blocking the drift score.
+ */
+export interface GraphStatusNotification {
+  /** `disabled` = the client launched with `--no-graph` (the Graph setting is off). */
+  state: 'building' | 'ready' | 'error' | 'disabled';
+  message?: string;
 }
 
 // ── Band + severity mapping ────────────────────────────────────────────────
@@ -131,6 +186,10 @@ interface ServerOptions {
   offline: boolean;
   /** Problems-panel diagnostics. OFF unless the client asks (plan §8.1). */
   diagnostics: boolean;
+  /** The local Vibgrate Graph. `false` (`--no-graph`) skips the background build and disables graph queries. */
+  graph: boolean;
+  /** Semantic search over the graph. `false` (`--no-semantic`) forces lexical and never downloads the embedding model. */
+  semantic: boolean;
 }
 
 export class VibgrateLanguageServer {
@@ -141,6 +200,8 @@ export class VibgrateLanguageServer {
   private queued = false;
   private debounce: NodeJS.Timeout | null = null;
   private shuttingDown = false;
+  private graph: VgGraph | null = null;
+  private graphBuilding = false;
 
   constructor(
     private readonly opts: ServerOptions,
@@ -165,7 +226,12 @@ export class VibgrateLanguageServer {
       serverInfo: { name: 'Vibgrate', version: VERSION },
     }));
 
-    this.conn.onNotification('initialized', () => this.scheduleScan(0));
+    this.conn.onNotification('initialized', () => {
+      this.scheduleScan(0);
+      // Independent of the drift scan — a slow first graph build must not
+      // delay the score the status bar/panel are waiting on.
+      void this.ensureGraph();
+    });
 
     this.conn.onNotification('textDocument/didOpen', (_m, params) => {
       const p = params as { textDocument?: { uri?: string; text?: string } };
@@ -207,6 +273,10 @@ export class VibgrateLanguageServer {
     this.conn.onRequest('textDocument/hover', (_m, params) => this.onHover(params));
     this.conn.onRequest('textDocument/codeLens', (_m, params) => this.onCodeLens(params));
 
+    this.conn.onRequest('vibgrate/graph/query', (_m, params) => this.onGraphQuery(params));
+    this.conn.onRequest('vibgrate/score/forFile', (_m, params) => this.onScoreForFile(params));
+    this.conn.onRequest('vibgrate/enrich', (_m, params) => this.onEnrich(params));
+
     this.conn.onRequest('workspace/executeCommand', (_m, params) => {
       const p = params as { command?: string };
       if (p.command === 'vibgrate.rescan') {
@@ -242,20 +312,34 @@ export class VibgrateLanguageServer {
     this.scanning = true;
 
     try {
-      const scanOpts: ScanOptions = {
-        format: 'json',
-        concurrency: 8,
-        offline: this.opts.offline,
-        noLocalArtifacts: true, // an editor scan must not litter the repo
-        noGraph: true, // the code map is not needed to score drift; skip the cost
-        quiet: true, // no spinners, no artifact dump — an editor is not a terminal
-        vibgrateVersion: VERSION,
-      } as ScanOptions;
+      // The expensive part of a scan is the per-package registry lookups, not
+      // reading the manifest/lockfile — so hash just those first (cheap: no
+      // network) and skip `runCoreScan` entirely when nothing a scan cares
+      // about has changed since the last successful scan on this machine.
+      // `toolVersion`/`offline` are part of the key too: an engine upgrade or a
+      // flip of `vibgrate.offline` must not replay a scan from before it.
+      const cacheKey = { manifestHash: manifestHash(this.opts.root), toolVersion: VERSION, offline: this.opts.offline };
+      const cached = loadScanCache(this.opts.root, cacheKey);
 
-      // Same hook `vg scan` uses, so the number the editor shows is the number
-      // the CLI shows — by construction, not by coincidence (plan §8.3).
-      const advanced = await loadAdvancedScanHook();
-      this.artifact = await runCoreScan(this.opts.root, scanOpts, advanced);
+      if (cached) {
+        this.artifact = cached.artifact;
+      } else {
+        const scanOpts: ScanOptions = {
+          format: 'json',
+          concurrency: 8,
+          offline: this.opts.offline,
+          noLocalArtifacts: true, // an editor scan must not litter the repo
+          noGraph: true, // the code map is not needed to score drift; skip the cost
+          quiet: true, // no spinners, no artifact dump — an editor is not a terminal
+          vibgrateVersion: VERSION,
+        } as ScanOptions;
+
+        // Same hook `vg scan` uses, so the number the editor shows is the number
+        // the CLI shows — by construction, not by coincidence (plan §8.3).
+        const advanced = await loadAdvancedScanHook();
+        this.artifact = await runCoreScan(this.opts.root, scanOpts, advanced);
+        writeScanCache(this.opts.root, cacheKey, this.artifact);
+      }
 
       this.publishScore();
       for (const uri of this.docs.keys()) this.publishForDoc(uri);
@@ -310,12 +394,15 @@ export class VibgrateLanguageServer {
       band,
       // v3 §2.4: `estimated` means "no timestamps at all" — it is NOT an
       // offline marker. An air-gapped scan against a dated snapshot is Verified.
-      mode: hasReleaseDates(a) ? 'verified' : 'estimated',
+      // The score now carries the authoritative provenance (driftscore-3.0
+      // envelope); fall back to the artifact heuristic for pre-v3 engines.
+      mode: a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated'),
       methodology: a.drift.methodologyVersion ?? 'unknown',
       scale: '0 best, 100 worst',
       counts: { behind, eol, unmaintained, total },
       rootPath: a.rootPath,
       scannedAt: a.timestamp,
+      ...(buildBreakdown(a.drift, a.projects ?? []) ? { breakdown: buildBreakdown(a.drift, a.projects ?? []) } : {}),
     };
 
     this.conn.notify('vibgrate/score', payload);
@@ -395,8 +482,9 @@ export class VibgrateLanguageServer {
     );
     if (!dep) return null;
 
+    const contribution = a.drift.dependencyDrift?.top.find((t) => t.package === dep.package)?.drift ?? null;
     return {
-      contents: { kind: 'markdown', value: hoverMarkdown(dep) },
+      contents: { kind: 'markdown', value: hoverMarkdown(dep, contribution) },
     };
   }
 
@@ -421,7 +509,8 @@ export class VibgrateLanguageServer {
       (f) => f.ruleId === 'vibgrate/runtime-eol' || f.ruleId === 'vibgrate/eol',
     ).length;
 
-    const mode = hasReleaseDates(a) ? '' : '~';
+    const estimated = (a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated')) === 'estimated';
+    const mode = estimated ? '~' : '';
     const title =
       `Vibgrate · drift ${mode}${a.drift.score} (${a.drift.riskLevel}) · ` +
       `${behind} behind · ${eol} EOL`;
@@ -432,6 +521,89 @@ export class VibgrateLanguageServer {
         command: { title, command: 'vibgrate.openPanel', arguments: [] },
       },
     ];
+  }
+
+  // ── Graph ────────────────────────────────────────────────────────────────
+
+  /**
+   * Load the committed map if one exists, else build it once (this is the
+   * "first activation sets up the graph" step). Fire-and-forget from
+   * `initialized` so it never blocks the drift score; a query that arrives
+   * mid-build awaits the same in-flight promise via the `graphBuilding` guard.
+   */
+  private async ensureGraph(): Promise<void> {
+    if (!this.opts.graph) {
+      // Turned off by the user (`--no-graph`). Say so once, quietly — the
+      // client's Graph section renders the off state instead of "building…".
+      this.conn.notify('vibgrate/graph/status', { state: 'disabled' } satisfies GraphStatusNotification);
+      return;
+    }
+    if (this.graph || this.graphBuilding) return;
+    this.graphBuilding = true;
+    try {
+      const existing = loadGraph(this.opts.root);
+      if (existing) {
+        this.graph = existing;
+        this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
+        return;
+      }
+
+      this.conn.notify('vibgrate/graph/status', { state: 'building' } satisfies GraphStatusNotification);
+      const result = await buildGraph({ root: this.opts.root });
+      // Leaves `.vibgrate/graph.json` exactly as a manual `vg build` would, so
+      // `vg ask` from a terminal afterward sees the same map.
+      writeArtifacts(result.graph, { root: this.opts.root, html: false, report: false });
+      writeSnapshot(this.opts.root, result.graph.provenance.corpusHash, result.fileStats, {});
+      this.graph = result.graph;
+      this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.conn.notify('window/logMessage', { type: 3, message: `Vibgrate graph build failed: ${message}` });
+      this.conn.notify('vibgrate/graph/status', { state: 'error', message } satisfies GraphStatusNotification);
+    } finally {
+      this.graphBuilding = false;
+    }
+  }
+
+  /** The graph, refreshed if the working tree drifted since the last build (same probe `vg ask` uses). */
+  private async graphForQuery(): Promise<VgGraph | null> {
+    await this.ensureGraph();
+    if (!this.graph) return null;
+    const refreshed = await refreshIfStale(this.opts.root);
+    if (refreshed.status === 'refreshed' && refreshed.wrote) {
+      const reloaded = loadGraph(this.opts.root);
+      if (reloaded) this.graph = reloaded;
+    }
+    return this.graph;
+  }
+
+  private async onGraphQuery(params: unknown): Promise<GraphQueryResult> {
+    const p = params as GraphQueryParams;
+    if (!this.opts.graph) {
+      return { ok: false, mode: p.mode, error: 'disabled', message: 'the local Vibgrate Graph is turned off' };
+    }
+    const graph = await this.graphForQuery();
+    if (!graph) {
+      return { ok: false, mode: p.mode, error: 'not-found', message: 'no code map yet — it is still building' };
+    }
+    return runGraphQuery(graph, p, { root: this.opts.root, offline: this.opts.offline, semantic: this.opts.semantic });
+  }
+
+  /**
+   * `vibgrate/enrich` — lazy vulnerability enrichment for one expanded package,
+   * straight from OSV.dev (never our API). Honours the server's offline flag.
+   */
+  private onEnrich(params: unknown): Promise<EnrichResult> {
+    const p = (params ?? {}) as { ecosystem?: string | null; package?: string; version?: string | null };
+    return enrichVulns(p.ecosystem ?? null, p.package ?? '', p.version ?? null, { offline: this.opts.offline });
+  }
+
+  private onScoreForFile(params: unknown): ScoreNotification | null {
+    const p = params as { uri?: string };
+    const a = this.artifact;
+    if (!a || !p.uri) return null;
+    const project = projectForFile(this.opts.root, a, uriToPath(p.uri));
+    return project ? scoreForProject(a, project) : null;
   }
 }
 
@@ -485,6 +657,116 @@ function hasReleaseDates(a: ScanArtifact): boolean {
   return false;
 }
 
+/**
+ * `vibgrate/score/forFile` payload for one project — same shape as the
+ * whole-repo `ScoreNotification`, scoped to a single manifest. Reuses the
+ * per-project `drift` the scan already computed (`ProjectScan.drift`) rather
+ * than re-deriving a score client-side, for the same "one engine" reason the
+ * whole-repo score is never recomputed in a client.
+ */
+function scoreForProject(a: ScanArtifact, proj: ProjectScan): ScoreNotification | null {
+  if (!proj.drift) return null;
+
+  let behind = 0;
+  let total = 0;
+  for (const dep of proj.dependencies ?? []) {
+    total++;
+    if (dep.drift === 'major-behind' || dep.drift === 'minor-behind') behind++;
+  }
+  const projFindings = (a.findings ?? []).filter((f) => sameProject(f.location, proj.path));
+  const eol = projFindings.filter((f) => f.ruleId === 'vibgrate/runtime-eol' || f.ruleId === 'vibgrate/eol').length;
+  const unmaintained = projFindings.filter(
+    (f) => f.ruleId === 'vibgrate/unmaintained' || f.ruleId === 'vibgrate/abandoned',
+  ).length;
+  const hasDates = (proj.dependencies ?? []).some((d) => d.ageDays !== null && d.ageDays !== undefined);
+
+  return {
+    score: proj.drift.score,
+    band: (proj.drift.riskLevel ?? 'low') as Band,
+    mode: proj.drift.mode ?? (hasDates ? 'verified' : 'estimated'),
+    methodology: proj.drift.methodologyVersion ?? a.drift.methodologyVersion ?? 'unknown',
+    scale: '0 best, 100 worst',
+    counts: { behind, eol, unmaintained, total },
+    rootPath: proj.path,
+    scannedAt: a.timestamp,
+    ...(buildBreakdown(proj.drift, [proj]) ? { breakdown: buildBreakdown(proj.drift, [proj]) } : {}),
+  };
+}
+
+/** Band for a 0–100 drift number — the reconciled score bands (§6.5). The
+ *  server sends the band; the client never re-derives one. */
+function bandForScore(n: number): Band {
+  if (n <= 30) return 'low';
+  if (n <= 60) return 'moderate';
+  return 'high';
+}
+
+/**
+ * The per-package contribution breakdown for the panel accordion. Built from the
+ * driftscore-3.0 envelope's ranked `top` (authoritative — the same per-dependency
+ * drift the aggregate used), enriched with the row detail (spec, resolved,
+ * latest, age). Only contributing packages (drift > 0); empty when nothing
+ * drifts (e.g. offline, where latest versions can't be resolved).
+ */
+function buildBreakdown(drift: DriftScore, projects: ProjectScan[]): BreakdownItem[] | undefined {
+  const top = drift.dependencyDrift?.top;
+  if (!top || top.length === 0) return undefined;
+
+  const byPkg = new Map<string, { row: DependencyRow; ecosystem: string | null }>();
+  for (const p of projects) {
+    const ecosystem = osvEcosystem(p.type);
+    for (const d of p.dependencies ?? []) if (!byPkg.has(d.package)) byPkg.set(d.package, { row: d, ecosystem });
+  }
+
+  const items = top
+    .filter((t) => t.drift > 0)
+    .map((t): BreakdownItem => {
+      const found = byPkg.get(t.package);
+      const row = found?.row;
+      return {
+        package: t.package,
+        section: row?.section ?? 'dependencies',
+        ecosystem: found?.ecosystem ?? null,
+        drift: t.drift,
+        band: bandForScore(t.drift),
+        currentSpec: row?.currentSpec ?? '',
+        resolvedVersion: row?.resolvedVersion ?? null,
+        latestStable: row?.latestStable ?? null,
+        majorsBehind: row?.majorsBehind ?? null,
+        ageDays: row?.ageDays ?? null,
+        mode: t.mode,
+        unsupported: t.unsupported,
+        abandoned: t.flags.includes('abandoned-floor'),
+        flags: t.flags,
+      };
+    });
+
+  return items.length > 0 ? items : undefined;
+}
+
+/** Map a scanned project type to its OSV.dev ecosystem slug (null = no OSV
+ *  coverage, so the client skips vulnerability enrichment). */
+function osvEcosystem(type: ProjectScan['type']): string | null {
+  switch (type) {
+    case 'node':
+    case 'typescript': return 'npm';
+    case 'python': return 'PyPI';
+    case 'java':
+    case 'kotlin':
+    case 'scala':
+    case 'groovy': return 'Maven';
+    case 'go': return 'Go';
+    case 'rust': return 'crates.io';
+    case 'ruby': return 'RubyGems';
+    case 'php': return 'Packagist';
+    case 'dotnet': return 'NuGet';
+    case 'dart': return 'Pub';
+    case 'swift': return 'SwiftURL';
+    case 'elixir': return 'Hex';
+    default: return null;
+  }
+}
+
 /** The end-of-line decoration text. Terse: it sits in the user's code. */
 function inlineLabel(dep: DependencyRow): string {
   const bits: string[] = [];
@@ -503,22 +785,79 @@ function inlineLabel(dep: DependencyRow): string {
   return bits.join(' · ');
 }
 
+/** `command:` URI for a `MarkdownString` link — one JSON-encoded arg object, matching `executeCommand`. */
+function commandUri(command: string, args: unknown): string {
+  return `command:${command}?${encodeURIComponent(JSON.stringify([args]))}`;
+}
+
+/** "2 majors behind" / "minor behind" — the hover card's badge text. Mirrors `inlineLabel`'s drift wording. */
+function driftBadge(dep: DependencyRow): string | null {
+  if (dep.drift === 'major-behind') {
+    const n = dep.majorsBehind ?? 1;
+    return `${n} major${n === 1 ? '' : 's'} behind`;
+  }
+  if (dep.drift === 'minor-behind') return 'minor behind';
+  return null;
+}
+
 /**
- * The hover card. Facts, in a fixed order — and no fix affordance, ever.
- * `vg fix` is a paid product; the thing that computes the number does not get
- * to advertise the thing that sells the fix (plan §0.1).
+ * "17.x → 18.x → 19.x" — a plain-text stand-in for the wireframe's version
+ * ladder graphic (hover markdown can't draw one). Built only from the real
+ * major-version numbers in `yours`/`latest`; long jumps are truncated with
+ * `…` rather than listing every major, so a package that is a decade behind
+ * doesn't produce a wall of numbers. Returns null when either version isn't
+ * a parseable `<major>.x` (so nothing is shown rather than something wrong).
  */
-function hoverMarkdown(dep: DependencyRow): string {
+function versionJourney(yours: string, latest: string): string | null {
+  const from = Number(/^(\d+)/.exec(yours)?.[1]);
+  const to = Number(/^(\d+)/.exec(latest)?.[1]);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
+
+  const majors: number[] = [];
+  for (let m = from; m <= to; m++) majors.push(m);
+  const shown = majors.length > 5 ? [majors[0], majors[1], -1, majors[majors.length - 2], majors[majors.length - 1]] : majors;
+  return shown.map((m) => (m === -1 ? '…' : `${m}.x`)).join(' → ');
+}
+
+/**
+ * The hover card (docs/ide-integration/wireframes/02-hover-card.svg). Shows
+ * the facts we actually have: version currency, this dependency's real
+ * contribution to the score, and real maintenance flags (`unsupported`/
+ * `abandoned`).
+ *
+ * The wireframe also lists upstream release cadence, a last-commit date, a
+ * breaking-change count, and transitive blast radius. None of those are
+ * backed by real data today — no release-history or changelog source is
+ * scanned, and the graph does not track per-npm-package import edges — so
+ * they are left out rather than approximated. Fabricating them would violate
+ * the same rule that keeps marketing visuals honest (no invented product
+ * output); a hover card is not exempt.
+ *
+ * Two links, both real, not aspirational: "Route this fix →" opens the
+ * existing ranked, vendor-neutral remediation menu (`routeFix.ts`) — per the
+ * wireframe's own design notes, that is explicitly not a "Fix" button, so it
+ * does not conflict with "no fix affordance" (plan §0.1). "Explain this
+ * drift" focuses the panel and expands this dependency's breakdown row,
+ * which already carries the full explanation (guards, floors, age).
+ */
+function hoverMarkdown(dep: DependencyRow, contribution: number | null): string {
   const lines: string[] = [];
-  lines.push(`**${dep.package}**`);
+  const badge = driftBadge(dep);
+  const contributionText = contribution != null ? ` · contributes +${Math.round(contribution)} to drift` : '';
+  lines.push(badge ? `**${dep.package}**  \`${badge}\`${contributionText}` : `**${dep.package}**`);
   lines.push('');
 
   const yours = dep.resolvedVersion ?? dep.currentSpec;
+  const drifted = dep.drift === 'major-behind' || dep.drift === 'minor-behind';
+
   if (dep.latestStable && dep.latestStable !== yours) {
+    lines.push('**Currency**');
     lines.push(`| | |`);
     lines.push(`|---|---|`);
     lines.push(`| yours | \`${yours}\` |`);
     lines.push(`| latest | \`${dep.latestStable}\` |`);
+    const journey = versionJourney(yours, dep.latestStable);
+    if (journey) lines.push(`| journey | ${journey} |`);
     if (dep.majorsBehind) lines.push(`| majors behind | ${dep.majorsBehind} |`);
     if (dep.ageDays != null && dep.ageDays >= 1) {
       lines.push(`| age | ${Math.round(dep.ageDays).toLocaleString('en-US')} days |`);
@@ -532,7 +871,28 @@ function hoverMarkdown(dep: DependencyRow): string {
     lines.push(`\`${yours}\` — current.`);
   }
 
+  if (dep.unsupported || dep.abandoned) {
+    lines.push('');
+    lines.push('**Maintenance**');
+    if (dep.unsupported) lines.push('$(warning) Unsupported / deprecated — floored at 70.');
+    if (dep.abandoned) lines.push('$(warning) Abandoned — no recent releases — floored at 50.');
+  }
+
+  if (drifted) {
+    lines.push('');
+    lines.push('---');
+    const routeFixUri = commandUri('vibgrate.routeFix', {
+      package: dep.package,
+      from: yours,
+      to: dep.latestStable ?? yours,
+      majorsBehind: dep.majorsBehind ?? 0,
+    });
+    const explainUri = commandUri('vibgrate.explain', { package: dep.package });
+    lines.push(`[Route this fix →](${routeFixUri}) · [Explain this drift](${explainUri})`);
+  }
+
   lines.push('');
+  lines.push('---');
   lines.push('$(shield) Resolved locally from your lockfile. No source uploaded.');
   return lines.join('\n');
 }

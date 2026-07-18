@@ -137,6 +137,21 @@ export interface DependencyRow {
   ageDays?: number | null;
   /** ageDays expressed in libyears (ageDays / 365.25). Null when unavailable. */
   libyears?: number | null;
+  /**
+   * The resolved major is past vendor support / registry-deprecated. Fires the
+   * driftscore-3.0 unsupported floor (per-dependency drift ≥ 70) — a stale-but-
+   * supported package is drift, but an unsupported one cannot read healthy.
+   * Populated by ecosystem scanners (e.g. the npm `deprecated` flag); absent
+   * when the scanner has no support signal.
+   */
+  unsupported?: boolean;
+  /**
+   * No release in ~24+ months ("no pulse") / registry-flagged abandoned. Fires
+   * the driftscore-3.0 abandoned floor (per-dependency drift ≥ 50). Distinct
+   * from `unsupported`: an abandoned package may still be a current version, but
+   * it has stopped moving. Populated from the latest release's age.
+   */
+  abandoned?: boolean;
 }
 
 // ── Detected framework ──
@@ -296,6 +311,39 @@ export interface DriftScore {
    * artifacts from CLIs predating this field will not carry it.
    */
   methodologyVersion?: string;
+  /**
+   * Provenance of the score (DRIFTSCORE-V3-SPEC §2.4): `estimated` means there
+   * were no release-date timestamps at all (version-only fallback), and is
+   * branded with a leading `~` by renderers. `verified` means time data was
+   * present — online OR from a dated snapshot. **Offline is not Estimated.**
+   * Optional: absent on artifacts from pre-v3 CLIs.
+   */
+  mode?: 'verified' | 'estimated';
+  /**
+   * driftscore-3.0 dependency-pillar detail, surfaced for explainability and the
+   * per-package breakdown (the IDE accordion, the dashboard). Present when there
+   * were scoreable dependencies.
+   */
+  dependencyDrift?: {
+    /** 95th-percentile per-dependency drift — the tail term that stops one
+     *  ancient dependency averaging into invisibility. */
+    p95: number;
+    /** Fraction (0–1) of scored deps at the unsupported/EOL floor. */
+    unsupportedShare: number;
+    /** Fraction (0–1) of scored deps that had release-date (Verified) data. */
+    coverage: number;
+    /** Worst offenders, ranked by drift (highest first), for the breakdown. */
+    top: {
+      package: string;
+      /** 0–100 per-dependency drift contribution. */
+      drift: number;
+      mode: 'verified' | 'estimated';
+      /** Hit the unsupported/EOL floor. */
+      unsupported: boolean;
+      /** Data-quality guards that fired (canary-latest, scheme-jump, …). */
+      flags: string[];
+    }[];
+  };
 }
 
 // ── Risk score (security & business risk — distinct from maintainability drift) ──

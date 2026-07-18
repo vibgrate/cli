@@ -45,9 +45,6 @@ function planBlock(plan: UpgradePlan, recommended: boolean): string {
   if (plan.upgrades.length > shown.length) {
     lines.push(chalk.dim(`      … and ${plan.upgrades.length - shown.length} more`));
   }
-  if (plan.upgrades.length === 0) {
-    lines.push(chalk.dim('      (no upgrades in this plan)'));
-  }
   return lines.join('\n');
 }
 
@@ -77,9 +74,15 @@ export function renderText(report: FixPlanResponse): string {
     out.push(chalk.red(`⚠ ${report.exploitability.kevPackages} package(s) carry a KNOWN-EXPLOITED (KEV) advisory${epss} — prioritise these.`));
   }
   out.push('');
-  for (const plan of report.plans) {
-    out.push(planBlock(plan, plan.tier === report.recommended));
+  const visiblePlans = report.plans.filter((plan) => plan.upgrades.length > 0);
+  if (visiblePlans.length === 0) {
+    out.push(chalk.green('✔ Nothing to upgrade — every tracked dependency is current.'));
     out.push('');
+  } else {
+    for (const plan of visiblePlans) {
+      out.push(planBlock(plan, plan.tier === report.recommended));
+      out.push('');
+    }
   }
   out.push(chalk.bold('Recommendation'));
   out.push(`  ${chalk.green(report.plans.find((p) => p.tier === report.recommended)?.label ?? report.recommended)} — ${report.rationale}`);
@@ -103,7 +106,12 @@ export function renderMarkdown(report: FixPlanResponse): string {
     out.push(`_${report.vulnerabilityData === 'unavailable' ? 'Advisory data was unavailable — vulnerability impact is not shown.' : 'Advisory data was partial — some ecosystems were not checked.'}_`);
   }
   out.push('');
-  for (const plan of report.plans) {
+  const visiblePlans = report.plans.filter((plan) => plan.upgrades.length > 0);
+  if (visiblePlans.length === 0) {
+    out.push('✔ Nothing to upgrade — every tracked dependency is current.');
+    out.push('');
+  }
+  for (const plan of visiblePlans) {
     const rec = plan.tier === report.recommended ? ' ✅ **recommended**' : '';
     out.push(`## ${plan.label}${rec}`);
     out.push('');
@@ -116,14 +124,12 @@ export function renderMarkdown(report: FixPlanResponse): string {
       out.push(`- ⚠ Introduces advisories in target versions: ${deltaSummary(plan.introduces)}`);
     }
     out.push('');
-    if (plan.upgrades.length) {
-      out.push('| Package | From | To | Kind | Reason |');
-      out.push('|---|---|---|---|---|');
-      for (const u of plan.upgrades) {
-        out.push(`| \`${u.package}\` | ${u.from ?? '?'} | ${u.to ?? '?'} | ${u.kind} | ${u.reason} |`);
-      }
-      out.push('');
+    out.push('| Package | From | To | Kind | Reason |');
+    out.push('|---|---|---|---|---|');
+    for (const u of plan.upgrades) {
+      out.push(`| \`${u.package}\` | ${u.from ?? '?'} | ${u.to ?? '?'} | ${u.kind} | ${u.reason} |`);
     }
+    out.push('');
   }
   out.push('## Recommendation');
   out.push('');

@@ -90,7 +90,7 @@ function walk(
   });
 }
 
-function toJsonTree(
+export function toJsonTree(
   index: GraphIndex,
   node: GraphNode,
   direction: 'callers' | 'callees',
