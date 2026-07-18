@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import { Command } from 'commander';
 import { defaultGraphPath } from '../engine/artifacts.js';
 import { serveStdio, createServer, GraphSource, type ServeOptions } from '../mcp/server.js';
-import { StatsSharer, statsEndpoint } from '../engine/stats-share.js';
+import { StatsSharer, statsEndpoint, telemetryOptOut } from '../engine/stats-share.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { driftCount } from '../engine/freshness.js';
 import { runBuild } from './build.js';
@@ -10,6 +10,7 @@ import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.
 import { rootOf } from './util.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { c, info } from '../util/output.js';
+import { originAllowed } from '../util/origin.js';
 
 /** How often the opt-in `--share-stats` flusher uploads new ledger entries. */
 const SHARE_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
@@ -52,9 +53,17 @@ export function registerServe(program: Command): void {
       // upload — but still lets `--savings` record locally. Sharing implies
       // recording so there's something to send.
       const local = global.local === true;
-      const shareStats = opts.shareStats === true && !local;
+      // The universal DO_NOT_TRACK opt-out (and VIBGRATE_TELEMETRY=0) wins even
+      // over an explicit --share-stats: the env is how operators of shared or
+      // managed machines say "never upload", and CI passes flags mechanically.
+      const optOut = telemetryOptOut();
+      const shareStats = opts.shareStats === true && !local && optOut === null;
       const serveOpts: ServeOptions = {
-        savings: opts.savings === true || shareStats,
+        // A *requested* --share-stats always implies local recording, even when
+        // the upload itself is suppressed (--local / env opt-out) — the local
+        // ledger never leaves the machine, and the disclosure messages below
+        // promise "recording locally".
+        savings: opts.savings === true || opts.shareStats === true,
         shareStats,
         local,
         dedup: opts.dedup === true,
@@ -69,6 +78,8 @@ export function registerServe(program: Command): void {
 
       if (opts.shareStats === true && local) {
         info(c.dim('vg · --share-stats ignored under --local (air-gapped): recording locally, not uploading.'));
+      } else if (opts.shareStats === true && optOut !== null) {
+        info(c.dim(`vg · --share-stats disabled by ${optOut}: recording locally, not uploading.`));
       }
       if (shareStats) startSharing(root);
 
@@ -188,6 +199,17 @@ async function serveHttp(graphPath: string, host: string, port: number, opts: Se
   const httpServer = createHttp(async (req, res) => {
     if (req.url !== '/mcp') {
       res.writeHead(404).end('not found');
+      return;
+    }
+    // DNS-rebinding protection (MCP 2025-11-25): a browser-set Origin must be
+    // loopback or explicitly allowlisted; absent Origin (CLI clients) passes.
+    // See util/origin.ts.
+    const origin = req.headers.origin;
+    if (!originAllowed(origin, process.env.VIBGRATE_ALLOWED_ORIGINS)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' }).end(
+        'forbidden origin — vg serve only accepts browser requests from loopback origins. ' +
+          'Set VIBGRATE_ALLOWED_ORIGINS to allow others.',
+      );
       return;
     }
     try {

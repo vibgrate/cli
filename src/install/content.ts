@@ -59,6 +59,21 @@ tools improved):
 - **Version-correct docs:** \`vg lib <name>\` returns drift-annotated, version-
   specific usage docs for a library — inject these instead of guessing an API.
 
+### Library-docs discipline
+
+When a task needs a library's API, use the docs tools before web search or
+training-data recall — they are official content matched to the version **this
+project has installed**, and they win when the two conflict.
+
+- **Workflow:** \`resolve_library\` once per library, then \`library_docs\` with the
+  returned \`targetId\` and a focused query (good: "zod refine custom error
+  message"; bad: "zod"). Never guess a targetId.
+- **Budget:** at most **3 docs calls per task**. If 2 \`library_docs\` calls have
+  not surfaced the section you need, read the package source under
+  \`node_modules\` instead of searching again.
+- **Skip the docs tools** for language built-ins, stable well-known syntax, or
+  an API already shown in the current context — they add nothing there.
+
 ## Keep it fresh
 
 The map keeps itself fresh: \`vg ask\` and the MCP tools detect changed files
