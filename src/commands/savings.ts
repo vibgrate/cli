@@ -68,7 +68,7 @@ function printBreakdown(usage: UsageReport): void {
   const header =
     '    ' +
     'command'.padEnd(nameW) +
-    ['calls', 'complete', 'partial', 'miss', 'success%'].map((h) => h.padStart(9)).join('');
+    ['calls', 'complete', 'partial', 'miss', 'success%', 'avg ms'].map((h) => h.padStart(9)).join('');
   info(c.dim(header));
   for (const cmd of usage.commands) {
     info(
@@ -78,11 +78,13 @@ function printBreakdown(usage: UsageReport): void {
         String(cmd.complete).padStart(9) +
         String(cmd.partial).padStart(9) +
         String(cmd.miss).padStart(9) +
-        `${cmd.successPct}%`.padStart(9),
+        `${cmd.successPct}%`.padStart(9) +
+        // Absent ≠ zero: calls recorded before timing existed show '—'.
+        (cmd.avgMs === null ? '—' : String(cmd.avgMs)).padStart(9),
     );
   }
   const t = usage.totals;
-  info(c.dim('    ' + '─'.repeat(nameW + 45)));
+  info(c.dim('    ' + '─'.repeat(nameW + 54)));
   info(
     '    ' +
       c.bold('total'.padEnd(nameW)) +
@@ -90,6 +92,7 @@ function printBreakdown(usage: UsageReport): void {
       String(t.complete).padStart(9) +
       String(t.partial).padStart(9) +
       String(t.miss).padStart(9) +
+      ''.padStart(9) +
       ''.padStart(9),
   );
   info(c.dim(`    avg success across commands: ${usage.avgSuccessPct}%`));

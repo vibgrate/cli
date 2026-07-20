@@ -9,6 +9,7 @@ import { refreshIfStale } from '../engine/refresh.js';
 import { TOOLS, warmEmbedderInBackground } from './tools.js';
 import { renderToolResult } from './response.js';
 import { recordSaving, sanitizeClient, PER_FILE_TOKENS, SAVINGS_TOOLS, type Outcome } from '../engine/savings.js';
+import type { SessionStats } from './serve-stats.js';
 import { countTokens } from '../engine/tokens.js';
 import { VERSION } from '../version.js';
 import type { VgGraph } from '../schema.js';
@@ -59,6 +60,12 @@ export interface ServeOptions {
   dedup?: boolean;
   /** Auto-refresh the map when the working tree drifts (default true). */
   refresh?: boolean;
+  /**
+   * In-memory session stats behind the live `vg serve` status display. Always
+   * safe to pass: nothing recorded here is persisted or uploaded — it dies with
+   * the process (the opt-in ledger above is a separate concern).
+   */
+  stats?: SessionStats;
 }
 
 export class GraphSource {
@@ -130,7 +137,7 @@ export class GraphSource {
 }
 
 export function createServer(source: GraphSource, opts: ServeOptions = {}): Server {
-  const { savings = false, shareStats = false, local = false, dedup = false } = opts;
+  const { savings = false, shareStats = false, local = false, dedup = false, stats } = opts;
   // Recording feeds both the local `vg savings` report and the opt-in upload, so
   // enabling either turns it on. Absent both, `vg serve` records nothing.
   const record = savings || shareStats;
@@ -195,17 +202,32 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
         'no code map found. Run `vg` in the project to build .vibgrate/graph.json, then retry.',
       );
     }
+    const startedAt = Date.now();
     try {
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;
       const result = await tool.handler(graph, args, { root, local, dedup, seen });
+      const ms = Date.now() - startedAt;
+      // Live, in-memory session stats for the serve status display — always on
+      // when a serve process passed them (nothing leaves the process).
+      stats?.record({ ...measureCall(tool.name, result), client: sanitizeClient(detectClient(server)), ms });
       // Opt-in, counts-only usage ledger: one entry per navigation call, with its
       // outcome, the grep-baseline token counts, and — so `vg savings` can show
       // the command-vs-MCP split and which AI is calling — the source (`mcp`) and
       // the client detected from the initialize handshake.
-      if (record) recordUsage(root, tool.name, result, detectClient(server));
+      if (record) recordUsage(root, tool.name, result, detectClient(server), ms);
       // Compact → clamp to the token ceiling → compact-serialise. See ./response.ts.
       return renderToolResult(result);
     } catch (err) {
+      // A failed call still counts in the live display — as a miss, so the
+      // operator sees trouble instead of a silently frozen dashboard.
+      stats?.record({
+        tool: tool.name,
+        client: sanitizeClient(detectClient(server)),
+        outcome: 'miss',
+        ms: Date.now() - startedAt,
+        vgTokens: 0,
+        baselineTokens: 0,
+      });
       return errorResult(`tool "${tool.name}" failed: ${(err as Error).message}`);
     }
   });
@@ -242,12 +264,23 @@ function sleep(ms: number): Promise<void> {
  * set that (get_node never did), so the old code recorded nothing under normal
  * concise usage and `vg savings` always reported "recording is off".
  */
-export function recordUsage(root: string, tool: string, result: unknown, client?: string): void {
+export function recordUsage(root: string, tool: string, result: unknown, client?: string, ms?: number): void {
+  recordSaving(
+    root,
+    { ...measureCall(tool, result), source: 'mcp', client: sanitizeClient(client), ...(ms !== undefined ? { ms } : {}) },
+    Date.now(),
+  );
+}
+
+/**
+ * Measure one tool call for the ledger and the live session stats: its outcome
+ * plus — for the grep-baseline tools only — the context tokens vg returned and
+ * the baseline they replaced (other tools report zeros, meaning "no baseline").
+ */
+function measureCall(tool: string, result: unknown): { tool: string; outcome: Outcome; vgTokens: number; baselineTokens: number } {
   const outcome = classifyOutcome(result);
   let vgTokens = 0;
   let baselineTokens = 0;
-  // Token savings are only meaningful for the tools with a grep/read baseline;
-  // other tools still record their outcome for the per-command breakdown.
   if (SAVINGS_TOOLS.has(tool) && result && typeof result === 'object') {
     vgTokens = countTokens(renderedText(renderToolResult(result)));
     // Grep/read baseline: ~PER_FILE_TOKENS per distinct file the answer points
@@ -256,11 +289,7 @@ export function recordUsage(root: string, tool: string, result: unknown, client?
     // `file` plus the files of the callers/callees it returned in one call.
     baselineTokens = referencedFiles(result).size * PER_FILE_TOKENS;
   }
-  recordSaving(
-    root,
-    { tool, outcome, vgTokens, baselineTokens, source: 'mcp', client: sanitizeClient(client) },
-    Date.now(),
-  );
+  return { tool, outcome, vgTokens, baselineTokens };
 }
 
 /**

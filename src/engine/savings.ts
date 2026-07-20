@@ -90,6 +90,9 @@ export interface SavingEntry {
   // sanitized coarse label (see sanitizeClient) or absent when unidentified.
   source?: Source;
   client?: string;
+  // Wall time of the call, ms. Optional: absent on lines written before timing
+  // existed (and on CLI-sourced lines) — absent means "not measured", never 0.
+  ms?: number;
 }
 
 /**
@@ -150,9 +153,10 @@ export interface SavingsReport {
 }
 
 // Published-style input rate ($/1M tokens), shipped with the CLI. Labelled
-// estimate; the user can pass their own model rate.
-const DEFAULT_RATE_PER_M = 3.0; // e.g. a mid-tier model input rate
-const DEFAULT_RATE_LABEL = 'input @ $3/1M';
+// estimate; the user can pass their own model rate. Exported so the live
+// `vg serve` status display quotes the same rate as `vg savings`.
+export const DEFAULT_RATE_PER_M = 3.0; // e.g. a mid-tier model input rate
+export const DEFAULT_RATE_LABEL = 'input @ $3/1M';
 
 export function readSavings(root: string, days: number, now: number, ratePerM = DEFAULT_RATE_PER_M): SavingsReport {
   const file = ledgerPath(root);
@@ -206,6 +210,8 @@ export interface CommandStat {
   miss: number;
   /** (complete + partial) / calls, as a whole-number percentage. */
   successPct: number;
+  /** Mean wall time over the calls that recorded one; null when none did. */
+  avgMs: number | null;
 }
 
 /** Calls attributed to one dimension value (a source, or a client). */
@@ -268,6 +274,9 @@ export function readUsage(root: string, days: number, now: number): UsageReport 
   const byTool = new Map<string, OutcomeCounts>();
   const bySource = new Map<string, OutcomeCounts>();
   const byClient = new Map<string, OutcomeCounts>();
+  // Per-tool timing over the entries that recorded a duration (older ledger
+  // lines and CLI-sourced calls carry none — "not measured", never zero).
+  const msByTool = new Map<string, { sum: number; n: number }>();
   const bump = (m: Map<string, OutcomeCounts>, key: string, outcome: Outcome): void => {
     const row = m.get(key) ?? { complete: 0, partial: 0, miss: 0 };
     row[outcome]++;
@@ -285,19 +294,29 @@ export function readUsage(root: string, days: number, now: number): UsageReport 
         bump(byTool, e.tool, outcome);
         bump(bySource, e.source ?? 'mcp', outcome);
         bump(byClient, e.client ?? 'unknown', outcome);
+        if (typeof e.ms === 'number' && e.ms >= 0) {
+          const timing = msByTool.get(e.tool) ?? { sum: 0, n: 0 };
+          timing.sum += e.ms;
+          timing.n++;
+          msByTool.set(e.tool, timing);
+        }
       } catch {
         /* skip corrupt line */
       }
     }
   }
-  const commands: CommandStat[] = toDimensionStats(byTool).map((d) => ({
-    tool: d.key,
-    calls: d.calls,
-    complete: d.complete,
-    partial: d.partial,
-    miss: d.miss,
-    successPct: d.successPct,
-  }));
+  const commands: CommandStat[] = toDimensionStats(byTool).map((d) => {
+    const timing = msByTool.get(d.key);
+    return {
+      tool: d.key,
+      calls: d.calls,
+      complete: d.complete,
+      partial: d.partial,
+      miss: d.miss,
+      successPct: d.successPct,
+      avgMs: timing && timing.n > 0 ? Math.round(timing.sum / timing.n) : null,
+    };
+  });
   const totals = commands.reduce(
     (t, c) => ({
       calls: t.calls + c.calls,
