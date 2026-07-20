@@ -21,8 +21,13 @@ const LEDGER = 'savings.jsonl';
 // A conservative, documented estimate: tokens an agent reads per file it opens.
 export const PER_FILE_TOKENS = 400;
 
-/** The tools whose grep/read token baseline the savings summary is computed from. */
-export const SAVINGS_TOOLS = new Set(['query_graph', 'get_node']);
+/** The tools whose grep/read token baseline the savings summary is computed from.
+ *  search_symbols belongs here: it is the direct grep replacement (the server
+ *  instructions steer agents to it INSTEAD of grep), yet it used to contribute
+ *  zero to the estimate — on search-heavy sessions most of the real saving went
+ *  uncounted. Its baseline is the same measure as query_graph's: the distinct
+ *  files its matches point at, at PER_FILE_TOKENS each. */
+export const SAVINGS_TOOLS = new Set(['query_graph', 'get_node', 'search_symbols']);
 
 /**
  * How a navigation call reached the map:

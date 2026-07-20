@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { searchSymbols, type TextHit } from './search.js';
+import { searchSymbols, parseRgFileList, clearListingCache, type TextHit } from './search.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
 /**
@@ -73,6 +73,16 @@ beforeAll(() => {
     path.join(root, 'docs', 'brand.md'),
     ['# You Say', 'you say', 'You say', 'YOU SAY', 'we watch. you say.', 'trailing you say line'].join('\n'),
   );
+  // A literal USE of a known symbol (not its definition) — exists to prove that
+  // an exact symbol lookup no longer pays a literal sweep to find lines like it.
+  fs.writeFileSync(path.join(root, 'src', 'usage.ts'), ['import { BillSayCard } from "./BillSayCard";', 'render(BillSayCard({}));'].join('\n'));
+  // Binary-by-extension files carrying the needle as text: the listing-time
+  // extension skip must exclude them from the corpus (previously they were read
+  // in full and, lacking a NUL byte, even matched).
+  fs.writeFileSync(path.join(root, 'lib.dll'), 'you say — inside a dll\n');
+  // Generated .NET intermediate output: ignored as a directory.
+  fs.mkdirSync(path.join(root, 'obj'));
+  fs.writeFileSync(path.join(root, 'obj', 'gen.cs'), '// you say — generated\n');
 });
 
 afterAll(() => {
@@ -107,11 +117,24 @@ describe('searchSymbols — literal phrase sweep', () => {
     expect(r.hint).toMatch(/of 10 literal matches/);
   });
 
-  it('is case-insensitive across files and reports repo-relative paths', async () => {
+  it('is case-insensitive across files and reports POSIX repo-relative paths on every platform', async () => {
     const r = await searchSymbols(makeGraph(), root, 'you say', 50);
     const files = new Set(textHits(r).map((h) => h.file));
-    expect(files.has(path.join('src', 'Footer.tsx'))).toBe(true);
-    expect(files.has(path.join('docs', 'brand.md'))).toBe(true);
+    // Forward slashes always — matching the graph's own path style, so the
+    // symbol-hit/text-hit dedup key agrees across passes on Windows too.
+    expect(files.has('src/Footer.tsx')).toBe(true);
+    expect(files.has('docs/brand.md')).toBe(true);
+    for (const f of files) expect(f).not.toContain('\\');
+  });
+
+  it('excludes binary-extension files and generated dirs from the corpus', async () => {
+    const r = await searchSymbols(makeGraph(), root, 'you say', 50);
+    // lib.dll and obj/gen.cs both contain the needle as plain text; neither may
+    // be scanned, so the totals stay pinned at the 10 real occurrences.
+    expect(r.totalTextMatches).toBe(TOTAL_LITERAL);
+    const files = new Set(textHits(r).map((h) => h.file));
+    expect(files.has('lib.dll')).toBe(false);
+    expect(files.has('obj/gen.cs')).toBe(false);
   });
 });
 
@@ -133,6 +156,99 @@ describe('searchSymbols — single-name lookups are unchanged', () => {
     const r = await searchSymbols(makeGraph(), root, 'zzz qqq nomatch', 8);
     expect(r.matches).toHaveLength(0);
     expect(r.hint).toMatch(/query_graph/);
+  });
+});
+
+describe('searchSymbols — exact symbol match skips the literal sweep', () => {
+  it('an exact name resolves from the graph alone, with no text rows padded in', async () => {
+    // src/usage.ts literally contains "BillSayCard(" — before the short-circuit,
+    // the spare budget triggered a full-tree scan and returned those lines too.
+    const r = await searchSymbols(makeGraph(), root, 'BillSayCard', 8);
+    expect(r.matches[0]).toMatchObject({ kind: 'component', name: 'src/BillSayCard.tsx:BillSayCard' });
+    expect(textHits(r)).toHaveLength(0);
+  });
+
+  it('case-insensitive exact names short-circuit the same way', async () => {
+    const r = await searchSymbols(makeGraph(), root, 'billsaycard', 8);
+    expect(r.matches.length).toBeGreaterThan(0);
+    expect(textHits(r)).toHaveLength(0);
+  });
+
+  it('a non-exact single-name query still falls through to the literal scan', async () => {
+    // "BillSayCard(" names no symbol exactly (the paren), so the literal pass
+    // must still run and surface the call sites — the GetTimezoneId( shape.
+    const r = await searchSymbols(makeGraph(), root, 'BillSayCard(', 8);
+    const hits = textHits(r);
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits.some((h) => h.file === 'src/usage.ts')).toBe(true);
+  });
+});
+
+describe('parseRgFileList — Windows and POSIX rg output', () => {
+  it('normalises Windows backslash paths instead of discarding them', () => {
+    // The regression: '.\\src\\Foo.cs' used to read as ONE dot-leading segment
+    // and the defensive filter dropped every Windows rg result silently.
+    const out = parseRgFileList('.\\src\\Foo.cs\n.\\tests\\unit\\Bar.cs\n', '\\');
+    expect(out).toEqual(['src/Foo.cs', 'tests/unit/Bar.cs']);
+  });
+
+  it('still applies ignore/hidden/binary rules to Windows paths per segment', () => {
+    const out = parseRgFileList(
+      ['.\\src\\Ok.cs', '.\\obj\\Debug\\Gen.cs', '.\\node_modules\\x\\y.js', '.\\.hidden\\z.cs', '.\\bin\\Release\\App.dll'].join('\n') + '\n',
+      '\\',
+    );
+    expect(out).toEqual(['src/Ok.cs']);
+  });
+
+  it('POSIX output is unchanged: ./-stripped, filtered, sorted, deduped', () => {
+    const out = parseRgFileList('./b.ts\na.ts\n./a.ts\nnode_modules/x.js\n.git/config\nimg.png\n', '/');
+    expect(out).toEqual(['a.ts', 'b.ts']);
+  });
+});
+
+describe('searchSymbols — listing cache freshness', () => {
+  // Force the Node walk (the only cached lister) and pin the TTL per test;
+  // each test restores the env and clears the cache in its finally block.
+  const sweepIn = async (dir: string, needle: string) => searchSymbols(makeGraph(), dir, needle, 50);
+
+  it('reuses the walked listing within the TTL, and clearListingCache invalidates it', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-cache-'));
+    try {
+      process.env.VG_DISABLE_RIPGREP = '1';
+      process.env.VG_LISTING_TTL_MS = '60000';
+      clearListingCache();
+      fs.writeFileSync(path.join(dir, 'a.md'), 'cache probe one\n');
+      expect((await sweepIn(dir, 'cache probe')).totalTextMatches).toBe(1);
+      // A file created inside the TTL window is not in the cached listing…
+      fs.writeFileSync(path.join(dir, 'b.md'), 'cache probe two\n');
+      expect((await sweepIn(dir, 'cache probe')).totalTextMatches).toBe(1);
+      // …and is picked up the moment the cache is invalidated.
+      clearListingCache();
+      expect((await sweepIn(dir, 'cache probe')).totalTextMatches).toBe(2);
+    } finally {
+      delete process.env.VG_DISABLE_RIPGREP;
+      delete process.env.VG_LISTING_TTL_MS;
+      clearListingCache();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('VG_LISTING_TTL_MS=0 disables caching entirely (every call re-walks)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-cache0-'));
+    try {
+      process.env.VG_DISABLE_RIPGREP = '1';
+      process.env.VG_LISTING_TTL_MS = '0';
+      clearListingCache();
+      fs.writeFileSync(path.join(dir, 'a.md'), 'cache probe one\n');
+      expect((await sweepIn(dir, 'cache probe')).totalTextMatches).toBe(1);
+      fs.writeFileSync(path.join(dir, 'b.md'), 'cache probe two\n');
+      expect((await sweepIn(dir, 'cache probe')).totalTextMatches).toBe(2);
+    } finally {
+      delete process.env.VG_DISABLE_RIPGREP;
+      delete process.env.VG_LISTING_TTL_MS;
+      clearListingCache();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
