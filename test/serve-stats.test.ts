@@ -108,9 +108,10 @@ describe('serveStatusLines', () => {
     expect(text).toMatch(/orient\s+1 · avg 80ms · 1 miss/);
     // Session totals: 1.7k served vs 13.2k baseline, honest labelling.
     expect(text).toContain('ctx 1.7k vs grep/read ≈13.2k');
-    expect(text).toContain('est. saved ≈');
+    expect(text).toContain('est. saved ≈ 11.5k context tokens');
     expect(text).toContain('estimate');
-    expect(text).toContain('input @ $3/1M');
+    // Tokens only — the live display never shows monetary figures.
+    expect(text).not.toContain('$');
   });
 
   it('folds long tool lists into "+N more"', () => {
@@ -170,5 +171,40 @@ describe('ServeStatusDisplay (non-TTY heartbeat)', () => {
     expect(plain(written[1]!)).toContain('1 call');
 
     display.stop();
+  });
+});
+
+describe('CLI-sourced calls (ledger fold-in)', () => {
+  it('records untimed CLI samples without skewing averages', () => {
+    const stats = new SessionStats(0);
+    stats.record(sample({ ms: 200 }), 1);
+    stats.record(sample({ tool: 'impact_of', source: 'cli', ms: undefined, vgTokens: 0, baselineTokens: 0 }), 2);
+
+    const snap = stats.snapshot();
+    expect(snap.totals).toMatchObject({ calls: 2, timed: 1, totalMs: 200 });
+    expect(snap.sources.map((s) => [s.key, s.calls])).toEqual([
+      ['cli', 1],
+      ['mcp', 1],
+    ]);
+    // The untimed CLI call renders as '—', the timed MCP one keeps its avg.
+    const text = plain(serveStatusLines(snap, 1000).join('\n'));
+    expect(text).toMatch(/impact_of\s+1 · avg —/);
+    expect(text).toMatch(/query_graph\s+1 · avg 200ms/);
+  });
+
+  it('shows the mcp-vs-cli split only once CLI calls exist', () => {
+    const stats = new SessionStats(0);
+    stats.record(sample(), 1);
+    expect(plain(serveStatusLines(stats.snapshot(), 1000).join('\n'))).not.toContain('via');
+    stats.record(sample({ tool: 'impact_of', source: 'cli', ms: undefined }), 2);
+    const text = plain(serveStatusLines(stats.snapshot(), 1000).join('\n'));
+    expect(text).toMatch(/via (mcp 1 · cli 1|cli 1 · mcp 1)/);
+  });
+
+  it('heartbeat line reports the CLI share', () => {
+    const stats = new SessionStats(0);
+    stats.record(sample(), 1);
+    stats.record(sample({ tool: 'impact_of', source: 'cli', ms: undefined }), 2);
+    expect(plain(serveHeartbeatLine(stats.snapshot(), 30_000))).toContain('1 via CLI');
   });
 });

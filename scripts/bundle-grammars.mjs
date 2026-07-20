@@ -35,6 +35,10 @@ const GRAMMARS = [
   'tree-sitter-zig',
   'tree-sitter-c',
   'tree-sitter-cpp',
+  'tree-sitter-objc',
+  'tree-sitter-ocaml',
+  'tree-sitter-rescript',
+  'tree-sitter-solidity',
 ];
 
 const outDir = path.dirname(require.resolve('tree-sitter-wasms/package.json')) + '/out';

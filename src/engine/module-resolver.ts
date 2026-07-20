@@ -18,11 +18,15 @@ export interface ModuleResolver {
   resolve(fromRel: string, source: string): string | null;
 }
 
-const JS_TS_EXT = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+// Container SFC formats (.vue/.svelte/.astro) resolve as part of the JS/TS
+// group: their script region is JS/TS, they import ts/js modules, and ts/js
+// files import them back (`import Foo from './Foo.vue'`).
+const JS_TS_EXT = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte', '.astro'];
 const OTHER_EXT = [
   '.py', '.pyi', '.go', '.rs', '.rb', '.java', '.cs',
   '.php', '.kt', '.kts', '.swift', '.scala', '.sc', '.dart', '.lua',
   '.ex', '.exs', '.sh', '.bash', '.zig', '.c', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h',
+  '.m', '.mm', '.ml', '.mli', '.res', '.sol',
 ];
 
 // Which target extensions a dotted import from a given file may resolve to.
@@ -61,6 +65,18 @@ Object.assign(EXT_GROUPS, {
   '.hh': CPP_EXT,
   '.hxx': CPP_EXT,
   '.h': [...CPP_EXT, '.c'],
+  // ObjC #imports headers; ObjC++ additionally reaches C++ headers.
+  '.m': ['.h', '.m', '.mm'],
+  '.mm': ['.h', '.m', '.mm', ...CPP_EXT],
+  '.ml': ['.ml', '.mli'],
+  '.mli': ['.ml', '.mli'],
+  '.res': ['.res'],
+  '.sol': ['.sol'],
+  // Template containers: ERB fragments are Ruby; HTML/EJS script is JS.
+  '.erb': ['.rb', '.erb'],
+  '.html': JS_TS_EXT,
+  '.htm': JS_TS_EXT,
+  '.ejs': JS_TS_EXT,
 });
 
 export function buildModuleResolver(root: string, relSet: Set<string>): ModuleResolver {

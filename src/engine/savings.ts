@@ -120,8 +120,17 @@ export function recordCliCall(
   );
 }
 
-function ledgerPath(root: string): string {
+/**
+ * Absolute path of the local usage ledger for this repo. Exported so the serve
+ * status display can tail it live (mcp/ledger-tail.ts) — the file itself stays
+ * local-only (GUARDRAILS §3.4; upload is the separate opt-in stats-share path).
+ */
+export function savingsLedgerPath(root: string): string {
   return path.join(cacheDir(root), LEDGER);
+}
+
+function ledgerPath(root: string): string {
+  return savingsLedgerPath(root);
 }
 
 /** Whether a savings ledger exists for this repo (i.e. `vg serve --savings` has recorded). */
@@ -153,10 +162,9 @@ export interface SavingsReport {
 }
 
 // Published-style input rate ($/1M tokens), shipped with the CLI. Labelled
-// estimate; the user can pass their own model rate. Exported so the live
-// `vg serve` status display quotes the same rate as `vg savings`.
-export const DEFAULT_RATE_PER_M = 3.0; // e.g. a mid-tier model input rate
-export const DEFAULT_RATE_LABEL = 'input @ $3/1M';
+// estimate; the user can pass their own model rate.
+const DEFAULT_RATE_PER_M = 3.0; // e.g. a mid-tier model input rate
+const DEFAULT_RATE_LABEL = 'input @ $3/1M';
 
 export function readSavings(root: string, days: number, now: number, ratePerM = DEFAULT_RATE_PER_M): SavingsReport {
   const file = ledgerPath(root);
