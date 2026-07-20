@@ -56,8 +56,41 @@ export interface SearchResult {
   hint?: string;
 }
 
-const IGNORE_DIRS = new Set(['.git', '.vibgrate', 'node_modules', 'dist', 'build', 'out', 'target', 'vendor', '__pycache__']);
+const IGNORE_DIRS = new Set([
+  '.git', '.vibgrate', 'node_modules', 'dist', 'build', 'out', 'target', 'vendor', '__pycache__',
+  // .NET intermediate output and coverage reports: purely generated trees that a
+  // C#/coverage-heavy repo pays for on every literal sweep. `bin` is deliberately
+  // NOT here — plenty of repos keep real scripts in bin/ (rails, node CLIs), and
+  // completeness beats speed; the binary-extension skip below keeps a .NET bin/
+  // cheap anyway.
+  'obj', 'coverage',
+]);
 const MAX_FILES_SCANNED = 20_000;
+
+/**
+ * Extensions that are binary by construction — skipped at listing time so the
+ * scan never stats/reads megabytes of DLLs or images just to reject them on the
+ * NUL check. Applied identically to the Node walk and the rg parse so both
+ * listers see the same corpus. Content-level binary detection (the NUL check in
+ * literal-scan) still guards everything this list misses.
+ */
+const BINARY_EXTS = new Set([
+  '.dll', '.pdb', '.exe', '.so', '.dylib', '.a', '.lib', '.o', '.class', '.jar', '.wasm', '.node',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.icns', '.bmp',
+  '.zip', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar',
+  '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  '.mp3', '.mp4', '.mov', '.avi', '.pdf',
+]);
+
+function hasBinaryExt(rel: string): boolean {
+  return BINARY_EXTS.has(path.extname(rel).toLowerCase());
+}
+
+/** Repo-relative paths are always reported with forward slashes — matching the
+ *  graph's own file paths, so symbol-hit/text-hit dedup works on Windows too. */
+function toPosix(rel: string): string {
+  return path.sep === '\\' ? rel.replaceAll('\\', '/') : rel;
+}
 
 export async function searchSymbols(graph: VgGraph, root: string, query: string, limit: number): Promise<SearchResult> {
   const q = query.trim();
@@ -119,7 +152,15 @@ export async function searchSymbols(graph: VgGraph, root: string, query: string,
   const textHits: TextHit[] = [];
   let truncatedScan = false;
   let totalTextMatches: number | undefined;
-  if (spare > 0) {
+  // A single name the graph resolved EXACTLY (id / name / qualified name /
+  // file:line) doesn't fall through to the literal scan at all: the symbol
+  // answer is authoritative for "where is X defined", and padding it with text
+  // occurrences meant every perfect lookup still paid a worst-case full-tree
+  // sweep (the 16s-per-call trace on a large repo). Occurrence sweeps stay one
+  // explicit call away (quote it / add whitespace, or use impact_of/get_node
+  // callers for reference lists). Non-exact fallthroughs are unchanged.
+  const skipScan = !isPhrase && hasExactSymbolMatch(nodes, q);
+  if (spare > 0 && !skipScan) {
     const seen = new Set(symbolHits.map((h) => `${h.file}:${h.line}`));
     const scan = await scanFiles(root, q, spare, seen, textHits, isPhrase);
     truncatedScan = scan.truncated;
@@ -145,6 +186,19 @@ export async function searchSymbols(graph: VgGraph, root: string, query: string,
     result.hint = `showing ${textHits.length} of ${totalTextMatches}${truncatedScan ? '+' : ''} literal matches — raise limit or narrow the query to get them all`;
   }
   return result;
+}
+
+/**
+ * Did the graph resolve `q` as an exact identifier (not a loose substring)?
+ * Mirrors findNodes' exact tiers: content-hash id, `file:line`, and whole-name /
+ * qualified-name equality (case-insensitive). Substring-tier matches return
+ * false so a partial name still gets the literal fallthrough.
+ */
+function hasExactSymbolMatch(nodes: GraphNode[], q: string): boolean {
+  if (nodes.length === 0) return false;
+  if (/^(.*):(\d+)$/.test(q)) return true; // resolved via the file:line tier
+  const lower = q.toLowerCase();
+  return nodes.some((n) => n.id === q || n.qualifiedName.toLowerCase() === lower || n.name.toLowerCase() === lower);
 }
 
 /** Meaningful query words for the multi-word fallthrough (drop tiny tokens). */
@@ -240,9 +294,44 @@ interface Listing {
   truncated: boolean;
 }
 
-/** rg-pruned candidates when available (fast), else the full Node walk. */
+/** rg-pruned candidates when available (fast), else the (cached) full Node walk. */
 function listCandidateFiles(root: string, needle: string): Listing {
-  return ripgrepCandidates(root, needle) ?? walkCandidates(root);
+  return ripgrepCandidates(root, needle) ?? walkCandidatesCached(root);
+}
+
+/**
+ * TTL cache for the Node-walk listing. The walk is needle-independent (it lists
+ * every scannable file), so a burst of search_symbols calls — the normal agent
+ * pattern is several lookups in one turn — was re-walking the whole tree each
+ * time. The TTL bounds staleness to the same few-second window the serve
+ * freshness probe already accepts (server.ts PROBE_INTERVAL_MS); file CONTENTS
+ * are always read live at scan time, so only a file created/deleted inside the
+ * window can be missed, and only from the listing. rg listings are per-needle
+ * and fast, so they bypass this cache entirely.
+ */
+const LISTING_TTL_MS = 2000;
+const listingCache = new Map<string, { listing: Listing; at: number }>();
+
+/** Drop all cached listings (tests, or after a known tree mutation). */
+export function clearListingCache(): void {
+  listingCache.clear();
+}
+
+/** TTL, overridable via VG_LISTING_TTL_MS (0 disables caching entirely). */
+function listingTtlMs(): number {
+  const v = Number(process.env.VG_LISTING_TTL_MS);
+  return Number.isFinite(v) && v >= 0 ? v : LISTING_TTL_MS;
+}
+
+function walkCandidatesCached(root: string): Listing {
+  const ttl = listingTtlMs();
+  if (ttl > 0) {
+    const hit = listingCache.get(root);
+    if (hit && Date.now() - hit.at < ttl) return hit.listing;
+  }
+  const listing = walkCandidates(root);
+  if (ttl > 0) listingCache.set(root, { listing, at: Date.now() });
+  return listing;
 }
 
 /** Every non-ignored, non-hidden file under root — the Node-native fallback. */
@@ -265,11 +354,12 @@ function walkCandidates(root: string): Listing {
         stack.push(abs);
         continue;
       }
+      if (hasBinaryExt(e.name)) continue;
       if (files.length >= MAX_FILES_SCANNED) {
         truncated = true;
         continue;
       }
-      files.push(path.relative(root, abs));
+      files.push(toPosix(path.relative(root, abs)));
     }
   }
   files.sort();
@@ -308,16 +398,34 @@ function ripgrepCandidates(root: string, needle: string): Listing | null {
   // status 0 = matches, 1 = no matches (both fine); anything else / a spawn error
   // (signal kill on timeout, buffer overflow) is untrustworthy — fall back.
   if (res.error || (res.status !== 0 && res.status !== 1) || res.signal) return null;
-  const seen = new Set<string>();
-  for (const raw of res.stdout.split('\n')) {
-    const rel = raw.startsWith('./') ? raw.slice(2) : raw;
-    if (!rel) continue;
-    // Defensive: never trust a path that escaped the ignore/hidden rules.
-    const segs = rel.split('/');
-    if (segs.some((s) => s.startsWith('.') || IGNORE_DIRS.has(s))) continue;
-    seen.add(rel);
-  }
-  const files = [...seen].sort();
+  const files = parseRgFileList(res.stdout);
   if (files.length > MAX_FILES_SCANNED) return { files: files.slice(0, MAX_FILES_SCANNED), truncated: true };
   return { files, truncated: false };
+}
+
+/**
+ * Parse `rg --files-with-matches` stdout into clean, sorted, POSIX-relative
+ * paths. On Windows rg emits `.\src\Foo.cs` — before this was separator-aware,
+ * the whole backslash path read as ONE segment starting with `.`, so the
+ * defensive hidden-file filter below discarded every result and a Windows
+ * machine with rg installed silently lost all literal hits. Normalising to
+ * forward slashes first (matching the graph's own path style) makes the filter
+ * see real segments on every platform. Exported for tests; `sep` is injectable
+ * so Windows output can be simulated on any host.
+ */
+export function parseRgFileList(stdout: string, sep: string = path.sep): string[] {
+  const seen = new Set<string>();
+  for (const raw of stdout.split('\n')) {
+    if (!raw) continue;
+    const posix = sep === '\\' ? raw.replaceAll('\\', '/') : raw;
+    const rel = posix.startsWith('./') ? posix.slice(2) : posix;
+    if (!rel) continue;
+    // Defensive: never trust a path that escaped the ignore/hidden rules, and
+    // keep the corpus identical to the walk's (same binary-extension skip).
+    const segs = rel.split('/');
+    if (segs.some((s) => s.startsWith('.') || IGNORE_DIRS.has(s))) continue;
+    if (hasBinaryExt(rel)) continue;
+    seen.add(rel);
+  }
+  return [...seen].sort();
 }

@@ -76,4 +76,25 @@ describe('scanCandidates — parallel worker path', () => {
     expect(out.hits.length).toBe(10);
     expect(out.truncated).toBe(true);
   });
+
+  it('bounded mode over the worker path matches the inline early-stop rows exactly', async () => {
+    // The single-name fallthrough (collectAll:false) used to be exempt from the
+    // worker fan-out — a rare needle on a big repo swept everything on one
+    // thread. It now parallelises above the same byte threshold; rows must be
+    // identical to the inline path (files are pre-sorted, so the first `budget`
+    // sorted rows are the same set the early-stop collects).
+    process.env.VG_PARALLEL_MIN_BYTES = String(Number.MAX_SAFE_INTEGER);
+    const inline = await scanCandidates(root, rels(), NEEDLE, { collectAll: false, budget: 10 });
+    process.env.VG_PARALLEL_MIN_BYTES = '0';
+    const parallel = await scanCandidates(root, rels(), NEEDLE, { collectAll: false, budget: 10 });
+    expect(parallel.hits).toEqual(inline.hits);
+    expect(parallel.truncated).toBe(true);
+  });
+
+  it('bounded worker path with spare budget returns the complete result untruncated', async () => {
+    const out = await scanCandidates(root, rels(), NEEDLE, { collectAll: false, budget: 1000 });
+    expect(out.hits.length).toBe(MATCHERS);
+    expect(out.total).toBe(MATCHERS);
+    expect(out.truncated).toBe(false);
+  });
 });

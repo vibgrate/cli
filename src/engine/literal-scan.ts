@@ -75,18 +75,32 @@ export interface ScanOptions {
 export async function scanCandidates(root: string, files: string[], needle: string, opts: ScanOptions): Promise<ScanOutcome> {
   const needleLower = needle.toLowerCase();
   if (!needleLower || files.length === 0) return { hits: [], total: 0, truncated: false };
-  // Bounded fallthrough (single-name spare pass) is always a cheap inline scan.
-  if (!opts.collectAll) return scanInline(root, files, needleLower, opts.budget, true, undefined);
   // Few files can't out-earn worker startup — inline directly, no stat pass.
+  // (Bounded mode additionally early-stops the moment the budget fills.)
   if (files.length < PARALLEL_MIN_FILES && !process.env.VG_PARALLEL_MIN_BYTES) {
-    return scanInline(root, files, needleLower, ROW_CAP, false, undefined);
+    return opts.collectAll
+      ? scanInline(root, files, needleLower, ROW_CAP, false, undefined)
+      : scanInline(root, files, needleLower, opts.budget, true, undefined);
   }
-  // A "find every occurrence" sweep over many files: measure the candidate bytes
-  // once, then let workers in only when there's enough volume to amortise them.
-  // Sizes from the measure pass are reused by the inline scan (no double-stat).
+  // Many files: measure the candidate bytes once, then let workers in only when
+  // there's enough volume to amortise them. This now includes the BOUNDED path
+  // (a single-name fallthrough): its early-stop only ever helps when the needle
+  // is common enough to fill the budget — the expensive case is precisely a RARE
+  // needle, where the scan must sweep everything anyway and used to do so
+  // single-threaded (the 16s-per-call trace). Sizes from the measure pass are
+  // reused by the inline scan (no double-stat).
   const { over, sizes } = measure(root, files);
-  if (!over) return scanInline(root, files, needleLower, ROW_CAP, false, sizes);
-  return scanParallel(root, files, needleLower);
+  if (!over) {
+    return opts.collectAll
+      ? scanInline(root, files, needleLower, ROW_CAP, false, sizes)
+      : scanInline(root, files, needleLower, opts.budget, true, sizes);
+  }
+  const out = await scanParallel(root, files, needleLower);
+  if (!opts.collectAll && out.hits.length > opts.budget) {
+    out.hits.length = opts.budget;
+    out.truncated = true;
+  }
+  return out;
 }
 
 /** The byte threshold, overridable via VG_PARALLEL_MIN_BYTES (ops knob + tests). */
