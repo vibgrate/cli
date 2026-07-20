@@ -1,7 +1,16 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { skillMarkdown, nudgeMarkdown, mcpServerEntry, NUDGE_BEGIN, NUDGE_END, type ServeLaunch } from './content.js';
+import {
+  skillMarkdown,
+  nudgeMarkdown,
+  mcpServerEntry,
+  installedContentVersion,
+  INSTALL_CONTENT_VERSION,
+  NUDGE_BEGIN,
+  NUDGE_END,
+  type ServeLaunch,
+} from './content.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { whichOnPath, isInstalledOwnBinary } from '../util/cli-invocation.js';
 import { navigationToolsetConfig, HOT_TOOLS, deferredToolNames } from '../mcp/tools.js';
@@ -315,6 +324,90 @@ function removeMcp(file: string, target: McpTarget): boolean {
   delete bag.vg;
   writeFileEnsured(file, `${JSON.stringify(config, null, 2)}\n`);
   return true;
+}
+
+/**
+ * Below this many mapped files the nudge honestly says searching is fine.
+ * Shared by `vg install` and the post-build instruction refresh so both write
+ * the same variant.
+ */
+export const SMALL_REPO_FILES = 150;
+
+/** One instruction file brought up to the current content version. */
+export interface RefreshedInstruction {
+  /** Repo-relative path of the refreshed file. */
+  file: string;
+  /** The version it carried (0 = pre-versioning legacy content). */
+  from: number;
+  to: number;
+}
+
+/**
+ * Bring previously-installed assistant instructions up to the current content
+ * version (INSTALL_CONTENT_VERSION). Called after every successful `vg` build,
+ * so evolved instructions reach existing repos the first time a new CLI
+ * version builds there — no re-run of `vg install` needed.
+ *
+ * Ownership rules — this must never clobber user-authored content:
+ *  - a file with a `vg:v<N>` marker is ours; refreshed when N is older.
+ *    Removing the marker line opts the file out permanently.
+ *  - a marker-less file at a known install path is refreshed ONLY when it
+ *    still carries the generated headings (legacy pre-versioning copies),
+ *    and treated as version 0.
+ *  - nudge blocks refresh only the vg:begin…vg:end region; the rest of the
+ *    host file (CLAUDE.md, AGENTS.md, …) is untouched.
+ */
+export function refreshInstalledInstructions(root: string, smallRepo: boolean): RefreshedInstruction[] {
+  const out: RefreshedInstruction[] = [];
+  const staleVersion = (text: string, legacySignature: string): number | null => {
+    const v = installedContentVersion(text);
+    if (v !== null) return v < INSTALL_CONTENT_VERSION ? v : null;
+    return text.includes(legacySignature) ? 0 : null; // marker-less: legacy ours, or not ours at all
+  };
+
+  for (const a of ASSISTANTS) {
+    if (a.skill) {
+      const file = path.join(root, a.skill);
+      if (fs.existsSync(file)) {
+        const text = readTextSafe(file);
+        const from = text === null ? null : staleVersion(text, '# vg — the code map');
+        if (from !== null) {
+          writeFileEnsured(file, skillMarkdown(a.id));
+          out.push({ file: a.skill, from, to: INSTALL_CONTENT_VERSION });
+        }
+      }
+    }
+    if (a.nudge) {
+      const file = path.join(root, a.nudge.file);
+      if (!fs.existsSync(file)) continue;
+      const text = readTextSafe(file);
+      if (text === null) continue;
+      if (a.nudge.kind === 'block') {
+        const block = new RegExp(`${escapeRe(NUDGE_BEGIN)}[\\s\\S]*?${escapeRe(NUDGE_END)}`).exec(text);
+        if (!block) continue; // no vg block in this host file — nothing of ours to refresh
+        const from = staleVersion(block[0], '## Code navigation (vg)');
+        if (from !== null) {
+          writeNudge(file, a.nudge, smallRepo, a.id);
+          out.push({ file: a.nudge.file, from, to: INSTALL_CONTENT_VERSION });
+        }
+      } else {
+        const from = staleVersion(text, '## Code navigation (vg)');
+        if (from !== null) {
+          writeNudge(file, a.nudge, smallRepo, a.id);
+          out.push({ file: a.nudge.file, from, to: INSTALL_CONTENT_VERSION });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function readTextSafe(file: string): string | null {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null; // unreadable — leave it alone
+  }
 }
 
 function writeNudge(file: string, target: NudgeTarget, smallRepo: boolean, client?: string): void {

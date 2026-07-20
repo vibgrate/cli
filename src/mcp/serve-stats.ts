@@ -1,5 +1,6 @@
 import { c } from '../util/output.js';
 import { SAVINGS_TOOLS, type Outcome } from '../engine/savings.js';
+import { mergeSnapshots } from './live-stats.js';
 
 /**
  * Live, in-memory session stats for `vg serve` — the "is it earning its keep?"
@@ -11,11 +12,14 @@ import { SAVINGS_TOOLS, type Outcome } from '../engine/savings.js';
  * ledger by ./ledger-tail.ts, so agents that shell out to `vg` instead of
  * calling MCP tools still show up here.
  *
- * Privacy: everything here lives and dies with the process — nothing is
+ * Privacy: everything here lives and dies with the serve session — nothing is
  * persisted or uploaded, so the display is always on (GUARDRAILS §3.4 applies
  * to the opt-in ledger/upload, which remain separate and off by default).
  * Counts only — never code, paths beyond what the operator already sees, or
- * question text.
+ * question text. Sibling serve processes in the same repo (an assistant's own
+ * spawned stdio server) surface their counts to a TTY display through the
+ * ephemeral live-stats bus (./live-stats.ts) — same counts-only data, swept
+ * on exit.
  *
  * Output discipline: stderr only. Under stdio transport, stdout IS the MCP
  * protocol stream and carries nothing else.
@@ -173,15 +177,23 @@ const MAX_TOOL_ROWS = 8;
  * The status block as lines (no I/O, injected clock) so it is unit-testable —
  * same pattern as `logoLines`. `tick` drives the spinner frame.
  */
-export function serveStatusLines(snap: SessionSnapshot, now: number, tick = 0): string[] {
+export function serveStatusLines(snap: SessionSnapshot, now: number, tick = 0, siblingServers = 0): string[] {
   const spinner = mint(SPINNER[tick % SPINNER.length]!);
   const up = fmtUptime(now - snap.startedAt);
   const lines: string[] = [];
+  // Assistant-spawned serve processes in this repo whose live counts are
+  // folded into this view (see ./live-stats.ts) — worth a line either way:
+  // "your assistant IS connected, just to its own server process".
+  const siblingNote =
+    siblingServers > 0
+      ? `    ${c.dim(`incl. ${siblingServers} assistant-spawned server${siblingServers === 1 ? '' : 's'} in this repo`)}`
+      : null;
 
   if (snap.totals.calls === 0) {
     lines.push(
       `  ${spinner} ${c.bold.white('vg serve')} ${c.dim('·')} up ${teal(up)} ${c.dim('· waiting for your assistant’s first call (MCP tool call, or `vg … --client=<ai>` CLI)…')}`,
     );
+    if (siblingNote) lines.push(siblingNote);
     return lines;
   }
 
@@ -241,6 +253,7 @@ export function serveStatusLines(snap: SessionSnapshot, now: number, tick = 0): 
       `    ${c.dim('est. saved ≈')} ${mint(`${fmtTokens(savedTokens)} context tokens`)} ${c.dim('(estimate)')}`,
     );
   }
+  if (siblingNote) lines.push(siblingNote);
   return lines;
 }
 
@@ -288,6 +301,8 @@ export class ServeStatusDisplay {
   constructor(
     private readonly stats: SessionStats,
     private readonly stream: NodeJS.WriteStream = process.stderr,
+    /** Fresh sibling-process snapshots to fold into the view (live-stats bus). */
+    private readonly siblings?: () => SessionSnapshot[],
   ) {
     this.isTTY = (stream.isTTY ?? false) && process.env.VIBGRATE_PROGRESS_MODE !== 'plain';
   }
@@ -332,7 +347,9 @@ export class ServeStatusDisplay {
 
   private renderTTY(): void {
     this.tick++;
-    const lines = serveStatusLines(this.stats.snapshot(), Date.now(), this.tick);
+    const sibs = this.siblings?.() ?? [];
+    const snap = mergeSnapshots(this.stats.snapshot(), sibs);
+    const lines = serveStatusLines(snap, Date.now(), this.tick, sibs.length);
     const content = lines.join('\n') + '\n';
     if (content === this.lastFrame) return;
     this.lastFrame = content;

@@ -33,6 +33,26 @@ backward compatible.
   templates (`.ejs`, parsed as JavaScript), all with true line numbers. Elm
   was evaluated but its prebuilt grammar predates the web-tree-sitter
   compatibility floor, so it is deliberately excluded for now.
+- **Installed assistant instructions are versioned and self-updating** — the
+  skill and nudge files `vg install` writes now carry a `vg:v<N>` marker, and
+  every successful `vg` build brings previously-installed copies up to the
+  current content version automatically (only files with vg's own marker or
+  the exact legacy generated content are touched; removing the marker line
+  opts a file out permanently, and nudge refreshes rewrite only the vg block
+  inside CLAUDE.md/AGENTS.md). The instructions themselves now **strongly
+  recommend the MCP tools over the CLI** — the warm server answers in
+  milliseconds while each CLI call pays Node startup plus a fresh map parse —
+  with the CLI positioned as the fallback when no server is available.
+- **A terminal `vg serve` now shows the traffic of the assistant's own
+  spawned server** — stdio MCP servers are launched by the client, so the
+  serve process an operator watches in a terminal never receives the
+  assistant's tool calls itself. Serve processes now share their live,
+  counts-only session stats over an ephemeral per-process file under
+  `.vibgrate/cache/serve-live/` (written by non-interactive serves, folded
+  into the interactive display, swept on exit/staleness), and the dashboard
+  notes how many assistant-spawned servers are online. Same privacy posture
+  as the display itself: counts, tool names, and coarse client labels only —
+  local, ephemeral, never uploaded.
 - **The live `vg serve` status display now counts CLI calls too** — an agent
   that shells out to the CLI (`vg impact <name> --client=claude`) records into
   the local ledger from a separate process, which previously left the serve
