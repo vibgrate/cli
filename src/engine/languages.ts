@@ -1,5 +1,7 @@
 /**
- * Language registry: 20 supported languages (first wave + the Phase-3 expansion).
+ * Language registry: 20 grammar-backed languages (first wave + the Phase-3
+ * expansion) plus the embedded-script container formats (Vue/Svelte/Astro
+ * single-file components, parsed via sfc.ts with the JS/TS grammars).
  *
  * Each language maps to a tree-sitter grammar shipped (pre-compiled to .wasm) by
  * `tree-sitter-wasms`. `grammarFile` is the base name under that package's `out/`
@@ -95,6 +97,25 @@ export const LANGUAGES: LanguageDef[] = [
     extensions: ['.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h'],
     grammarFile: 'tree-sitter-cpp',
   },
+  // Objective-C owns `.m` (the far more common meaning in repos than MATLAB);
+  // `.mm` (ObjC++) degrades gracefully on C++-only constructs.
+  { id: 'objc', label: 'Objective-C', extensions: ['.m', '.mm'], grammarFile: 'tree-sitter-objc' },
+  // `.mli` interface files parse best-effort under the implementation grammar.
+  { id: 'ocaml', label: 'OCaml', extensions: ['.ml', '.mli'], grammarFile: 'tree-sitter-ocaml' },
+  { id: 'rescript', label: 'ReScript', extensions: ['.res'], grammarFile: 'tree-sitter-rescript' },
+  { id: 'solidity', label: 'Solidity', extensions: ['.sol'], grammarFile: 'tree-sitter-solidity' },
+  // Embedded-script container formats (single-file components and templates).
+  // Their script regions are extracted with a position-preserving mask and
+  // parsed with the JS/TS (or Ruby, for ERB) grammars — see sfc.ts. The
+  // grammarFile below is the effective-grammar fallback so bundling always
+  // ships something loadable for the id; the actual grammar is chosen per file
+  // (script `lang` attribute / the container's fixed embedded language).
+  { id: 'vue', label: 'Vue', extensions: ['.vue'], grammarFile: 'tree-sitter-typescript' },
+  { id: 'svelte', label: 'Svelte', extensions: ['.svelte'], grammarFile: 'tree-sitter-typescript' },
+  { id: 'astro', label: 'Astro', extensions: ['.astro'], grammarFile: 'tree-sitter-typescript' },
+  { id: 'html', label: 'HTML', extensions: ['.html', '.htm'], grammarFile: 'tree-sitter-javascript' },
+  { id: 'erb', label: 'ERB', extensions: ['.erb'], grammarFile: 'tree-sitter-ruby' },
+  { id: 'ejs', label: 'EJS', extensions: ['.ejs'], grammarFile: 'tree-sitter-javascript' },
 ];
 
 const EXT_TO_LANG = new Map<string, LanguageDef>();

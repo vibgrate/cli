@@ -14,6 +14,34 @@ backward compatible.
 
 ### Added
 
+- **Vue/Svelte/Astro single-file components are now part of the code graph** —
+  `.vue`, `.svelte`, and `.astro` files were previously invisible to the map,
+  so `vg impact` (and every other navigation command) missed callers that live
+  inside components. The script region of an SFC (`<script>`/`<script setup>`
+  blocks, Astro frontmatter) is now extracted with a position-preserving mask
+  and parsed with the JS/TS grammars, so defs, calls, and imports land on
+  their true lines in the original file. Imports of `./Foo.vue`
+  (extension-bearing or extensionless) resolve to the component, and imports
+  from a component into plain `.ts`/`.js` modules resolve back — impact blast
+  radius in Vue/Svelte/Astro apps now includes component usage sites.
+- **Coverage expansion: Objective-C, OCaml, ReScript, Solidity, and template
+  containers** — four more grammar-backed languages join the graph
+  (`.m`/`.mm`, `.ml`/`.mli`, `.res`, `.sol`), with defs, calls (including ObjC
+  message sends and Solidity `emit`s), imports, and inheritance extracted; and
+  the SFC masking mechanism now also covers inline `<script>` blocks in plain
+  HTML (`.html`/`.htm`), ERB templates (`.erb`, parsed as Ruby), and EJS
+  templates (`.ejs`, parsed as JavaScript), all with true line numbers. Elm
+  was evaluated but its prebuilt grammar predates the web-tree-sitter
+  compatibility floor, so it is deliberately excluded for now.
+- **The live `vg serve` status display now counts CLI calls too** — an agent
+  that shells out to the CLI (`vg impact <name> --client=claude`) records into
+  the local ledger from a separate process, which previously left the serve
+  dashboard frozen at "waiting for your assistant's first tool call". The
+  display now tails the ledger while serving and folds in CLI-sourced calls,
+  with an mcp-vs-cli split in the header and honest avg-ms handling (CLI
+  lines carry no wall time and are never counted as 0 ms). Counts only,
+  in-process, nothing uploaded — same privacy posture as before.
+
 - **Memory safeguards for the graph build** — a pathological corpus (a
   vendored 200 MB bundle, a million-file tree, a giant TypeScript program) can
   no longer OOM-kill `vg build` / `vg scan`. Files over a per-file size cap

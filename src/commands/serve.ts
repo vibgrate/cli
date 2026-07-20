@@ -13,6 +13,8 @@ import { c, info } from '../util/output.js';
 import { originAllowed } from '../util/origin.js';
 import { printLogo } from '../util/logo.js';
 import { SessionStats, ServeStatusDisplay } from '../mcp/serve-stats.js';
+import { LedgerTail } from '../mcp/ledger-tail.js';
+import { savingsLedgerPath } from '../engine/savings.js';
 
 /** How often the opt-in `--share-stats` flusher uploads new ledger entries. */
 const SHARE_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
@@ -100,6 +102,11 @@ export function registerServe(program: Command): void {
       // The display starts only after the startup lines are printed, so they
       // stay in scroll history above the repainted status block.
       const display = stats ? new ServeStatusDisplay(stats) : undefined;
+      // Fold in CLI navigation calls (`vg <cmd> --client=<ai>`) made while
+      // serving: they land in the local ledger from a separate process, so the
+      // display tails it — otherwise an agent that shells out to the CLI would
+      // leave this dashboard frozen at zero (see mcp/ledger-tail.ts).
+      if (stats) new LedgerTail(savingsLedgerPath(root), stats).start();
       const freshness = refresh ? 'auto-refresh' : 'as built';
       if (opts.http) {
         await serveHttp(graphPath, opts.host ?? '127.0.0.1', Number(opts.port) || 7437, serveOpts, freshness, () => display?.start());

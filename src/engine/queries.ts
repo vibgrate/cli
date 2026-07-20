@@ -476,6 +476,75 @@ const CPP: LangQueries = {
   guards: ['(call_expression function: (identifier) @_g (#match? @_g "^(assert|static_assert)$")) @guard'],
 };
 
+const OBJC: LangQueries = {
+  defs: [
+    {
+      kind: 'function',
+      query: '(function_definition declarator: (function_declarator declarator: (identifier) @name)) @def',
+    },
+    // The selector segments are the method_definition's direct bare identifiers
+    // (param names sit inside method_parameter); the first segment names it.
+    { kind: 'method', query: '(method_definition (identifier) @name) @def' },
+    { kind: 'class', query: '(class_implementation . (identifier) @name) @def' },
+    { kind: 'interface', query: '(class_interface . (identifier) @name) @def' },
+  ],
+  calls: [
+    '(call_expression function: (identifier) @callee)',
+    '(message_expression method: (identifier) @callee)',
+  ],
+  imports: [
+    '(preproc_include path: (string_literal) @source)',
+    '(preproc_include path: (system_lib_string) @source)',
+  ],
+  heritage: ['(class_interface superclass: (identifier) @extends)'],
+  guards: ASSERT_CALLS,
+};
+
+const OCAML: LangQueries = {
+  defs: [
+    // Only parameterised bindings — plain `let x = …` values would drown the
+    // graph in constants.
+    { kind: 'function', query: '(let_binding pattern: (value_name) @name (parameter)) @def' },
+    { kind: 'module', query: '(module_binding name: (module_name) @name) @def' },
+  ],
+  calls: ['(application_expression function: (value_path (value_name) @callee))'],
+  imports: ['(open_module (module_path (module_name) @source))'],
+  heritage: [],
+};
+
+const RESCRIPT: LangQueries = {
+  defs: [
+    { kind: 'function', query: '(let_binding pattern: (value_identifier) @name body: (function)) @def' },
+    { kind: 'module', query: '(module_binding name: (module_identifier) @name) @def' },
+  ],
+  calls: [
+    '(call_expression function: (value_identifier) @callee)',
+    '(call_expression function: (value_identifier_path (value_identifier) @callee))',
+  ],
+  imports: ['(open_statement (module_identifier) @source)'],
+  heritage: [],
+};
+
+const SOLIDITY: LangQueries = {
+  defs: [
+    { kind: 'function', query: '(function_definition name: (identifier) @name) @def' },
+    { kind: 'function', query: '(modifier_definition name: (identifier) @name) @def' },
+    { kind: 'class', query: '(contract_declaration name: (identifier) @name) @def' },
+    { kind: 'class', query: '(library_declaration name: (identifier) @name) @def' },
+    { kind: 'interface', query: '(interface_declaration name: (identifier) @name) @def' },
+  ],
+  calls: [
+    '(call_expression function: (identifier) @callee)',
+    '(call_expression function: (member_expression property: (identifier) @callee))',
+    '(emit_statement name: (identifier) @callee)',
+  ],
+  imports: ['(import_directive source: (string) @source)'],
+  heritage: ['(inheritance_specifier ancestor: (user_defined_type (identifier) @extends))'],
+  guards: [
+    '(call_expression function: (identifier) @_g (#match? @_g "^(require|assert)$")) @guard',
+  ],
+};
+
 const BY_LANG: Record<string, LangQueries> = {
   ts: TYPESCRIPT,
   tsx: TYPESCRIPT,
@@ -497,6 +566,12 @@ const BY_LANG: Record<string, LangQueries> = {
   zig: ZIG,
   c: C_LANG,
   cpp: CPP,
+  objc: OBJC,
+  ocaml: OCAML,
+  rescript: RESCRIPT,
+  solidity: SOLIDITY,
+  // Container formats (vue/svelte/astro/html/erb/ejs) have no entry here on
+  // purpose: parse.ts routes them to their embedded language's queries.
 };
 
 export function queriesFor(langId: string): LangQueries | undefined {
