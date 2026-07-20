@@ -11,6 +11,8 @@ import { rootOf } from './util.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { c, info } from '../util/output.js';
 import { originAllowed } from '../util/origin.js';
+import { printLogo } from '../util/logo.js';
+import { SessionStats, ServeStatusDisplay } from '../mcp/serve-stats.js';
 
 /** How often the opt-in `--share-stats` flusher uploads new ledger entries. */
 const SHARE_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
@@ -58,6 +60,17 @@ export function registerServe(program: Command): void {
       // managed machines say "never upload", and CI passes flags mechanically.
       const optOut = telemetryOptOut();
       const shareStats = opts.shareStats === true && !local && optOut === null;
+      // Live session stats (in-memory only — nothing persisted or uploaded, so
+      // no opt-in needed): uptime, which AI is calling, per-tool calls/timing,
+      // and the context-vs-grep-baseline estimate, rendered to stderr while the
+      // server runs. `--quiet` turns the whole display off.
+      const quiet = global.quiet === true;
+      const stats = quiet ? undefined : new SessionStats();
+      if (!quiet) {
+        // Brand banner for a human at a TTY, same as the scanner (printLogo
+        // no-ops under a pipe, so assistant-spawned stdio stays clean).
+        printLogo(root, { product: 'AI Context', tagline: 'Local-first MCP for your AI' });
+      }
       const serveOpts: ServeOptions = {
         // A *requested* --share-stats always implies local recording, even when
         // the upload itself is suppressed (--local / env opt-out) — the local
@@ -68,6 +81,7 @@ export function registerServe(program: Command): void {
         local,
         dedup: opts.dedup === true,
         refresh,
+        stats,
       };
 
       // Check the map is up to date and, when it isn't, run the build before we
@@ -83,13 +97,17 @@ export function registerServe(program: Command): void {
       }
       if (shareStats) startSharing(root);
 
+      // The display starts only after the startup lines are printed, so they
+      // stay in scroll history above the repainted status block.
+      const display = stats ? new ServeStatusDisplay(stats) : undefined;
       const freshness = refresh ? 'auto-refresh' : 'as built';
       if (opts.http) {
-        await serveHttp(graphPath, opts.host ?? '127.0.0.1', Number(opts.port) || 7437, serveOpts, freshness);
+        await serveHttp(graphPath, opts.host ?? '127.0.0.1', Number(opts.port) || 7437, serveOpts, freshness, () => display?.start());
       } else {
         // stdio: NOTHING may go to stdout except the protocol stream.
         info(c.dim(`vg · MCP server on stdio (read-only, ${freshness}). Connect your assistant to this process.`));
         await serveStdio(graphPath, serveOpts);
+        display?.start();
       }
     });
   applyGlobalOptions(cmd);
@@ -185,7 +203,14 @@ function startSharing(root: string): void {
   process.once('beforeExit', finalFlush);
 }
 
-async function serveHttp(graphPath: string, host: string, port: number, opts: ServeOptions, freshness: string): Promise<void> {
+async function serveHttp(
+  graphPath: string,
+  host: string,
+  port: number,
+  opts: ServeOptions,
+  freshness: string,
+  onReady?: () => void,
+): Promise<void> {
   const { createServer: createHttp } = await import('node:http');
   const { StreamableHTTPServerTransport } = await import(
     '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -232,6 +257,8 @@ async function serveHttp(graphPath: string, host: string, port: number, opts: Se
 
   await new Promise<void>((resolve) => httpServer.listen(port, host, resolve));
   info(c.dim(`vg · MCP server on http://${host}:${port}/mcp (read-only, local, ${freshness})`));
+  // Live status display, once the listen line is safely in scroll history.
+  onReady?.();
   // Keep the process alive until killed.
   await new Promise<never>(() => {});
 }
