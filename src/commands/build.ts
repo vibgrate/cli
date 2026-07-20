@@ -10,6 +10,7 @@ import { isModelReady, countPending, resolveEmbedModel } from '../engine/embeddi
 import type { VgGraph } from '../schema.js';
 import { writeArtifacts } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
+import { refreshInstalledInstructions, SMALL_REPO_FILES } from '../install/registry.js';
 import { serializeGraph } from '../engine/serialize.js';
 import { renderReport } from '../engine/report.js';
 import { renderHtml } from '../engine/html.js';
@@ -148,6 +149,21 @@ export async function runBuild(
   }
 
   if (opts.export) writeExport(result.graph, opts.export);
+
+  // Bring previously-installed assistant instructions (skill/nudge files from
+  // `vg install`) up to the current content version — so evolved instructions
+  // reach this repo the first time a new CLI builds here. Only files carrying
+  // vg's own version marker (or the exact legacy generated content) are
+  // touched; a custom --graph build is an explicit artifact and skips this.
+  if (!global.graph) {
+    const fileCount = result.graph.nodes.filter((n) => n.kind === 'file').length;
+    const refreshed = refreshInstalledInstructions(root, fileCount > 0 && fileCount < SMALL_REPO_FILES);
+    if (interactive) {
+      for (const r of refreshed) {
+        info(c.dim(`vg · refreshed assistant instructions ${r.file} (v${r.from} → v${r.to})`));
+      }
+    }
+  }
 
   // `--attest`: sign the freshly-built graph → .vibgrate/attestation.intoto.jsonl.
   let attestation: SignSummary | undefined;

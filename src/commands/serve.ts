@@ -14,6 +14,7 @@ import { originAllowed } from '../util/origin.js';
 import { printLogo } from '../util/logo.js';
 import { SessionStats, ServeStatusDisplay } from '../mcp/serve-stats.js';
 import { LedgerTail } from '../mcp/ledger-tail.js';
+import { LiveStatsBus, liveStatsDir } from '../mcp/live-stats.js';
 import { savingsLedgerPath } from '../engine/savings.js';
 
 /** How often the opt-in `--share-stats` flusher uploads new ledger entries. */
@@ -99,14 +100,25 @@ export function registerServe(program: Command): void {
       }
       if (shareStats) startSharing(root);
 
+      // Cross-process live stats, split by role so nothing double-counts:
+      // an assistant-spawned (non-interactive) serve PUBLISHES its counts to
+      // the ephemeral bus; the operator's terminal (interactive) serve
+      // AGGREGATES — it folds sibling snapshots and the CLI `--client` ledger
+      // into its display. See mcp/live-stats.ts and mcp/ledger-tail.ts.
+      const interactive = process.stderr.isTTY === true;
+      const bus = stats ? new LiveStatsBus(liveStatsDir(root), stats) : undefined;
+      if (bus && !interactive) bus.start();
       // The display starts only after the startup lines are printed, so they
       // stay in scroll history above the repainted status block.
-      const display = stats ? new ServeStatusDisplay(stats) : undefined;
+      const display = stats
+        ? new ServeStatusDisplay(stats, process.stderr, bus && interactive ? () => bus.siblings() : undefined)
+        : undefined;
       // Fold in CLI navigation calls (`vg <cmd> --client=<ai>`) made while
       // serving: they land in the local ledger from a separate process, so the
-      // display tails it — otherwise an agent that shells out to the CLI would
-      // leave this dashboard frozen at zero (see mcp/ledger-tail.ts).
-      if (stats) new LedgerTail(savingsLedgerPath(root), stats).start();
+      // watching display tails it — otherwise an agent that shells out to the
+      // CLI would leave this dashboard frozen at zero. Interactive-only: if a
+      // publisher folded them too, the aggregate would count each call twice.
+      if (stats && interactive) new LedgerTail(savingsLedgerPath(root), stats).start();
       const freshness = refresh ? 'auto-refresh' : 'as built';
       if (opts.http) {
         await serveHttp(graphPath, opts.host ?? '127.0.0.1', Number(opts.port) || 7437, serveOpts, freshness, () => display?.start());
