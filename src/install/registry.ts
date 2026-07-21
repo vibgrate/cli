@@ -12,6 +12,7 @@ import {
   type ServeLaunch,
 } from './content.js';
 import { CliError, ExitCode } from '../util/exit.js';
+import { ensureVibgrateGitignore } from '../engine/artifacts.js';
 import { whichOnPath, isInstalledOwnBinary } from '../util/cli-invocation.js';
 import { navigationToolsetConfig, HOT_TOOLS, deferredToolNames } from '../mcp/tools.js';
 
@@ -288,6 +289,9 @@ function writeFileEnsured(file: string, content: string): void {
  * repo-relative path written.
  */
 export function writeNavigationConfig(root: string): string {
+  // `vg install` may be the first thing to create `.vibgrate/` — make sure the
+  // default ignore file lands with it so the install never dirties the branch.
+  ensureVibgrateGitignore(root);
   const rel = path.join('.vibgrate', 'mcp-navigation.json');
   const doc = {
     _readme:

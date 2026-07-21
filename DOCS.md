@@ -621,6 +621,8 @@ Maps source code into a graph artifact, enabling all downstream queries (`vg sho
 | `--grammars <dir>` | — | Grammar `.wasm` directory for offline/air-gapped use |
 | `-o, --export <file>` | — | Also write the map to a file (format from extension) |
 
+**Local by default — no git churn.** The first time vg writes into `.vibgrate/` it also creates `.vibgrate/.gitignore`, keeping the graph artifacts (`graph.json`, `graph.html`, `GRAPH_REPORT.md`, `facts.jsonl`, `mcp-navigation.json`) and the cache out of git — so builds, auto-refreshes, and MCP use never leave your branch dirty. Run `vg share` when you want the map committed for your team (it rewrites that ignore file). vg never touches an existing `.vibgrate/.gitignore`, so edit it (or leave it empty) to manage the ignores yourself.
+
 ---
 
 ### vg bundle
@@ -849,6 +851,7 @@ Reads the counts-only usage ledger recorded when you run `vg serve --savings` (o
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--days <n>` | `30` | Reporting window in days |
+| `--clear` | — | Delete the recorded usage data for this repo (the ledger under `.vibgrate/cache/`, plus the opt-in stats-share upload state and per-install id) |
 
 Add `--json` for machine-readable output.
 
@@ -902,7 +905,7 @@ Make the code map committable and auto-updating for your team.
 vg share
 ```
 
-Installs a pre-commit hook, deterministic merge driver, and `.gitignore` so the map stays fresh without any manual steps.
+Installs a pre-commit hook, deterministic merge driver, and `.gitignore` so the map stays fresh without any manual steps. This rewrites the default `.vibgrate/.gitignore` (which ignores the graph artifacts, `graph.json` included) so `graph.json` is committed while the cache and volatile reports stay ignored.
 
 | Flag | Description |
 |------|-------------|

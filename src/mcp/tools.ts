@@ -251,7 +251,7 @@ export const TOOLS: VgTool[] = [
   {
     name: 'search_symbols',
     description:
-      'Find a known name or literal string fast: ranked symbol lookup, plus a complete literal file-search for any quoted/multi-word phrase (config keys, log lines, UI copy). A phrase query reports totalTextMatches so you know you have every occurrence — use it instead of grep. Use first for most discovery; use query_graph for meaning.',
+      'Find a known name or literal string fast: ranked symbol lookup, plus a complete literal file-search for any quoted, multi-word, or path-like query (config keys, routes, log lines, UI copy). Quote a single name ("AddJwtBearer") to sweep every occurrence of it as text. A sweep reports totalTextMatches so you know you have every occurrence — use it instead of grep. Use first for most discovery; use query_graph for meaning.',
     inputSchema: obj(
       {
         query: { type: 'string', maxLength: 120, description: 'a symbol name, or a literal phrase to sweep for every occurrence of' },

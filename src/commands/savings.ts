@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { readSavings, readUsage, type UsageReport } from '../engine/savings.js';
+import { clearSavings, readSavings, readUsage, type UsageReport } from '../engine/savings.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { c, info, json } from '../util/output.js';
@@ -14,10 +14,26 @@ export function registerSavings(program: Command): void {
     .command('savings')
     .description('local, privacy-safe report of tokens/$ saved vs a grep baseline (estimates)')
     .option('--days <n>', 'window in days', '30')
+    .option('--clear', 'delete the recorded usage data for this repo')
     .action(function (this: Command) {
       const global = readGlobal(this);
       const days = Number(this.opts().days) || 30;
       const root = rootOf(global);
+
+      if (this.opts().clear) {
+        const existed = clearSavings(root);
+        if (global.json) {
+          json({ ok: true, cleared: existed });
+          return;
+        }
+        info(
+          existed
+            ? `${c.cyan('vg savings')} ${c.dim('--clear')} · usage data deleted for this repo`
+            : `${c.cyan('vg savings')} ${c.dim('--clear')} · nothing recorded here — nothing to delete`,
+        );
+        return;
+      }
+
       const now = Date.now();
       const report = readSavings(root, days, now);
       const usage = readUsage(root, days, now);

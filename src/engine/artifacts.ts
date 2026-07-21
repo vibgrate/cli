@@ -29,6 +29,41 @@ export function vibgrateDir(root: string): string {
   return path.join(root, '.vibgrate');
 }
 
+/**
+ * By default the graph artifacts are *local*: builds and auto-refreshes rewrite
+ * them constantly, and without an ignore file every `vg ask`/`vg serve` leaves
+ * the branch dirty (untracked or modified `.vibgrate/` files) — irritating for
+ * humans and a source of junk commits from AI agents. So the first time vg
+ * writes into `.vibgrate/` it also drops a `.gitignore` covering the graph
+ * artifacts, the cache, and itself.
+ *
+ * Deliberately create-once: an existing `.vibgrate/.gitignore` is NEVER
+ * touched, whatever its content — `vg share` owns it after opt-in (rewritten to
+ * commit `graph.json`), and a user-managed file (even an empty one) is theirs.
+ * Scanner artifacts meant for git (`baseline.json`, `standards.json`,
+ * `attestation.intoto.jsonl`) are intentionally not listed.
+ */
+const DEFAULT_GITIGNORE = [
+  '# Created once by vg — local graph artifacts stay out of git by default.',
+  '# Run `vg share` to commit the map for your team (it rewrites this file).',
+  '# vg never touches an existing .vibgrate/.gitignore: edit it (or leave it',
+  '# empty) to manage these ignores yourself.',
+  '.gitignore',
+  'cache/',
+  'graph.json',
+  'graph.html',
+  'GRAPH_REPORT.md',
+  'facts.jsonl',
+  'mcp-navigation.json',
+];
+
+export function ensureVibgrateGitignore(root: string): void {
+  const file = path.join(vibgrateDir(root), '.gitignore');
+  if (fs.existsSync(file)) return;
+  fs.mkdirSync(vibgrateDir(root), { recursive: true });
+  fs.writeFileSync(file, `${DEFAULT_GITIGNORE.join('\n')}\n`);
+}
+
 export function defaultGraphPath(root: string): string {
   return path.join(vibgrateDir(root), 'graph.json');
 }
@@ -36,6 +71,7 @@ export function defaultGraphPath(root: string): string {
 export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenArtifacts {
   const dir = vibgrateDir(options.root);
   fs.mkdirSync(dir, { recursive: true });
+  ensureVibgrateGitignore(options.root);
 
   const graphPath = options.graphPath ?? defaultGraphPath(options.root);
   fs.mkdirSync(path.dirname(graphPath), { recursive: true });

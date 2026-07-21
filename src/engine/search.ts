@@ -93,21 +93,39 @@ function toPosix(rel: string): string {
 }
 
 export async function searchSymbols(graph: VgGraph, root: string, query: string, limit: number): Promise<SearchResult> {
-  const q = query.trim();
+  let q = query.trim();
   if (!q) return { matches: [], moreAvailable: false, hint: 'query is required' };
 
-  // A query with internal whitespace can never name a single symbol
-  // (identifiers have no spaces), so it is almost always a literal-string sweep
-  // — "find every place that says X". Route it literal-first: the symbol pass on
-  // such a query only ever produces loose per-token matches (e.g. the `Say`
-  // components for the phrase "you say"), and letting those fill the budget
-  // starves the real string hits and pushes the caller back to grep — the exact
-  // failure the analysis caught. Single-name lookups (no whitespace — the hot
-  // path) keep the symbol-first behaviour below unchanged.
-  const isPhrase = /\s/.test(q);
+  // A query wrapped in matching quotes is an explicit "find this exact string"
+  // — the tool description tells agents a QUOTED phrase runs a complete literal
+  // sweep, but a quoted SINGLE identifier ("AddJwtBearer") has no whitespace,
+  // used to take the single-name path, and searched for the quote characters
+  // themselves: a guaranteed no-match that sent the agent straight back to grep
+  // (the field-report failure). Strip the quotes and honour the intent.
+  const quoted = /^(["'`])(.+)\1$/.exec(q);
+  if (quoted && quoted[2]!.trim()) q = quoted[2]!.trim();
+
+  // Literal-sweep routing. Three shapes can never name one graph symbol:
+  //  - internal whitespace ("find every place that says X");
+  //  - explicit quotes (stripped above — quoting IS the sweep signal);
+  //  - a slash path with no `:` and no glob chars ("opportunities/mine",
+  //    "api/users/mine") — a route/path STRING. Its tokens previously fell into
+  //    the per-token symbol union, where a single loose token ("mine") produced
+  //    a confidently-ranked, completely unrelated symbol instead of a clean
+  //    literal answer. (`:`-bearing queries stay symbol-first: file:line and
+  //    qualified names look like paths too; globs keep the glob tier.)
+  // Single-name lookups (the hot path) keep symbol-first behaviour unchanged.
+  const isPhrase = Boolean(quoted) || /\s/.test(q) || (/[/\\]/.test(q) && !q.includes(':') && !/[*?]/.test(q));
 
   // Pass 1 — graph name index (already ranked by importance).
   let nodes = findNodes(graph, q).filter((n) => n.kind !== 'file');
+  // File-path tier: a query that IS a repo path ("src/services/OrderService.ts")
+  // used to dead-end — the name index only knows the file NODE (filtered out as
+  // uninteresting) and the literal scan only finds the path where it appears as
+  // text. The useful answer is the symbols DEFINED in that file, ranked.
+  if (nodes.length === 0) {
+    nodes = fileSymbolNodes(graph, q);
+  }
   // Reconstructed-identifier fallthrough: a humanized/spaced query ("get id",
   // "use team", "f 0304") is frequently a *single* identifier whose original
   // separators (camelCase boundary, `_`) were lost in humanization, not a
@@ -189,6 +207,21 @@ export async function searchSymbols(graph: VgGraph, root: string, query: string,
 }
 
 /**
+ * Symbols defined in the file the query names, ranked by importance — the
+ * file-path resolution tier. Accepts the exact repo-relative path (with or
+ * without a leading `./`, either separator style) or an unambiguous path
+ * suffix ("services/OrderService.ts"). Returns [] when the query names no file.
+ */
+function fileSymbolNodes(graph: VgGraph, q: string): GraphNode[] {
+  if (!/[/\\]/.test(q) && !/\.\w+$/.test(q)) return []; // cheap guard: not path-shaped
+  const norm = q.replaceAll('\\', '/').replace(/^\.\//, '');
+  const inFile = graph.nodes.filter(
+    (n) => n.kind !== 'file' && (n.file === norm || n.file.endsWith(`/${norm}`)),
+  );
+  return [...inFile].sort((a, b) => b.importance - a.importance || a.qualifiedName.localeCompare(b.qualifiedName));
+}
+
+/**
  * Did the graph resolve `q` as an exact identifier (not a loose substring)?
  * Mirrors findNodes' exact tiers: content-hash id, `file:line`, and whole-name /
  * qualified-name equality (case-insensitive). Substring-tier matches return
@@ -228,19 +261,37 @@ function reconstructedIdentifierNodes(graph: VgGraph, q: string): GraphNode[] {
  * tokens each symbol covers (then by importance). Reuses `findNodes` per token
  * so the matching rules (exact/short/case-insensitive/substring) stay identical
  * to a single-name lookup — this only broadens a phrase into its words.
+ *
+ * Noise guard: a symbol that only SUBSTRING-matched a single token is exactly
+ * the false-positive case — "opportunities/mine" surfacing an unrelated symbol
+ * through "mine" and presenting it as a confident answer when the honest
+ * result is "no match" (field report). Such nodes need ≥ 2 covered tokens to
+ * survive. A node whose NAME (or qualified name) equals a token outright is a
+ * strong signal on its own and always survives — "UserCard7 card panel" must
+ * keep UserCard7 even when the loose "card" token list is capped elsewhere.
  */
 function multiTokenNodes(graph: VgGraph, tokens: string[]): GraphNode[] {
-  const cov = new Map<string, { node: GraphNode; hits: number }>();
-  for (const t of tokens) {
-    for (const n of findNodes(graph, t)) {
-      if (n.kind === 'file') continue;
-      const e = cov.get(n.id);
-      if (e) e.hits++;
-      else cov.set(n.id, { node: n, hits: 1 });
+  // One uncapped pass over the graph, scoring every node against every token.
+  // (Delegating per-token to findNodes hit its 25-row substring cap: on a large
+  // graph a common token's list overflows, real targets lose that token's
+  // coverage, and the noise filter below would then discard them.)
+  const scored: Array<{ node: GraphNode; hits: number; exact: boolean }> = [];
+  for (const n of graph.nodes) {
+    if (n.kind === 'file') continue;
+    const name = n.name.toLowerCase();
+    const qn = n.qualifiedName.toLowerCase();
+    let hits = 0;
+    let exact = false;
+    for (const t of tokens) {
+      if (name === t || qn === t) {
+        hits++;
+        exact = true;
+      } else if (qn.includes(t)) hits++;
     }
+    if (exact || hits >= 2) scored.push({ node: n, hits, exact });
   }
-  return [...cov.values()]
-    .sort((a, b) => b.hits - a.hits || b.node.importance - a.node.importance)
+  return scored
+    .sort((a, b) => Number(b.exact) - Number(a.exact) || b.hits - a.hits || b.node.importance - a.node.importance || a.node.qualifiedName.localeCompare(b.node.qualifiedName))
     .map((e) => e.node);
 }
 

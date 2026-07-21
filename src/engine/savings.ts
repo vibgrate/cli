@@ -143,6 +143,22 @@ export function savingsRecorded(root: string): boolean {
   return fs.existsSync(ledgerPath(root));
 }
 
+/**
+ * Delete the recorded usage data for this repo: the ledger itself plus the
+ * stats-share state that indexes into it (a byte offset into the ledger and the
+ * random per-install id) — a stale offset against a fresh ledger would silently
+ * skip new entries, and clearing "my data" should also reset the id. Everything
+ * removed lives under `.vibgrate/cache/`; nothing else is touched. Returns
+ * whether a ledger existed.
+ */
+export function clearSavings(root: string): boolean {
+  const file = ledgerPath(root);
+  const existed = fs.existsSync(file);
+  fs.rmSync(file, { force: true });
+  fs.rmSync(path.join(cacheDir(root), 'stats-share.json'), { force: true });
+  return existed;
+}
+
 export function recordSaving(root: string, entry: Omit<SavingEntry, 'ts'>, now: number): void {
   try {
     fs.mkdirSync(cacheDir(root), { recursive: true });
