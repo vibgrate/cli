@@ -8,6 +8,7 @@ import chalk from 'chalk';
 import { VERSION } from '../version.js';
 import { fetchLatestVersion } from '../utils/update-check.js';
 import { pathExists } from '../utils/fs.js';
+import { liveStatsDir, reapOtherVersionServers, type ReapedServer } from '../../mcp/live-stats.js';
 
 export type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'bun';
 
@@ -220,6 +221,7 @@ export const updateCommand = new Command('update')
   .option('--global', 'Update global installation')
   .option('-y, --yes', 'Skip confirmation prompts (e.g. installing at a workspace root)')
   .option('-w, --workspace-root', 'Allow updating the pnpm workspace root (implies --yes for that prompt)')
+  .option('--no-reap', 'Do not signal running vg serve processes on an older version to restart')
   .action(
     async (opts: {
       check?: boolean;
@@ -227,6 +229,7 @@ export const updateCommand = new Command('update')
       global?: boolean;
       yes?: boolean;
       workspaceRoot?: boolean;
+      reap?: boolean;
     }) => {
       console.log(chalk.dim(`Current version: ${VERSION}`));
       console.log(chalk.dim('Checking npm registry...'));
@@ -241,6 +244,12 @@ export const updateCommand = new Command('update')
       const semver = await import('semver');
       if (!semver.gt(latest, VERSION)) {
         console.log(chalk.green('✔') + ` You are on the latest version (${VERSION}).`);
+        // Even on the latest binary, an assistant-spawned `vg serve` started
+        // before a prior update may still be executing an OLDER build (a
+        // long-lived stdio child the client never restarted). Retire those so
+        // the client respawns them on this version — the exact "stale spawned
+        // server" case that makes fixes look absent until an editor restart.
+        if (opts.reap !== false) reapAndReport(process.cwd(), VERSION);
         return;
       }
 
@@ -317,5 +326,36 @@ export const updateCommand = new Command('update')
         console.error(chalk.red(`Update failed. Run manually: ${cmd}`));
         process.exit(1);
       }
+
+      // Retire any running vg serve on the OLD build so the client respawns it
+      // on the one just installed. Without this the update lands on disk but a
+      // long-lived assistant-spawned server keeps answering from the old code.
+      if (opts.reap !== false) reapAndReport(cwd, latest);
     },
   );
+
+/**
+ * Signal every running vg serve in `cwd`'s repo that is NOT on `keepVersion`,
+ * and tell the user what happened. Best-effort and never throws — a reap
+ * problem must not fail an otherwise-successful update.
+ */
+function reapAndReport(cwd: string, keepVersion: string): void {
+  let reaped: ReapedServer[] = [];
+  try {
+    reaped = reapOtherVersionServers(liveStatsDir(cwd), keepVersion);
+  } catch {
+    return; // registry unreadable / no permission to signal — nothing to report
+  }
+  if (reaped.length === 0) return;
+  const list = reaped.map((r) => `pid ${r.pid} (v${r.version})`).join(', ');
+  console.log(
+    chalk.dim(
+      `Signalled ${reaped.length} running vg serve process${reaped.length === 1 ? '' : 'es'} on an older version to restart: ${list}.`,
+    ),
+  );
+  console.log(
+    chalk.dim(
+      'Your editor/agent will respawn them on the new version. Restart your AI session if a server does not reconnect.',
+    ),
+  );
+}

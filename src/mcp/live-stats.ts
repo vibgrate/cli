@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { cacheDir } from '../engine/cache.js';
+import { VERSION } from '../version.js';
 import type { SessionStats, SessionSnapshot, RollupRow } from './serve-stats.js';
 
 /**
@@ -34,11 +35,77 @@ const STALE_MS = 60_000;
 interface LiveSnapshotFile {
   pid: number;
   updatedAt: number;
+  /** CLI version this serve process is running. Absent on files written before
+   *  versioning existed → read as 'unknown', which the reaper treats as stale
+   *  (a server that predates the field is by definition an older build). */
+  version?: string;
   snapshot: SessionSnapshot;
 }
 
 export function liveStatsDir(root: string): string {
   return path.join(cacheDir(root), 'serve-live');
+}
+
+/** A reaped process: the pid signalled and the version it was running. */
+export interface ReapedServer {
+  pid: number;
+  version: string;
+}
+
+/**
+ * SIGTERM every OTHER `vg serve` process in this repo that is running a version
+ * other than `keepVersion` — used by `vg update` so an assistant-spawned server
+ * still executing the old build is retired and respawned by its client on the
+ * freshly-installed one.
+ *
+ * Safety — this only ever signals vg's own servers, never an arbitrary process:
+ *  - candidates come exclusively from `serve-<pid>.json` heartbeat files that
+ *    only a `vg serve` process writes (same registry the live display reads);
+ *  - a candidate must be HEARTBEATING (updatedAt within STALE_MS). A live serve
+ *    rewrites its file at least every KEEPALIVE_MS, so a fresh heartbeat proves
+ *    the pid is that live serve right now — this is what rules out signalling a
+ *    reused pid; a crashed process's file is stale and is swept, never signalled;
+ *  - the reaper's own pid is skipped;
+ *  - SIGTERM (graceful — serve installs a handler), never SIGKILL, so even the
+ *    millisecond-window worst case is the gentlest possible signal.
+ *
+ * `now` and `kill` are injectable for tests. Returns the servers signalled.
+ */
+export function reapOtherVersionServers(
+  dir: string,
+  keepVersion: string,
+  now: number = Date.now(),
+  kill: (pid: number, signal: NodeJS.Signals) => void = (pid, signal) => process.kill(pid, signal),
+  selfPid: number = process.pid,
+): ReapedServer[] {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return []; // no serve-live dir → nothing running here
+  }
+  const reaped: ReapedServer[] = [];
+  for (const name of entries) {
+    if (!/^serve-\d+\.json$/.test(name)) continue;
+    let parsed: LiveSnapshotFile;
+    try {
+      parsed = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) as LiveSnapshotFile;
+    } catch {
+      continue; // mid-write or corrupt — skip
+    }
+    if (typeof parsed?.pid !== 'number' || typeof parsed.updatedAt !== 'number') continue;
+    if (parsed.pid === selfPid) continue; // never signal ourselves
+    if (now - parsed.updatedAt > STALE_MS) continue; // not heartbeating → dead/unknown, do not signal
+    const version = typeof parsed.version === 'string' ? parsed.version : 'unknown';
+    if (version === keepVersion) continue; // already on the kept build
+    try {
+      kill(parsed.pid, 'SIGTERM');
+      reaped.push({ pid: parsed.pid, version });
+    } catch {
+      /* already exited, or not permitted — nothing to do */
+    }
+  }
+  return reaped;
 }
 
 export class LiveStatsBus {
@@ -78,7 +145,7 @@ export class LiveStatsBus {
     if (snap.revision === this.lastRevision && now - this.lastWriteAt < KEEPALIVE_MS) return;
     this.lastRevision = snap.revision;
     this.lastWriteAt = now;
-    const body: LiveSnapshotFile = { pid: this.pid, updatedAt: now, snapshot: snap };
+    const body: LiveSnapshotFile = { pid: this.pid, updatedAt: now, version: VERSION, snapshot: snap };
     try {
       fs.mkdirSync(this.dir, { recursive: true });
       // tmp + rename so a concurrent reader never sees a half-written file.
