@@ -124,6 +124,61 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
     }
   }
 
+  // --- namespace reachability (C#-style: a namespace is decoupled from the
+  // directory, so cross-directory refs resolve through `using`, not co-location).
+  // filesByNamespace: which files declare types in a namespace. nsReachableByRel:
+  // for each file, the files reachable through a namespace it declares (same
+  // namespace, split across files/dirs) or `using`-imports.
+  const filesByNamespace = new Map<string, Set<string>>();
+  for (const p of parses) for (const ns of p.namespaces ?? []) addToSet(filesByNamespace, ns, p.rel);
+  const relsByLang = new Map<string, string[]>();
+  for (const p of parses) push(relsByLang, p.lang, p.rel);
+  // EXPLICIT namespace reachability (a shared namespace, or a `using`/`import`
+  // of the target's namespace). Strong enough to justify a unique-name match —
+  // the developer named the scope.
+  const nsReachableByRel = new Map<string, Set<string>>();
+  // IMPLICIT whole-module reachability (Swift: every file in the module sees the
+  // others with no import). Too broad to justify a unique-name match — used ONLY
+  // to let the heritage-anchored interface/implementation disambiguation see the
+  // conforming type. Otherwise a lone same-named symbol anywhere in the repo
+  // would wrongly resolve (the precision guard covers exactly this).
+  const moduleReachableByRel = new Map<string, Set<string>>();
+  for (const p of parses) {
+    if (MODULE_SCOPED_LANGS.has(p.lang)) {
+      const mod = new Set<string>();
+      for (const rel of relsByLang.get(p.lang) ?? []) if (rel !== p.rel) mod.add(rel);
+      moduleReachableByRel.set(p.rel, mod);
+    }
+    const reach = new Set<string>();
+    const namespaces = new Set<string>(p.namespaces ?? []);
+    for (const imp of p.imports) {
+      namespaces.add(imp.source); // C# `using X.Y` names the namespace directly
+      // Java/Kotlin/Scala `import a.b.Foo` names a CLASS, so the package (its
+      // dotted parent) is what becomes reachable. Only matched candidates that
+      // are ACTUALLY declared namespaces survive, so this never invents scope.
+      if (IMPORT_NAMES_A_TYPE.has(p.lang)) {
+        const sep = Math.max(imp.source.lastIndexOf('.'), imp.source.lastIndexOf('\\'));
+        if (sep > 0) namespaces.add(imp.source.slice(0, sep));
+      }
+    }
+    for (const ns of namespaces) for (const rel of filesByNamespace.get(ns) ?? []) if (rel !== p.rel) reach.add(rel);
+    nsReachableByRel.set(p.rel, reach);
+  }
+
+  // --- interface/implementation index: type name → the super types it declares
+  // (`class Foo : IFoo` → Foo⇒{IFoo}). Anchors DI call disambiguation on a real
+  // heritage declaration, so `_svc.M()` (ambiguous between an interface method
+  // and its implementation) resolves to the concrete implementation instead of
+  // being dropped — the exact reason DI-wired services looked like orphans.
+  const superTypesByType = new Map<string, Set<string>>();
+  for (const p of parses) {
+    const localDefs = defsByFile.get(p.rel) ?? [];
+    for (const h of p.heritage) {
+      const encl = enclosingDefRef(localDefs, h.byte);
+      if (encl && (encl.kind === 'class' || encl.kind === 'interface')) addToSet(superTypesByType, encl.name, h.superName);
+    }
+  }
+
   const edges = new EdgeSet();
   const unresolved = new Map<string, UnresolvedRef>();
   const stats: ResolveResult['stats'] = {
@@ -173,9 +228,11 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
     const localDefs = defsByFile.get(p.rel) ?? [];
     const imported = importedFilesByRel.get(p.rel) ?? new Set<string>();
     const testCaller = isTestFile(p.rel);
+    const nsReach = nsReachableByRel.get(p.rel) ?? new Set<string>();
+    const modReach = moduleReachableByRel.get(p.rel) ?? new Set<string>();
     for (const call of p.calls) {
       const srcId = enclosingDefId(localDefs, call.byte) ?? fileId;
-      const resolved = resolveCall(call, p.rel, p.lang, imported, defsByName, srcId, testCaller);
+      const resolved = resolveCall(call, p.rel, p.lang, imported, defsByName, srcId, testCaller, nsReach, superTypesByType, modReach);
       if (resolved) {
         edges.add('call', srcId, resolved.id, 'heuristic', resolved.confidence);
         stats.callsResolved++;
@@ -197,9 +254,11 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
     const localDefs = defsByFile.get(p.rel) ?? [];
     const imported = importedFilesByRel.get(p.rel) ?? new Set<string>();
     const testCaller = isTestFile(p.rel);
+    const nsReach = nsReachableByRel.get(p.rel) ?? new Set<string>();
+    const modReach = moduleReachableByRel.get(p.rel) ?? new Set<string>();
     for (const ref of p.typeRefs) {
       const srcId = enclosingDefId(localDefs, ref.byte) ?? fileId;
-      const target = resolveType(ref.name, p.rel, p.lang, imported, defsByName, testCaller);
+      const target = resolveType(ref.name, p.rel, p.lang, imported, defsByName, testCaller, nsReach, modReach);
       if (target) edges.add('references', srcId, target.id, 'heuristic', 0.7);
     }
   }
@@ -212,7 +271,9 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
     for (const h of p.heritage) {
       const srcId = enclosingDefId(localDefs, h.byte);
       if (!srcId) continue;
-      const target = resolveType(h.superName, p.rel, p.lang, imported, defsByName, testCaller);
+      const nsReach = nsReachableByRel.get(p.rel) ?? new Set<string>();
+      const modReach = moduleReachableByRel.get(p.rel) ?? new Set<string>();
+      const target = resolveType(h.superName, p.rel, p.lang, imported, defsByName, testCaller, nsReach, modReach);
       if (target) edges.add(h.kind as EdgeKind, srcId, target.id, 'heuristic', 0.85);
       else bumpUnresolved(unresolved, srcId, h.superName, h.kind as 'extends' | 'implements', p.rel);
     }
@@ -285,14 +346,66 @@ function parentQualifiedName(qn: string): string | null {
   return idx > 0 ? qn.slice(0, idx) : null;
 }
 
-function enclosingDefId(defs: DefNodeRef[], byte: number): string | undefined {
+function enclosingDefRef(defs: DefNodeRef[], byte: number): DefNodeRef | undefined {
   let best: DefNodeRef | undefined;
   for (const d of defs) {
     if (d.startByte <= byte && d.endByte >= byte) {
       if (!best || d.endByte - d.startByte < best.endByte - best.startByte) best = d;
     }
   }
-  return best?.id;
+  return best;
+}
+
+function enclosingDefId(defs: DefNodeRef[], byte: number): string | undefined {
+  return enclosingDefRef(defs, byte)?.id;
+}
+
+function addToSet(map: Map<string, Set<string>>, key: string, value: string): void {
+  const s = map.get(key);
+  if (s) s.add(value);
+  else map.set(key, new Set([value]));
+}
+
+/** The declaring type of a method, from its dotted qualified name (`Foo.bar` → `Foo`). */
+function parentTypeName(qualifiedName: string): string | null {
+  const i = qualifiedName.lastIndexOf('.');
+  return i > 0 ? qualifiedName.slice(0, i) : null;
+}
+
+/**
+ * Disambiguate an interface/implementation family among same-named candidate
+ * methods, anchored on real heritage (`class Impl : IFace`):
+ *   - exactly one implementation → resolve to it (the concrete runtime target,
+ *     so impact_of/tests_for/find_path on the service work);
+ *   - several implementations of one interface → resolve to the interface method
+ *     (the stable contract) rather than fan out to every impl or pick arbitrarily;
+ *   - not an interface/impl family → null (stay honestly ambiguous).
+ * Returns the chosen def, or null when the pool is not a single such family.
+ */
+function disambiguateInterfaceImpl(
+  pool: DefNodeRef[],
+  superTypesByType: Map<string, Set<string>>,
+): DefNodeRef | null {
+  const withParent = pool
+    .map((c) => ({ c, parent: parentTypeName(c.qualifiedName) }))
+    .filter((x): x is { c: DefNodeRef; parent: string } => x.parent !== null);
+  if (withParent.length < 2) return null;
+  const parents = new Set(withParent.map((x) => x.parent));
+  // An impl candidate: its parent type declares (implements/extends) another
+  // candidate's parent type.
+  const impls = withParent.filter((x) =>
+    [...parents].some((other) => other !== x.parent && superTypesByType.get(x.parent)?.has(other)),
+  );
+  if (impls.length === 0) return null;
+  // The interface(s) those impls satisfy (a candidate whose parent is a super of an impl's parent).
+  const interfaceParents = new Set<string>();
+  for (const impl of impls) for (const s of superTypesByType.get(impl.parent) ?? []) interfaceParents.add(s);
+  const interfaces = withParent.filter((x) => interfaceParents.has(x.parent));
+  const uniqueImplIds = new Set(impls.map((x) => x.c.id));
+  if (uniqueImplIds.size === 1) return impls[0].c;
+  const uniqueIfaceIds = new Set(interfaces.map((x) => x.c.id));
+  if (uniqueIfaceIds.size === 1) return interfaces[0].c;
+  return null;
 }
 
 /**
@@ -309,6 +422,15 @@ function enclosingDefId(defs: DefNodeRef[], byte: number): string | undefined {
  * a same-name def elsewhere is not reachable.
  */
 const PACKAGE_SCOPED_LANGS = new Set(['go', 'java', 'cs', 'kotlin', 'scala', 'swift']);
+
+/** Languages whose `import` names a TYPE (not a namespace), so the reachable
+ *  namespace is the import's parent (`import a.b.Foo` → package `a.b`, PHP
+ *  `use A\B\Foo` → namespace `A\B`). Separator is `.` except PHP's `\`. */
+const IMPORT_NAMES_A_TYPE = new Set(['java', 'kotlin', 'scala', 'php']);
+
+/** Languages with whole-module visibility — every file in the module sees the
+ *  others' top-level symbols with no import (Swift). Treated as one module. */
+const MODULE_SCOPED_LANGS = new Set(['swift']);
 
 function dirOf(rel: string): string {
   const i = rel.lastIndexOf('/');
@@ -333,6 +455,9 @@ function resolveCall(
   defsByName: Map<string, DefNodeRef[]>,
   enclosingId?: string,
   fromIsTestFile = false,
+  nsReachableRels: Set<string> = new Set(),
+  superTypesByType: Map<string, Set<string>> = new Map(),
+  moduleReachableRels: Set<string> = new Set(),
 ): { id: string; confidence: number } | null {
   const candidates = defsByName.get(call.callee);
   if (!candidates || candidates.length === 0) return null;
@@ -355,20 +480,38 @@ function resolveCall(
     return { id: pick.id, confidence: 0.4 };
   }
 
-  // 2. Import-justified: the target's file is imported by the caller's file.
-  const imported = pool.filter((c) => importedRels.has(c.rel));
-  if (imported.length === 1) return { id: imported[0].id, confidence: 0.75 };
-  if (imported.length > 1) return null; // ambiguous across imports — let a precise rung decide
+  // 2. Reachable-candidate resolution, in two tiers of trust.
+  //
+  //    STRICT reachability (imported file, same package directory, or an
+  //    explicitly named namespace) is strong enough to resolve a UNIQUE match —
+  //    the developer named the scope. Unified into one pool BEFORE deciding, so
+  //    a DI call reaches the concrete implementation even when only the interface
+  //    was directly imported (interface via `import`, impl via its package) —
+  //    the ordering that previously stopped at the interface method.
+  const dir = dirOf(fromRel);
+  const notSelf = (c: DefNodeRef): boolean => !(call.qualified && enclosingId && c.id === enclosingId);
+  const strict = pool.filter(
+    (c) =>
+      notSelf(c) &&
+      (importedRels.has(c.rel) ||
+        (PACKAGE_SCOPED_LANGS.has(fromLang) && c.lang === fromLang && dirOf(c.rel) === dir) ||
+        nsReachableRels.has(c.rel)),
+  );
+  if (strict.length === 1) return { id: strict[0].id, confidence: 0.75 };
 
-  // 3. Same package directory (Go/Java/C#/Kotlin/Scala/Swift: visible without an
-  // import). Same self-loop rule as rung 1: a *qualified* call never resolves to
-  // the enclosing def itself.
-  if (PACKAGE_SCOPED_LANGS.has(fromLang)) {
-    const dir = dirOf(fromRel);
-    let samePkg = pool.filter((c) => c.lang === fromLang && dirOf(c.rel) === dir);
-    if (call.qualified && enclosingId) samePkg = samePkg.filter((c) => c.id !== enclosingId);
-    if (samePkg.length === 1) return { id: samePkg[0].id, confidence: 0.7 };
+  //    The DISAMBIGUATION pool additionally admits whole-module reachability
+  //    (Swift) — too broad for a unique-name match, but fine for the
+  //    heritage-anchored interface/implementation family, which requires a real
+  //    `implements`/`extends` declaration and so cannot fire on an unrelated
+  //    same-named symbol. Resolve a DI family to the concrete implementation.
+  const broad = pool.filter((c) => notSelf(c) && (moduleReachableRels.has(c.rel) || strict.includes(c)));
+  if (broad.length > 1) {
+    const dedup = disambiguateInterfaceImpl(broad, superTypesByType);
+    if (dedup) return { id: dedup.id, confidence: 0.6 };
   }
+  // Ambiguous within STRICT scope with no interface/impl resolution → do not
+  // guess (the "lone global match" false-positive class stays out).
+  if (strict.length > 1) return null;
 
   // 4. Swift-only test-file fallback. Xcode test targets commonly live in a
   // sibling `Tests/` tree, not the product code's directory, so rung 3's
@@ -395,6 +538,8 @@ function resolveType(
   importedRels: Set<string>,
   defsByName: Map<string, DefNodeRef[]>,
   fromIsTestFile = false,
+  nsReachableRels: Set<string> = new Set(),
+  moduleReachableRels: Set<string> = new Set(),
 ): { id: string } | null {
   const candidates = (defsByName.get(name) ?? []).filter(
     (c) => c.kind === 'class' || c.kind === 'interface',
@@ -412,6 +557,16 @@ function resolveType(
     const dir = dirOf(fromRel);
     const samePkg = candidates.filter((c) => c.lang === fromLang && dirOf(c.rel) === dir);
     if (samePkg.length === 1) return { id: samePkg[0].id };
+  }
+
+  // Namespace / whole-module reachable type: the type's file declares a
+  // namespace this file `using`/`import`s or shares (C#/JVM), or is in the same
+  // module (Swift). An explicit type annotation naming a unique reachable type
+  // is unambiguous — this is not a call, so the lone-name-call precision guard
+  // does not apply. A type name matching two reachable types stays unresolved.
+  if (nsReachableRels.size || moduleReachableRels.size) {
+    const reach = candidates.filter((c) => nsReachableRels.has(c.rel) || moduleReachableRels.has(c.rel));
+    if (reach.length === 1) return { id: reach[0].id };
   }
 
   // Swift-only test-file fallback — see the matching rung in resolveCall.
