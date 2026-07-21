@@ -56,6 +56,9 @@ export function registerShare(program: Command): void {
   applyGlobalOptions(cmd);
 }
 
+// Deliberately overwrites the default create-once ignore file (see
+// ensureVibgrateGitignore): sharing is the explicit opt-in that flips
+// graph.json from ignored-by-default to committed.
 function writeVibgrateGitignore(root: string, reports: boolean): void {
   const dir = path.join(root, '.vibgrate');
   fs.mkdirSync(dir, { recursive: true });

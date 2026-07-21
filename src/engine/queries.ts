@@ -186,6 +186,13 @@ const C_SHARP: LangQueries = {
     { kind: 'class', query: '(class_declaration name: (identifier) @name) @def' },
     { kind: 'interface', query: '(interface_declaration name: (identifier) @name) @def' },
     { kind: 'class', query: '(struct_declaration name: (identifier) @name) @def' },
+    // Enums and records are load-bearing lookup targets in real C# codebases
+    // (permission enums, DTO records); without these captures a `Privilege`-
+    // style lookup only ever resolves via the literal text fallthrough.
+    // 'class' is this engine's established kind for enum-like types (see the
+    // Rust enum_item and C enum_specifier mappings).
+    { kind: 'class', query: '(enum_declaration name: (identifier) @name) @def' },
+    { kind: 'class', query: '(record_declaration name: (identifier) @name) @def' },
   ],
   calls: ['(invocation_expression function: (member_access_expression name: (identifier) @callee))', '(invocation_expression function: (identifier) @callee)'],
   imports: ['(using_directive (qualified_name) @source)', '(using_directive (identifier) @source)'],
