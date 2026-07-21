@@ -15,7 +15,9 @@ import type { FileParse } from './types.js';
  * prove this.
  */
 
-const CACHE_VERSION = 'vg-parse-cache/2';
+// Bumped to /3: FileParse now carries `namespaces` (C# cross-namespace
+// resolution); a cache written before this lacks it and must be re-parsed.
+const CACHE_VERSION = 'vg-parse-cache/3';
 
 interface CacheFile {
   version: string;

@@ -57,6 +57,14 @@ export interface FileParse {
   heritage: RawHeritage[];
   typeRefs: RawTypeRef[];
   guards: RawGuard[];
+  /**
+   * Namespaces this file declares (C#/package-scoped langs). Used to resolve a
+   * cross-directory reference when the caller `using`-imports the namespace the
+   * target is declared in — the correct scoping rule for C#, where a namespace
+   * is decoupled from the directory (unlike Java/Go, where package == dir).
+   * Empty/absent for languages with no namespace query.
+   */
+  namespaces?: string[];
   /** Non-fatal issues (e.g. a query that failed to compile for this grammar). */
   warnings?: string[];
 }

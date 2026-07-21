@@ -36,6 +36,14 @@ export interface LangQueries {
    * own capture. Resolved to a `references` edge (not `call`) in resolve.ts.
    */
   typeRefs?: string[];
+  /**
+   * Namespace declarations captured as @namespace — the namespaces a file
+   * declares its types in. For languages where a namespace is decoupled from
+   * the directory (C#), this lets the resolver connect a cross-directory
+   * reference when the caller `using`-imports that namespace. Absent for
+   * languages that have no namespace concept or where package == directory.
+   */
+  namespaces?: string[];
 }
 
 // assert-like call detection, shared by the C-family languages.
@@ -162,6 +170,10 @@ const JAVA: LangQueries = {
     '(constructor_declaration parameters: (formal_parameters (formal_parameter type: (type_identifier) @typeref)))',
     '(field_declaration type: (type_identifier) @typeref)',
   ],
+  // A Java package is a directory, so cross-directory (cross-package) DI
+  // resolves through `import a.b.Foo`. Capturing the package lets the resolver
+  // reach the implementation in another package when the caller imports it.
+  namespaces: ['(package_declaration (scoped_identifier) @namespace)', '(package_declaration (identifier) @namespace)'],
 };
 
 const RUST: LangQueries = {
@@ -194,9 +206,32 @@ const C_SHARP: LangQueries = {
     { kind: 'class', query: '(enum_declaration name: (identifier) @name) @def' },
     { kind: 'class', query: '(record_declaration name: (identifier) @name) @def' },
   ],
-  calls: ['(invocation_expression function: (member_access_expression name: (identifier) @callee))', '(invocation_expression function: (identifier) @callee)'],
+  calls: [
+    '(invocation_expression function: (member_access_expression name: (identifier) @callee))',
+    '(invocation_expression function: (identifier) @callee)',
+    // `new Foo(...)` is an instantiation dependency (the caller depends on Foo),
+    // and it is how a test most directly links to the class under test — without
+    // it a test that only constructs the service showed up as no coverage.
+    '(object_creation_expression type: (identifier) @callee)',
+  ],
   imports: ['(using_directive (qualified_name) @source)', '(using_directive (identifier) @source)'],
   heritage: ['(base_list (identifier) @extends)'],
+  // Dependency-injection wiring: the interface a class depends on appears as a
+  // constructor-parameter type or a readonly field type, never as a call — so
+  // without these captures a controller/service injected through an interface
+  // looks like it references nothing. Simple (identifier) types only; generics/
+  // qualified names are left to a precise rung. Mirrors the Java DI captures.
+  typeRefs: [
+    '(constructor_declaration (parameter_list (parameter type: (identifier) @typeref)))',
+    '(field_declaration (variable_declaration type: (identifier) @typeref))',
+  ],
+  // A namespace is decoupled from the directory in C#, so cross-namespace
+  // resolution needs to know which namespace a file declares. Both block-scoped
+  // (`namespace N { }`) and file-scoped (`namespace N;`) forms.
+  namespaces: [
+    '(namespace_declaration name: [(identifier) (qualified_name)] @namespace)',
+    '(file_scoped_namespace_declaration name: [(identifier) (qualified_name)] @namespace)',
+  ],
 };
 
 const RUBY: LangQueries = {
@@ -239,6 +274,15 @@ const PHP: LangQueries = {
     '[(require_expression (string) @source) (require_once_expression (string) @source) (include_expression (string) @source) (include_once_expression (string) @source)]',
   ],
   heritage: ['(base_clause (name) @extends)', '(class_interface_clause (name) @implements)'],
+  // PHP namespaces are decoupled from directories (PSR-4 maps them, but the
+  // resolver has no composer.json), so cross-namespace DI resolves through
+  // `use`. Constructor-parameter and typed-property types are the injection
+  // points.
+  namespaces: ['(namespace_definition name: (namespace_name) @namespace)'],
+  typeRefs: [
+    '(simple_parameter type: (named_type (name) @typeref))',
+    '(property_declaration type: (named_type (name) @typeref))',
+  ],
   guards: ['(function_call_expression function: (name) @_g (#eq? @_g "assert")) @guard'],
 };
 
@@ -257,6 +301,14 @@ const KOTLIN: LangQueries = {
     '(call_expression (navigation_expression (navigation_suffix (simple_identifier) @callee)))',
   ],
   imports: ['(import_header (identifier) @source)'],
+  // Kotlin: package for cross-package DI reachability; primary-constructor
+  // `val` params and property types are the injection points.
+  namespaces: ['(package_header (identifier) @namespace)'],
+  typeRefs: [
+    '(class_parameter (user_type (type_identifier) @typeref))',
+    '(property_declaration (variable_declaration (user_type (type_identifier) @typeref)))',
+    '(property_declaration (variable_declaration (nullable_type (user_type (type_identifier) @typeref))))',
+  ],
   heritage: [
     '(delegation_specifier (constructor_invocation (user_type (type_identifier) @extends)))',
     '(delegation_specifier (user_type (type_identifier) @implements))',
@@ -280,6 +332,13 @@ const SWIFT: LangQueries = {
   ],
   imports: ['(import_declaration (identifier) @source)'],
   heritage: ['(inheritance_specifier inherits_from: (user_type (type_identifier) @extends))'],
+  // Swift: init-parameter and stored-property types are the injection points
+  // (protocol-typed). Whole-module visibility (handled in resolve.ts) makes the
+  // conforming implementation reachable cross-file.
+  typeRefs: [
+    '(parameter (user_type (type_identifier) @typeref))',
+    '(type_annotation (user_type (type_identifier) @typeref))',
+  ],
   guards: [
     '(call_expression (simple_identifier) @_g (#match? @_g "^(assert|precondition|assertionFailure|preconditionFailure)$")) @guard',
   ],
@@ -307,6 +366,13 @@ const SCALA: LangQueries = {
     '(extends_clause type: (compound_type base: (type_identifier) @extends))',
     '(extends_clause type: (compound_type extra: (type_identifier) @implements))',
   ],
+  // Scala: package for cross-package DI reachability; class-parameter and val
+  // types are the injection points.
+  namespaces: ['(package_clause name: (package_identifier) @namespace)'],
+  typeRefs: [
+    '(class_parameter type: (type_identifier) @typeref)',
+    '(val_definition type: (type_identifier) @typeref)',
+  ],
   guards: ['(call_expression function: (identifier) @_g (#match? @_g "^(require|assert|assume)$")) @guard'],
 };
 
@@ -326,6 +392,13 @@ const DART: LangQueries = {
     '(cascade_section (cascade_selector (identifier) @callee) . (argument_part))',
   ],
   imports: ['(import_specification (configurable_uri (uri (string_literal) @source)))'],
+  // Dart: constructor/method parameter types and typed field declarations are
+  // the injection points (Dart resolves cross-file via `import`, so no
+  // namespace query is needed — the import rung already reaches the impl).
+  typeRefs: [
+    '(formal_parameter (type_identifier) @typeref)',
+    '(declaration (type_identifier) @typeref)',
+  ],
   heritage: [
     '(superclass (type_identifier) @extends)',
     '(interfaces (type_identifier) @implements)',
@@ -494,6 +567,9 @@ const OBJC: LangQueries = {
     { kind: 'method', query: '(method_definition (identifier) @name) @def' },
     { kind: 'class', query: '(class_implementation . (identifier) @name) @def' },
     { kind: 'interface', query: '(class_interface . (identifier) @name) @def' },
+    // A @protocol is Objective-C's interface — without this it is not a node, so
+    // conformance and protocol-typed DI cannot resolve.
+    { kind: 'interface', query: '(protocol_declaration (identifier) @name) @def' },
   ],
   calls: [
     '(call_expression function: (identifier) @callee)',
@@ -503,7 +579,13 @@ const OBJC: LangQueries = {
     '(preproc_include path: (string_literal) @source)',
     '(preproc_include path: (system_lib_string) @source)',
   ],
-  heritage: ['(class_interface superclass: (identifier) @extends)'],
+  // Superclass (`: NSObject`) is `extends`; adopted protocols (`<Servicing>`,
+  // captured as parameterized_arguments after the interface name) are the
+  // `implements` relationship a DI call disambiguates through.
+  heritage: [
+    '(class_interface superclass: (identifier) @extends)',
+    '(class_interface (parameterized_arguments (type_name (type_identifier) @implements)))',
+  ],
   guards: ASSERT_CALLS,
 };
 

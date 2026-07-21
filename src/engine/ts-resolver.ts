@@ -63,6 +63,16 @@ export function tsResolveEdges(
   const edges = new Map<string, GraphEdge>();
   const covered = new Set<string>();
   const stats = empty.stats;
+  // A method call on an interface-typed receiver resolves to the interface (its
+  // method signatures are not graph nodes), so DI-injected services never got a
+  // call edge to the concrete implementation. Record such calls and, once all
+  // `implements` edges are known, bridge each to the SINGLE implementation's
+  // matching method — the DI reality (the impl choice lives in module config,
+  // not the caller). Only when exactly one class implements the interface, so it
+  // never guesses among several. { srcId, interfaceId, method } tuples.
+  const interfaceCalls: Array<{ srcId: string; interfaceId: string; method: string }> = [];
+  const byId = new Map<string, GraphNode>();
+  for (const list of nodesByFile.values()) for (const n of list) byId.set(n.id, n);
 
   for (const file of tsFiles) {
     const sf = program.getSourceFile(file.abs);
@@ -86,6 +96,12 @@ export function tsResolveEdges(
           if (src && src.id !== target.id) {
             add(edges, callKind(target), src.id, target.id);
             stats.resolved++;
+            // Interface-typed method call (`svc.method()` where svc: IFoo): the
+            // target is the interface node, and the method name is the accessed
+            // property. Record it for the single-implementation bridge below.
+            if (target.kind === 'interface' && ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+              interfaceCalls.push({ srcId: src.id, interfaceId: target.id, method: node.expression.name.text });
+            }
           }
         }
       } else if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
@@ -122,6 +138,34 @@ export function tsResolveEdges(
       ts.forEachChild(node, visit);
     };
     visit(sf);
+  }
+
+  // Single-implementation bridge: for each interface with EXACTLY ONE
+  // implementing class, redirect its recorded interface-typed calls to the
+  // implementation's matching method. This is the DI edge that makes impact_of /
+  // tests_for / find_path work on the concrete service. Skipped when an
+  // interface has zero or several implementations (genuinely ambiguous — the
+  // references→interface edge already recorded the dependency).
+  const implsByInterface = new Map<string, string[]>();
+  for (const e of edges.values()) {
+    if (e.kind !== 'implements' && e.kind !== 'extends') continue;
+    if (byId.get(e.dst)?.kind !== 'interface') continue;
+    const list = implsByInterface.get(e.dst);
+    if (list) list.push(e.src);
+    else implsByInterface.set(e.dst, [e.src]);
+  }
+  for (const { srcId, interfaceId, method } of interfaceCalls) {
+    const impls = implsByInterface.get(interfaceId);
+    if (!impls || impls.length !== 1) continue;
+    const impl = byId.get(impls[0]);
+    if (!impl) continue;
+    const target = (nodesByFile.get(impl.file) ?? []).find(
+      (n) => (n.kind === 'method' || n.kind === 'function') && n.qualifiedName === `${impl.qualifiedName}.${method}`,
+    );
+    if (target && target.id !== srcId) {
+      add(edges, 'call', srcId, target.id);
+      stats.resolved++;
+    }
   }
 
   return { edges: [...edges.values()], coveredFiles: covered, stats };

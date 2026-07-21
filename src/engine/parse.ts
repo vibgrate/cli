@@ -333,6 +333,19 @@ export async function parseSource(
   }
   result.typeRefs = typeRefs.sort((a, b) => a.byte - b.byte || a.name.localeCompare(b.name));
 
+  // --- namespaces declared by this file (C# cross-namespace resolution) ---
+  const namespaces = new Set<string>();
+  for (const qsrc of langQueries.namespaces ?? []) {
+    const q = compile(language, effLangId, qsrc);
+    if (!q) continue;
+    for (const cap of q.captures(root)) {
+      if (cap.name !== 'namespace') continue;
+      const name = cap.node.text.trim();
+      if (name) namespaces.add(name);
+    }
+  }
+  if (namespaces.size) result.namespaces = [...namespaces].sort();
+
   // --- guards (assert-like expressions → invariant facts) ---
   const guards: RawGuard[] = [];
   for (const qsrc of langQueries.guards ?? []) {
