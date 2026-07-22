@@ -301,6 +301,7 @@ See [docs/QUICKSTART-PROMPT.md](./docs/QUICKSTART-PROMPT.md) for the full prompt
 | `vg benchmark` | Reproducible build + memory + token-reduction benchmark (honest estimates) |
 | `vg build [path]` | Build / update the code map (incremental, deterministic) |
 | `vg bundle` | Build an air-gapped bundle (grammars + graph + library catalog) |
+| `vg code "<instruction>"` | Propose a graph-grounded code edit (dry-run by default; `--apply --yes` to write) |
 | `vg embed` | Precompute the semantic index for instant `vg ask` |
 | `vg export` | Export the map (json / ndjson / graphml / dot / cypher / md / html / SBOM) |
 | `vg facts <file>` | Deterministic facts for a node (contracts, invariants) |
@@ -309,7 +310,7 @@ See [docs/QUICKSTART-PROMPT.md](./docs/QUICKSTART-PROMPT.md) for the full prompt
 | `vg install` / `vg uninstall` | Wire (or remove) **Vibgrate AI Context** + skill in your AI assistant |
 | `vg lib <package>` | Version-correct, drift-annotated library docs |
 | `vg map` / `vg hubs` / `vg areas` / `vg oddities` | Map insights: overview, most-depended-on code, natural groupings, cross-area smells |
-| `vg models` | The local model fleet (Ollama / LM Studio / gguf), discovered offline |
+| `vg models` / `vg models pull` | The local model fleet (Ollama / LM Studio / gguf), discovered offline; `pull` fetches one (needs `--yes`) |
 | `vg path <from> <to>` | How A connects to B (shortest path) |
 | `vg savings` | Local report of tokens/$ saved vs a grep baseline (estimates) |
 | `vg serve` | Start **Vibgrate AI Context** (local-first MCP: code map + drift + version-correct docs) |

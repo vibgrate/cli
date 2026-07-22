@@ -50,3 +50,27 @@ export function printLogo(root?: string, opts: { product?: string; tagline?: str
   if (!process.stderr.isTTY) return;
   process.stderr.write(`${logoLines(root, opts).join('\n')}\n`);
 }
+
+/**
+ * The **VG Code** banner (the approved marketing name for the code-editing
+ * capability; see docs/NAMING-AND-MARKETING-STRATEGY.md). Same robot mark, but
+ * the wordmark reads "VG Code" rather than "Vibgrate Graph".
+ */
+export function codeLogoLines(root?: string): string[] {
+  return [
+    '',
+    `  ${ROBOT[0]}`,
+    `  ${ROBOT[1]}`,
+    `  ${ROBOT[2]}`,
+    `  ${ROBOT[3]}`,
+    `  ${c.bold.white('VG')} ${teal('Code')}  ${c.dim(`· graph-grounded coding · v${VERSION}`)}`,
+    ...(root ? [`  ${c.dim(root)}`] : []),
+    '',
+  ];
+}
+
+/** Print the VG Code banner to stderr, only for an interactive human (TTY). */
+export function printCodeLogo(root?: string): void {
+  if (!process.stderr.isTTY) return;
+  process.stderr.write(`${codeLogoLines(root).join('\n')}\n`);
+}
