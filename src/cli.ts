@@ -28,6 +28,7 @@ import { registerWhy } from './commands/why.js';
 import { registerBisect } from './commands/bisect.js';
 import { registerDrift } from './commands/drift.js';
 import { registerModels } from './commands/models.js';
+import { registerCode } from './commands/code.js';
 import { registerSavings } from './commands/savings.js';
 import { registerLib } from './commands/lib.js';
 import { registerExport } from './commands/export.js';
@@ -49,6 +50,7 @@ import { logoutCommand } from './reporting/commands/logout.js';
 import { pushCommand } from './reporting/commands/push.js';
 import { updateCommand } from './reporting/commands/update.js';
 import { sbomCommand } from './reporting/commands/sbom.js';
+import { evidenceCommand } from './reporting/commands/evidence/index.js';
 
 /** The set of registered subcommand names (kept in sync with registration). */
 export const KNOWN_COMMANDS = new Set([
@@ -68,6 +70,7 @@ export const KNOWN_COMMANDS = new Set([
   'bisect',
   'drift',
   'models',
+  'code',
   'savings',
   'lib',
   'export',
@@ -96,6 +99,7 @@ export const KNOWN_COMMANDS = new Set([
   'dsn',
   'update',
   'sbom',
+  'evidence',
 ]);
 
 export function buildProgram(): Command {
@@ -150,6 +154,7 @@ export function buildProgram(): Command {
   registerBisect(program);
   registerDrift(program);
   registerModels(program);
+  registerCode(program);
   registerSavings(program);
   registerLib(program);
   registerExport(program);
@@ -169,6 +174,7 @@ export function buildProgram(): Command {
   program.addCommand(pushCommand);
   program.addCommand(updateCommand);
   program.addCommand(sbomCommand);
+  program.addCommand(evidenceCommand);
 
   return program;
 }

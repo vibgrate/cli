@@ -15,6 +15,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg bisect](#vg-bisect)
   - [vg drift](#vg-drift)
   - [vg dsn create](#vg-dsn-create)
+  - [vg evidence](#vg-evidence)
   - [vg fix](#vg-fix)
   - [vg init](#vg-init)
   - [vg login](#vg-login)
@@ -240,6 +241,55 @@ vg dsn create --workspace <id|new> [--region <region>] [--ingest <url>] [--write
 
 When using `--workspace new`, the CLI auto-generates a workspace ID and provisions the DSN
 with the Vibgrate API. Rate limited to 1 new DSN per 5 minutes per IP address.
+
+---
+
+### vg evidence
+
+Vibgrate Evidence — signed, reproducible regulatory evidence. Register products with digital elements, freeze a shipped release into an immutable component manifest, then answer "which shipped products contain this vulnerability, at which versions, in which markets, still in support?" as evidence a third party can verify offline.
+
+Reporting duties are modelled as **regimes** (jurisdiction-neutral): the EU Cyber Resilience Act (`--regime cra`) is the first; DORA incident reporting (`--regime dora-incident`) ships too. A new jurisdiction is a regime profile, not a new command.
+
+```bash
+vg evidence init [--regime <id>] [--coordinator <csirt>] [--responsible <name>] [--filing-authority] [--ooo <contact>]
+vg evidence regimes
+vg evidence product add <name> [--markets DE,FR] [--classification <id>] [--in-scope] [--rationale <text>] [--bind <ref>] [--until <date>]
+vg evidence product list
+vg evidence product show <id>
+vg evidence release <product> <version> --from <sbom-or-scan> [--ship-date <date>] [--build-id <id>] [--digest <sha256>] [--markets DE,FR]
+vg evidence exposure <vuln> [--regime <id>] [--advisory <file>] [--offline] [--as-of <date>] [--products <substr>] [--include-eol] [--format table|json] [--pack --stage <stage>] [--bundle <dir>] [--tsa <url>]
+vg evidence readiness [--regime <id>] [--format table|json]
+vg evidence support-period <product> [--from <date>] [--until <date>]
+vg evidence pack <vuln> [--regime <id>] [--stage <stage>] [--advisory <file>] [--offline] [--out <file>]
+vg evidence drill [--regime <id>] [--scenario <name>] [--elapsed <seconds>]
+vg evidence watch [--regime <id>] [--since <date>] [--webhook <url>] [--format table|json]
+vg evidence verify <bundle> [--pub <file>]
+vg evidence push [--result <bundle-or-file>] [--regime <id>] [--dsn <dsn>] [--signed]
+vg evidence export [--out <dir>] [--regime <id>]
+```
+
+| Command | Description |
+|---------|-------------|
+| `vg evidence init` | Set org, coordinator CSIRT, and the person with filing authority |
+| `vg evidence regimes` | List available reporting regimes and their clocks |
+| `vg evidence product add` | Register a product with digital elements (PDE) |
+| `vg evidence release` | Freeze a shipped release into an immutable component manifest |
+| `vg evidence exposure` | Which shipped products contain a vulnerability — with signed evidence |
+| `vg evidence readiness` | Deterministic gap report against the regime's obligations |
+| `vg evidence drill` | Timed dry-run of the determination against a simulated advisory |
+| `vg evidence pack` | Build the submission pack a human pastes into the reporting platform |
+| `vg evidence watch` | Check CISA KEV for new exposure against your shipped components |
+| `vg evidence verify` | Verify an evidence bundle offline — no account, no network |
+| `vg evidence push` | Push the product registry (and an optional exposure result) to Vibgrate Cloud |
+| `vg evidence export` | Air-gap bundle of all evidence state |
+
+`exposure` matches against manifests **frozen at ship time**, not the current tree, and never guesses: a bound product with no frozen manifest returns `undetermined` with a reason. It runs fully `--offline` against a local advisory file, and can emit a signed evidence bundle (`--bundle <dir>`) that `vg evidence verify` checks offline with honest `verified` / `unverified` / `failed` states. Pass `--tsa <url>` to anchor the bundle to a trusted **RFC 3161** timestamp (`timestamp.tsr`), fully verifiable with `openssl ts -verify`.
+
+`watch` joins the CISA **Known Exploited Vulnerabilities (KEV)** catalog to the components in your frozen manifests (via OSV) and reports any KEV-listed vulnerability that affects a shipped release — alerting via stdout or `--webhook`. It **surfaces the KEV listing**; whether a vulnerability is "actively exploited" for a filing is your determination, not the tool's.
+
+**Exit codes** (CI-usable): `0` no exposure · `2` exposure found · `3` undetermined (manual review) · `1` operational error.
+
+No language model touches any figure in the evidence path, and every determination carries an evidence-not-compliance disclaimer. Vibgrate Evidence produces evidence to support your obligations under a regime; it does not determine compliance and is not legal advice.
 
 ---
 
@@ -818,6 +868,141 @@ vg models
 ```
 
 Lists the local inference backends and models Vibgrate can see, so you know what is available without any network calls. Add `--json` for machine-readable output.
+
+To fetch a model through your Ollama runtime, use the `pull` subcommand. **No model is ever downloaded by default** — the download only happens when you pass `--yes`; without it, `pull` just prints the plan.
+
+```bash
+vg models pull qwen2.5-coder:7b --yes
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `<name>` | — | Model to pull, e.g. `qwen2.5-coder:7b` |
+| `--runtime <id>` | `ollama` | Runtime to pull with |
+| `--yes` | — | Actually download (without this it only prints the plan) |
+
+---
+
+### vg code
+
+Propose a code edit for a plain-language instruction, grounded in the deterministic code graph. `vg code` is **dry-run by default**: it prints the proposed diff and writes nothing.
+
+```bash
+vg code "add a --timeout flag to the scan command"
+```
+
+**Agentic sessions.** With a real model, `vg code` is a coding *agent*, not just a one-shot editor: the model is given tools and works in steps — **search the code graph**, read files, check a symbol's blast radius, edit, create/delete files, and run your tests or build — until the task is done. Every mutating step (an edit or a command) is **governed**: you approve it, or run autonomously with `--auto`. Read-only steps (search/read/list/impact) run without prompting. `--single` forces the old one-shot diff; `--max-steps <n>` caps the loop.
+
+**Guided mode.** Run `vg code` with no instruction at an interactive terminal and it walks you through everything: it builds the code map, then asks where the model should run — a local model, or one of the current top providers (Claude, GPT, Grok, Gemini, …) surfaced live from the catalog — and which model, with an "enter a slug myself" option at every step. Before pulling any local model it runs a memory pre-flight (estimated footprint vs free RAM/VRAM and already-loaded models) and won't pull a model your machine can't run; then it drops into an agent session where you describe tasks and approve each change. For scripts and CI, pass an instruction with `--auto` (or `--mock`) — the agent only prompts at a TTY, so automation never blocks.
+
+While a session is active, Vibgrate Graph (`vg serve`) runs as a separate process for the life of the session and is stopped when you exit. Every graph-backed call is attributed to VG Code and the model in use, so `vg savings` reports token/$ savings **per model**.
+
+**A full local session (no cloud):**
+
+```bash
+# one-time: a local coding model (nothing is downloaded by default)
+vg models pull qwen2.5-coder:7b --yes
+
+# start a guided agent session — pick "Local model" → qwen2.5-coder:7b
+vg code
+```
+
+```text
+  VG Code  · graph-grounded coding · v2026.x
+
+  ✔ Code map built
+  ✔ Model catalog loaded
+  ? Where should the model run?
+  ❯ Local model (on your machine)   1 found
+    Anthropic (Claude)              via OpenRouter
+    …
+  ✔ qwen2.5-coder:7b
+  ◆ Ready — ollama/qwen2.5-coder:7b · graph 48213. Describe a task; empty line to exit.
+
+  code › add a --timeout flag to the scan command and use it
+
+    → search_code(query: --timeout flag scan command)
+      scanCommand (function) src/commands/scan.ts:12
+    → read_file(path: src/commands/scan.ts)
+      src/commands/scan.ts (40 lines): …
+    → graph_impact(symbol: runScan)
+      3 symbol(s) depend on runScan: …
+  I'll add the option and thread it through.
+    → edit_file(path: src/commands/scan.ts, …)
+--- a/src/commands/scan.ts
++++ b/src/commands/scan.ts
+@@ …
++  .option('--timeout <ms>', 'abort the scan after <ms> milliseconds')
+  ? Apply edit to src/commands/scan.ts? [Y/n] y
+      ✔ edited src/commands/scan.ts
+    → run_command(command: npm test -- scan)
+  ? Run `npm test -- scan`? [y/N] y
+      ✔ exit 0  … 12 passing
+    → finish(summary: added a --timeout flag to scan and covered it with tests)
+
+  ✔ added a --timeout flag to scan and covered it with tests
+    +6 -1 across 1 file(s) · via ollama/qwen2.5-coder:7b
+```
+
+Run it non-interactively with `vg code "add a --timeout flag to scan" --provider ollama --model qwen2.5-coder:7b --auto`, or against a hosted model with `--provider openrouter --model anthropic/claude-3.5-sonnet` (set `OPENROUTER_API_KEY`).
+
+**In a session** you can type slash-commands: `/undo` reverts the last change, `/diff` shows it, `/model` switches model, `/cost` shows the running token/$ cost, `/help` lists them, `/exit` quits.
+
+**More session controls:**
+
+- `--stream` streams the model's output live as it's generated.
+- `--verify [command]` runs your tests after the agent finishes and, if they fail, feeds the failures back so it fixes them (uses the `testCommand` from config if you don't name one).
+- `--continue` resumes your most recent session — it recaps what was already done for the model and restores `/undo`.
+- A live **token/$ meter** shows after each task and via `/cost` (cost is shown when the model's price is known; local models are free).
+- **External MCP tools:** list servers under `mcpServers` in `.vibgrate/code.json` and the agent can call their tools (namespaced `mcp__<server>__<tool>`); read-only tools run freely, anything else is approved like a built-in mutating tool. VG Code also **adopts the standard MCP config files** already in your repo — `.mcp.json` (Claude Code), `.cursor/mcp.json` (Cursor), and `.vscode/mcp.json` (VS Code) — and merges them with your `.vibgrate/code.json` (which wins on any name clash), so servers you've already configured for another tool work here with no extra setup. Both local (`command`) and remote (`url`) servers are supported.
+
+**Tools the agent has:** searching is the code graph (`search_code`) — not a grep — plus `read_file`, `list_files`, `graph_impact` (blast radius), **`library_docs`** (version-correct docs for a dependency you actually have installed, so the model uses the right API for your version), `edit_file`, `create_file`, `delete_file`, and `run_command`.
+
+**Safety.** The agent never sends a secrets file (`.env`, keys, credentials) to the model, and redacts stray credential shapes from any file it reads. Under `--auto`, a denylist blocks catastrophic commands (filesystem wipes, `curl … | sh`, force-push, …); interactively you see and approve each command yourself.
+
+**Configure once** in `.vibgrate/code.json` so you can then just run `vg code` (flags still override):
+
+```json
+{
+  "provider": "ollama",
+  "model": "qwen2.5-coder:7b",
+  "testCommand": "npm test",
+  "auto": false,
+  "denyCommands": ["deploy", "kubectl\\s+delete"],
+  "maxSteps": 24,
+  "mcpServers": {
+    "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp"] }
+  }
+}
+```
+
+It assembles a small, high-signal context from the map (the relevant symbols, their relations, the blast radius of changing them, and any hard constraints), asks the model you choose for a minimal edit, and applies that edit through a deterministic merge so the change lands exactly where it was meant to.
+
+Writing is opt-in and confirmed. `--apply` walks the full inspect → assess → dry-run → approve → execute → verify → log lifecycle, and still requires your explicit `--yes` (or an interactive confirmation) — there is no write-without-consent path.
+
+```bash
+vg code "rename readCfg to readConfig everywhere it is called" --apply --yes
+```
+
+Pick a backend with `--provider` and `--model`. No model is bundled, and nothing is installed until you first use a backend that needs it:
+
+- **Local** — `--provider ollama` or `--provider lmstudio` (or `--local` to force on-device only, no network).
+- **Hosted** — any OpenAI-compatible endpoint: `--provider openrouter` / `litellm` / `openai` / `together`. API keys are read from the environment only (e.g. `OPENROUTER_API_KEY`), never passed as flags.
+
+With no `--provider`, `vg code` chooses from what you have already configured (a hosted key, or a locally-pulled model) and never dials a cloud endpoint you didn't set up.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `<instruction>` | — | What to change, in plain language |
+| `--provider <id>` | auto | `ollama`, `lmstudio`, `openrouter`, `litellm`, `openai`, `together`, `llama-cpp` |
+| `--model <id>` | — | Model id (or set `VG_CODE_MODEL`) |
+| `--file <path>` | — | Restrict the edit surface to this file (repeatable) |
+| `--budget <n>` | `3000` | Approx context token budget |
+| `--apply` | — | Write the change (still requires `--yes` or a confirmation) |
+| `--yes` | — | Consent to write, or to a first-use package install, non-interactively |
+| `--local` | — | On-device backends only; never touch the network |
+
+Add `--json` for the full machine-readable result (proposed changes, diffs, and the verification summary), or `--out <file>` to write it for CI. Requires a map — run `vg` first if you have not built one.
 
 ---
 

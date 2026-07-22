@@ -95,9 +95,31 @@ export interface SavingEntry {
   // sanitized coarse label (see sanitizeClient) or absent when unidentified.
   source?: Source;
   client?: string;
+  // The model that made the call, for per-model savings auditing. `provider` is
+  // a coarse provider label (e.g. `anthropic`, `ollama`), `model` the sanitized
+  // model slug. VG Code sets both so `vg savings` can break usage down per model.
+  // Absent on lines from callers that don't identify a model.
+  provider?: string;
+  model?: string;
   // Wall time of the call, ms. Optional: absent on lines written before timing
   // existed (and on CLI-sourced lines) — absent means "not measured", never 0.
   ms?: number;
+}
+
+/**
+ * Normalise a model slug to a bounded, non-PII token — like {@link sanitizeClient}
+ * but keeping the `/` and `:` that model ids use (`anthropic/claude-3.5-sonnet`,
+ * `qwen2.5-coder:7b`). Returns undefined when nothing usable is given.
+ */
+export function sanitizeModelId(name: string | undefined | null): string | undefined {
+  if (typeof name !== 'string') return undefined;
+  const cleaned = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._:/-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+  return cleaned || undefined;
 }
 
 /**
@@ -108,7 +130,7 @@ export interface SavingEntry {
  */
 export function recordCliCall(
   root: string,
-  entry: { tool: string; client?: string; outcome: Outcome; vgTokens?: number; baselineFiles?: number },
+  entry: { tool: string; client?: string; provider?: string; model?: string; outcome: Outcome; vgTokens?: number; baselineFiles?: number },
   now: number,
 ): void {
   recordSaving(
@@ -117,6 +139,8 @@ export function recordCliCall(
       tool: entry.tool,
       source: 'cli',
       client: sanitizeClient(entry.client),
+      provider: entry.provider ? sanitizeClient(entry.provider) : undefined,
+      model: sanitizeModelId(entry.model),
       outcome: entry.outcome,
       vgTokens: entry.vgTokens ?? 0,
       baselineTokens: (entry.baselineFiles ?? 0) * PER_FILE_TOKENS,
@@ -228,6 +252,59 @@ export function readSavings(root: string, days: number, now: number, ratePerM = 
 
 function round2(x: number): number {
   return Math.round(x * 100) / 100;
+}
+
+/** Token + cost savings attributed to one model (VG Code per-model auditing). */
+export interface ModelSaving {
+  /** `provider/model`, the ledger's per-model key. */
+  key: string;
+  provider: string;
+  model: string;
+  queries: number;
+  vgTokens: number;
+  baselineTokens: number;
+  saved: number;
+}
+
+/**
+ * Per-model breakdown of the token-savings figures — the basis of "full savings
+ * auditing per model". Only entries that carry a `model` and are savings-baseline
+ * tools contribute, so it lines up with the headline `readSavings` totals.
+ * Sorted by dollars saved (desc), then key.
+ */
+export function readModelSavings(root: string, days: number, now: number, ratePerM = DEFAULT_RATE_PER_M): ModelSaving[] {
+  const file = ledgerPath(root);
+  const cutoff = now - days * 24 * 60 * 60 * 1000;
+  const byModel = new Map<string, { provider: string; model: string; queries: number; vg: number; base: number }>();
+  if (fs.existsSync(file)) {
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const e = JSON.parse(line) as SavingEntry;
+        if (e.ts < cutoff || !e.model || !SAVINGS_TOOLS.has(e.tool)) continue;
+        const provider = e.provider ?? 'unknown';
+        const key = `${provider}/${e.model}`;
+        const row = byModel.get(key) ?? { provider, model: e.model, queries: 0, vg: 0, base: 0 };
+        row.queries++;
+        row.vg += e.vgTokens;
+        row.base += e.baselineTokens;
+        byModel.set(key, row);
+      } catch {
+        /* skip corrupt line */
+      }
+    }
+  }
+  return [...byModel.entries()]
+    .map(([key, r]) => ({
+      key,
+      provider: r.provider,
+      model: r.model,
+      queries: r.queries,
+      vgTokens: r.vg,
+      baselineTokens: r.base,
+      saved: round2(((r.base - r.vg) / 1e6) * ratePerM),
+    }))
+    .sort((a, b) => b.saved - a.saved || a.key.localeCompare(b.key));
 }
 
 /** Per-command usage stats over the ledger window (all recorded tools). */

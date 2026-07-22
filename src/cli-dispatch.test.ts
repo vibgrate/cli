@@ -28,6 +28,14 @@ describe('dispatch', () => {
     expect(dispatch(['lodash'], cwd)).toEqual(['ask', 'lodash']);
   });
 
+  it('keeps an explicit `code` invocation as the code command', () => {
+    expect(dispatch(['code', 'add a flag'], cwd)).toEqual(['code', 'add a flag']);
+  });
+
+  it('routes a quoted question (with a space) to ask, not code', () => {
+    expect(dispatch(['add a flag to scan'], cwd)).toEqual(['ask', 'add a flag to scan']);
+  });
+
   it('moves a command in front of leading global flags', () => {
     expect(dispatch(['--json', 'bisect', 'lodash', '4.17.21'], cwd)).toEqual([
       'bisect',
