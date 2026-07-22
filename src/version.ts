@@ -1,2 +1,2 @@
 // Calendar version (YYYY.DDD.PATCH), shared scheme with @vibgrate/cli.
-export const VERSION = '2026.722.1';
+export const VERSION = '2026.722.2';
