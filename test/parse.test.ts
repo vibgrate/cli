@@ -1,6 +1,28 @@
 import { describe, it, expect } from 'vitest';
 import { parseSource } from '../src/engine/parse.js';
 
+describe('parse — JavaScript object-literal methods', () => {
+  it('extracts classic object methods (showToast-style)', async () => {
+    const src = [
+      'const utilities = {',
+      '  showToast: function (toastText) {',
+      '    return toastText;',
+      '  },',
+      '  sendSentryMessage: function (messageText) {',
+      '    return messageText;',
+      '  },',
+      '  shorthand() { return 1; },',
+      '  arrow: () => 2,',
+      '};',
+      'export default utilities;',
+    ].join('\n');
+    const p = await parseSource('utilities.js', 'js', src);
+    const names = p.defs.map((d) => d.name).sort();
+    expect(names).toEqual(expect.arrayContaining(['showToast', 'sendSentryMessage', 'shorthand', 'arrow']));
+    expect(p.defs.find((d) => d.name === 'showToast')?.kind).toBe('method');
+  });
+});
+
 describe('parse — TypeScript', () => {
   it('extracts functions, classes, methods, calls, imports, heritage', async () => {
     const src = [

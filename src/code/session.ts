@@ -24,12 +24,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { buildCodeContext } from './context.js';
+import { buildTaskCapsule, capsuleToCodeContext } from './capsule.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
+import { repositoryIdFromRoot } from '../runtime/paths.js';
 import { parseEdits, applyEdits, type SymbolSpan } from './apply.js';
 import { unifiedDiff } from './diff.js';
 import { buildMessages } from './prompt.js';
 import { redactSecrets } from './providers.js';
-import type { ChatOptions, CodeSessionResult, FileChange, LifecyclePhase, Provider, ProviderResult } from './types.js';
+import type { ChatOptions, CodeContext, CodeSessionResult, FileChange, LifecyclePhase, Provider, ProviderResult } from './types.js';
 import type { VgGraph } from '../schema.js';
 
 /** Minimal filesystem seam so the session is testable without touching real disk. */
@@ -72,6 +74,11 @@ export interface RunSessionOptions {
    * `vg savings` can break usage down per model. VG Code always sets this.
    */
   attribution?: { client: string; provider?: string; model?: string };
+  /**
+   * Use a source-bearing Task Capsule for the inspect context (Fusion Runtime
+   * Phase 0 A/B). Default false keeps the metadata-only path.
+   */
+  capsule?: boolean;
 }
 
 export async function runCodeSession(options: RunSessionOptions): Promise<CodeSessionResult> {
@@ -97,8 +104,14 @@ export async function runCodeSession(options: RunSessionOptions): Promise<CodeSe
   };
 
   // ── inspect ──────────────────────────────────────────────────────────────
-  phase('inspect', 'building graph-grounded context');
-  const context = buildCodeContext(graph, instruction, { budget, files });
+  phase('inspect', options.capsule ? 'building source-bearing task capsule' : 'building graph-grounded context');
+  const context = buildSessionContext(graph, instruction, {
+    budget,
+    files,
+    capsule: options.capsule,
+    root,
+    fsImpl,
+  });
 
   // Per-model savings: the context build is VG Code's `query_graph`-equivalent.
   // Record it (counts only — never code or the instruction) tagged with the
@@ -236,6 +249,25 @@ export function undoChanges(changes: FileChange[], fsImpl: CodeFs): string[] {
     restored.push(ch.file);
   }
   return restored;
+}
+
+function buildSessionContext(
+  graph: VgGraph,
+  instruction: string,
+  opts: { budget?: number; files?: string[]; capsule?: boolean; root: string; fsImpl: CodeFs },
+): CodeContext {
+  const budget = opts.budget;
+  const files = opts.files;
+  if (!opts.capsule) {
+    return buildCodeContext(graph, instruction, { budget, files });
+  }
+  const capsule = buildTaskCapsule(graph, instruction, {
+    budget,
+    files,
+    readFile: (rel) => opts.fsImpl.read(rel),
+    repositoryId: repositoryIdFromRoot(opts.root),
+  });
+  return capsuleToCodeContext(capsule);
 }
 
 /** Try each provider in order; fall back on transport failure. Throws the last actionable error. */

@@ -23,6 +23,9 @@ export const SKIP_DIRS = new Set<string>([
   '.git', '.svn', '.hg',
   '.idea', '.vscode', '.vs',
   '.vibgrate', '.wrangler', '.turbo', '.cache',
+  // Migration / tool backup trees (NativeScript, codemods, agent worktrees)
+  '.migration_backup', '.update_backup', '.backup', '.bak',
+  '.history', '.snapshots', '.snapshots_bak',
   // JavaScript / Node — installed dependency trees
   'node_modules', 'bower_components', 'jspm_packages', 'web_modules',
   '.pnpm-store', '.yarn',
@@ -32,6 +35,8 @@ export const SKIP_DIRS = new Set<string>([
   'storybook-static',
   // Generic build / dist / coverage output
   'dist', 'build', 'out', 'coverage',
+  // Native mobile platform build trees (NativeScript / Cordova / Capacitor)
+  'platforms', 'App_Resources',
   // Vendored third-party source trees
   'vendor', 'Pods', 'Carthage',
   // Python — virtualenvs & tool caches

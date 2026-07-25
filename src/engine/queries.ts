@@ -75,6 +75,13 @@ const TYPESCRIPT: LangQueries = {
         '(variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)]) @def',
     },
     { kind: 'method', query: '(method_definition name: (property_identifier) @name) @def' },
+    // Object-literal methods: `{ showToast: function () {} }` / `{ showToast: () => {} }`
+    // (common in Vue/NS utilities; class method_definition alone does not cover these).
+    {
+      kind: 'method',
+      query:
+        '(pair key: (property_identifier) @name value: [(function_expression) (arrow_function)] @def)',
+    },
     { kind: 'class', query: '(class_declaration name: (type_identifier) @name) @def' },
     { kind: 'class', query: '(abstract_class_declaration name: (type_identifier) @name) @def' },
     { kind: 'interface', query: '(interface_declaration name: (type_identifier) @name) @def' },
@@ -103,6 +110,12 @@ const JAVASCRIPT: LangQueries = {
         '(variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)]) @def',
     },
     { kind: 'method', query: '(method_definition name: (property_identifier) @name) @def' },
+    // Object-literal methods (see TYPESCRIPT above).
+    {
+      kind: 'method',
+      query:
+        '(pair key: (property_identifier) @name value: [(function_expression) (arrow_function)] @def)',
+    },
     { kind: 'class', query: '(class_declaration name: (identifier) @name) @def' },
   ],
   calls: TS_JS_CALLS,

@@ -13,17 +13,32 @@
  * no real disk, model, or shell.
  */
 
-import { queryGraph } from '../engine/query.js';
-import { impactOf } from '../engine/impact.js';
-import { resolveOne } from '../engine/lookup.js';
 import { loadCatalog, resolveLib, readDoc, localPackageDocs, resolveVersion } from '../engine/lib.js';
 import { applyEdit, type SymbolSpan } from './apply.js';
+import { applyPatchIR, locatorsFromGraph } from './apply-patch-ir.js';
+import { PATCH_IR_SCHEMA_VERSION, validatePatchIR, type PatchIR } from './patch-ir.js';
 import { unifiedDiff } from './diff.js';
-import { isSecretPath, secretRefusal, redactText } from './secrets.js';
+import { isSecretPath, secretRefusal, redactText, secretEgressRefusal } from './secrets.js';
 import { dangerousCommand } from './safety.js';
+import { networkCommandRefusal } from './network-policy.js';
+import { buildFailureCapsule } from './failure-capsule.js';
+import { compileVerificationLadder, runVerificationLadder } from './verify-ladder.js';
+import { summarizeCapsule, type TaskCapsule } from './capsule.js';
+import { localGraphBackend, type GraphBackend } from './graph-backend.js';
+import { inspectChange } from './inspect-change.js';
 import type { CodeFs } from './session.js';
 import type { ToolCall, ToolSpec, FileChange } from './types.js';
 import type { VgGraph } from '../schema.js';
+
+/** One file entry inside a multi-file {@link MutatingAction} of kind `patch`. */
+export type PatchFileAction = {
+  file: string;
+  op: 'edit' | 'create' | 'delete';
+  /** Unified diff for edits (and creates/deletes when available). */
+  diff?: string;
+  /** Byte size for creates. */
+  bytes?: number;
+};
 
 /** A state-changing action the agent wants to take — shown to the gate for approval. */
 export type MutatingAction =
@@ -31,7 +46,9 @@ export type MutatingAction =
   | { kind: 'create'; file: string; bytes: number }
   | { kind: 'delete'; file: string }
   | { kind: 'run'; command: string }
-  | { kind: 'tool'; name: string; args: Record<string, unknown> };
+  | { kind: 'tool'; name: string; args: Record<string, unknown> }
+  /** Atomic multi-file PatchIR apply — one decision for the whole transaction. */
+  | { kind: 'patch'; files: PatchFileAction[] };
 
 export interface ShellResult {
   stdout: string;
@@ -51,6 +68,25 @@ export interface ToolContext {
   auto?: boolean;
   /** Project-configured extra denylist rules for autonomous commands. */
   denyCommands?: string[];
+  /** Active Task Capsule when the run used source-bearing context. */
+  capsule?: TaskCapsule | null;
+  /** Live capsule accessor (session may refresh). */
+  getTaskCapsule?: () => TaskCapsule | null;
+  /**
+   * Graph query backend (vgd when attached, else in-process). When omitted,
+   * tools use {@link localGraphBackend} over {@link graph}.
+   */
+  graphBackend?: GraphBackend;
+  /** Session overlay dirty paths (for inspect_change without explicit files). */
+  dirtyFiles?: () => string[];
+  /** Transcript file changes this run (inspect_change default surface). */
+  changedFiles?: () => string[];
+  /**
+   * Enforce default-deny network policy on `run_command` (Phase 7).
+   * Defaults to true under `--auto`; hosts may set true whenever there is no
+   * human reviewing each shell line (or when the sandbox cannot deny net).
+   */
+  enforceNetworkPolicy?: boolean;
 }
 
 export interface ToolResult {
@@ -111,14 +147,76 @@ export const AGENT_TOOLS: ToolSpec[] = [
     parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
   },
   {
+    name: 'apply_patch',
+    description:
+      'Apply a validated PatchIR (patch-ir/0) multi-op edit transactionally. Prefer for multi-file changes with assumptions. JSON object with operations[], optional assumptions[]. Requires approval per file change.',
+    parameters: {
+      type: 'object',
+      properties: {
+        patch: {
+          type: 'object',
+          description: 'PatchIR document: { operations: [...], assumptions?: [...] } (schemaVersion optional, defaults to patch-ir/0)',
+        },
+      },
+      required: ['patch'],
+    },
+  },
+  {
     name: 'run_command',
     description: 'Run a shell command (e.g. the test or build command) and read its output. Requires approval.',
     parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
   },
   {
+    name: 'inspect_task',
+    description:
+      'Return (or refresh) the current Task Capsule summary — primary symbols, source files, and verification plan. Prefer this over re-searching when capsule context is already available.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'inspect_change',
+    description:
+      'Blast radius of a proposed change before (or after) editing — what depends on the symbols/files you will touch. Prefer before multi-file edits. Does not write files.',
+    parameters: {
+      type: 'object',
+      properties: {
+        symbols: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Symbol ids or qualified names under change',
+        },
+        files: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Relative file paths under change (defaults to session dirty/changed files)',
+        },
+        depth: { type: 'number', description: 'Impact depth (default 3)' },
+      },
+    },
+  },
+  {
+    name: 'verify_change',
+    description:
+      'Run the graph-derived verification ladder (syntax + optional test command). On failure returns a Failure Capsule for focused repair. Read-only regarding files; may run the project test command.',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Optional verify command override (default: project test command from capsule plan)' },
+      },
+    },
+  },
+  {
     name: 'finish',
     description: 'Finish the task. Call this when the change is complete, with a short summary of what you did.',
     parameters: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] },
+  },
+  {
+    name: 'abort',
+    description: 'Stop the task without further edits. Use when the request is impossible or the user intent is unclear.',
+    parameters: {
+      type: 'object',
+      properties: { reason: { type: 'string', description: 'Why the task is aborted' } },
+      required: ['reason'],
+    },
   },
 ];
 
@@ -128,13 +226,13 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
   try {
     switch (call.name) {
       case 'search_code':
-        return search(ctx, str(a.query));
+        return await search(ctx, str(a.query));
       case 'read_file':
         return readFile(ctx, str(a.path), num(a.start_line), num(a.end_line));
       case 'list_files':
         return listFiles(ctx, str(a.dir), str(a.pattern));
       case 'graph_impact':
-        return graphImpact(ctx, str(a.symbol));
+        return await graphImpact(ctx, str(a.symbol));
       case 'library_docs':
         return libraryDocs(ctx, str(a.name));
       case 'edit_file':
@@ -143,10 +241,25 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
         return createFile(ctx, str(a.path), str(a.content));
       case 'delete_file':
         return deleteFile(ctx, str(a.path));
+      case 'apply_patch':
+        return applyPatchTool(ctx, a.patch);
       case 'run_command':
         return runCommand(ctx, str(a.command));
+      case 'inspect_task':
+        return inspectTask(ctx);
+      case 'inspect_change':
+        return inspectChangeTool(ctx, a);
+      case 'verify_change':
+        return verifyChange(ctx, str(a.command) || undefined);
       case 'finish':
         return { content: 'done', mutated: false, finished: true, finalSummary: str(a.summary) || 'done' };
+      case 'abort':
+        return {
+          content: `aborted: ${str(a.reason) || 'no reason given'}`,
+          mutated: false,
+          finished: true,
+          finalSummary: `aborted: ${str(a.reason) || 'no reason given'}`,
+        };
       default:
         return { content: `unknown tool "${call.name}". Available: ${AGENT_TOOLS.map((t) => t.name).join(', ')}`, mutated: false };
     }
@@ -157,12 +270,17 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
 
 /* ── read-only tools (auto-approved) ─────────────────────────────────────── */
 
-function search(ctx: ToolContext, query: string): ToolResult {
+async function search(ctx: ToolContext, query: string): Promise<ToolResult> {
   if (!query) return { content: 'search_code needs a query', mutated: false };
-  const res = queryGraph(ctx.graph, query, { budget: 1500, limit: 10 });
+  const backend = ctx.graphBackend ?? localGraphBackend(ctx.graph);
+  const res = await backend.search(query, { limit: 10 });
   if (res.matches.length === 0) return { content: `no symbols matched "${query}"`, mutated: false };
-  const lines = res.matches.map((m) => `- ${m.node.qualifiedName} (${m.node.kind}) ${m.node.file}:${m.node.span.start}${m.node.signature ? `  ${m.node.signature}` : ''}`);
-  return { content: `Matches for "${query}":\n${lines.join('\n')}`, mutated: false };
+  const lines = res.matches.map(
+    (m) =>
+      `- ${m.qualifiedName} (${m.kind}) ${m.file}:${m.line}${m.signature ? `  ${m.signature}` : ''}`,
+  );
+  const via = res.source === 'vgd' ? ' via vgd' : '';
+  return { content: `Matches for "${query}"${via}:\n${lines.join('\n')}`, mutated: false };
 }
 
 function readFile(ctx: ToolContext, path: string, start?: number, end?: number): ToolResult {
@@ -211,13 +329,22 @@ function libraryDocs(ctx: ToolContext, name: string): ToolResult {
   };
 }
 
-function graphImpact(ctx: ToolContext, symbol: string): ToolResult {
-  const { node } = resolveOne(ctx.graph, symbol);
-  if (!node) return { content: `no symbol named "${symbol}" in the map`, mutated: false };
-  const impact = impactOf(ctx.graph, node.id, { depth: 3 });
-  if (impact.affected.length === 0) return { content: `nothing depends on ${node.qualifiedName} (safe to change in isolation)`, mutated: false };
+async function graphImpact(ctx: ToolContext, symbol: string): Promise<ToolResult> {
+  const backend = ctx.graphBackend ?? localGraphBackend(ctx.graph);
+  const impact = await backend.impact(symbol, { depth: 3 });
+  if (!impact) return { content: `no symbol named "${symbol}" in the map`, mutated: false };
+  if (impact.affected.length === 0) {
+    return {
+      content: `nothing depends on ${impact.root.name} (safe to change in isolation)`,
+      mutated: false,
+    };
+  }
   const lines = impact.affected.slice(0, 20).map((i) => `- ${i.name} (${i.file}:${i.line})`);
-  return { content: `${impact.affected.length} symbol(s) depend on ${node.qualifiedName}:\n${lines.join('\n')}`, mutated: false };
+  const via = impact.source === 'vgd' ? ' via vgd' : '';
+  return {
+    content: `${impact.affected.length} symbol(s) depend on ${impact.root.name}${via}:\n${lines.join('\n')}`,
+    mutated: false,
+  };
 }
 
 /* ── mutating tools (gated) ──────────────────────────────────────────────── */
@@ -256,6 +383,119 @@ async function deleteFile(ctx: ToolContext, path: string): Promise<ToolResult> {
   return { content: `deleted ${path}`, mutated: true, change: { file: path, before, after: null, outcomes: [{ edit: { op: 'delete', file: path }, status: 'applied' }], diff: unifiedDiff(before, null, path) } };
 }
 
+/**
+ * Apply a multi-op PatchIR transactionally. Each touched file is approved with
+ * a unified diff before any write (all-or-nothing after dry-run validation).
+ */
+async function applyPatchTool(ctx: ToolContext, raw: unknown): Promise<ToolResult> {
+  const patch = coercePatchIR(raw);
+  if (!patch) {
+    return { content: 'apply_patch needs a patch object with operations[] (patch-ir/0)', mutated: false };
+  }
+  const structural = validatePatchIR(patch);
+  if (!structural.ok) {
+    return { content: `invalid PatchIR: ${structural.errors.join('; ')}`, mutated: false };
+  }
+
+  const locate = locatorsFromGraph(ctx.graph.nodes);
+  const dry = applyPatchIR(patch, {
+    readFile: (f) => ctx.fsImpl.read(f),
+    spansForFile: (f) => ctx.spans.get(normalize(f)) ?? [],
+    locateSymbol: locate,
+    transactional: true,
+  });
+  if (!dry.ok) {
+    const detail = dry.errors.length ? dry.errors.join('; ') : dry.ops.map((o) => `${o.op}@${o.file}:${o.status}`).join('; ');
+    return { content: `patch not applied: ${detail}`, mutated: false };
+  }
+
+  // Build the full multi-file plan first, then one atomic approval. Hosts (VS Code
+  // multi-file tray, stream-json) show every file + diff together — no per-file
+  // round-trip that would leave a half-approved transaction.
+  const planned: Array<{
+    file: string;
+    op: PatchFileAction['op'];
+    before: string | null;
+    after: string | null;
+    diff: string;
+  }> = [];
+  for (const [file, entry] of [...dry.files.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (entry.before === entry.after) continue;
+    if (isSecretPath(file)) return { content: secretRefusal(file), mutated: false };
+    const op: PatchFileAction['op'] =
+      entry.after === null ? 'delete' : entry.before === null ? 'create' : 'edit';
+    planned.push({
+      file,
+      op,
+      before: entry.before,
+      after: entry.after,
+      diff: unifiedDiff(entry.before, entry.after, file),
+    });
+  }
+
+  if (planned.length === 0) {
+    return { content: 'patch applied with no content changes (no-op)', mutated: false };
+  }
+
+  const files: PatchFileAction[] = planned.map((p) => {
+    if (p.op === 'delete') return { file: p.file, op: 'delete', diff: p.diff };
+    if (p.op === 'create') {
+      return { file: p.file, op: 'create', bytes: Buffer.byteLength(p.after ?? ''), diff: p.diff };
+    }
+    return { file: p.file, op: 'edit', diff: p.diff };
+  });
+
+  if (!(await ctx.approve({ kind: 'patch', files }))) {
+    return {
+      content: `patch declined — ${planned.length} file change(s) refused (nothing written)`,
+      mutated: false,
+    };
+  }
+
+  const changes: FileChange[] = [];
+  for (const p of planned) {
+    const edit =
+      p.after === null
+        ? ({ op: 'delete' as const, file: p.file })
+        : p.before === null
+          ? ({ op: 'create' as const, file: p.file, content: p.after })
+          : ({ op: 'replace' as const, file: p.file, search: '', replace: p.after });
+    changes.push({
+      file: p.file,
+      before: p.before,
+      after: p.after,
+      outcomes: [{ edit, status: 'applied' }],
+      diff: p.diff,
+    });
+    if (p.after === null) ctx.fsImpl.remove(p.file);
+    else ctx.fsImpl.write(p.file, p.after);
+  }
+
+  const summary = changes.map((c) => c.file).join(', ');
+  // Surface the first change for the agent transcript accumulator; multi-file
+  // details are in the content string and the patch approval payload.
+  return {
+    content: `applied patch to ${changes.length} file(s): ${summary}`,
+    mutated: true,
+    change: changes[0],
+  };
+}
+
+function coercePatchIR(raw: unknown): PatchIR | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  if (!Array.isArray(o.operations)) return null;
+  return {
+    schemaVersion: PATCH_IR_SCHEMA_VERSION,
+    operations: o.operations as PatchIR['operations'],
+    assumptions: Array.isArray(o.assumptions) ? (o.assumptions as PatchIR['assumptions']) : [],
+    requestedVerification: Array.isArray(o.requestedVerification)
+      ? (o.requestedVerification as PatchIR['requestedVerification'])
+      : [],
+    provenance: { format: 'structured-json', modelId: null, raw: null },
+  };
+}
+
 async function runCommand(ctx: ToolContext, command: string): Promise<ToolResult> {
   if (!command) return { content: 'run_command needs a command', mutated: false };
   // In autonomous mode there is no human reviewing each command, so the denylist
@@ -265,11 +505,109 @@ async function runCommand(ctx: ToolContext, command: string): Promise<ToolResult
     const reason = dangerousCommand(command, ctx.denyCommands);
     if (reason) return { content: `refused to run \`${command}\` autonomously — ${reason}. Run it yourself if you intend to, or re-run without --auto to approve it interactively.`, mutated: false };
   }
+  // Phase 7 network policy: default-deny outbound from agent shell when
+  // enforceNetworkPolicy is set (defaults on under --auto).
+  const enforceNet = ctx.enforceNetworkPolicy ?? !!ctx.auto;
+  const netReason = networkCommandRefusal(command, { enforce: enforceNet });
+  if (netReason) {
+    return { content: `refused to run \`${command}\` — ${netReason}`, mutated: false };
+  }
+  // Scan the command line for credential shapes before any shell (and before
+  // approval) so secrets never ride out on a curl/header line.
+  const secretReason = secretEgressRefusal(command, 'shell command');
+  if (secretReason) {
+    return { content: `refused to run \`${command}\` — ${secretReason}`, mutated: false };
+  }
   if (!(await ctx.approve({ kind: 'run', command }))) {
     return { content: `running \`${command}\` was declined by the user`, mutated: false };
   }
   const res = ctx.run(command);
   return { content: `$ ${command}\nexit ${res.exitCode}\n${truncate(res.stdout)}`, mutated: true };
+}
+
+function inspectTask(ctx: ToolContext): ToolResult {
+  const capsule = ctx.getTaskCapsule?.() ?? ctx.capsule ?? null;
+  if (!capsule) {
+    return {
+      content:
+        'No Task Capsule for this run (metadata-only context). Re-run with --capsule, or use search_code / read_file to gather evidence.',
+      mutated: false,
+    };
+  }
+  const summary = summarizeCapsule(capsule);
+  const lines = [
+    `Task Capsule ${summary.schemaVersion} · ranking ${summary.rankingVersion} · ~${summary.tokensEstimate} tokens`,
+    `Instruction: ${summary.instruction}`,
+    `Primary (${summary.primary.length}):`,
+    ...summary.primary.map((p) => `  - ${p.qualifiedName} (${p.kind}) ${p.file}`),
+    `Supporting (${summary.supporting.length}):`,
+    ...summary.supporting.slice(0, 8).map((p) => `  - ${p.qualifiedName} ${p.file}`),
+    `Source slices: ${summary.sourceSliceCount} across ${summary.sourceFiles.join(', ') || '(none)'}`,
+    `Verification files: ${capsule.verificationPlan.syntaxFiles.slice(0, 8).join(', ') || '(none)'}`,
+  ];
+  if (capsule.provenance.modelProfileId) lines.push(`Model profile: ${capsule.provenance.modelProfileId}`);
+  if (capsule.provenance.securityTier) lines.push(`Security tier: ${capsule.provenance.securityTier}`);
+  return { content: lines.join('\n'), mutated: false };
+}
+
+function inspectChangeTool(ctx: ToolContext, args: Record<string, unknown>): ToolResult {
+  const symbols = Array.isArray(args.symbols)
+    ? args.symbols.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+    : [];
+  let files = Array.isArray(args.files)
+    ? args.files.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+    : [];
+  if (!files.length) {
+    const dirty = ctx.dirtyFiles?.() ?? [];
+    const changed = ctx.changedFiles?.() ?? [];
+    files = [...new Set([...dirty, ...changed])];
+  }
+  if (!symbols.length && !files.length) {
+    return {
+      content:
+        'inspect_change needs symbols[] or files[] (or session dirty/changed files). Example: { "files": ["src/auth.ts"] }',
+      mutated: false,
+    };
+  }
+  const depth = typeof args.depth === 'number' && args.depth > 0 ? args.depth : 3;
+  const report = inspectChange(ctx.graph, { symbols, files, depth });
+  return { content: report.rendered, mutated: false };
+}
+
+function verifyChange(ctx: ToolContext, commandOverride?: string): ToolResult {
+  const capsule = ctx.getTaskCapsule?.() ?? ctx.capsule ?? null;
+  if (!capsule) {
+    if (commandOverride) {
+      const res = ctx.run(commandOverride);
+      if (res.exitCode === 0) return { content: `verify ok — \`${commandOverride}\` exit 0`, mutated: false };
+      const fc = buildFailureCapsule({
+        verify: { command: commandOverride, exitCode: res.exitCode, stdout: res.stdout },
+        changedFiles: [],
+      });
+      return { content: fc.rendered, mutated: false };
+    }
+    return { content: 'verify_change needs a Task Capsule or an explicit command', mutated: false };
+  }
+  const steps = compileVerificationLadder(capsule.verificationPlan, {
+    testCommand: commandOverride,
+  });
+  const ladder = runVerificationLadder(steps, {
+    readFile: (f) => ctx.fsImpl.read(f),
+    run: ctx.run,
+    runCommands: true,
+  });
+  if (ladder.ok) {
+    return {
+      content: `verification ladder passed:\n${ladder.steps.map((s) => `✔ ${s.message}`).join('\n')}`,
+      mutated: false,
+    };
+  }
+  const fc = buildFailureCapsule({
+    ladderSteps: ladder.steps,
+    capsule,
+    changedFiles: [],
+  });
+  return { content: fc.rendered, mutated: false };
 }
 
 function truncate(s: string): string {

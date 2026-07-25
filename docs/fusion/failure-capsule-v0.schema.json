@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibgrate.com/schemas/failure-capsule/0",
+  "title": "FailureCapsule",
+  "description": "Focused repair context after verification failure (Fusion Runtime).",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "failedStep",
+    "diagnosticExcerpt",
+    "affectedSymbols",
+    "sourceSlices",
+    "previousOpsSummary",
+    "likelyCorrections",
+    "rendered",
+    "provenance"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "failure-capsule/0" },
+    "failedStep": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["command", "syntax", "verify", "ladder", "other"] },
+        "command": { "type": "string" },
+        "exitCode": { "type": "integer" },
+        "detail": { "type": "string" }
+      }
+    },
+    "diagnosticExcerpt": { "type": "string" },
+    "affectedSymbols": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["qualifiedName", "file"],
+        "properties": {
+          "qualifiedName": { "type": "string" },
+          "file": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "sourceSlices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "startLine", "endLine", "content", "contentHash"],
+        "properties": {
+          "file": { "type": "string" },
+          "startLine": { "type": "integer" },
+          "endLine": { "type": "integer" },
+          "content": { "type": "string" },
+          "contentHash": { "type": "string" }
+        }
+      }
+    },
+    "previousOpsSummary": { "type": "array", "items": { "type": "string" } },
+    "graphDeltaNote": { "type": "string" },
+    "likelyCorrections": { "type": "array", "items": { "type": "string" } },
+    "rendered": { "type": "string" },
+    "provenance": {
+      "type": "object",
+      "required": ["compiler", "modelId", "policyVersion"],
+      "properties": {
+        "compiler": { "type": "string" },
+        "modelId": { "type": ["string", "null"] },
+        "policyVersion": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "additionalProperties": false
+}

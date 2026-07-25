@@ -283,7 +283,10 @@ const HEARTBEAT_INTERVAL_MS = 15 * 60 * 1000;
  *
  * - **TTY** (a human ran `vg serve` in a terminal): an in-place repainted block,
  *   spinner + uptime + per-client/per-tool stats, redrawn atomically
- *   (cursor-up + erase) with a dirty check, cursor hidden while live.
+ *   (cursor-up + erase) with a dirty check, cursor hidden while live. Automatic
+ *   line wrapping is disabled only for each atomic write, so a narrow terminal
+ *   clips long rows instead of making cursor accounting drift and appending a
+ *   stale header on every tick.
  * - **non-TTY** (assistant-spawned, logs, CI): one compact heartbeat line every
  *   15 minutes, and only when there is new activity — never log spam.
  *
@@ -354,11 +357,19 @@ export class ServeStatusDisplay {
     if (content === this.lastFrame) return;
     this.lastFrame = content;
     // Atomic repaint: cursor-up over the previous block, erase to end, redraw.
+    // Disable terminal auto-wrap for this one write. Calculating physical rows
+    // from `stream.columns` is not reliable when a PTY reports stale dimensions
+    // or treats ambiguous-width glyphs differently (notably VS Code terminals);
+    // one missed wrapped row leaves the old header behind on every tick.
+    // Explicit CRLF keeps every status row to exactly one terminal row, while
+    // restoring auto-wrap in the same buffer avoids changing the user's shell.
     let buf = '';
     if (this.lastRowCount > 0) buf += `\x1B[${this.lastRowCount}A\x1B[J`;
-    buf += content;
+    buf += '\x1B[?7l';
+    buf += lines.map((line) => `\r\x1B[2K${line}`).join('\r\n');
+    buf += '\r\n\x1B[?7h';
     this.stream.write(buf);
-    this.lastRowCount = this.countRows(lines);
+    this.lastRowCount = lines.length;
   }
 
   private renderHeartbeat(): void {
@@ -367,15 +378,6 @@ export class ServeStatusDisplay {
     if (snap.revision === this.lastHeartbeatRevision) return;
     this.lastHeartbeatRevision = snap.revision;
     this.stream.write(serveHeartbeatLine(snap, Date.now()) + '\n');
-  }
-
-  /** Terminal rows the frame occupies, accounting for line wrap. */
-  private countRows(lines: string[]): number {
-    const columns = Math.max(this.stream.columns ?? 80, 20);
-    return lines.reduce((total, line) => {
-      const visible = line.replace(/\x1b\[[0-9;]*m/g, '').length;
-      return total + Math.max(1, Math.ceil(visible / columns));
-    }, 0);
   }
 
   private hideCursor(): void {

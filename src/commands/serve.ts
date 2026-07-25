@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import { Command } from 'commander';
-import { defaultGraphPath } from '../engine/artifacts.js';
+import { resolveGraphPath } from '../engine/artifacts.js';
 import { serveStdio, createServer, GraphSource, type ServeOptions } from '../mcp/server.js';
 import { StatsSharer, statsEndpoint, telemetryOptOut } from '../engine/stats-share.js';
 import { refreshIfStale } from '../engine/refresh.js';
@@ -51,7 +51,7 @@ export function registerServe(program: Command): void {
     .action(async function (this: Command, opts: { http?: boolean; port?: string; host?: string; savings?: boolean; shareStats?: boolean; dedup?: boolean; refresh?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
-      const graphPath = global.graph ?? defaultGraphPath(root);
+      const graphPath = resolveGraphPath(root, global.graph);
       // A custom --graph is an explicit artifact — never rebuild over it.
       const refresh = opts.refresh !== false && !global.graph;
       // Sharing needs the network, so `--local` (air-gapped) hard-disables the

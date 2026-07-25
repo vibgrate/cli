@@ -23,6 +23,55 @@ async function run(args: string[]): Promise<unknown> {
 
 afterEach(() => vi.restoreAllMocks());
 
+describe('vg models status / resolve', () => {
+  it('emits Code Modes status JSON', async () => {
+    const res = (await run(['models', 'status', '--json'])) as {
+      schemaVersion: string;
+      modes: { mode: string; packId: string; fit: string }[];
+      recommended: string;
+    };
+    expect(res.schemaVersion).toMatch(/model-orchestrator/);
+    expect(res.modes.length).toBe(3);
+    expect(['spark', 'flow', 'forge']).toContain(res.recommended);
+  });
+
+  it('resolves a mode without downloading', async () => {
+    const res = (await run(['models', 'resolve', 'spark', '--json'])) as {
+      mode: string;
+      pack: { packId: string };
+      underlying: { weightsRef: string };
+      fit: { label: string };
+    };
+    expect(res.mode).toBe('spark');
+    expect(res.pack.packId).toMatch(/^spark@/);
+    expect(res.underlying.weightsRef).toBeTruthy();
+    expect(res.fit.label).toBeTruthy();
+  });
+
+  it('ensure without --yes is a dry-run plan', async () => {
+    const res = (await run(['models', 'ensure', 'spark', '--json'])) as {
+      willDownload?: boolean;
+      installed?: boolean;
+      note?: string;
+      mode?: string;
+      ok?: boolean;
+      reason?: string;
+      resolved?: { mode: string };
+    };
+    // Either already installed, dry-run plan, or will_not_fit — never silently downloads.
+    if (res.reason === 'will_not_fit') {
+      expect(res.ok).toBe(false);
+      expect(res.resolved?.mode).toBe('spark');
+    } else if (res.installed) {
+      expect(res.mode).toBe('spark');
+      expect(res.willDownload).not.toBe(true);
+    } else {
+      expect(res.willDownload ?? false).toBe(false);
+      expect(String(res.note ?? '')).toMatch(/dry-run|--yes|already/i);
+    }
+  });
+});
+
 describe('vg models rm', () => {
   it('prints a dry-run plan and removes nothing without --yes', async () => {
     const res = (await run(['models', 'rm', 'qwen2.5-coder:7b', '--json'])) as {

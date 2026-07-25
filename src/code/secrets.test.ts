@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { isSecretPath, redactText, secretRefusal } from './secrets.js';
+import {
+  isSecretPath,
+  redactText,
+  secretRefusal,
+  findSecretShapes,
+  containsSecretShapes,
+  secretEgressRefusal,
+} from './secrets.js';
 
 describe('isSecretPath', () => {
   it('flags env, key, and credential files', () => {
@@ -32,5 +39,25 @@ describe('redactText', () => {
   it('leaves ordinary code untouched', () => {
     const code = 'const total = price * qty;\nreturn total;';
     expect(redactText(code)).toBe(code);
+  });
+});
+
+describe('findSecretShapes / secretEgressRefusal', () => {
+  it('locates token and assignment shapes', () => {
+    const hits = findSecretShapes('token sk-abcdefghijklmnop and OPENAI_API_KEY=supersecretvalue');
+    expect(hits.length).toBeGreaterThan(0);
+    expect(containsSecretShapes('ghp_0123456789abcdefghij')).toBe(true);
+    expect(containsSecretShapes('const x = 1')).toBe(false);
+  });
+
+  it('refuses egress when shapes remain', () => {
+    // Avoid curl -H "x-api-key: …" / Authorization header shapes — those trip
+    // gitleaks curl-auth-header even as fixtures. Assignment + token prefixes
+    // still exercise the same egress gate.
+    const payload = ['OPENAI_API_KEY', '=', 'supersecretvalue'].join('');
+    const refusal = secretEgressRefusal(payload);
+    expect(typeof refusal).toBe('string');
+    expect(refusal).toMatch(/refusing to send/);
+    expect(secretEgressRefusal('npm test')).toBeNull();
   });
 });

@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibgrate.com/schemas/task-capsule/0",
+  "title": "TaskCapsule",
+  "description": "Source-bearing task context compiled from the deterministic code graph before the first model inference (Fusion Runtime Phase 0).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "instruction",
+    "primary",
+    "supporting",
+    "sourceSlices",
+    "relationships",
+    "pinnedFacts",
+    "targetFiles",
+    "verificationPlan",
+    "rendered",
+    "tokensEstimate",
+    "provenance"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "task-capsule/0"
+    },
+    "instruction": {
+      "type": "string",
+      "minLength": 1
+    },
+    "primary": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/symbolRef" }
+    },
+    "supporting": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/symbolRef" }
+    },
+    "sourceSlices": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sourceSlice" }
+    },
+    "relationships": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/relationship" }
+    },
+    "pinnedFacts": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "targetFiles": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "verificationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["syntaxFiles", "suggestedTests", "notes"],
+      "properties": {
+        "syntaxFiles": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "suggestedTests": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "rendered": {
+      "type": "string"
+    },
+    "tokensEstimate": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compiler", "rankingVersion"],
+      "properties": {
+        "compiler": { "type": "string" },
+        "rankingVersion": { "type": "string" },
+        "graphCorpusHash": { "type": ["string", "null"] },
+        "repositoryId": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "symbolRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "qualifiedName", "kind", "file", "span", "why"],
+      "properties": {
+        "id": { "type": "string" },
+        "qualifiedName": { "type": "string" },
+        "kind": { "type": "string" },
+        "file": { "type": "string" },
+        "span": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {
+            "start": { "type": "integer", "minimum": 1 },
+            "end": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "signature": { "type": ["string", "null"] },
+        "why": { "type": "string" },
+        "importance": { "type": "number" }
+      }
+    },
+    "sourceSlice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "start", "end", "content", "contentHash", "symbolIds"],
+      "properties": {
+        "file": { "type": "string" },
+        "start": { "type": "integer", "minimum": 1 },
+        "end": { "type": "integer", "minimum": 1 },
+        "content": { "type": "string" },
+        "contentHash": {
+          "type": "string",
+          "description": "blake3 hex of UTF-8 content (full digest)"
+        },
+        "symbolIds": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "from", "to"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["calls", "called-by", "impacts", "contains", "other"]
+        },
+        "from": { "type": "string" },
+        "to": { "type": "string" }
+      }
+    }
+  }
+}
