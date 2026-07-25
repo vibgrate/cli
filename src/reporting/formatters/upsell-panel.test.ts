@@ -48,13 +48,17 @@ function makeBilling(
 
 describe('free-plan upsell panel', () => {
   it('shows Team/Business monthly costs and the login→push flow when free', () => {
-    // 3 standard → 3 billable, first band: Team 3×$6=$18, Business 3×$15=$45.
+    // 3 standard → 3 billable, first band: Team floor(3×$4)=$12, Business floor(3×$10)=$30.
     const text = formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), { free: true });
     expect(text).toContain('KEEP TRACKING YOUR DRIFTSCORE');
     expect(text).toContain('Team');
-    expect(text).toContain('$18 / mo');
+    expect(text).toContain('$12 / mo');
     expect(text).toContain('Business');
-    expect(text).toContain('$45 / mo');
+    expect(text).toContain('$30 / mo');
+    // First-year new-customer offer is advertised (25% off, rounded down).
+    expect(text).toContain('25% off your first year');
+    expect(text).toContain('$9 / mo first year');
+    expect(text).toContain('$22 / mo first year');
     expect(text).toContain('DriftScore tracked over time');
     expect(text).toContain('Scheduled scans');
     expect(text).toContain('5 pushed scans / month');
@@ -95,8 +99,9 @@ describe('free-plan upsell panel', () => {
     expect(top).toBeGreaterThanOrEqual(0);
     const bottomOffset = all.slice(top).findIndex((l) => l.startsWith('╰'));
     const rows = all.slice(top, top + bottomOffset + 1);
-    // The 15-line body plus the top and bottom borders make 17 boxed rows.
-    expect(rows.length).toBe(17);
+    // The 16-line body (incl. the new-customer offer line) plus the top and
+    // bottom borders make 18 boxed rows.
+    expect(rows.length).toBe(18);
     const widths = new Set(rows.map((l) => [...l].length));
     expect(widths.size).toBe(1);
     // The widest line (`Start tracking:  npx @vibgrate/cli login  →  npx
@@ -104,11 +109,11 @@ describe('free-plan upsell panel', () => {
     expect([...widths][0]).toBeGreaterThan(62);
   });
 
-  it('prices a fractional single-repo estate to the cent', () => {
-    // 2 micro → 0.2 billable: Team 0.2×$6=$1.20, Business 0.2×$15=$3.
+  it('rounds a fractional single-repo estate down to whole dollars', () => {
+    // 2 micro → 0.2 billable: Team floor(0.2×$4)=$0, Business floor(0.2×$10)=$2.
     const text = formatText(makeArtifact({ billing: makeBilling({ micro: 2 }) }), { free: true });
-    expect(text).toContain('$1.20 / mo');
-    expect(text).toContain('$3 / mo');
+    expect(text).toContain('$0 / mo');
+    expect(text).toContain('$2 / mo');
     expect(text).toContain('0.2 billable projects');
   });
 
@@ -137,8 +142,8 @@ describe('authenticated free-plan upsell panel', () => {
     });
     expect(text).toContain('KEEP TRACKING YOUR DRIFTSCORE');
     // Same banded pricing as the signed-out panel.
-    expect(text).toContain('$18 / mo');
-    expect(text).toContain('$45 / mo');
+    expect(text).toContain('$12 / mo');
+    expect(text).toContain('$30 / mo');
     // Upgrade call to action pointing at the provided URL.
     expect(text).toContain('More on Team or Business');
     expect(text).toContain('https://dash.vibgrate.com/ws42');

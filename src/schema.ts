@@ -67,6 +67,8 @@ export type NodeKind =
   | 'test'
   | 'route'
   | 'component'
+  /** Documentation / config text ingested for semantic ask (markdown, txt, env examples). */
+  | 'document'
   | 'external';
 
 export interface Span {

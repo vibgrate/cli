@@ -17,9 +17,9 @@ function withConfig(json: string, fn: (root: string) => void): void {
 
 describe('loadCodeConfig', () => {
   it('reads recognised keys', () => {
-    withConfig(JSON.stringify({ provider: 'ollama', model: 'qwen2.5-coder:7b', auto: true, testCommand: 'npm test', denyCommands: ['deploy'], contextWindow: 32000, maxSteps: 30 }), (root) => {
+    withConfig(JSON.stringify({ provider: 'ollama', model: 'qwen2.5-coder:7b', auto: true, testCommand: 'npm test', denyCommands: ['deploy'], contextWindow: 32000, maxSteps: 30, capsule: true, securityTier: 'L1' }), (root) => {
       const c = loadCodeConfig(root);
-      expect(c).toEqual({ provider: 'ollama', model: 'qwen2.5-coder:7b', auto: true, testCommand: 'npm test', denyCommands: ['deploy'], contextWindow: 32000, maxSteps: 30 });
+      expect(c).toEqual({ provider: 'ollama', model: 'qwen2.5-coder:7b', auto: true, testCommand: 'npm test', denyCommands: ['deploy'], contextWindow: 32000, maxSteps: 30, capsule: true, securityTier: 'L1' });
     });
   });
 

@@ -15,6 +15,7 @@
 
 import { loadGraph } from '../engine/load.js';
 import { refreshIfStale } from '../engine/refresh.js';
+import { BranchGraphSession } from '../runtime/branch-graph-session.js';
 import { discoverModels } from '../engine/models.js';
 import { runBuild } from '../commands/build.js';
 import { printCodeLogo } from '../util/logo.js';
@@ -36,7 +37,17 @@ import { loadLatestSession, saveSession, summarizeSession, newSession, recordTas
 import type { McpServerConfig } from './config.js';
 import type { MutatingAction, ShellResult } from './tools.js';
 import type { FileChange, Provider } from './types.js';
-import { GraphProcess } from './graph-process.js';
+import { startCodeRuntimeSession } from './runtime-session.js';
+import { loadOrDiscoverFederation } from '../runtime/federation.js';
+import { bridgePinnedFacts } from '../runtime/bridge-facts.js';
+import { resolveExecutionEnv, type SecurityTier } from '../runtime/execution-env.js';
+import {
+  mergeModelExecutionProfile,
+  resolveModelExecutionProfile,
+  type ModelExecutionProfile,
+} from '../runtime/model-execution-profile.js';
+import { vgdIsRunning, vgdRequest } from '../runtime/vgd/index.js';
+import { resolveGraphBackend } from './graph-backend.js';
 import { summarizeDiffs } from './diff.js';
 
 export interface InteractiveOptions {
@@ -65,6 +76,15 @@ export interface InteractiveOptions {
   mcpSources?: string[];
   /** Resume the most recent session (inject a recap, restore /undo). */
   continueSession?: boolean;
+  /** Prefer source-bearing Task Capsule context (Fusion Runtime A/B). */
+  capsule?: boolean;
+  /**
+   * Security ladder tier for shell (ADR-002). When omitted: L1 under `--auto`,
+   * otherwise L0. Explicit value always wins.
+   */
+  securityTier?: SecurityTier;
+  /** Optional Model Execution Profile overrides from code.json. */
+  modelProfile?: Partial<ModelExecutionProfile>;
   /** Injectable MCP connect (tests). */
   mcpConnect?: McpConnect;
 }
@@ -195,15 +215,75 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
     for (const w of warnings) prompter.note(c.yellow(`  ${w}`));
   }
 
-  const graphProc = GraphProcess.start({ root });
+  // Fusion Runtime: attach to (or own) a local vgd session instead of spawning
+  // `vg serve` as GraphProcess. Failure degrades to in-process graph only.
+  const runtime = await startCodeRuntimeSession({ root });
+  // Multi-branch ActiveGraph: warm maps per gitRef; ensureCurrent on each turn
+  // so `git checkout` mid-session switches the tool-visible graph (plan §4.1.1).
+  const branchGraphs = new BranchGraphSession({ root, graphPath: global.graph });
+  // Federated workspaces: if `.vibgrate/federation.json` exists and a daemon is
+  // reachable, register every member so multi-repo graphs share one vgd session.
+  const federation = loadOrDiscoverFederation(root);
+  const extraPinnedFacts = bridgePinnedFacts(federation.bridges);
+  if (federation.members.length > 1 && (await vgdIsRunning({ socketPath: runtime.socketPath }))) {
+    try {
+      await vgdRequest(
+        {
+          op: 'register-federation',
+          primaryRoot: federation.primaryRoot,
+          members: federation.members.map((m) => ({ root: m.root, label: m.label, role: m.role })),
+        },
+        { socketPath: runtime.socketPath },
+      );
+      const bridgeN = federation.bridges?.length ?? 0;
+      prompter.note(
+        c.dim(
+          `federation · ${federation.members.length} workspace(s) registered with vgd` +
+            (bridgeN ? ` · ${bridgeN} bridge edge(s)` : ''),
+        ),
+      );
+    } catch {
+      /* federation registration is best-effort */
+    }
+  } else if ((federation.bridges?.length ?? 0) > 0) {
+    prompter.note(
+      c.dim(
+        `federation · ${federation.members.length} member(s) · ${federation.bridges!.length} bridge edge(s) (discovery)`,
+      ),
+    );
+  }
+
+  // Model Execution Profile: provider/model heuristics + code.json overrides.
+  let modelProfile = mergeModelExecutionProfile(
+    resolveModelExecutionProfile({
+      providerId: sel.providerSlug,
+      model: sel.model,
+      budget: opts.budget ? Number(opts.budget) : undefined,
+      maxRepairRounds: opts.verify?.maxRounds,
+      securityTier: opts.securityTier,
+    }),
+    opts.modelProfile,
+  );
+
+  // Security ladder (ADR-002): explicit flag > MEP > --auto → L1 > L0.
+  // Writable roots include every federation member so multi-root sessions can
+  // write into sibling workspace folders under L1/L2 isolation.
+  const securityTier: SecurityTier =
+    opts.securityTier ?? modelProfile.securityTier ?? (opts.auto ? 'L1' : 'L0');
+  const writableRoots = federation?.members.map((m) => m.root) ?? [root];
+  const executionEnv = resolveExecutionEnv(securityTier, { writableRoots });
+
   const cleanup = (): void => {
-    graphProc?.dispose();
+    void runtime.dispose();
     void mcp?.dispose();
   };
   process.once('SIGINT', cleanup);
 
   const autoNote = opts.auto ? c.yellow(' · auto-approve ON') : '';
-  prompter.intro(`Ready — ${sel.providerSlug}/${sel.model}${graphProc ? c.dim(' · graph ' + graphProc.pid) : ''}${autoNote}. Describe a task, or /help. Empty line to exit.`);
+  const runtimeNote = runtime.kind !== 'none' ? c.dim(` · ${runtime.label}`) : '';
+  const securityNote = c.dim(` · ${executionEnv.tier}/${executionEnv.label}`);
+  const mepNote = c.dim(` · mep ${modelProfile.mode}`);
+  prompter.intro(`Ready — ${sel.providerSlug}/${sel.model}${runtimeNote}${securityNote}${mepNote}${autoNote}. Describe a task, or /help. Empty line to exit.`);
 
   try {
     for (;;) {
@@ -244,11 +324,51 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
         continue;
       }
 
-      const graph = loadGraph(root, global.graph);
+      const branchLoad = branchGraphs.ensureCurrent();
+      const graph = branchLoad.graph;
       if (!graph) {
         prompter.note(c.red('the code map disappeared — run `vg` to rebuild'));
         break;
       }
+      if (branchLoad.switched) {
+        prompter.note(
+          c.dim(
+            `branch · ${branchLoad.gitRef}${branchLoad.fromCache ? ' (warm cache)' : ' (loaded map)'}`,
+          ),
+        );
+      }
+      // Share warm slot with a running vgd (local process or long-lived daemon).
+      if (runtime.socketPath && graph && branchLoad.gitRef && branchLoad.gitRef !== 'unknown') {
+        void vgdRequest(
+          {
+            op: 'put-graph',
+            repositoryId: branchLoad.repositoryId,
+            gitRef: branchLoad.gitRef,
+            graph,
+          },
+          { socketPath: runtime.socketPath },
+        ).catch(() => {
+          /* best-effort IPC */
+        });
+      }
+      // Prefer vgd ActiveGraph for search/impact when the daemon holds this slot.
+      const graphBackend = resolveGraphBackend({
+        graph,
+        repositoryId: branchLoad.repositoryId,
+        gitRef: branchLoad.gitRef !== 'unknown' ? branchLoad.gitRef : null,
+        socketPath: runtime.socketPath,
+      });
+      // Refresh MEP if the user swapped models mid-session.
+      modelProfile = mergeModelExecutionProfile(
+        resolveModelExecutionProfile({
+          providerId: sel.providerSlug,
+          model: sel.model,
+          budget: opts.budget ? Number(opts.budget) : undefined,
+          maxRepairRounds: opts.verify?.maxRounds,
+          securityTier,
+        }),
+        opts.modelProfile,
+      );
       const result = await agentTask({
         root,
         graph,
@@ -258,15 +378,23 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
         attribution: { client: 'vg-code', provider: sel.providerSlug, model: sel.model },
         auto: !!opts.auto,
         maxSteps: opts.maxSteps,
+        budget: modelProfile.capsuleBudgetTokens,
         denyCommands: opts.denyCommands,
         testCommand: opts.testCommand,
         contextBudget: opts.contextBudget,
         stream: opts.stream,
-        verify: opts.verify,
+        verify: opts.verify
+          ? { ...opts.verify, maxRounds: opts.verify.maxRounds ?? modelProfile.maxRepairRounds }
+          : undefined,
         priorSummary,
         externalTools: mcp ? mcpExternalTools(mcp, agentApprove(opts, prompter)) : undefined,
         meter,
         prompter,
+        capsule: opts.capsule,
+        executionEnv,
+        graphBackend,
+        modelProfile,
+        extraPinnedFacts,
       });
       priorSummary = undefined; // recap only seeds the first task after --continue
       if (result.changes.length) {
@@ -289,6 +417,15 @@ function agentApprove(opts: InteractiveOptions, prompter: Prompter): (a: Mutatin
   return async (action) => {
     if (opts.auto) return true;
     if (action.kind === 'tool') return prompter.confirm(`Call ${action.name}?`, false);
+    if (action.kind === 'patch') {
+      const n = action.files.length;
+      const names = action.files
+        .slice(0, 6)
+        .map((f) => f.file)
+        .join(', ');
+      const more = n > 6 ? ` (+${n - 6} more)` : '';
+      return prompter.confirm(`Apply patch to ${n} file(s): ${names}${more}?`, false);
+    }
     return true;
   };
 }
@@ -362,6 +499,16 @@ export async function agentTask(params: {
   externalTools?: AgentOptions['externalTools'];
   meter?: SessionMeter;
   prompter?: Prompter;
+  /** Prefer source-bearing Task Capsule context (Fusion Runtime A/B). */
+  capsule?: boolean;
+  files?: string[];
+  /** Security ladder substrate (ADR-002). */
+  executionEnv?: AgentOptions['executionEnv'];
+  graphBackend?: AgentOptions['graphBackend'];
+  modelProfile?: AgentOptions['modelProfile'];
+  advancedMode?: boolean;
+  worktreeOverlay?: boolean;
+  extraPinnedFacts?: string[];
 }): Promise<AgentResult> {
   const { prompter } = params;
   const approve = async (action: MutatingAction): Promise<boolean> => {
@@ -379,6 +526,19 @@ export async function agentTask(params: {
         return prompter.confirm(`Run \`${action.command}\`?`, false);
       case 'tool':
         return prompter.confirm(`Call ${action.name}(${briefArgs(action.args)})?`, false);
+      case 'patch': {
+        const n = action.files.length;
+        for (const f of action.files) {
+          if (f.diff) out(f.diff);
+          else out(`${f.op} ${f.file}`);
+        }
+        const names = action.files
+          .slice(0, 6)
+          .map((f) => f.file)
+          .join(', ');
+        const more = n > 6 ? ` (+${n - 6} more)` : '';
+        return prompter.confirm(`Apply patch to ${n} file(s): ${names}${more}?`, false);
+      }
     }
   };
 
@@ -408,6 +568,20 @@ export async function agentTask(params: {
       info(c.dim(`  · compacted context (${e.droppedRounds} earlier round(s) summarized)`));
     } else if (e.type === 'verify') {
       info(e.passed ? c.green(`  ✔ ${e.command} passed`) : c.yellow(`  ✗ ${e.command} failed — asking the model to fix it`));
+    } else if (e.type === 'ladder') {
+      info(e.ok ? c.green('  ✔ verification ladder passed') : c.yellow('  ✗ verification ladder failed — asking the model to fix it'));
+      if (!e.ok && e.summary.trim()) {
+        for (const line of e.summary.split('\n').slice(0, 6)) info(c.dim(`    ${line}`));
+      }
+    } else if (e.type === 'session-graph') {
+      info(c.dim(`  · session graph updated (${e.reparsed} reparsed, ${e.dirty} dirty)`));
+    } else if (e.type === 'capsule') {
+      info(c.dim(`  · Task Capsule · ${e.summary.primary.length} primary · ${e.summary.sourceSliceCount} source slice(s) · ~${e.summary.tokensEstimate} tokens`));
+    } else if (e.type === 'failure-capsule') {
+      info(c.yellow(`  · Failure Capsule · ${e.capsule.failedStep.type}${e.capsule.failedStep.command ? ` · ${e.capsule.failedStep.command}` : ''}`));
+    } else if (e.type === 'metrics') {
+      const m = e.metrics;
+      info(c.dim(`  · metrics · discovery ${m.discoveryToolCalls} · mutations ${m.mutationToolCalls}${m.znsAt1 ? ' · ZNS@1' : ''}`));
     }
   };
 
@@ -418,6 +592,13 @@ export async function agentTask(params: {
     providers: params.providers,
     fsImpl: params.fsImpl,
     run: shellRunner(params.root),
+    executionEnv: params.executionEnv,
+    graphBackend: params.graphBackend,
+    modelProfile: params.modelProfile,
+    advancedMode: params.advancedMode,
+    // Interactive sessions always prefer a worktree-correct map unless disabled.
+    worktreeOverlay: params.worktreeOverlay ?? true,
+    extraPinnedFacts: params.extraPinnedFacts,
     approve,
     onEvent,
     attribution: params.attribution,
@@ -431,6 +612,8 @@ export async function agentTask(params: {
     verify: params.verify,
     priorSummary: params.priorSummary,
     externalTools: params.externalTools,
+    capsule: params.capsule,
+    files: params.files,
     now: () => Date.now(),
   });
   closeStream();

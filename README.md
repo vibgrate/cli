@@ -293,7 +293,11 @@ See [docs/QUICKSTART-PROMPT.md](./docs/QUICKSTART-PROMPT.md) for the full prompt
 
 ## Command reference
 
+Under each set, commands are listed A–Z. A short **typical path** (usual order) is called out where it helps.
+
 ### Code graph
+
+**Typical path:** `vg build` → `vg status` → `vg ask` → `vg impact` → `vg share`
 
 | Command | Description |
 | --- | --- |
@@ -307,10 +311,10 @@ See [docs/QUICKSTART-PROMPT.md](./docs/QUICKSTART-PROMPT.md) for the full prompt
 | `vg facts <file>` | Deterministic facts for a node (contracts, invariants) |
 | `vg guide <file>` | Cited standards / practices for a node (free pack) |
 | `vg impact <file>` | What breaks if you change it — and the tests to run |
-| `vg install` / `vg uninstall` | Wire (or remove) **Vibgrate AI Context** + skill in your AI assistant |
+| `vg install` / `vg uninstall` | Wire (or remove) **Vibgrate AI Context** + skill in your AI assistant (`--detect`, `--all`, `--list`) |
 | `vg lib <package>` | Version-correct, drift-annotated library docs |
 | `vg map` / `vg hubs` / `vg areas` / `vg oddities` | Map insights: overview, most-depended-on code, natural groupings, cross-area smells |
-| `vg models` / `vg models pull` | The local model fleet (Ollama / LM Studio / gguf), discovered offline; `pull` fetches one (needs `--yes`) |
+| `vg models` | Code Modes (Spark / Flow / Forge) + local fleet (Ollama / LM Studio / gguf); `pull` / `ensure` need `--yes` |
 | `vg path <from> <to>` | How A connects to B (shortest path) |
 | `vg savings` | Local report of tokens/$ saved vs a grep baseline (estimates) |
 | `vg serve` | Start **Vibgrate AI Context** (local-first MCP: code map + drift + version-correct docs) |
@@ -321,26 +325,49 @@ See [docs/QUICKSTART-PROMPT.md](./docs/QUICKSTART-PROMPT.md) for the full prompt
 | `vg tree <file>` | Call tree rooted at a node |
 | `vg unknowns` | What the graph cannot resolve, ranked by blast radius |
 
-### Drift reporting
+### Diagnostics, IDE & runtime
+
+**Typical path:** `vg doctor` → `vg lsp` → `vg daemon`
+
+| Command | Description |
+| --- | --- |
+| `vg daemon` | Local workspace daemon for multi-root graph sessions (IDE / agents): `status`, `ensure`, `publish`, `query`, `impact`, … |
+| `vg doctor` | Read-only diagnosis: config, credentials (redacted), map freshness, hosted reachability, MCP launch |
+| `vg lsp` | Language server (stdio) — engine behind Vibgrate for VS Code and other thin IDE clients |
+| `vg policy` | Show production context-policy pin; `vg policy verify <file>` for signed learning patches |
+
+### Drift scoring & supply chain
+
+**Typical path:** `vg init` → `vg scan` → `vg baseline` → `vg report` → `vg fix`
 
 | Command | Description |
 | --- | --- |
 | `vg baseline [path]` | Create a drift baseline |
 | `vg bisect <package> <constraint>` | The commit where a dependency crossed a version line (`--assert` to gate CI) |
 | `vg drift` | What is outdated across dependencies (offline; `--online` for currency) |
-| `vg dsn create` | Generate a DSN token |
+| `vg evidence` | Signed, reproducible regulatory evidence (regime-neutral; CRA first) |
 | `vg fix` | Ranked, risk-tiered upgrade plans from the hosted planner — then apply the one you choose |
 | `vg init [path]` | Initialise config and `.vibgrate/` |
-| `vg login` / `vg logout` | Authenticate the CLI with your Vibgrate workspace (or clear stored credentials) |
-| `vg push` | Upload scan results to Vibgrate Cloud |
 | `vg report` | Generate a report from a scan artifact |
 | `vg sbom export` / `delta` / `vex` | Export CycloneDX/SPDX SBOM, diff two artifacts, or emit an OpenVEX document |
 | `vg scan [path]` | Scan for upgrade drift |
-| `vg scan --vulns` | Also detect known vulnerabilities (OSV; offline via `--package-manifest`) |
 | `vg scan --full` | Comprehensive scan: drift + vulnerabilities + a banned-dependency report |
 | `vg scan --push` | Scan and push results to Vibgrate Cloud |
+| `vg scan --vulns` | Also detect known vulnerabilities (OSV; offline via `--package-manifest`) |
 | `vg update` | Check for and install updates |
 | `vg why <package>` | Who introduced a dependency, its version history, and any open vulnerabilities |
+
+### Workspace auth & cloud upload
+
+Local scoring does not require this — nothing leaves your machine until you push.
+
+**Typical path:** `vg login` → `vg dsn create` → `vg push` → `vg logout`
+
+| Command | Description |
+| --- | --- |
+| `vg dsn create` | Generate a DSN token |
+| `vg login` / `vg logout` | Authenticate the CLI with your Vibgrate workspace (or clear stored credentials) |
+| `vg push` | Upload scan results to Vibgrate Cloud |
 
 ```bash
 vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [--fail-on warn|error] \

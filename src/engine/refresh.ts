@@ -28,6 +28,16 @@ export interface RefreshOptions {
   inline?: boolean;
   /** Worker count for the parse pool. */
   jobs?: number;
+  /**
+   * The map path already resolved by the caller (e.g. `vg serve`'s startup
+   * resolution). Passed straight through to `writeArtifacts` so a refresh
+   * never re-resolves it: `defaultGraphPath` shells out to `git rev-parse`
+   * (Fusion §4.1.1 branch keying), and re-running that on every drift-driven
+   * refresh put a synchronous git spawn back on the hot tool-call path this
+   * function exists to keep off of. Omit only when no caller-known path
+   * exists (falls back to a fresh `defaultGraphPath` resolution).
+   */
+  graphPath?: string;
 }
 
 export type RefreshOutcome =
@@ -84,6 +94,7 @@ export async function refreshIfStale(root: string, opts: RefreshOptions = {}): P
       const dir = vibgrateDir(root);
       writeArtifacts(result.graph, {
         root,
+        graphPath: opts.graphPath,
         report: fs.existsSync(path.join(dir, 'GRAPH_REPORT.md')),
         html: fs.existsSync(path.join(dir, 'graph.html')),
       });

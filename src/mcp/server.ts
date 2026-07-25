@@ -109,7 +109,7 @@ export class GraphSource {
       const interval = this.tuning.probeIntervalMs ?? this.probeIntervalMs;
       if (now < this.failedUntil || now - this.lastProbeAt < interval) return;
       this.lastProbeAt = now;
-      this.inflight = refreshIfStale(this.root)
+      this.inflight = refreshIfStale(this.root, { graphPath: this.graphPath })
         .then((r) => {
           if (r.status === 'error') this.failedUntil = Date.now() + FAILURE_COOLDOWN_MS;
           // Self-tune the probe cadence to the repo's actual size: when the

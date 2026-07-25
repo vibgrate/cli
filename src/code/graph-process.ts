@@ -1,11 +1,16 @@
 /**
  * The VG Code ⇄ Vibgrate Graph process boundary (VG-CLI-CODE §11).
  *
- * When VG Code enters coding mode it spawns Vibgrate Graph (`vg serve`, the
- * local-first AI-context MCP server) as a **separate child process** and kills
- * it when the session ends — so the code map is served for the life of the
- * session and never outlives it. The child is launched with `--client vg-code`
- * so anything it records is attributed to VG Code.
+ * @deprecated Prefer {@link startCodeRuntimeSession} (`src/code/runtime-session.ts`).
+ * Interactive `vg code` no longer spawns `vg serve`; it attaches to (or owns)
+ * a local `vgd` session. This class remains for tests and any external callers
+ * that still need a managed `vg serve` child.
+ *
+ * When VG Code enters coding mode it historically spawned Vibgrate Graph
+ * (`vg serve`) as a **separate child process** and killed it when the session
+ * ends — so the code map is served for the life of the session and never
+ * outlives it. The child is launched with `--client vg-code` so anything it
+ * records is attributed to VG Code.
  *
  * Per-model savings themselves are recorded in-process by the session (it is the
  * only side that knows which model made the call; see session.ts + savings.ts),

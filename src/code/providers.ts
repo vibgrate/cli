@@ -331,7 +331,8 @@ export class ScriptedProvider implements Provider {
     readonly model: string,
     private readonly steps: Array<{ text?: string; toolCalls?: ToolCall[] }>,
   ) {}
-  async chat(): Promise<ProviderResult> {
+  // Match Provider.chat so tests can wrap/spy with the full signature.
+  async chat(_messages?: ChatMessage[], _opts?: ChatOptions): Promise<ProviderResult> {
     const step = this.steps[Math.min(this.turn, this.steps.length - 1)];
     this.turn++;
     return { text: step.text ?? '', model: this.model, provider: this.id, toolCalls: step.toolCalls };
