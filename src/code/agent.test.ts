@@ -7,7 +7,7 @@ import { ScriptedProvider } from './providers.js';
 import { fixtureGraph } from './graph-fixture.js';
 import { readModelSavings } from '../engine/savings.js';
 import type { CodeFs } from './session.js';
-import type { ChatMessage, ToolCall } from './types.js';
+import type { ChatMessage, Provider, ToolCall } from './types.js';
 
 function memFs(seed: Record<string, string> = {}): CodeFs & { files: Record<string, string | null>; audit: string[] } {
   const files: Record<string, string | null> = { ...seed };
@@ -63,6 +63,13 @@ describe('runAgent — the agentic loop', () => {
     // the tool activity was surfaced
     expect(events.some((e) => e.type === 'tool-call' && e.name === 'search_code')).toBe(true);
     expect(events.some((e) => e.type === 'change')).toBe(true);
+    // run-provenance/0: policy pin + content-hashed mutation
+    expect(result.provenance?.schemaVersion).toBe('run-provenance/0');
+    expect(result.provenance?.policyVersion).toMatch(/^context-policy@/);
+    expect(result.provenance?.mutations).toHaveLength(1);
+    expect(result.provenance?.mutations[0]?.file).toBe('src/scan.ts');
+    expect(result.provenance?.mutations[0]?.afterHash).toBeTruthy();
+    expect(result.provenance?.mutationsRootHash).toBeTruthy();
   });
 
   it('respects a declined edit — nothing is written, the loop continues', async () => {
@@ -227,6 +234,113 @@ describe('runAgent — the agentic loop', () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('with capsule:true, first context includes exact source evidence (no navigation needed)', async () => {
+    const scanBody = [
+      'export type Report = { ok: boolean };',
+      'export type Config = { root: string };',
+      '',
+      '// scanDir must never follow symlinks out of the root',
+      'export function scanDir(dir: string): Report {',
+      '  const cfg = readConfig();',
+      '  return { ok: true };',
+      '}',
+      '',
+      'export function readConfig(): Config {',
+      '  return { root: "." };',
+      '}',
+    ].join('\n');
+    const seen: string[] = [];
+    const scripted = new ScriptedProvider('m', [{ toolCalls: [tc('finish', { summary: 'done' }, 't1')] }]);
+    // Spy that implements Provider.chat fully (ScriptedProvider ignores messages).
+    const provider: Provider = {
+      id: scripted.id,
+      label: scripted.label,
+      local: scripted.local,
+      model: scripted.model,
+      async chat(messages, opts) {
+        for (const m of messages) {
+          if (typeof m.content === 'string') seen.push(m.content);
+        }
+        return scripted.chat(messages, opts);
+      },
+    };
+
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'add a timeout to scanDir',
+      providers: [provider],
+      fsImpl: memFs({ 'src/scan.ts': scanBody }),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      capsule: true,
+      noAudit: true,
+    });
+
+    expect(result.stopped).toBe('finished');
+    const joined = seen.join('\n');
+    expect(joined).toContain('Exact source evidence');
+    expect(joined).toContain('function scanDir');
+  });
+
+  it('with capsule + overlay, edits are readable before flush and persist on finish', async () => {
+    const scanBody = 'export function scanDir() {\n  const timeout = 0;\n  return timeout;\n}\n';
+    const fsImpl = memFs({ 'src/scan.ts': scanBody });
+    const provider = new ScriptedProvider('m', [
+      {
+        toolCalls: [
+          tc('edit_file', { path: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 7;' }, 't1'),
+        ],
+      },
+      { toolCalls: [tc('finish', { summary: 'done' }, 't2')] },
+    ]);
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'scanDir timeout',
+      providers: [provider],
+      fsImpl,
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      capsule: true,
+      overlay: true,
+      verifyLadder: false,
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    expect(fsImpl.files['src/scan.ts']).toContain('timeout = 7');
+  });
+
+  it('default (no capsule) does not inject Exact source evidence block', async () => {
+    const seen: string[] = [];
+    const scripted = new ScriptedProvider('m', [{ toolCalls: [tc('finish', { summary: 'done' }, 't1')] }]);
+    const provider: Provider = {
+      id: scripted.id,
+      label: scripted.label,
+      local: scripted.local,
+      model: scripted.model,
+      async chat(messages, opts) {
+        for (const m of messages) {
+          if (typeof m.content === 'string') seen.push(m.content);
+        }
+        return scripted.chat(messages, opts);
+      },
+    };
+
+    await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'add a timeout to scanDir',
+      providers: [provider],
+      fsImpl: memFs({ 'src/scan.ts': 'export function scanDir() {}' }),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      noAudit: true,
+    });
+
+    expect(seen.join('\n')).not.toContain('Exact source evidence');
   });
 });
 

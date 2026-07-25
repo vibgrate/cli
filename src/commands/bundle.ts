@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Command } from 'commander';
 import { resolvedGrammarFiles, grammarSetVersion } from '../engine/grammars.js';
-import { defaultGraphPath } from '../engine/artifacts.js';
+import { resolveGraphPath } from '../engine/artifacts.js';
 import { catalogPath, libDir } from '../engine/lib.js';
 import { stableStringify } from '../engine/serialize.js';
 import { VERSION } from '../version.js';
@@ -46,7 +46,7 @@ export function registerBundle(program: Command): void {
 
       const included: string[] = [`grammars/ (${grammarCount} .wasm)`];
 
-      const graphSrc = global.graph ?? defaultGraphPath(root);
+      const graphSrc = resolveGraphPath(root, global.graph);
       if (fs.existsSync(graphSrc)) {
         fs.copyFileSync(graphSrc, path.join(outDir, 'graph.json'));
         included.push('graph.json');

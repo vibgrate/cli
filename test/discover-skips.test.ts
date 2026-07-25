@@ -44,6 +44,8 @@ describe('discover skips package folders and lockfiles', () => {
       'packages/api/bower_components/lib/old.js': 'function old(){}',
       '.yarn/cache/pkg/index.js': 'module.exports = 1;',
       'DerivedData/Build/x.swift': 'func x() {}',
+      '.migration_backup/webpack.config.js': 'module.exports = {};',
+      'platforms/android/app.js': 'function platform(){}',
     });
     const rels = discover({ root }).map((f) => f.rel);
     expect(rels).toEqual(['src/app.ts']);

@@ -174,6 +174,40 @@ describe('ServeStatusDisplay (non-TTY heartbeat)', () => {
   });
 });
 
+describe('ServeStatusDisplay (TTY repaint)', () => {
+  const fakeTTY = (columns: number): { written: string[]; stream: NodeJS.WriteStream } => {
+    const written: string[] = [];
+    const stream = {
+      isTTY: true,
+      columns,
+      write: (s: string) => {
+        written.push(s);
+        return true;
+      },
+    } as unknown as NodeJS.WriteStream;
+    return { written, stream };
+  };
+
+  it('prevents terminal wrapping so narrow PTYs repaint the whole block', () => {
+    const stats = new SessionStats(Date.now());
+    stats.record(sample({ tool: 'orient', outcome: 'miss', vgTokens: 0, baselineTokens: 0 }));
+    const { written, stream } = fakeTTY(20);
+    const display = new ServeStatusDisplay(stats, stream);
+    const render = display as unknown as { renderTTY(): void };
+
+    render.renderTTY();
+    render.renderTTY();
+
+    // Header + client + tool are three logical rows even though each is wider
+    // than this simulated terminal. The second frame must therefore return
+    // exactly three rows, rather than leaving the old header in scrollback.
+    expect(written[0]).toContain('\x1B[?7l');
+    expect(written[0]).toContain('\x1B[?7h');
+    expect(written[1]).toMatch(/^\x1B\[3A\x1B\[J/);
+    expect(written[1]).toContain('\r\x1B[2K');
+  });
+});
+
 describe('CLI-sourced calls (ledger fold-in)', () => {
   it('records untimed CLI samples without skewing averages', () => {
     const stats = new SessionStats(0);

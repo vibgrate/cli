@@ -263,11 +263,18 @@ export function formatText(artifact: ScanArtifact, opts: FormatTextOptions = {})
 // first band. Keep these in sync with the pricing page and llms.txt.
 const PRICE_EDGES = [0, 25, 100, 300, 500];
 const PRICE_RATES = {
-  team: [6, 5, 4, 3.5],
-  business: [15, 12, 10, 8],
+  team: [4, 3.5, 2.75, 2.25],
+  business: [10, 8.5, 7, 5.5],
 };
 
-/** Monthly cost for `billableProjects` under a banded rate table. */
+// New customers get 25% off their first year — advertised here to nudge the
+// upgrade. Keep in sync with NEW_CUSTOMER_DISCOUNT in @vibgrate/core pricing.
+const NEW_CUSTOMER_DISCOUNT = 0.25;
+
+/**
+ * Monthly cost for `billableProjects` under a banded rate table, rounded **down**
+ * to a whole dollar — the money we quote is always whole dollars.
+ */
 function estimateMonthly(billableProjects: number, rates: number[]): number {
   let total = 0;
   for (let i = 0; i < 4; i++) {
@@ -277,13 +284,17 @@ function estimateMonthly(billableProjects: number, rates: number[]): number {
       total += (Math.min(billableProjects, hi) - lo) * rates[i];
     }
   }
-  // Round to whole cents to avoid binary-float noise (e.g. 0.1 * 3 = 0.30000004).
-  return Math.round(total * 100) / 100;
+  return Math.floor(total);
 }
 
-/** Whole dollars when integral, otherwise two decimal places. */
+/** First-year (intro) price for a new customer: retail less the discount, rounded down. */
+function firstYearPrice(retail: number): number {
+  return Math.floor(retail * (1 - NEW_CUSTOMER_DISCOUNT));
+}
+
+/** Whole-dollar money (headline prices are always integers after rounding down). */
 function formatMoney(value: number): string {
-  return value === Math.floor(value) ? `$${value}` : `$${value.toFixed(2)}`;
+  return `$${Math.floor(value)}`;
 }
 
 interface UpsellPanelOptions {
@@ -306,6 +317,8 @@ function renderUpsellPanel(billing: BillingSummary, opts: UpsellPanelOptions): s
   const raw = billing.billableProjectsRaw;
   const team = estimateMonthly(raw, PRICE_RATES.team);
   const business = estimateMonthly(raw, PRICE_RATES.business);
+  const teamFirstYear = firstYearPrice(team);
+  const businessFirstYear = firstYearPrice(business);
   const rawLabel = formatBillable(raw);
 
   const intro = opts.authenticated
@@ -351,9 +364,10 @@ function renderUpsellPanel(billing: BillingSummary, opts: UpsellPanelOptions): s
     ...intro,
     ``,
     chalk.bold(costLead),
-    `  ${chalk.bold('Team')}       ${chalk.bold.white(formatMoney(team))} / mo`,
-    `  ${chalk.bold('Business')}   ${chalk.bold.white(formatMoney(business))} / mo`,
+    `  ${chalk.bold('Team')}       ${chalk.bold.white(formatMoney(team))} / mo   ${chalk.dim('·')}  ${chalk.cyan(`${formatMoney(teamFirstYear)} / mo first year`)}`,
+    `  ${chalk.bold('Business')}   ${chalk.bold.white(formatMoney(business))} / mo   ${chalk.dim('·')}  ${chalk.cyan(`${formatMoney(businessFirstYear)} / mo first year`)}`,
     chalk.dim(`  (${rawLabel} billable project${raw === 1 ? '' : 's'}, banded per-project pricing)`),
+    chalk.cyan(`  New-customer offer: 25% off your first year.`),
     ``,
     chalk.bold(addsLead),
     ...adds,
