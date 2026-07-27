@@ -25,6 +25,28 @@ export interface CodeConfig {
   contextWindow?: number;
   /** Default step cap. */
   maxSteps?: number;
+  /**
+   * Prefer a source-bearing Task Capsule for the first context (Fusion Runtime
+   * A/B). Overridable by `vg code --capsule` / `--no-capsule`.
+   */
+  capsule?: boolean;
+  /**
+   * Security ladder tier for agent shell commands (Fusion ADR-002).
+   * L0 = host process; L1 = Seatbelt/bubblewrap path isolation when available.
+   * Overridable by `vg code --security-tier`.
+   */
+  securityTier?: 'L0' | 'L1' | 'L2' | 'L3';
+  /**
+   * Optional Model Execution Profile overrides (Fusion). Merged onto the
+   * provider/model-derived defaults at session start.
+   */
+  modelProfile?: {
+    mode?: 'spark' | 'flow' | 'forge';
+    capsuleBudgetTokens?: number;
+    maxRepairRounds?: number;
+    constrainedDecoding?: boolean;
+    securityTier?: 'L0' | 'L1' | 'L2' | 'L3';
+  };
   /** External MCP servers whose tools the agent may call (name → launch spec). */
   mcpServers?: Record<string, McpServerConfig>;
 }
@@ -69,6 +91,26 @@ function sanitize(raw: Record<string, unknown>): CodeConfig {
   if (Array.isArray(raw.denyCommands)) out.denyCommands = raw.denyCommands.filter((x): x is string => typeof x === 'string');
   if (typeof raw.contextWindow === 'number' && raw.contextWindow > 0) out.contextWindow = raw.contextWindow;
   if (typeof raw.maxSteps === 'number' && raw.maxSteps > 0) out.maxSteps = Math.floor(raw.maxSteps);
+  if (typeof raw.capsule === 'boolean') out.capsule = raw.capsule;
+  if (raw.securityTier === 'L0' || raw.securityTier === 'L1' || raw.securityTier === 'L2' || raw.securityTier === 'L3') {
+    out.securityTier = raw.securityTier;
+  }
+  if (raw.modelProfile && typeof raw.modelProfile === 'object') {
+    const mp = raw.modelProfile as Record<string, unknown>;
+    const profile: NonNullable<CodeConfig['modelProfile']> = {};
+    if (mp.mode === 'spark' || mp.mode === 'flow' || mp.mode === 'forge') profile.mode = mp.mode;
+    if (typeof mp.capsuleBudgetTokens === 'number' && mp.capsuleBudgetTokens > 0) {
+      profile.capsuleBudgetTokens = Math.floor(mp.capsuleBudgetTokens);
+    }
+    if (typeof mp.maxRepairRounds === 'number' && mp.maxRepairRounds >= 0) {
+      profile.maxRepairRounds = Math.floor(mp.maxRepairRounds);
+    }
+    if (typeof mp.constrainedDecoding === 'boolean') profile.constrainedDecoding = mp.constrainedDecoding;
+    if (mp.securityTier === 'L0' || mp.securityTier === 'L1' || mp.securityTier === 'L2' || mp.securityTier === 'L3') {
+      profile.securityTier = mp.securityTier;
+    }
+    if (Object.keys(profile).length) out.modelProfile = profile;
+  }
   if (raw.mcpServers && typeof raw.mcpServers === 'object') {
     const servers = parseMcpServers(raw.mcpServers as Record<string, unknown>);
     if (Object.keys(servers).length) out.mcpServers = servers;

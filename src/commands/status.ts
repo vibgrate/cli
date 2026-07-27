@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { Command } from 'commander';
 import { loadGraph } from '../engine/load.js';
-import { defaultGraphPath, vibgrateDir } from '../engine/artifacts.js';
+import { resolveGraphPath, vibgrateDir } from '../engine/artifacts.js';
 import { cacheDir } from '../engine/cache.js';
 import { discover } from '../engine/discover.js';
 import { probeFreshness, driftCount } from '../engine/freshness.js';
@@ -25,7 +25,7 @@ export function registerStatus(program: Command): void {
 
 async function runStatus(global: GlobalOpts): Promise<void> {
   const root = path.resolve(global.cwd ?? '.');
-  const graphPath = global.graph ?? defaultGraphPath(root);
+  const graphPath = resolveGraphPath(root, global.graph);
   const graph = loadGraph(root, graphPath);
   const hasCache = fs.existsSync(path.join(cacheDir(root), 'parse-cache.json'));
 

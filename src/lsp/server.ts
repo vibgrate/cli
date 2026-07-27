@@ -36,7 +36,7 @@ import {
 } from './manifest-positions.js';
 import { buildGraph } from '../engine/build.js';
 import { loadGraph } from '../engine/load.js';
-import { writeArtifacts } from '../engine/artifacts.js';
+import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { manifestHash, loadScanCache, writeScanCache } from './scan-cache.js';
@@ -569,7 +569,8 @@ export class VibgrateLanguageServer {
   private async graphForQuery(): Promise<VgGraph | null> {
     await this.ensureGraph();
     if (!this.graph) return null;
-    const refreshed = await refreshIfStale(this.opts.root);
+    const graphPath = resolveGraphPath(this.opts.root);
+    const refreshed = await refreshIfStale(this.opts.root, { graphPath });
     if (refreshed.status === 'refreshed' && refreshed.wrote) {
       const reloaded = loadGraph(this.opts.root);
       if (reloaded) this.graph = reloaded;

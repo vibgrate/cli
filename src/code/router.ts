@@ -19,6 +19,7 @@
 
 import { CliError, ExitCode } from '../util/exit.js';
 import { discoverModels, type LocalModel } from '../engine/models.js';
+import { resolveGgufPath } from '../runtime/resolve-gguf.js';
 import {
   LocalLlamaProvider,
   MockProvider,
@@ -30,7 +31,7 @@ import {
 import type { Provider } from './types.js';
 
 export interface RouteOptions {
-  /** Explicit `--provider` (ollama, lmstudio, openrouter, litellm, openai, together, llama-cpp). */
+  /** Explicit `--provider` (ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp). */
   provider?: string;
   /** Explicit `--model`. */
   model?: string;
@@ -40,6 +41,11 @@ export interface RouteOptions {
   consent?: boolean;
   /** Path to a gguf for the llama-cpp backend. */
   modelPath?: string;
+  /**
+   * Prefer embedded llama.cpp when a GGUF is resolvable (Code Mode preferredInference).
+   * Still falls back to Ollama/LM Studio.
+   */
+  preferEmbedded?: boolean;
   /** A scripted reply → force the deterministic MockProvider (tests/`--mock`). */
   mockReply?: string;
 }
@@ -115,13 +121,29 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
 function buildExplicit(id: string, opts: RouteOptions, env: NodeJS.ProcessEnv, discover: () => LocalModel[]): Provider {
   if (id === 'ollama') return new OllamaProvider(resolveLocalModel(opts, discover, 'ollama'), env.OLLAMA_HOST);
   if (id === 'llama-cpp') {
-    const modelPath = opts.modelPath || env.VG_CODE_MODEL_PATH;
-    if (!modelPath) throw new CliError('--provider llama-cpp needs a gguf path via --model-path or VG_CODE_MODEL_PATH (no weights are downloaded automatically; see `vg models`).', ExitCode.USAGE_ERROR);
-    return new LocalLlamaProvider(opts.model ?? basename(modelPath), modelPath, undefined, !!opts.consent);
+    const resolved = resolveGgufPath({
+      modelPath: opts.modelPath || env.VG_CODE_MODEL_PATH,
+      modelRef: opts.model,
+      env,
+      discover,
+    });
+    if (!resolved) {
+      throw new CliError(
+        '--provider llama-cpp needs a GGUF: pass --model-path, set VG_CODE_MODEL_PATH, or run `vg models install` so the weight store has a catalogued gguf. See `vg models`.',
+        ExitCode.USAGE_ERROR,
+      );
+    }
+    return new LocalLlamaProvider(opts.model ?? basename(resolved.path), resolved.path, undefined, !!opts.consent);
   }
   if (id === 'lmstudio') return buildHosted('lmstudio', resolveHostedModel(opts, env, 'lmstudio'));
+  if (id === 'foundry-local' || id === 'foundry') {
+    return buildHosted('foundry-local', resolveHostedModel(opts, env, 'foundry-local'));
+  }
   if (HOSTED_IDS.has(id)) return buildHosted(id, resolveHostedModel(opts, env, id));
-  throw new CliError(`unknown --provider "${id}". Known: ollama, lmstudio, openrouter, litellm, openai, together, llama-cpp.`, ExitCode.USAGE_ERROR);
+  throw new CliError(
+    `unknown --provider "${id}". Known: ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp.`,
+    ExitCode.USAGE_ERROR,
+  );
 }
 
 function buildHosted(id: string, model: string): OpenAiCompatibleProvider {
@@ -134,11 +156,46 @@ function buildHosted(id: string, model: string): OpenAiCompatibleProvider {
 function localFallbacks(opts: RouteOptions, env: NodeJS.ProcessEnv, discover: () => LocalModel[], exclude: string): Provider[] {
   const out: Provider[] = [];
   const models = safeDiscover(discover);
+
+  // Approach B default: when a GGUF is already on disk, embedded is primary local.
+  // Opt out with VG_PREFER_OLLAMA=1 if the user wants Ollama first.
+  const preferOllama =
+    env.VG_PREFER_OLLAMA === '1' ||
+    env.VIBGRATE_PREFER_OLLAMA === '1' ||
+    opts.preferEmbedded === false;
+  const gguf =
+    exclude === 'llama-cpp'
+      ? null
+      : resolveGgufPath({
+          modelPath: opts.modelPath || env.VG_CODE_MODEL_PATH,
+          modelRef: opts.model,
+          env,
+          discover: () => models,
+        });
+
+  if (gguf && !preferOllama) {
+    out.push(new LocalLlamaProvider(opts.model ?? basename(gguf.path), gguf.path, undefined, !!opts.consent));
+  }
+
   const ollamaModel = opts.model ?? firstOfRuntime(models, 'ollama');
   if (exclude !== 'ollama' && ollamaModel) out.push(new OllamaProvider(ollamaModel, env.OLLAMA_HOST));
   // LM Studio serves an OpenAI-compatible endpoint locally; include if a model id is known.
   const lmModel = opts.model ?? firstOfRuntime(models, 'lm-studio');
   if (exclude !== 'lmstudio' && lmModel) out.push(buildHosted('lmstudio', lmModel));
+  // Foundry Local when server/env is configured.
+  if (exclude !== 'foundry-local' && exclude !== 'foundry' && (env.FOUNDRY_LOCAL_BASE_URL || env.VG_CODE_PROVIDER === 'foundry-local')) {
+    try {
+      const m = opts.model || env.VG_CODE_MODEL;
+      if (m) out.push(buildHosted('foundry-local', m));
+    } catch {
+      /* skip if no model */
+    }
+  }
+
+  // Embedded last if user forced Ollama-first but GGUF still available.
+  if (gguf && !out.some((p) => p.id === 'llama-cpp')) {
+    out.push(new LocalLlamaProvider(opts.model ?? basename(gguf.path), gguf.path, undefined, !!opts.consent));
+  }
   return out;
 }
 

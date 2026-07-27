@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import { Command } from 'commander';
-import { defaultGraphPath } from '../engine/artifacts.js';
+import { resolveGraphPath } from '../engine/artifacts.js';
 import { serveStdio, createServer, GraphSource, type ServeOptions } from '../mcp/server.js';
 import { StatsSharer, statsEndpoint, telemetryOptOut } from '../engine/stats-share.js';
 import { refreshIfStale } from '../engine/refresh.js';
@@ -51,7 +51,7 @@ export function registerServe(program: Command): void {
     .action(async function (this: Command, opts: { http?: boolean; port?: string; host?: string; savings?: boolean; shareStats?: boolean; dedup?: boolean; refresh?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
-      const graphPath = global.graph ?? defaultGraphPath(root);
+      const graphPath = resolveGraphPath(root, global.graph);
       // A custom --graph is an explicit artifact — never rebuild over it.
       const refresh = opts.refresh !== false && !global.graph;
       // Sharing needs the network, so `--local` (air-gapped) hard-disables the
@@ -84,6 +84,7 @@ export function registerServe(program: Command): void {
         local,
         dedup: opts.dedup === true,
         refresh,
+        root,
         stats,
       };
 
@@ -167,7 +168,7 @@ export async function ensureServableGraph(
         { ...global, json: false },
       );
     } else {
-      const refreshed = await refreshIfStale(root, { inline: opts.inline });
+      const refreshed = await refreshIfStale(root, { inline: opts.inline, graphPath });
       if (refreshed.status === 'refreshed') {
         const n = driftCount(refreshed.drift);
         info(c.dim(`vg · map refreshed before serving — ${n} file(s) drifted (${(refreshed.ms / 1000).toFixed(2)}s)`));
@@ -238,7 +239,7 @@ async function serveHttp(
   // One graph source for the whole process: the parsed graph, hot-reload state,
   // and refresh debounce live across requests (re-parsing per request would be
   // wasteful and would probe freshness on every call).
-  const source = new GraphSource(graphPath, opts.refresh !== false);
+  const source = new GraphSource(graphPath, opts.refresh !== false, { root: opts.root });
 
   const httpServer = createHttp(async (req, res) => {
     if (req.url !== '/mcp') {

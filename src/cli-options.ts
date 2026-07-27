@@ -51,7 +51,7 @@ export function applyGlobalOptions(cmd: Command): Command {
 export function readGlobal(cmd: Command): GlobalOpts {
   // `optsWithGlobals()`, not `opts()`: a global flag (e.g. `--json`) declared on
   // both a command and its parent binds to the parent in commander, so a nested
-  // subcommand (`vg models rm … --json`) would otherwise never see it.
+  // subcommand (`vg models uninstall … --json`) would otherwise never see it.
   const o = cmd.optsWithGlobals() as Record<string, unknown>;
   return {
     cwd: o.cwd as string | undefined,

@@ -65,3 +65,52 @@ export function redactText(text: string): string {
     .replace(BEARER, (_m, k) => `${k}: ***redacted***`)
     .replace(ASSIGNMENT, (_m, name, op) => `${name}${op}***redacted***`);
 }
+
+export type SecretShapeKind = 'token' | 'bearer' | 'assignment' | 'url-auth';
+
+export interface SecretShapeHit {
+  kind: SecretShapeKind;
+  /** Character index of the match in the original text. */
+  index: number;
+}
+
+/**
+ * Locate credential shapes without redacting. Used to refuse network egress
+ * (and similar) when a payload still contains secrets — defense-in-depth on
+ * top of path refusal + redaction.
+ */
+export function findSecretShapes(text: string): SecretShapeHit[] {
+  const hits: SecretShapeHit[] = [];
+  const scan = (re: RegExp, kind: SecretShapeKind): void => {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      hits.push({ kind, index: m.index });
+      if (m[0].length === 0) re.lastIndex++;
+    }
+  };
+  scan(TOKEN_SHAPES, 'token');
+  scan(BEARER, 'bearer');
+  scan(ASSIGNMENT, 'assignment');
+  scan(URL_AUTH, 'url-auth');
+  return hits.sort((a, b) => a.index - b.index || a.kind.localeCompare(b.kind));
+}
+
+/** True when {@link findSecretShapes} finds at least one credential shape. */
+export function containsSecretShapes(text: string): boolean {
+  return findSecretShapes(text).length > 0;
+}
+
+/**
+ * Refuse network-bound payloads that still carry secret shapes after redaction
+ * would be expected. Returns an actionable reason, or null when safe.
+ */
+export function secretEgressRefusal(text: string, surface = 'network payload'): string | null {
+  const hits = findSecretShapes(text);
+  if (hits.length === 0) return null;
+  const kinds = [...new Set(hits.map((h) => h.kind))].sort().join(', ');
+  return (
+    `refusing to send ${surface} — detected credential-shaped content (${kinds}). ` +
+    `Remove secrets before any network call; path-level secrets files are also blocked.`
+  );
+}

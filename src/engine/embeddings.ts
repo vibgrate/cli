@@ -297,10 +297,40 @@ function pathContext(file: string): string {
  * strongest available signal — the node's **doc-comment / docstring** summary —
  * plus lightweight context already on the graph (file-path words, area label), so
  * a tersely-named symbol (`Table`, `NotificationJob`) a concept query can reach.
- * Only the short, truncated doc summary is used (captured at build time); no full
- * file bodies, so the graph artifact stays deterministic.
+ *
+ * `document` nodes (markdown, manifests, Docker, CI, OpenAPI, …) put the
+ * scrubbed body in `doc` — that body is the primary embed signal so `vg ask`
+ * can answer project-context questions, not only code symbols.
  */
 export function nodeEmbedText(node: GraphNode, areaLabel?: string): string {
+  if (node.kind === 'document') {
+    const category = (node.signature ?? 'document').replace(/^document:/, '');
+    // Category keywords help ops/config queries land on the right file type.
+    const categoryHints: Record<string, string> = {
+      manifest: 'package dependencies scripts install dependencies versions',
+      docker: 'dockerfile container image build runtime',
+      compose: 'docker-compose services containers networking volumes',
+      ci: 'continuous integration github actions workflow pipeline test build deploy',
+      'build-config': 'typescript tsconfig bundler vite webpack eslint prettier test',
+      'api-contract': 'openapi swagger graphql protobuf api schema endpoints',
+      'task-runner': 'makefile justfile tasks build test run commands',
+      workspace: 'monorepo workspace packages pnpm turbo nx',
+      infra: 'deploy infrastructure kubernetes kubernetes terraform helm kubernetes',
+      'env-example': 'environment variables configuration secrets template',
+      markdown: 'documentation readme guide',
+    };
+    const hint = categoryHints[category] ?? category;
+    return [
+      node.qualifiedName,
+      'document',
+      category,
+      hint,
+      pathContext(node.file),
+      (node.doc ?? '').slice(0, 5000),
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
   return [node.qualifiedName, node.kind, node.signature ?? '', node.doc ?? '', pathContext(node.file), areaLabel ?? '']
     .filter(Boolean)
     .join(' ');
@@ -347,6 +377,7 @@ export function countPending(graph: VgGraph, root: string, modelId: string): num
   const areaLabel = new Map(graph.areas.map((a) => [a.id, a.label] as const));
   let pending = 0;
   for (const n of graph.nodes) {
+    // file/external stay out of the index; document (docs/env examples) are in.
     if (n.kind === 'file' || n.kind === 'external') continue;
     const h = hashString(nodeEmbedText(n, areaLabel.get(n.area)));
     const cached = entries[n.id];
@@ -394,6 +425,7 @@ export async function getNodeEmbeddings(
   }
 
   const areaLabel = new Map(graph.areas.map((a) => [a.id, a.label] as const));
+  // Include document nodes (markdown/txt/env examples) so ask can retrieve docs.
   const targets = graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external');
   const toEmbed: { id: string; text: string; hash: string }[] = [];
   const vectors = new Map<string, number[]>();

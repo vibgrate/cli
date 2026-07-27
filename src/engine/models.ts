@@ -1,12 +1,13 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { listCachedWeights } from '../runtime/weight-store.js';
 
 /**
  * Local-model discovery (VG-LOCAL-MODELS §9.2) — be a no-key *consumer* of the
  * developer's local model fleet. Fully offline and deterministic: inspect the
- * on-disk layouts of Ollama / LM Studio / llama.cpp, never the network. No
- * runtime is built or launched.
+ * on-disk layouts of Ollama / LM Studio / llama.cpp / the Vibgrate weight store,
+ * never the network. No runtime is built or launched.
  */
 
 export interface LocalModel {
@@ -16,9 +17,14 @@ export interface LocalModel {
 }
 
 export function discoverModels(home = os.homedir()): LocalModel[] {
-  return [...ollama(home), ...lmStudio(home), ...looseGguf(home)].sort(
+  return [...ollama(home), ...lmStudio(home), ...looseGguf(home), ...vibgrateWeightStore()].sort(
     (a, b) => a.runtime.localeCompare(b.runtime) || a.name.localeCompare(b.name),
   );
+}
+
+/** First-party GGUF cache (runtime/weight-store.ts). */
+function vibgrateWeightStore(): LocalModel[] {
+  return listCachedWeights().map((w) => ({ runtime: 'gguf' as const, name: w.name, path: w.path }));
 }
 
 function ollama(home: string): LocalModel[] {

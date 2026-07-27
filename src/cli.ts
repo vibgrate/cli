@@ -34,6 +34,9 @@ import { registerLib } from './commands/lib.js';
 import { registerExport } from './commands/export.js';
 import { registerBundle } from './commands/bundle.js';
 import { registerDoctor } from './commands/doctor.js';
+import { registerDaemon } from './commands/daemon.js';
+import { registerPolicy } from './commands/policy.js';
+import { registerLlmHost } from './commands/llm-host.js';
 import { CliError, ExitCode } from './util/exit.js';
 import { c, info, disableColor } from './util/output.js';
 
@@ -83,6 +86,9 @@ export const KNOWN_COMMANDS = new Set([
   'serve',
   'lsp',
   'doctor',
+  'daemon',
+  'policy',
+  'llm-host',
   'install',
   'uninstall',
   'share',
@@ -160,6 +166,9 @@ export function buildProgram(): Command {
   registerExport(program);
   registerBundle(program);
   registerDoctor(program);
+  registerDaemon(program);
+  registerPolicy(program);
+  registerLlmHost(program);
 
   // Drift-reporting commands (merged from the Vibgrate CLI). `push` here is the
   // real scan-artifact upload, so it replaces the graph engine's no-op `push`.

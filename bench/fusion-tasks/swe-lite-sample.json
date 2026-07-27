@@ -1,0 +1,61 @@
+[
+  {
+    "instance_id": "swe-lite-json-hello",
+    "repo": "vibgrate/fixtures",
+    "problem_statement": "change greeting from hello to hi",
+    "files": {
+      "src/hello.ts": "export const greeting = 'hello';\n"
+    },
+    "scripts": {
+      "capsule": [
+        {
+          "toolCalls": [
+            {
+              "id": "c1",
+              "name": "edit_file",
+              "arguments": {
+                "path": "src/hello.ts",
+                "search": "greeting = 'hello'",
+                "replace": "greeting = 'hi'"
+              }
+            }
+          ]
+        },
+        {
+          "toolCalls": [
+            {
+              "id": "c2",
+              "name": "finish",
+              "arguments": { "summary": "hi" }
+            }
+          ]
+        }
+      ],
+      "oracle": [
+        {
+          "toolCalls": [
+            {
+              "id": "o1",
+              "name": "edit_file",
+              "arguments": {
+                "path": "src/hello.ts",
+                "search": "greeting = 'hello'",
+                "replace": "greeting = 'hi'"
+              }
+            }
+          ]
+        },
+        {
+          "toolCalls": [
+            {
+              "id": "o2",
+              "name": "finish",
+              "arguments": { "summary": "hi" }
+            }
+          ]
+        }
+      ]
+    },
+    "tags": ["lite", "json-pack"]
+  }
+]

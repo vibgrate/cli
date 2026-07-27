@@ -41,7 +41,23 @@ const call = (name: string, args: Record<string, unknown>): ToolCall => ({ id: '
 
 describe('AGENT_TOOLS', () => {
   it('advertises the expected tool names', () => {
-    expect(AGENT_TOOLS.map((t) => t.name)).toEqual(['search_code', 'read_file', 'list_files', 'graph_impact', 'library_docs', 'edit_file', 'create_file', 'delete_file', 'run_command', 'finish']);
+    expect(AGENT_TOOLS.map((t) => t.name)).toEqual([
+      'search_code',
+      'read_file',
+      'list_files',
+      'graph_impact',
+      'library_docs',
+      'edit_file',
+      'create_file',
+      'delete_file',
+      'apply_patch',
+      'run_command',
+      'inspect_task',
+      'inspect_change',
+      'verify_change',
+      'finish',
+      'abort',
+    ]);
   });
 });
 
@@ -128,6 +144,100 @@ describe('mutating tools (gated)', () => {
     expect(clobber.content).toContain('already exists');
   });
 
+  it('apply_patch blocks invented identifiers when trie is set', async () => {
+    const { buildIdentifierTrieFromGraph } = await import('../runtime/identifier-trie.js');
+    const c = ctx();
+    c.identifierTrie = buildIdentifierTrieFromGraph({
+      nodes: c.graph.nodes.map((n) => ({ name: n.name, qualifiedName: n.qualifiedName, id: n.id })),
+    });
+    c.enforceIdentifiers = true;
+    const r = await executeTool(
+      call('apply_patch', {
+        patch: {
+          operations: [
+            {
+              op: 'replace-text',
+              file: 'src/scan.ts',
+              search: 'const timeout = 0;',
+              replace: 'const timeout = inventGhostSymbol();',
+            },
+          ],
+        },
+      }),
+      c,
+    );
+    expect(r.mutated).toBe(false);
+    expect(r.content).toMatch(/blocked|identifier/i);
+    expect(c.files['src/scan.ts']).toContain('timeout = 0');
+  });
+
+  it('apply_patch applies a multi-op PatchIR when approved', async () => {
+    const c = ctx();
+    const r = await executeTool(
+      call('apply_patch', {
+        patch: {
+          operations: [
+            { op: 'replace-text', file: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 9;' },
+            { op: 'create-file', file: 'src/extra.ts', content: 'export const n = 1;\n' },
+          ],
+        },
+      }),
+      c,
+    );
+    expect(r.mutated).toBe(true);
+    expect(c.files['src/scan.ts']).toContain('timeout = 9');
+    expect(c.files['src/extra.ts']).toContain('export const n = 1');
+    expect(r.content).toMatch(/2 file/);
+    // One atomic multi-file approval (not per-file).
+    expect(c.approvals).toHaveLength(1);
+    expect(c.approvals[0]).toMatchObject({
+      kind: 'patch',
+      files: expect.arrayContaining([
+        expect.objectContaining({ file: 'src/scan.ts', op: 'edit' }),
+        expect.objectContaining({ file: 'src/extra.ts', op: 'create' }),
+      ]),
+    });
+  });
+
+  it('apply_patch declines the whole transaction without writing', async () => {
+    const c = ctx({ approve: async () => false });
+    const before = c.files['src/scan.ts'];
+    const r = await executeTool(
+      call('apply_patch', {
+        patch: {
+          operations: [
+            { op: 'replace-text', file: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 9;' },
+            { op: 'create-file', file: 'src/extra.ts', content: 'export const n = 1;\n' },
+          ],
+        },
+      }),
+      c,
+    );
+    expect(r.mutated).toBe(false);
+    expect(r.content).toMatch(/declined/i);
+    expect(c.files['src/scan.ts']).toBe(before);
+    expect(c.files['src/extra.ts']).toBeUndefined();
+  });
+
+  it('apply_patch is all-or-nothing when an op fails', async () => {
+    const c = ctx();
+    const before = c.files['src/scan.ts'];
+    const r = await executeTool(
+      call('apply_patch', {
+        patch: {
+          operations: [
+            { op: 'replace-text', file: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 1;' },
+            { op: 'replace-text', file: 'nope.ts', search: 'a', replace: 'b' },
+          ],
+        },
+      }),
+      c,
+    );
+    expect(r.mutated).toBe(false);
+    expect(c.files['src/scan.ts']).toBe(before);
+    expect(r.content).toMatch(/not applied/i);
+  });
+
   it('run_command is gated and returns output', async () => {
     const run = vi.fn(() => ({ stdout: 'PASS 3 tests', exitCode: 0 }));
     const r = await executeTool(call('run_command', { command: 'npm test' }), ctx({ run }));
@@ -157,6 +267,27 @@ describe('mutating tools (gated)', () => {
     const r = await executeTool(call('run_command', { command: 'npm test' }), ctx({ auto: true, run }));
     expect(run).toHaveBeenCalledWith('npm test');
     expect(r.mutated).toBe(true);
+  });
+
+  it('run_command refuses network-looking commands under --auto (network policy)', async () => {
+    const run = vi.fn(() => ({ stdout: '', exitCode: 0 }));
+    const r = await executeTool(
+      call('run_command', { command: 'curl https://example.com/x' }),
+      ctx({ auto: true, run }),
+    );
+    expect(run).not.toHaveBeenCalled();
+    expect(r.mutated).toBe(false);
+    expect(r.content).toMatch(/network policy/i);
+  });
+
+  it('run_command refuses shell lines that embed credential shapes', async () => {
+    const run = vi.fn(() => ({ stdout: '', exitCode: 0 }));
+    const r = await executeTool(
+      call('run_command', { command: 'echo sk-abcdefghijklmnop' }),
+      ctx({ auto: false, run }),
+    );
+    expect(run).not.toHaveBeenCalled();
+    expect(r.content).toMatch(/credential-shaped|secret/i);
   });
 });
 

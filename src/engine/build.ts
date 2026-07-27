@@ -22,6 +22,7 @@ import {
 import { hashString, hashBytes, canonicalize, shortId } from './hash.js';
 import { grammarSetVersion } from './grammars.js';
 import { classifyEpistemic } from './epistemic.js';
+import { discoverDocs, documentNodesFromDocs } from './docs-ingest.js';
 import { VERSION } from '../version.js';
 import {
   SCHEMA_VERSION,
@@ -268,11 +269,30 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const coverage = options.noCoverage ? null : loadCoverage(root, options.coverage);
   if (coverage) nodes = applyCoverage(nodes, coverage);
 
+  // Documentation / example-env text nodes for semantic ask (not AST-parsed).
+  const docs = discoverDocs({
+    root,
+    exclude: options.exclude,
+    paths: options.paths,
+  });
+  for (const d of docs) {
+    try {
+      const st = fs.statSync(d.abs);
+      const hash = hashBytes(fs.readFileSync(d.abs));
+      hashes.set(d.rel, hash);
+      fileStats.push({ rel: d.rel, size: st.size, mtimeMs: st.mtimeMs, hash });
+    } catch {
+      /* skip unreadable docs */
+    }
+  }
+  const docNodes = documentNodesFromDocs(docs);
+  if (docNodes.length) nodes = [...nodes, ...docNodes];
+
   // Analyse → centrality/areas/surprise (test/coverage edges excluded from these).
   const analysis = analyze(nodes, linked.edges, { cluster: options.cluster });
   checkMemoryBudget('analysis', limits.memoryBudgetMb);
 
-  const languages = [...new Set(parses.map((p) => p.lang))].sort();
+  const languages = [...new Set([...parses.map((p) => p.lang), ...docNodes.map((n) => n.lang)])].sort();
   const edgeKinds = [...new Set(analysis.edges.map((e) => e.kind))].sort() as EdgeKind[];
   const corpusHash = computeCorpusHash(parses, hashes);
 
@@ -443,11 +463,17 @@ function computeToolchain(grammars: string, resolvers: ResolverKind[]): Toolchai
   };
 }
 
-/** blake3 over the sorted (path, content-hash) list — the corpus identity. */
+/**
+ * blake3 over the sorted (path, content-hash) list — the corpus identity.
+ * Includes documentation / env-example files (in `hashes`) as well as parsed
+ * source, so README edits invalidate the map identity and embedding cache.
+ */
 function computeCorpusHash(parses: FileParse[], hashes: Map<string, string>): string {
-  const list = parses
-    .map((p) => [p.rel, hashes.get(p.rel) ?? p.hash] as const)
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const fromParses = parses.map((p) => [p.rel, hashes.get(p.rel) ?? p.hash] as const);
+  const fromHashes = [...hashes.entries()].map(([rel, hash]) => [rel, hash] as const);
+  const byRel = new Map<string, string>();
+  for (const [rel, hash] of [...fromParses, ...fromHashes]) byRel.set(rel, hash);
+  const list = [...byRel.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return hashString(canonicalize(list));
 }
 

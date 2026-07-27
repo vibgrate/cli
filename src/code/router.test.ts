@@ -58,4 +58,35 @@ describe('resolveProviders', () => {
   it('llama-cpp requires a gguf path', () => {
     expect(() => resolveProviders({ provider: 'llama-cpp' }, { env: {}, discover: noModels })).toThrow(/gguf|model-path/);
   });
+
+  it('accepts foundry-local as an explicit local OpenAI-compatible provider', () => {
+    const r = resolveProviders(
+      { provider: 'foundry-local', model: 'phi-4' },
+      { env: {}, discover: noModels },
+    );
+    expect(r.providers[0].id).toBe('foundry-local');
+    expect(r.providers[0].local).toBe(true);
+  });
+
+  it('puts embedded llama-cpp first when a real GGUF path is resolvable (Approach B default)', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-route-'));
+    const file = path.join(dir, 'coder.gguf');
+    fs.writeFileSync(file, 'gguf');
+    try {
+      const r = resolveProviders(
+        { model: 'coder' },
+        {
+          env: {},
+          discover: () => [{ runtime: 'gguf', name: 'coder.gguf', path: file }],
+        },
+      );
+      expect(r.providers[0].id).toBe('llama-cpp');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
+

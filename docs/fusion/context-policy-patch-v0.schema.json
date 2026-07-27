@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibgrate.com/schemas/context-policy-patch/0",
+  "title": "ContextPolicyPatch",
+  "description": "Signed proposal to bump the production context-policy pin after offline benchmark significance. Never auto-applied from a single task.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "proposedPolicyVersion",
+    "basePolicyVersion",
+    "rankingVersion",
+    "changeSummary",
+    "significance",
+    "contentHash"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "context-policy-patch/0" },
+    "proposedPolicyVersion": { "type": "string", "minLength": 1 },
+    "basePolicyVersion": { "type": "string", "minLength": 1 },
+    "rankingVersion": { "type": "string" },
+    "changeSummary": { "type": "string", "minLength": 1 },
+    "significance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["corpusId", "arms", "nTasks", "summary"],
+      "properties": {
+        "corpusId": { "type": "string" },
+        "arms": { "type": "array", "items": { "type": "string" } },
+        "fcs": { "type": ["number", "null"] },
+        "znsAt1": { "type": ["number", "null"] },
+        "nTasks": { "type": "integer", "minimum": 10 },
+        "summary": { "type": "string" }
+      }
+    },
+    "contentHash": { "type": "string", "minLength": 16 },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["keyid", "sig"],
+      "properties": {
+        "keyid": { "type": "string" },
+        "sig": { "type": "string" },
+        "publicKeyPem": { "type": "string" }
+      }
+    }
+  }
+}

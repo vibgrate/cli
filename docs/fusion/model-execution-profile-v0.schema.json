@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibgrate.com/schemas/model-execution-profile/0",
+  "title": "ModelExecutionProfile",
+  "description": "Per-model execution knobs for the Fusion agent kernel (capsule budget, repair, isolation).",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "id",
+    "mode",
+    "toolCalling",
+    "editFormat",
+    "capsuleBudgetTokens",
+    "maxParallelEdits",
+    "maxRepairRounds",
+    "constrainedDecoding"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "model-execution-profile/0" },
+    "id": { "type": "string" },
+    "displayName": { "type": "string" },
+    "mode": { "type": "string", "enum": ["spark", "flow", "forge"] },
+    "backend": {
+      "type": "string",
+      "enum": ["ollama", "llama.cpp", "mlx", "openai-compatible", "other"]
+    },
+    "toolCalling": { "type": "string", "enum": ["native", "grammar", "disabled"] },
+    "editFormat": {
+      "type": "string",
+      "enum": ["search_replace", "patch_ir_json", "whole_file", "auto"]
+    },
+    "capsuleBudgetTokens": { "type": "integer", "minimum": 1 },
+    "maxParallelEdits": { "type": "integer", "minimum": 1 },
+    "maxRepairRounds": { "type": "integer", "minimum": 0 },
+    "temperature": { "type": "number" },
+    "constrainedDecoding": { "type": "boolean" },
+    "kvCacheStrategy": {
+      "type": "string",
+      "enum": ["stable_prefix", "full_reprefill", "auto"]
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "minRamGb": { "type": "number" },
+        "minVramGb": { "type": "number" },
+        "quant": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "securityTier": { "type": "string", "enum": ["L0", "L1", "L2", "L3"] }
+  },
+  "additionalProperties": false
+}
