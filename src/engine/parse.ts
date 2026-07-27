@@ -200,6 +200,12 @@ export async function parseSource(
   langId: string,
   source: string,
 ): Promise<FileParse> {
+  // Pure extractors (no tree-sitter) — SQL DDL topology.
+  if (langId === 'sql') {
+    const { parseSqlFile } = await import('./sql-extract.js');
+    return parseSqlFile(rel, source);
+  }
+
   // Container formats (Vue/Svelte/Astro SFCs): parse the embedded script
   // region with the JS/TS grammar over a position-preserving mask, so every
   // offset/line below refers to the original file. The node keeps the

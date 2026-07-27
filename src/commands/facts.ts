@@ -8,7 +8,7 @@ import { c, info, json } from '../util/output.js';
 /**
  * `vg facts <name>` (VG-CLI-SPEC §5) — the deterministic open facts for a node,
  * epistemic-typed (declared/static → Observed/Derived; never learned/Hypothesized).
- * Facts are derived with `--deep`.
+ * Facts are derived on every build (contract / invariant / characterization).
  */
 export function registerFacts(program: Command): void {
   const cmd = program
@@ -23,8 +23,17 @@ export function registerFacts(program: Command): void {
       if (!node) throw ambiguityError(`"${name}" ${candidates.length ? 'is ambiguous' : 'not found'}`, candidates);
 
       if (!graph.facts) {
-        if (global.json) json({ node: node.qualifiedName, facts: [], note: 'facts require a --deep build' });
-        else info(`${c.cyan('vg facts')} · run ${c.bold('vg --deep')} to derive facts (none in this map)`);
+        if (global.json) {
+          json({
+            node: node.qualifiedName,
+            facts: [],
+            note: 'map has no facts — rebuild with a current vg (facts ship on every build)',
+          });
+        } else {
+          info(
+            `${c.cyan('vg facts')} · none in this map — rebuild with ${c.bold('vg')} (facts ship on every build)`,
+          );
+        }
         return;
       }
 

@@ -1,9 +1,12 @@
-import { serializeGraph } from './serialize.js';
+import { serializeGraph, slimGraphForExport } from './serialize.js';
 import { renderReport } from './report.js';
 import { renderHtml } from './html.js';
 import type { DepRecord } from './drift.js';
 import type { LocalModel } from './models.js';
 import type { VgGraph } from '../schema.js';
+
+/** Above this node count, JSON export defaults to compact (no pretty-print). */
+export const COMPACT_JSON_NODES = 5_000;
 
 /**
  * Deterministic exporters (VG-CLI-SPEC §4.2). One `vg export <file>` verb, format
@@ -53,30 +56,39 @@ export interface ExportContext {
   deps?: DepRecord[];
   models?: LocalModel[];
   generatedAt: string;
+  /** Force compact JSON (no indent). Default: auto when nodes > COMPACT_JSON_NODES. */
+  compact?: boolean;
+  /** Drop area members + grounding for smaller artifacts. */
+  slim?: boolean;
 }
 
 export function exportGraph(format: ExportFormat, ctx: ExportContext): string {
+  const graph = ctx.slim ? slimGraphForExport(ctx.graph) : ctx.graph;
+  const compact =
+    ctx.compact === true ||
+    (ctx.compact !== false && format === 'json' && graph.meta.counts.nodes > COMPACT_JSON_NODES);
+
   switch (format) {
     case 'json':
-      return serializeGraph(ctx.graph);
+      return serializeGraph(graph, { compact });
     case 'md':
-      return renderReport(ctx.graph);
+      return renderReport(graph);
     case 'html':
-      return renderHtml(ctx.graph);
+      return renderHtml(graph);
     case 'ndjson':
-      return ndjson(ctx.graph);
+      return ndjson(graph);
     case 'graphml':
-      return graphml(ctx.graph);
+      return graphml(graph);
     case 'dot':
-      return dot(ctx.graph);
+      return dot(graph);
     case 'cypher':
-      return cypher(ctx.graph);
+      return cypher(graph);
     case 'sql':
-      return sql(ctx);
+      return sql({ ...ctx, graph });
     case 'cyclonedx':
-      return cyclonedx(ctx);
+      return cyclonedx({ ...ctx, graph });
     case 'spdx':
-      return spdx(ctx);
+      return spdx({ ...ctx, graph });
   }
 }
 
@@ -199,7 +211,7 @@ function sql(ctx: ExportContext): string {
     for (const m of a.members) lines.push(`INSERT INTO area_members VALUES (${sqlNum(a.id)}, ${sqlStr(m)});`);
   }
 
-  // facts (+ subjects, evidence) — only with a --deep build.
+  // facts (+ subjects, evidence) when the graph carried them.
   if (graph.facts && graph.facts.length) {
     lines.push('CREATE TABLE IF NOT EXISTS facts (id TEXT PRIMARY KEY, kind TEXT, predicate_json TEXT, derived_by TEXT, confidence TEXT);');
     lines.push('CREATE TABLE IF NOT EXISTS fact_subjects (fact_id TEXT, node_id TEXT);');

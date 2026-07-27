@@ -26,6 +26,9 @@ import { discoverDocs, documentNodesFromDocs } from './docs-ingest.js';
 import { shardTsProjects } from './ts-projects.js';
 import { writeGraphIndex } from './index-db.js';
 import { StageTimer, type StageTimings } from './timing.js';
+import { buildSummaries } from './summaries.js';
+import { extractManifests } from './manifests.js';
+import { hashFilesParallel } from './hash-files.js';
 import { VERSION } from '../version.js';
 import {
   SCHEMA_VERSION,
@@ -168,6 +171,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const reused: FileParse[] = [];
   const buildWarnings: string[] = [];
   let statHits = 0;
+  const pendingHash: { file: DiscoveredFile; size: number; mtimeMs: number }[] = [];
   for (const file of files) {
     let stat: fs.Stats;
     try {
@@ -213,20 +217,34 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
       continue;
     }
 
-    let hash = '';
-    try {
-      hash = hashBytes(fs.readFileSync(file.abs));
-    } catch {
-      continue;
-    }
-    hashes.set(file.rel, hash);
-    fileStats.push({ rel: file.rel, size: stat.size, mtimeMs: stat.mtimeMs, hash });
-    const cached = cache.get(file.rel, hash);
-    if (cached) {
-      reused.push(cached);
-      cache.set(file.rel, cached, { mtimeMs: stat.mtimeMs, size: stat.size });
-    } else {
-      toParse.push(file);
+    // Defer content hashing to a parallel batch (below) for files that miss
+    // the mtime fast path — big monorepos spend real time in sequential reads.
+    pendingHash.push({ file, size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+
+  // Parallel content hash for the pending set.
+  if (pendingHash.length) {
+    const jobs = pendingHash.map((p) => ({ rel: p.file.rel, abs: p.file.abs }));
+    const results = await hashFilesParallel(jobs, options.jobs);
+    const byRel = new Map(results.map((r) => [r.rel, r]));
+    // Stable order: process pendingHash in discovery order (already sorted).
+    for (const p of pendingHash) {
+      const r = byRel.get(p.file.rel);
+      if (!r || !r.ok) continue;
+      hashes.set(p.file.rel, r.hash);
+      fileStats.push({
+        rel: p.file.rel,
+        size: p.size,
+        mtimeMs: p.mtimeMs,
+        hash: r.hash,
+      });
+      const cached = cache.get(p.file.rel, r.hash);
+      if (cached) {
+        reused.push(cached);
+        cache.set(p.file.rel, cached, { mtimeMs: p.mtimeMs, size: p.size });
+      } else {
+        toParse.push(p.file);
+      }
     }
   }
   timer.end('hash');
@@ -265,6 +283,34 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const resolved = resolve(parses, moduleResolver);
   timer.end('resolve');
   checkMemoryBudget('resolve', limits.memoryBudgetMb);
+
+  // Package manifests (package.json / go.mod) → package nodes + dep import edges.
+  // Runs after source resolve so package hubs participate in centrality/areas.
+  const manifests = extractManifests(root, {
+    exclude: options.exclude,
+    paths: options.paths,
+  });
+  if (manifests.files > 0) {
+    const byId = new Map(resolved.nodes.map((n) => [n.id, n]));
+    for (const n of manifests.nodes) {
+      if (!byId.has(n.id)) {
+        byId.set(n.id, n);
+        resolved.nodes.push(n);
+      }
+    }
+    const edgeById = new Map(resolved.edges.map((e) => [e.id, e]));
+    for (const e of manifests.edges) {
+      if (!edgeById.has(e.id)) {
+        edgeById.set(e.id, e);
+        resolved.edges.push(e);
+      }
+    }
+    resolved.nodes.sort((a, b) => a.id.localeCompare(b.id));
+    resolved.edges.sort(
+      (a, b) =>
+        a.kind.localeCompare(b.kind) || a.src.localeCompare(b.src) || a.dst.localeCompare(b.dst),
+    );
+  }
 
   // Precise resolution rungs sit above the heuristic floor and are authoritative
   // for the files they cover (their relational edges replace the heuristic ones,
@@ -448,11 +494,17 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     .map((u) => ({ from: u.from, name: u.name, kind: u.kind, count: u.count }));
   if (unknowns.length) graph.unknowns = unknowns;
 
-  // Facts (--deep) and grounding (default on).
-  if (options.deep) {
+  // Hub blast-radius summaries (cheap agent answers for "what breaks if X changes").
+  graph.summaries = buildSummaries(graph);
+
+  // Deterministic open facts (contracts / invariants / characterization) are
+  // cheap AST-level work and ship on every build so `vg facts` works without a
+  // second pass. `--deep` remains the switch for heavier semantic layers.
+  {
     const facts = buildFacts(parses, analysis.nodes, analysis.edges);
     if (facts.length) graph.facts = facts;
   }
+  // Grounding (default on).
   if (!options.noGround) {
     const grounding = groundGraph(analysis.nodes, analysis.edges, parses);
     if (grounding.length) graph.grounding = grounding;

@@ -27,7 +27,7 @@ export interface LangQueries {
   calls: string[];
   imports: string[];
   heritage: string[];
-  /** Assert/guard expressions captured as @guard → invariant facts (--deep). */
+  /** Assert/guard expressions captured as @guard → invariant facts. */
   guards?: string[];
   /**
    * Constructor-parameter / field declared types captured as @typeref — a

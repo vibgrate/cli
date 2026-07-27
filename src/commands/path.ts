@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { resolveOne } from '../engine/lookup.js';
-import { shortestPath } from '../engine/paths.js';
+import { pathDisconnect, shortestPath } from '../engine/paths.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
@@ -39,6 +39,21 @@ export function registerPath(program: Command): void {
         );
       }
       if (!result) {
+        const disc = pathDisconnect(graph, ra.node.id, rb.node.id);
+        if (global.json) {
+          // disc.from/to are neighborhood objects; keep names as the primary keys.
+          json(disc);
+          // Still a miss for CI/agents, but with structured neighbors for recovery.
+          throw new CliError(
+            `no path between ${ra.node.qualifiedName} and ${rb.node.qualifiedName}`,
+            ExitCode.NOT_FOUND,
+          );
+        }
+        info(`${c.cyan('vg path')} · no path between ${c.bold(disc.from.name)} and ${c.bold(disc.to.name)}`);
+        printNeighborhood('from', disc.from);
+        printNeighborhood('to', disc.to);
+        info(c.dim(`  ${disc.hint}`));
+        info(c.dim(`  try: vg show ${disc.from.name} · vg impact ${disc.from.name} · vg show ${disc.to.name}`));
         throw new CliError(
           `no path between ${ra.node.qualifiedName} and ${rb.node.qualifiedName}`,
           ExitCode.NOT_FOUND,
@@ -57,4 +72,16 @@ export function registerPath(program: Command): void {
       info('  ' + names.map((n) => c.bold(n)).join(c.dim(' → ')));
     });
   applyGlobalOptions(cmd);
+}
+
+function printNeighborhood(
+  label: string,
+  n: { name: string; calls: string[]; calledBy: string[]; imports: string[]; importedBy: string[] },
+): void {
+  const parts: string[] = [];
+  if (n.calls.length) parts.push(`calls ${n.calls.join(', ')}`);
+  if (n.calledBy.length) parts.push(`called by ${n.calledBy.join(', ')}`);
+  if (n.imports.length) parts.push(`imports ${n.imports.join(', ')}`);
+  if (n.importedBy.length) parts.push(`imported by ${n.importedBy.join(', ')}`);
+  info(`  ${c.dim(label)} ${c.bold(n.name)}${parts.length ? c.dim(` · ${parts.join(' · ')}`) : c.dim(' · (no call/import neighbors)')}`);
 }

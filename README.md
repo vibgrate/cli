@@ -103,7 +103,7 @@ Browse all 21+ supported assistants and their skill descriptions at **[vibgrate.
 - **get_graph_summary** — code map overview: counts, languages, top areas and hubs.
 - **list_areas** — code areas (communities) by size.
 - **list_hubs** — most-depended-on symbols.
-- **get_facts** — deterministic facts for a node (contract/invariant; needs a `--deep` build).
+- **get_facts** — deterministic facts for a node (contract / invariant / characterization).
 - **guide_node** — cited standards and practices for a node (OWASP/CWE).
 - **check_drift** — offline dependency inventory with optional git who-added attribution.
 - **vuln_attribution** — who introduced each open vulnerability, exposure windows, CRA remediation metrics.
@@ -316,6 +316,7 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | `vg models` | Code Modes (Spark / Flow / Forge) + local fleet (Ollama / LM Studio / gguf); `install` / `pull` by default (`--dry-run` to preview) |
 | `vg path <from> <to>` | How A connects to B (shortest path) |
 | `vg savings` | Local report of tokens/$ saved vs a grep baseline (estimates) |
+| `vg watch` | Rebuild the map when files change |
 | `vg serve` | Start **Vibgrate AI Context** (local-first MCP: code map + drift + version-correct docs) |
 | `vg share` | Make the graph committable + auto-updating for your team |
 | `vg show <file>` | Explain a node: what it is, what it calls, what calls it |

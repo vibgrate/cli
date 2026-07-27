@@ -84,7 +84,7 @@ describe('sql export', () => {
     }
   });
 
-  it('omits the facts tables when the graph has no facts (non --deep build)', () => {
+  it('omits the facts tables when the graph has no facts', () => {
     const out = exportGraph('sql', ctx(makeGraph(false)));
     expect(out).toContain('CREATE TABLE IF NOT EXISTS nodes ');
     expect(out).not.toContain('CREATE TABLE IF NOT EXISTS facts ');

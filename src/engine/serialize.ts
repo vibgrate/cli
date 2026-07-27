@@ -9,8 +9,27 @@ import type { VgGraph } from '../schema.js';
  * Pretty-printed (2-space) and newline-terminated so the committed artifact is
  * human-diffable and plays well with the union merge driver.
  */
-export function serializeGraph(graph: VgGraph): string {
-  return `${stableStringify(graph, 2)}\n`;
+export function serializeGraph(graph: VgGraph, opts?: { compact?: boolean }): string {
+  // Compact (no pretty-print) for large maps / CI artifacts — still deterministic.
+  const indent = opts?.compact ? 0 : 2;
+  return `${stableStringify(graph, indent)}\n`;
+}
+
+/**
+ * Drop heavy optional fields for export/sharing when size matters.
+ * Does not mutate the input graph.
+ */
+export function slimGraphForExport(graph: VgGraph): VgGraph {
+  return {
+    ...graph,
+    areas: graph.areas.map((a) => ({
+      ...a,
+      members: [], // member id lists dominate XL exports; area id still on nodes
+    })),
+    grounding: undefined,
+    facts: graph.facts,
+    // Keep summaries/unknowns — small and useful to agents.
+  };
 }
 
 export function stableStringify(value: unknown, indent = 2): string {

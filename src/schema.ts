@@ -177,6 +177,23 @@ export interface GroundingEdge {
   citation: { title: string; url: string };
 }
 
+/** Precomputed hub blast-radius counts for fast agent answers (optional). */
+export interface HubBlastSummary {
+  id: string;
+  name: string;
+  kind: string;
+  file: string;
+  importance: number;
+  direct: number;
+  depth2: number;
+  files: number;
+  tested: boolean | null;
+}
+
+export interface GraphSummaries {
+  hubs: HubBlastSummary[];
+}
+
 export interface VgGraph {
   schemaVersion: typeof SCHEMA_VERSION;
   generatedAt: string; // ISO; the ONLY nondeterministic field (pinned by --generated-at)
@@ -185,7 +202,9 @@ export interface VgGraph {
   nodes: GraphNode[]; // sorted by id
   edges: GraphEdge[]; // sorted by (kind, src, dst)
   areas: Area[]; // sorted by id
-  facts?: Fact[]; // present with --deep; sorted by id
+  facts?: Fact[]; // open facts (contract/invariant/characterization); sorted by id
   grounding?: GroundingEdge[]; // free-pack grounding (default on; omit with --no-ground)
   unknowns?: Unknown[]; // heuristic references left unresolved; sorted by (from, kind, name)
+  /** Build-time hub blast-radius summaries (always on; tiny). */
+  summaries?: GraphSummaries;
 }
