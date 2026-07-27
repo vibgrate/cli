@@ -122,12 +122,28 @@ export function computeVersionJump(
   return { majorsBehind, interimMajors };
 }
 
+/**
+ * Blast radius from version jump × source usage.
+ *
+ * Usage scale matters even when the package is current (majorsBehind ≤ 0): a
+ * 100+ import-site package is not "low" risk to touch on a patch/minor — agents
+ * should still treat wide fan-out as moderate. Major jumps combine with usage
+ * for high when either many files or many import sites are involved.
+ */
 function assessBlast(majorsBehind: number | null, usage: UpgradeUsage): BlastRadius {
   const ft = usage.filesTouched;
-  if (!majorsBehind || majorsBehind <= 0) return ft > 0 ? 'low' : 'none';
-  if (ft === 0) return 'low'; // major bump but no direct source usage found
-  if (ft > 20 || (majorsBehind >= 2 && ft > 5)) return 'high';
-  if (ft > 5 || majorsBehind >= 2) return 'moderate';
+  const sites = usage.importSites;
+  const wide = ft > 50 || sites > 100;
+  const broad = ft > 15 || sites > 30;
+  if (!majorsBehind || majorsBehind <= 0) {
+    if (ft === 0 && sites === 0) return 'none';
+    // Current / patch-minor: wide fan-out is moderate, not "low".
+    if (wide) return 'moderate';
+    return 'low';
+  }
+  if (ft === 0 && sites === 0) return 'low'; // major bump but no direct source usage found
+  if (ft > 20 || sites > 50 || wide || (majorsBehind >= 2 && (ft > 5 || sites > 10))) return 'high';
+  if (ft > 5 || sites > 15 || broad || majorsBehind >= 2) return 'moderate';
   return 'low';
 }
 

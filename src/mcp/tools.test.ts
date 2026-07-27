@@ -246,6 +246,50 @@ describe('ambiguity payloads carry discriminating info', () => {
     const nf = (await tool('impact_of').handler(g, { name: 'nope_zzz' }, ctx())) as { error: string };
     expect(nf.error).toBe('not_found');
   });
+
+  it('get_facts and guide_node honour pick like get_node', async () => {
+    const g = makeGraph();
+    g.nodes.push(node('n_foo2', 'foo', 'src/z.ts', { importance: 0.4 }));
+    g.facts = [
+      {
+        id: 'f1',
+        kind: 'contract',
+        subjectIds: ['n_foo2'],
+        predicate: { requires: 'pure' },
+        derivedBy: 'static',
+        confidence: 'Derived',
+        evidence: [{ file: 'src/z.ts', span: { start: 1, end: 2 } }],
+      },
+    ];
+    g.grounding = [
+      {
+        src: 'n_foo2',
+        kind: 'should_follow',
+        packEntryId: 'A01',
+        rationale: 'recommended',
+        confidence: 0.5,
+        citation: { title: 'OWASP', url: 'https://example.com' },
+      },
+    ];
+
+    const factsAmb = (await tool('get_facts').handler(g, { name: 'foo' }, ctx())) as { error: string };
+    expect(factsAmb.error).toBe('ambiguous');
+    const facts = (await tool('get_facts').handler(g, { name: 'foo', pick: 2 }, ctx())) as {
+      node: string;
+      facts: { predicate: { requires: string } }[];
+    };
+    expect(facts.node).toContain('z.ts');
+    expect(facts.facts.some((f) => f.predicate.requires === 'pure')).toBe(true);
+
+    const guideAmb = (await tool('guide_node').handler(g, { name: 'foo' }, ctx())) as { error: string };
+    expect(guideAmb.error).toBe('ambiguous');
+    const guide = (await tool('guide_node').handler(g, { name: 'foo', pick: 2 }, ctx())) as {
+      node: string;
+      guidance: unknown[];
+    };
+    expect(guide.node).toContain('z.ts');
+    expect(guide.guidance.length).toBe(1);
+  });
 });
 
 describe('list_areas token economy', () => {

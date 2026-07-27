@@ -359,6 +359,47 @@ describe('§4 MCP tool migration (resolve_library / library_docs)', () => {
     const root = project({ 'package.json': JSON.stringify({ dependencies: {} }) });
     expect(call('library_docs', { query: 'nope' }, root).error).toBe('not_found');
   });
+
+  it('library_docs marks focused API queries insufficient when only a README is present', () => {
+    const root = project({
+      'package.json': JSON.stringify({ dependencies: { hono: '^4.0.0' } }),
+      'node_modules/hono/package.json': JSON.stringify({ name: 'hono', version: '4.0.0' }),
+      'node_modules/hono/README.md': [
+        '# hono',
+        'Ultrafast web framework.',
+        '```ts',
+        'import { Hono } from "hono"',
+        'const app = new Hono()',
+        '```',
+        'It has middleware helpers described only at a high level — no createMiddleware signature.',
+        'Filler text so the token floor for a bare README is cleared easily in tests.',
+      ].join('\n'),
+    });
+    const r = call('library_docs', { targetId: 'hono', query: 'createMiddleware' }, root);
+    expect(r.metadata.quality.sufficient).toBe(false);
+    expect(r.metadata.escalate).toBe('hosted');
+    expect(r.metadata.quality.reasons.length).toBeGreaterThan(0);
+  });
+
+  it('library_docs surfaces matching .d.ts signatures for focused queries', () => {
+    const root = project({
+      'package.json': JSON.stringify({ dependencies: { hono: '^4.0.0' } }),
+      'node_modules/hono/package.json': JSON.stringify({
+        name: 'hono',
+        version: '4.0.0',
+        types: 'dist/types/index.d.ts',
+      }),
+      'node_modules/hono/README.md': '# hono\nOverview.\n```ts\nimport { Hono } from "hono"\n```\n',
+      'node_modules/hono/dist/types/index.d.ts':
+        "export { createMiddleware } from './factory';\n",
+      'node_modules/hono/dist/types/factory.d.ts':
+        'export declare const createMiddleware: (fn: unknown) => unknown;\n',
+    });
+    const r = call('library_docs', { targetId: 'hono', query: 'createMiddleware', max_tokens: 800 }, root);
+    expect(r.content).toContain('createMiddleware');
+    // With the typed surface matching the query, quality may pass even if README is thin.
+    expect(r.metadata.quality.sufficient === true || r.content.includes('createMiddleware')).toBe(true);
+  });
 });
 
 describe('library_docs hosted escalation (S2 seam, wired)', () => {
@@ -473,6 +514,48 @@ describe('local-first installed-docs resolution (A.2.3)', () => {
       'node_modules/@scope/pkg/README.md': '# scoped',
     });
     expect(localPackageDocs(root, '@scope/pkg')?.source).toBe('node_modules/@scope/pkg/README.md');
+    expect(localPackageDocs(root, '@scope/pkg')?.readmeOnly).toBe(true);
+  });
+
+  it('merges package docs/ markdown and marks readmeOnly false', () => {
+    const root = project({
+      'package.json': JSON.stringify({ dependencies: { cool: '^1.0.0' } }),
+      'node_modules/cool/package.json': JSON.stringify({ name: 'cool', version: '1.0.0' }),
+      'node_modules/cool/README.md': '# cool\nOverview only.',
+      'node_modules/cool/docs/middleware.md': '# Middleware\n\nUse createMiddleware like this.',
+    });
+    const local = localPackageDocs(root, 'cool', { query: 'createMiddleware' });
+    expect(local?.readmeOnly).toBe(false);
+    expect(local?.source).toContain('+docs/');
+    expect(local?.docs).toContain('createMiddleware');
+  });
+
+  it('localApiSurface prefers query-matching declarations across .d.ts files', () => {
+    const root = project({
+      'package.json': JSON.stringify({ dependencies: { hono: '^4.0.0' } }),
+      'node_modules/hono/package.json': JSON.stringify({
+        name: 'hono',
+        version: '4.0.0',
+        types: 'dist/types/index.d.ts',
+      }),
+      'node_modules/hono/dist/types/index.d.ts': [
+        "export { Hono } from './hono'",
+        "export { createMiddleware } from './helper/factory'",
+      ].join('\n'),
+      'node_modules/hono/dist/types/helper/factory.d.ts':
+        'export declare const createMiddleware: <E>(fn: (c: E, next: () => Promise<void>) => Promise<void>) => unknown;\n',
+      'node_modules/hono/dist/types/hono.d.ts': 'export declare class Hono {}\n',
+    });
+    const api = localApiSurface(root, 'hono', 'createMiddleware');
+    expect(api).toBeTruthy();
+    expect(api).toContain('createMiddleware');
+    expect(api).toMatch(/export declare const createMiddleware/);
+  });
+
+  it('extractDtsApi keeps named re-export lines', () => {
+    const decls = extractDtsApi("export { createMiddleware } from './factory';\nexport declare function other(): void;\n");
+    expect(decls.some((d) => d.includes('createMiddleware'))).toBe(true);
+    expect(decls.some((d) => d.includes('other'))).toBe(true);
   });
 });
 
@@ -532,7 +615,7 @@ describe('symbol-level API extraction from .d.ts', () => {
     'export default Client;',
   ].join('\n');
 
-  it('captures exported decls (function/const/interface/class/type) and skips re-exports', () => {
+  it('captures exported decls (function/const/interface/class/type) and named re-exports', () => {
     const decls = extractDtsApi(dts);
     const joined = decls.join('\n---\n');
     expect(joined).toContain('export declare function add(a: number, b: number): number;');
@@ -540,9 +623,10 @@ describe('symbol-level API extraction from .d.ts', () => {
     expect(joined).toContain('export interface Options {');
     expect(joined).toContain('send(path: string): Promise<void>;'); // class member, brace-matched
     expect(joined).toContain('export type ID = string | number;');
-    // re-exports / default are excluded
+    // Named re-exports are kept (barrel packages surface API names this way).
+    expect(joined).toContain('export { foo }');
+    // Star re-exports / default remain excluded (no usable symbol list).
     expect(joined).not.toContain("export * from");
-    expect(joined).not.toContain('export { foo }');
     expect(joined).not.toContain('export default');
   });
 

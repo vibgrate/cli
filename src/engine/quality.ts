@@ -9,6 +9,11 @@ import { tokenizeQuery } from './select.js';
  * checks — no LLM, no network — so the decision is free and deterministic. A doc is
  * "sufficient" when it shows a runnable example, isn't a stub, and is on-topic for the
  * query; otherwise it's a candidate for hosted escalation.
+ *
+ * Focused API queries are strict: identifier-shaped terms (camelCase / PascalCase /
+ * snake_case) must appear verbatim, and multi-term queries need a majority of terms.
+ * That stops a generic README with one overlapping word (e.g. "middleware") from being
+ * marked sufficient for "JWT middleware" or "createMiddleware".
  */
 export interface DocQuality {
   score: number;
@@ -21,6 +26,23 @@ export interface QualityOpts {
   query?: string;
   symbols?: string[];
   minTokens?: number;
+  /**
+   * When true, the payload is only a package README (no typed API surface, no
+   * package docs/). Focused API queries against README-only sources are never
+   * treated as sufficient — agents should fall through to hosted or read types.
+   */
+  readmeOnly?: boolean;
+}
+
+/** camelCase / PascalCase / snake_case / kebab identifiers long enough to be API-shaped. */
+const IDENT_RE = /^(?:[A-Za-z][a-z0-9]*[A-Z][A-Za-z0-9]*|[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[a-z][a-z0-9]*(?:-[a-z0-9]+)+)$/;
+
+/** Tokens that look like real API symbols (not generic prose words). */
+export function identifierTerms(query?: string): string[] {
+  if (!query) return [];
+  // Keep original casing tokens before lowercasing so we can detect camelCase.
+  const raw = [...new Set(query.split(/[^A-Za-z0-9_-]+/).filter((w) => w.length > 2))];
+  return raw.filter((t) => IDENT_RE.test(t) || (t.length >= 6 && /[A-Z]/.test(t) && /[a-z]/.test(t)));
 }
 
 export function assessDocQuality(content: string, opts: QualityOpts = {}): DocQuality {
@@ -48,14 +70,27 @@ export function assessDocQuality(content: string, opts: QualityOpts = {}): DocQu
 
   // 4. On-topic for the query (if one was given).
   const qt = tokenizeQuery(opts.query);
+  const idents = identifierTerms(opts.query);
   let onTopic = qt.length === 0;
   if (qt.length) {
-    const hits = qt.filter((t) => lc.includes(t)).length;
-    if (hits) {
-      score += Math.min(hits, 2);
-      onTopic = true;
+    // Identifier-shaped query terms must appear (case-insensitive). A single
+    // overlapping prose word must not green-light an API lookup.
+    const missingIdents = idents.filter((id) => !lc.includes(id.toLowerCase()));
+    if (missingIdents.length) {
+      reasons.push(`API symbol(s) absent: ${missingIdents.join(', ')}`);
+      onTopic = false;
     } else {
-      reasons.push('query terms absent');
+      const hits = qt.filter((t) => lc.includes(t)).length;
+      // Strict majority of terms (2-of-2, 2-of-3, 3-of-4, …) — a single shared word
+      // like "middleware" must not green-light "JWT middleware".
+      const need = Math.max(1, Math.floor(qt.length / 2) + 1);
+      if (hits >= need) {
+        score += Math.min(hits, 2);
+        onTopic = true;
+      } else {
+        reasons.push(hits === 0 ? 'query terms absent' : `query terms weak (${hits}/${qt.length})`);
+        onTopic = false;
+      }
     }
   }
 
@@ -63,6 +98,16 @@ export function assessDocQuality(content: string, opts: QualityOpts = {}): DocQu
   if (opts.symbols?.length) {
     if (opts.symbols.some((s) => s.length > 2 && lc.includes(s.toLowerCase()))) score += 1;
     else reasons.push('no API symbols present');
+  }
+
+  // 6. README-only + focused API query → never sufficient. A package README rarely
+  // answers createMiddleware / refine / useQuery; agents must not trust score ≥ 6.
+  if (opts.readmeOnly && (idents.length > 0 || qt.length >= 2)) {
+    onTopic = false;
+    if (!reasons.includes('README-only source cannot answer a focused API query')) {
+      reasons.push('README-only source cannot answer a focused API query');
+    }
+    score = Math.min(score, 4); // cap so agents don't treat this as high-confidence
   }
 
   // Gate: a usable doc has an example, isn't a stub, and is on-topic.

@@ -82,6 +82,15 @@ export const FIRST_PARTY_WEIGHT_CATALOG: WeightCatalogEntry[] = [
     sha256: '509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c',
     bytes: 4_683_073_536,
   },
+  {
+    ref: 'qwen2.5-coder-14b-q4_k_m.gguf',
+    url: 'https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/main/qwen2.5-coder-14b-instruct-q4_k_m.gguf',
+    license: 'Apache-2.0',
+    packChannel: '2026.07.4',
+    // Git LFS oid = content sha256 (from HF API tree, 2026-07-27).
+    sha256: 'c1e659736d89ac1065fb495330fb824d94001974a4bfa78e7270e43476a8d940',
+    bytes: 8_988_110_272,
+  },
 ];
 
 export interface CatalogIntegrityReport {

@@ -369,7 +369,8 @@ export const OPENAI_COMPATIBLE: Record<string, Omit<OpenAiCompatibleConfig, 'lab
  */
 export class LocalLlamaProvider implements Provider {
   readonly id = 'llama-cpp';
-  readonly label = 'llama.cpp (local)';
+  /** Surfaced as the Vibgrate model manager (embedded llama.cpp). */
+  readonly label = 'Vibgrate (local)';
   readonly local = true;
   /** Process-wide warm binding + path (best-in-breed: no reload per turn). */
   private static warmBinding: unknown | null = null;

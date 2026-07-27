@@ -191,7 +191,7 @@ export interface OrchestratorStatus {
 // ── Curated packs (versioned; weights may change under the same mode contract) ─
 
 /** Pack channel — bump when contracts or weight refs change under stable mode names. */
-const PACK_CHANNEL = '2026.07.3';
+const PACK_CHANNEL = '2026.07.4';
 
 /**
  * Current qualified packs — one primary per mode.
@@ -244,7 +244,7 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
     },
     resources: { minRamGb: 4, estimatedKvPer1kContext: 2 * 1024 * 1024 },
     provenance: {
-      notes: 'Spark@2026.07.3 — Approach B default: GGUF primary, PatchIR grammar fail-closed, Ollama fallback',
+      notes: 'Spark@2026.07.4 — Approach B: first-party GGUF + embedded vibgrate manager; Ollama pack fallback only',
     },
   },
   {
@@ -290,7 +290,7 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
     },
     resources: { minRamGb: 8, minVramGb: 6, estimatedKvPer1kContext: 4 * 1024 * 1024 },
     provenance: {
-      notes: 'Flow@2026.07.3 — Approach B default GGUF when fit allows; Ollama fallback for machines without store',
+      notes: 'Flow@2026.07.4 — first-party GGUF primary; Ollama pack fallback only',
     },
   },
   {
@@ -299,13 +299,20 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
     displayName: 'Forge',
     promise: 'Strongest deep work that safely fits (migrations, multi-file).',
     primary: {
-      backend: 'ollama',
-      weightsRef: 'qwen2.5-coder:14b',
+      backend: 'llama.cpp',
+      weightsRef: 'qwen2.5-coder-14b-q4_k_m.gguf',
       quant: 'q4_k_m',
       license: 'Apache-2.0',
       weightsBytes: estimateModelBytes('qwen2.5-coder:14b').bytes,
     },
     fallback: [
+      {
+        backend: 'ollama',
+        weightsRef: 'qwen2.5-coder:14b',
+        quant: 'q4_k_m',
+        license: 'Apache-2.0',
+        weightsBytes: estimateModelBytes('qwen2.5-coder:14b').bytes,
+      },
       {
         backend: 'ollama',
         weightsRef: 'qwen2.5-coder:7b',
@@ -322,12 +329,16 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
       maxParallelEdits: 6,
       minEffectiveScore: 0.7,
       constrainedDecoding: false,
-      preferredInference: 'ollama',
+      preferredInference: 'llama.cpp',
+      inferenceIsolation: 'embedded',
       kvCacheStrategy: 'stable_prefix',
       securityTier: 'L1',
     },
     resources: { minRamGb: 16, minVramGb: 12, estimatedKvPer1kContext: 8 * 1024 * 1024 },
-    provenance: { notes: 'Forge@2026.07.2 — deep work; PatchIR-oriented edits without forced grammar yet' },
+    provenance: {
+      notes:
+        'Forge@2026.07.4 — first-party 14B GGUF + embedded vibgrate manager (same path as Spark/Flow); Ollama pack fallback only',
+    },
   },
 ];
 
