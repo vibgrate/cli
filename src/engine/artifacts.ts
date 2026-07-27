@@ -190,7 +190,7 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
     written.htmlPath = htmlPath;
   }
 
-  // facts.jsonl (deterministic NDJSON) when facts were derived (--deep).
+  // facts.jsonl (deterministic NDJSON) when facts were derived.
   if (graph.facts && graph.facts.length) {
     const factsPath = path.join(companions, 'facts.jsonl');
     fs.writeFileSync(factsPath, graph.facts.map((f) => JSON.stringify(f)).join('\n') + '\n');

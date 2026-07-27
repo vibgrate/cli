@@ -31,6 +31,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
 - [Code Graph Commands](#code-graph-commands)
   - [vg ask](#vg-ask)
   - [vg build](#vg-build)
+  - [vg watch](#vg-watch)
   - [vg bundle](#vg-bundle)
   - [vg code](#vg-code)
   - [vg embed](#vg-embed)
@@ -677,6 +678,25 @@ Maps source code into a graph artifact, enabling all downstream queries (`vg sho
 
 ---
 
+
+### vg watch
+
+Rebuild the code map when source files change (debounced). Useful for long agent sessions.
+
+```bash
+vg watch
+vg watch src/ --fast
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `[paths...]` | `.` | Folders to watch |
+| `--debounce <ms>` | `400` | Settle time after a change before rebuild |
+| `--fast` | — | Skip precise TypeScript resolve on rebuilds |
+| `--no-html` | — | Do not rewrite `graph.html` |
+| `--no-report` | — | Do not rewrite `GRAPH_REPORT.md` |
+
+
 ### vg bundle
 
 Build an air-gapped bundle — grammars, the code graph, and the library catalog — for use on a machine with no network.
@@ -866,7 +886,7 @@ Deterministic open facts for a node (contract, invariant, characterization).
 vg facts <name>
 ```
 
-Epistemic-typed: declared/static → observed/derived. Requires `--deep` for derived facts beyond basic declarations.
+Epistemic-typed: declared/static → observed/derived. Open facts (contract / invariant / characterization) ship on every build.
 
 | Flag | Description |
 |------|-------------|

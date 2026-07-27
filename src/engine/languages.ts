@@ -116,6 +116,8 @@ export const LANGUAGES: LanguageDef[] = [
   { id: 'html', label: 'HTML', extensions: ['.html', '.htm'], grammarFile: 'tree-sitter-javascript' },
   { id: 'erb', label: 'ERB', extensions: ['.erb'], grammarFile: 'tree-sitter-ruby' },
   { id: 'ejs', label: 'EJS', extensions: ['.ejs'], grammarFile: 'tree-sitter-javascript' },
+  // SQL DDL — pure deterministic extract (sql-extract.ts), no tree-sitter grammar.
+  { id: 'sql', label: 'SQL', extensions: ['.sql'], grammarFile: 'tree-sitter-typescript' },
 ];
 
 const EXT_TO_LANG = new Map<string, LanguageDef>();

@@ -72,6 +72,35 @@ describe('freshness probe', () => {
     const snap = loadSnapshot(dir)!;
     expect(snap.files['src/math.ts'].mtimeMs).toBe(fs.statSync(abs).mtimeMs);
   });
+
+  it('does not report permanent drift for document files tracked in the snapshot', async () => {
+    // Build with docs present in fileStats (README etc.). Probe must include
+    // discoverDocs so status stays clean after build/refresh.
+    const withDocs = makeProject({
+      ...SAMPLE_FILES,
+      'README.md': '# Hello\n',
+      '.github/workflows/ci.yml': 'name: ci\non: push\njobs: {}\n',
+      'package.json': JSON.stringify({ name: 'demo', dependencies: {} }),
+    });
+    try {
+      const result = await buildGraph({
+        root: withDocs,
+        inline: true,
+        generatedAt: '2020-01-01T00:00:00.000Z',
+      });
+      writeArtifacts(result.graph, { root: withDocs, html: false, report: false });
+      writeSnapshot(withDocs, result.graph.provenance.corpusHash, result.fileStats, {});
+      const probe = probeFreshness(withDocs)!;
+      expect(hasDrift(probe.drift)).toBe(false);
+      // Docs are in the snapshot and re-discovered.
+      expect(probe.drift.removed).not.toContain('README.md');
+      expect(Object.keys(loadSnapshot(withDocs)!.files).some((f) => f.endsWith('.md') || f.includes('package.json'))).toBe(
+        true,
+      );
+    } finally {
+      cleanup(withDocs);
+    }
+  });
 });
 
 describe('refreshIfStale', () => {

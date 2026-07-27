@@ -12,7 +12,8 @@ import type { FileParse } from './types.js';
  *  - **invariant** — from a static assert/guard          (static → Derived)
  *  - **characterization** — from existing test linkage   (static → Observed)
  *
- * Emitted with `--deep`.
+ * Emitted on every build (cheap, deterministic). `--deep` is reserved for
+ * heavier semantic layers, not for these open facts.
  */
 export function buildFacts(parses: FileParse[], nodes: GraphNode[], edges: GraphEdge[]): Fact[] {
   const facts: Fact[] = [];

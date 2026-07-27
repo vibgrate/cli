@@ -29,9 +29,9 @@ const AUTH = {
   'package.json': JSON.stringify({ name: 'demo', dependencies: { jsonwebtoken: '^9.0.0' } }),
 };
 
-describe('facts (--deep)', () => {
+describe('facts (default build)', () => {
   it('derives contract and invariant facts, epistemic-typed', async () => {
-    const { graph } = await buildGraph({ root: project(AUTH), generatedAt: PIN, inline: true, deep: true });
+    const { graph } = await buildGraph({ root: project(AUTH), generatedAt: PIN, inline: true });
     const auth = findNodes(graph, 'authenticate')[0];
     const facts = (graph.facts ?? []).filter((f) => f.subjectIds.includes(auth.id));
     const kinds = facts.map((f) => f.kind);
@@ -42,15 +42,15 @@ describe('facts (--deep)', () => {
     expect(invariant.confidence).toBe('Derived');
   });
 
-  it('omits facts without --deep', async () => {
+  it('ships facts without --deep', async () => {
     const { graph } = await buildGraph({ root: project(AUTH), generatedAt: PIN, inline: true });
-    expect(graph.facts).toBeUndefined();
+    expect(graph.facts?.length).toBeGreaterThan(0);
   });
 
-  it('--deep build remains byte-deterministic', async () => {
+  it('build remains byte-deterministic with facts', async () => {
     const root = project(AUTH);
-    const a = serializeGraph((await buildGraph({ root, generatedAt: PIN, inline: true, deep: true, noCache: true })).graph);
-    const b = serializeGraph((await buildGraph({ root, generatedAt: PIN, inline: true, deep: true, noCache: true })).graph);
+    const a = serializeGraph((await buildGraph({ root, generatedAt: PIN, inline: true, noCache: true })).graph);
+    const b = serializeGraph((await buildGraph({ root, generatedAt: PIN, inline: true, noCache: true })).graph);
     expect(a).toBe(b);
   });
 });

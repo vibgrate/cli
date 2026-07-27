@@ -71,13 +71,15 @@ export function registerInsights(program: Command): void {
     .command('oddities')
     .description('surprising cross-area links (architectural smells)')
     .option('-n, --limit <n>', 'how many to show', '20')
-    .action(function (this: Command, opts: { limit?: string }) {
+    .option('--all', 'include framework/runtime externals (default: filter them out)')
+    .action(function (this: Command, opts: { limit?: string; all?: boolean }) {
       const global = readGlobal(this);
       const { graph } = requireGraph(global);
       const limit = Number(opts.limit) || 20;
       const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
       const list = graph.edges
         .filter((e) => typeof e.surprise === 'number' && e.surprise > 0)
+        .filter((e) => opts.all || !isFrameworkOddity(byId.get(e.src), byId.get(e.dst), e.kind))
         .sort((a, b) => (b.surprise ?? 0) - (a.surprise ?? 0) || a.id.localeCompare(b.id))
         .slice(0, limit);
       if (global.json) {
@@ -92,7 +94,12 @@ export function registerInsights(program: Command): void {
         return;
       }
       if (!list.length) {
-        info(`${c.cyan('vg oddities')} · none found (no cross-area links, or only one area)`);
+        info(
+          `${c.cyan('vg oddities')} · none found` +
+            (opts.all
+              ? ' (no cross-area links, or only one area)'
+              : ' (no app-level surprises; try --all for framework links)'),
+        );
         return;
       }
       info(`${c.cyan('vg oddities')} · top ${list.length} surprising links`);
@@ -103,6 +110,88 @@ export function registerInsights(program: Command): void {
       }
     });
   applyGlobalOptions(oddities);
+}
+
+/**
+ * Framework/runtime imports are almost always cross-area by construction and
+ * drown real architectural smells (import→react, import→vue, …). Default filter
+ * drops edges whose source or target is an external package in this set, or any
+ * external node on a pure `import` edge to a known framework.
+ */
+const FRAMEWORK_EXTERNALS = new Set([
+  'react',
+  'react-dom',
+  'react-native',
+  'vue',
+  'vue-router',
+  'svelte',
+  'svelte/store',
+  'next',
+  'next/link',
+  'next/router',
+  'next/navigation',
+  'nuxt',
+  'angular',
+  '@angular/core',
+  '@angular/common',
+  'preact',
+  'solid-js',
+  'express',
+  'fastify',
+  'koa',
+  'hono',
+  'rxjs',
+  'lodash',
+  'lodash-es',
+  'underscore',
+  'jquery',
+  'axios',
+  'node:fs',
+  'node:path',
+  'node:url',
+  'node:http',
+  'node:https',
+  'fs',
+  'path',
+  'url',
+  'http',
+  'https',
+  'crypto',
+  'util',
+  'stream',
+  'events',
+  'assert',
+  'os',
+  'child_process',
+]);
+
+/** Exported for unit tests — pure filter used by `vg oddities`. */
+export function isFrameworkOddity(
+  from: GraphNode | undefined,
+  to: GraphNode | undefined,
+  kind: string,
+): boolean {
+  // Only demote pure package imports to known frameworks/runtimes — never hide
+  // app-to-app links just because a symbol is named like a library.
+  if (kind !== 'import') return false;
+  for (const n of [from, to]) {
+    if (n?.kind === 'external' && isFrameworkName(n.qualifiedName || n.name)) return true;
+  }
+  return false;
+}
+
+/** Exported for unit tests. */
+export function isFrameworkName(name: string): boolean {
+  if (!name) return false;
+  if (FRAMEWORK_EXTERNALS.has(name)) return true;
+  // Scoped packages: @vue/runtime-dom, @react-navigation/native, …
+  const base = name.startsWith('@') ? name.split('/').slice(0, 2).join('/') : name.split('/')[0];
+  if (FRAMEWORK_EXTERNALS.has(base)) return true;
+  if (base.startsWith('react-') || base.startsWith('@types/react')) return true;
+  if (base.startsWith('@vue/') || base.startsWith('@angular/') || base.startsWith('@sveltejs/')) {
+    return true;
+  }
+  return false;
 }
 
 function nodeSummary(n: GraphNode) {

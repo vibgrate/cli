@@ -107,6 +107,8 @@ export function writeGraphIndex(root: string, graph: VgGraph): IndexWriteResult 
     insMeta.run('graphProvenance', JSON.stringify(graph.provenance));
     if (graph.facts) insMeta.run('factsJson', JSON.stringify(graph.facts));
     if (graph.grounding) insMeta.run('groundingJson', JSON.stringify(graph.grounding));
+    if (graph.summaries) insMeta.run('summariesJson', JSON.stringify(graph.summaries));
+    if (graph.unknowns) insMeta.run('unknownsJson', JSON.stringify(graph.unknowns));
 
     const insNode = db.prepare(
       `INSERT INTO nodes(id, name, qualified_name, kind, file, line, importance, area, is_hub, lang, json)
@@ -331,6 +333,8 @@ export function loadGraphFromIndex(root: string): VgGraph | null {
     };
     if (meta.factsJson) graph.facts = JSON.parse(meta.factsJson);
     if (meta.groundingJson) graph.grounding = JSON.parse(meta.groundingJson);
+    if (meta.summariesJson) graph.summaries = JSON.parse(meta.summariesJson);
+    if (meta.unknownsJson) graph.unknowns = JSON.parse(meta.unknownsJson);
 
     // Lightweight integrity: edge resolution types stay valid.
     for (const e of edges) {

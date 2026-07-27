@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { discover } from './discover.js';
+import { discoverDocs } from './docs-ingest.js';
 import { hashBytes } from './hash.js';
 import { cacheDir } from './cache.js';
 import { stableStringify } from './serialize.js';
@@ -118,9 +119,22 @@ export function probeFreshness(root: string): ProbeResult | null {
   if (!snapshot) return null;
 
   const { scope } = snapshot;
-  let discovered;
+  // Must match the build's fileStats universe: language sources + context docs
+  // (README, CI yaml, package manifests, …). Probing only `discover()` left
+  // every document in the snapshot as "removed" after a successful build, so
+  // `vg status` kept reporting hundreds of drifted files after ask/serve refresh.
+  let discovered: { rel: string; abs: string }[];
   try {
-    discovered = discover({ root, only: scope.only, exclude: scope.exclude, paths: scope.paths });
+    const code = discover({ root, only: scope.only, exclude: scope.exclude, paths: scope.paths });
+    const docs = discoverDocs({ root, exclude: scope.exclude, paths: scope.paths });
+    const byRel = new Map<string, string>();
+    for (const f of code) byRel.set(f.rel, f.abs);
+    for (const d of docs) {
+      if (!byRel.has(d.rel)) byRel.set(d.rel, d.abs);
+    }
+    discovered = [...byRel.entries()]
+      .map(([rel, abs]) => ({ rel, abs }))
+      .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   } catch {
     return null; // root vanished / unreadable — treat as unknown, not stale
   }
@@ -145,6 +159,18 @@ export function probeFreshness(root: string): ProbeResult | null {
     }
     if (stat.size === entry.size && stat.mtimeMs === entry.mtimeMs) continue;
     // Stat moved — confirm with content before declaring drift.
+    // Build records oversized files with a size-only sentinel hash so the probe
+    // must not re-read them into memory (or mis-report them as always-changed).
+    if (entry.hash.startsWith('vg:oversize:')) {
+      const expected = `vg:oversize:${stat.size}`;
+      if (entry.hash === expected) {
+        snapshot.files[file.rel] = { size: stat.size, mtimeMs: stat.mtimeMs, hash: entry.hash };
+        absorbed = true;
+      } else {
+        drift.changed.push(file.rel);
+      }
+      continue;
+    }
     let hash = '';
     try {
       hash = hashBytes(fs.readFileSync(file.abs));

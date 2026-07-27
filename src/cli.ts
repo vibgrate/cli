@@ -20,6 +20,7 @@ import { registerServe } from './commands/serve.js';
 import { registerLsp } from './commands/lsp.js';
 import { registerInstall } from './commands/install.js';
 import { registerShare } from './commands/share.js';
+import { registerWatch } from './commands/watch.js';
 import { registerTests } from './commands/tests.js';
 import { registerFacts } from './commands/facts.js';
 import { registerGuide } from './commands/guide.js';
@@ -91,6 +92,7 @@ export const KNOWN_COMMANDS = new Set([
   'install',
   'uninstall',
   'share',
+  'watch',
   'help',
   // Drift-reporting verbs (merged from the Vibgrate CLI).
   'init',
@@ -150,6 +152,7 @@ export function buildProgram(): Command {
   registerLsp(program);
   registerInstall(program);
   registerShare(program);
+  registerWatch(program);
   registerTests(program);
   registerFacts(program);
   registerGuide(program);

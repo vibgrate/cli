@@ -31,11 +31,11 @@ const SHARE_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
  * always queries an up-to-date graph (see mcp/server.ts). `--no-refresh`
  * pins serving to the map as built; a custom `--graph` implies it.
  *
- * Before the server accepts its first request it also brings the map in sync
- * once, up front: a missing map is built from scratch and a stale map is
- * rebuilt incrementally (see `ensureServableGraph`). That way the first tool
- * call already sees an up-to-date graph instead of waiting for the in-process
- * probe — which only fires once tool calls start arriving — to notice drift.
+ * Startup only **blocks** to build a missing map. A present-but-stale map is
+ * left for the in-process probe (and a background kick from
+ * `ensureServableGraph`) so the MCP `initialize` handshake is never delayed by
+ * a multi-second rebuild — hosts time out the handshake when serve blocks too
+ * long before connecting the transport.
  */
 export function registerServe(program: Command): void {
   const cmd = program
@@ -125,39 +125,47 @@ export function registerServe(program: Command): void {
         await serveHttp(graphPath, opts.host ?? '127.0.0.1', Number(opts.port) || 7437, serveOpts, freshness, () => display?.start());
       } else {
         // stdio: NOTHING may go to stdout except the protocol stream.
+        // Start the status display before connect so operators see activity
+        // while the transport waits for initialize (serveStdio blocks forever).
         info(c.dim(`vg · MCP server on stdio (read-only, ${freshness}). Connect your assistant to this process.`));
-        await serveStdio(graphPath, serveOpts);
         display?.start();
+        await serveStdio(graphPath, serveOpts);
       }
     });
   applyGlobalOptions(cmd);
 }
 
 /**
- * Ensure there is an up-to-date map to serve before the MCP server starts.
+ * Ensure there is a map to serve before the MCP server starts.
  *
  * When auto-refresh is on (the default; disabled by `--no-refresh` or a pinned
  * `--graph`):
  * - **No map yet** → run the ordinary `vg build` so a fresh checkout can `vg
  *   serve` without a separate build step first. Forced out of `--json` so the
  *   build summary never lands on stdout — under stdio that channel is the MCP
- *   protocol stream and carries nothing else.
- * - **Map present but stale** → the incremental refresh (`refreshIfStale`),
- *   replaying the last build's scope. Fail-soft: a refresh error degrades to
- *   serving the last built map rather than refusing to start.
+ *   protocol stream and carries nothing else. This is the only blocking work
+ *   at startup.
+ * - **Map present but stale** → **do not block**. Kick a background
+ *   `refreshIfStale` and let the transport connect immediately. Blocking here
+ *   on multi-second rebuilds causes host-side MCP handshake timeouts (Grok /
+ *   Cursor / etc. abort before `initialize` returns). Tool calls still run the
+ *   in-process micro-budget probe (`GraphSource`) and pick up the rebuild via
+ *   hot-reload.
  *
  * With auto-refresh off we serve the map exactly as built and only verify one
  * exists. Either way, if there is still no map afterwards we stop with an
  * actionable error instead of starting a server with nothing to answer from.
  *
  * `opts.inline` forces single-threaded build/refresh (tests only).
+ * `opts.awaitStaleRefresh` (tests only) waits for the background stale refresh
+ * so unit tests can assert the rebuild without racing.
  */
 export async function ensureServableGraph(
   root: string,
   graphPath: string,
   global: GlobalOpts,
   refresh: boolean,
-  opts: { inline?: boolean } = {},
+  opts: { inline?: boolean; awaitStaleRefresh?: boolean } = {},
 ): Promise<void> {
   if (refresh) {
     if (!fs.existsSync(graphPath)) {
@@ -168,13 +176,26 @@ export async function ensureServableGraph(
         { ...global, json: false },
       );
     } else {
-      const refreshed = await refreshIfStale(root, { inline: opts.inline, graphPath });
-      if (refreshed.status === 'refreshed') {
-        const n = driftCount(refreshed.drift);
-        info(c.dim(`vg · map refreshed before serving — ${n} file(s) drifted (${(refreshed.ms / 1000).toFixed(2)}s)`));
-      } else if (refreshed.status === 'error') {
-        info(c.yellow(`vg · map refresh failed (${refreshed.message}) — serving the last built map`));
-      }
+      // Non-blocking: handshake must not wait on a large-repo rebuild.
+      const kick = refreshIfStale(root, { inline: opts.inline, graphPath })
+        .then((refreshed) => {
+          if (refreshed.status === 'refreshed') {
+            const n = driftCount(refreshed.drift);
+            info(
+              c.dim(
+                `vg · map refreshed in background — ${n} file(s) drifted (${(refreshed.ms / 1000).toFixed(2)}s)`,
+              ),
+            );
+          } else if (refreshed.status === 'error') {
+            info(c.yellow(`vg · map refresh failed (${refreshed.message}) — serving the last built map`));
+          }
+        })
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          info(c.yellow(`vg · map refresh failed (${msg}) — serving the last built map`));
+        });
+      if (opts.awaitStaleRefresh) await kick;
+      else void kick;
     }
   }
 

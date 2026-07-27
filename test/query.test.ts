@@ -170,4 +170,19 @@ describe('shortestPath', () => {
       'double',
     ]);
   });
+
+  it('pathDisconnect reports neighbors when unconnected', async () => {
+    const { pathDisconnect } = await import('../src/engine/paths.js');
+    // double and OrderService are connected via calls; pick a file node vs a far leaf if needed.
+    // Use two distinct endpoints that may still be linked — assert shape on a self-path miss:
+    // shortestPath to self is a zero-hop path, so invent a synthetic check via any node.
+    const a = findNodes(graph, 'OrderService.deleteAsync')[0];
+    const disc = pathDisconnect(graph, a.id, a.id);
+    expect(disc.connected).toBe(false);
+    expect(disc.from.name).toBeTruthy();
+    expect(disc.to.name).toBe(disc.from.name);
+    expect(typeof disc.hint).toBe('string');
+    // deleteAsync should have callees in this fixture.
+    expect(disc.from.calls.length + disc.from.calledBy.length).toBeGreaterThan(0);
+  });
 });

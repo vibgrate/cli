@@ -47,17 +47,35 @@ describe('ensureServableGraph (vg serve pre-serve build/refresh)', () => {
     expect(probeFreshness(dir)).not.toBeNull();
   });
 
-  it('rebuilds a stale map before serving so the first query is current', async () => {
+  it('refreshes a stale map without blocking serve startup (handshake-safe)', async () => {
     const dir = project(SAMPLE_FILES);
     const graphPath = defaultGraphPath(dir);
     await buildAndSnapshot(dir);
     editFile(dir, 'src/math.ts', 'export function triple(x: number): number { return x * 3; }\n');
 
-    await ensureServableGraph(dir, graphPath, { cwd: dir }, true, { inline: true });
+    // Production path: ensure returns before the rebuild finishes so MCP
+    // initialize is never delayed. Tests await the background kick.
+    await ensureServableGraph(dir, graphPath, { cwd: dir }, true, {
+      inline: true,
+      awaitStaleRefresh: true,
+    });
 
     const graph = parseGraph(fs.readFileSync(graphPath, 'utf8'));
     expect(graph.nodes.some((n) => n.qualifiedName.endsWith('triple'))).toBe(true);
     expect(hasDrift(probeFreshness(dir)!.drift)).toBe(false);
+  });
+
+  it('returns immediately when a map exists even if stale (handshake micro-budget)', async () => {
+    const dir = project(SAMPLE_FILES);
+    const graphPath = defaultGraphPath(dir);
+    await buildAndSnapshot(dir);
+    editFile(dir, 'src/math.ts', 'export function triple(x: number): number { return x * 3; }\n');
+
+    const t0 = Date.now();
+    await ensureServableGraph(dir, graphPath, { cwd: dir }, true, { inline: true });
+    // Must not wait on the rebuild — only a quick exists check + fire-and-forget.
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(fs.existsSync(graphPath)).toBe(true);
   });
 
   it('leaves a fresh map untouched', async () => {

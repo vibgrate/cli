@@ -19,7 +19,13 @@ export function registerExport(program: Command): void {
     .command('export')
     .description('export the map (format inferred: json|ndjson|graphml|dot|cypher|sql|md|html|cdx.json|spdx.json)')
     .argument('[file]', 'target file (or - for stdout)', 'map.json')
-    .action(function (this: Command, file: string) {
+    .option('--compact', 'compact JSON (no pretty-print; auto for large maps)')
+    .option('--slim', 'drop heavy fields (area member lists, grounding) for smaller exports')
+    .action(function (
+      this: Command,
+      file: string,
+      opts: { compact?: boolean; slim?: boolean },
+    ) {
       const global = readGlobal(this);
       const { graph } = requireGraph(global);
       const root = rootOf(global);
@@ -33,6 +39,8 @@ export function registerExport(program: Command): void {
         deps: needsDeps ? inventory(root).records : undefined,
         models: needsDeps && !global.local ? discoverModels() : undefined,
         generatedAt: graph.generatedAt,
+        compact: opts.compact === true ? true : opts.compact === false ? false : undefined,
+        slim: opts.slim === true,
       });
 
       if (file === '-') {

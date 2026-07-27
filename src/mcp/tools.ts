@@ -2,7 +2,7 @@ import { queryGraph, queryGraphSemantic } from '../engine/query.js';
 import { loadEmbedder, getNodeEmbeddings, isModelReady, withTimeout, type Embedder } from '../engine/embeddings.js';
 import { resolveOne } from '../engine/lookup.js';
 import { indexFor } from '../engine/relations.js';
-import { shortestPath } from '../engine/paths.js';
+import { pathDisconnect, shortestPath } from '../engine/paths.js';
 import { impactOf } from '../engine/impact.js';
 import { coveringTests } from '../engine/test-query.js';
 import { loadVulnerabilities, filterBySeverity, resolvePackageTarget, openFixableAdvisories } from './vuln-data.js';
@@ -379,7 +379,7 @@ export const TOOLS: VgTool[] = [
       if (!ra.node) return { endpoint: 'a', ...unresolved(ra.candidates) };
       if (!rb.node) return { endpoint: 'b', ...unresolved(rb.candidates) };
       const result = shortestPath(graph, ra.node.id, rb.node.id);
-      if (!result) return { connected: false };
+      if (!result) return pathDisconnect(graph, ra.node.id, rb.node.id);
       const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
       return { connected: true, direction: result.direction, path: result.ids.map((id) => byId.get(id)?.qualifiedName ?? id) };
     },
@@ -498,23 +498,51 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'list_hubs',
-    description: 'Most-depended-on symbols.',
+    description: 'Most-depended-on symbols (includes precomputed blast-radius counts when available).',
     inputSchema: obj({ limit: { type: 'number' } }),
-    handler: (graph, args) =>
-      graph.nodes
+    handler: (graph, args) => {
+      const limit = numOr(args.limit, 20);
+      if (graph.summaries?.hubs?.length) {
+        return graph.summaries.hubs.slice(0, limit).map((h) => ({
+          name: h.name,
+          kind: h.kind,
+          file: h.file,
+          importance: h.importance,
+          isHub: true,
+          directDependents: h.direct,
+          depth2Dependents: h.depth2,
+          filesAffected: h.files,
+          tested: h.tested,
+        }));
+      }
+      return graph.nodes
         .filter((n) => n.kind !== 'file' && n.kind !== 'external')
         .sort((a, b) => b.importance - a.importance)
-        .slice(0, numOr(args.limit, 20))
-        .map((n) => ({ name: n.qualifiedName, kind: n.kind, file: n.file, line: n.span.start, importance: n.importance, isHub: n.isHub })),
+        .slice(0, limit)
+        .map((n) => ({
+          name: n.qualifiedName,
+          kind: n.kind,
+          file: n.file,
+          line: n.span.start,
+          importance: n.importance,
+          isHub: n.isHub,
+        }));
+    },
   },
   {
     name: 'get_facts',
-    description: 'Deterministic facts for a node (contract/invariant); needs a --deep build.',
+    description: 'Deterministic facts for a node (contract / invariant / characterization).',
     inputSchema: obj({ name: { type: 'string' } }, ['name']),
     handler: (graph, args) => {
       const { node, candidates } = resolveOne(graph, String(args.name ?? ''));
       if (!node) return unresolved(candidates);
-      if (!graph.facts) return { node: node.qualifiedName, facts: [], note: 'facts require a --deep build' };
+      if (!graph.facts) {
+        return {
+          node: node.qualifiedName,
+          facts: [],
+          note: 'map has no facts — rebuild with a current vg (facts ship on every build)',
+        };
+      }
       return { node: node.qualifiedName, facts: graph.facts.filter((f) => f.subjectIds.includes(node.id)) };
     },
   },
@@ -839,18 +867,28 @@ function conciseSummary(graph: VgGraph) {
 
 /** Shared map overview used by both `get_graph_summary` and `orient`. */
 function summarize(graph: VgGraph, top = 10) {
+  const topHubs = graph.summaries?.hubs?.length
+    ? graph.summaries.hubs.slice(0, top).map((h) => ({
+        name: h.name,
+        file: h.file,
+        importance: h.importance,
+        directDependents: h.direct,
+        depth2Dependents: h.depth2,
+      }))
+    : graph.nodes
+        .filter((n) => n.isHub)
+        .sort((a, b) => b.importance - a.importance)
+        .slice(0, top)
+        .map((n) => ({ name: n.qualifiedName, file: n.file, importance: n.importance }));
   return {
     counts: graph.meta.counts,
     languages: graph.meta.languages,
     cluster: graph.meta.cluster,
+    analysisTier: graph.meta.analysisTier ?? 'full',
     resolver: graph.provenance.resolver,
     generatedAt: graph.generatedAt,
     topAreas: [...graph.areas].sort((a, b) => b.size - a.size).slice(0, top).map((a) => ({ id: a.id, label: a.label, size: a.size })),
-    topHubs: graph.nodes
-      .filter((n) => n.isHub)
-      .sort((a, b) => b.importance - a.importance)
-      .slice(0, top)
-      .map((n) => ({ name: n.qualifiedName, file: n.file, importance: n.importance })),
+    topHubs,
   };
 }
 
