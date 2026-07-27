@@ -25,9 +25,9 @@ import type { VgGraph } from '../schema.js';
  * 2. **Auto-refresh** (default on) — each tool call runs a debounced, stat-only
  *    freshness probe against the last build's snapshot; if the working tree
  *    drifted, an incremental rebuild runs in-process (cross-process locked,
- *    single-flight). The call waits for it up to a small budget — warm
- *    incremental rebuilds land well inside it — and otherwise answers from
- *    the current map while the rebuild finishes for the next call.
+ *    single-flight). The call waits only a **micro-budget** so a warm probe can
+ *    land without stalling MCP tools — otherwise it answers from the current
+ *    map while the rebuild finishes for a later call (hot-reload picks it up).
  *
  * Every tool remains read-only and auto-approvable; the refresh only rewrites
  * vg's own artifacts under `.vibgrate/`, never user code.
@@ -37,12 +37,35 @@ import type { VgGraph } from '../schema.js';
 const PROBE_INTERVAL_MS = 2000;
 /** Ceiling for the self-tuned probe interval on very large repos. */
 const MAX_PROBE_INTERVAL_MS = 30_000;
-/** Probe may consume at most ~1/PROBE_DUTY_FACTOR of serve wall-time (20 → ≤5%). */
+/** Probe/rebuild may consume at most ~1/PROBE_DUTY_FACTOR of serve wall-time (20 → ≤5%). */
 const PROBE_DUTY_FACTOR = 20;
-/** How long a tool call waits for an in-flight refresh before answering from the current map. */
-const REFRESH_BUDGET_MS = 5_000;
+/**
+ * How long a tool call waits for an in-flight refresh before answering from
+ * the current map. Kept deliberately small: MCP tool latency is sub-10ms on
+ * warm maps, and a multi-second budget (the previous 5s ceiling matched
+ * `git rev-parse`'s spawn timeout) turned every sequential tool call during a
+ * large-repo rebuild into a multi-second stall — measured as TypeScript p50
+ * ~5.2s on the release benchmark for the `vg-cli-public` corpus entry.
+ * Warm probes still finish inside this window; heavy rebuilds never should.
+ */
+export const REFRESH_BUDGET_MS = 100;
 /** After a refresh failure (e.g. read-only checkout), don't retry for this long. */
 const FAILURE_COOLDOWN_MS = 60_000;
+
+export type RefreshImpl = typeof refreshIfStale;
+
+export interface GraphSourceTuning {
+  probeIntervalMs?: number;
+  refreshBudgetMs?: number;
+  /**
+   * Workspace root for freshness probes. Prefer passing this explicitly —
+   * deriving it from `graphPath` via `dirname` twice only works for the legacy
+   * `root/.vibgrate/graph.json` layout, not the global branch-keyed store.
+   */
+  root?: string;
+  /** Tests only: inject a slow/fake refresh to assert the micro-budget. */
+  refreshImpl?: RefreshImpl;
+}
 
 export interface ServeOptions {
   /** Record local, counts-only usage savings (opt-in). */
@@ -61,6 +84,11 @@ export interface ServeOptions {
   /** Auto-refresh the map when the working tree drifts (default true). */
   refresh?: boolean;
   /**
+   * Workspace root (project directory). When set, freshness probes and tools
+   * use this instead of inferring root from the graph path.
+   */
+  root?: string;
+  /**
    * In-memory session stats behind the live `vg serve` status display. Always
    * safe to pass: nothing recorded here is persisted or uploaded — it dies with
    * the process (the opt-in ledger above is a separate concern).
@@ -71,21 +99,25 @@ export interface ServeOptions {
 export class GraphSource {
   private cachedMtimeMs = -1;
   private cached: VgGraph | null = null;
-  private readonly root: string;
+  /** Project root used for freshness probes and rebuilds. */
+  readonly root: string;
   private lastProbeAt = 0;
   private failedUntil = 0;
   private inflight: Promise<void> | null = null;
-  /** Self-tuned: grows with measured probe cost so huge repos aren't penalized. */
+  /** Self-tuned: grows with measured probe/rebuild cost so huge repos aren't penalized. */
   private probeIntervalMs = PROBE_INTERVAL_MS;
+  private readonly refreshImpl: RefreshImpl;
 
   constructor(
     readonly graphPath: string,
     private readonly refresh = false,
-    /** Timing overrides (tests only). */
-    private readonly tuning: { probeIntervalMs?: number; refreshBudgetMs?: number } = {},
+    /** Timing / root overrides (production passes `root`; tests may pass more). */
+    private readonly tuning: GraphSourceTuning = {},
   ) {
-    // root = the directory containing .vibgrate/ (graphPath = root/.vibgrate/graph.json)
-    this.root = path.dirname(path.dirname(graphPath));
+    // Prefer an explicit root. Fallback assumes legacy `root/.vibgrate/graph.json`
+    // (dirname twice); wrong for the global store — callers should pass `root`.
+    this.root = tuning.root ?? path.dirname(path.dirname(graphPath));
+    this.refreshImpl = tuning.refreshImpl ?? refreshIfStale;
   }
 
   /** Current graph: auto-refreshed if the tree drifted, reloaded if the file changed. */
@@ -109,21 +141,20 @@ export class GraphSource {
       const interval = this.tuning.probeIntervalMs ?? this.probeIntervalMs;
       if (now < this.failedUntil || now - this.lastProbeAt < interval) return;
       this.lastProbeAt = now;
-      this.inflight = refreshIfStale(this.root)
+      this.inflight = this.refreshImpl(this.root, { graphPath: this.graphPath })
         .then((r) => {
           if (r.status === 'error') this.failedUntil = Date.now() + FAILURE_COOLDOWN_MS;
-          // Self-tune the probe cadence to the repo's actual size: when the
-          // outcome was probe-only (no rebuild), its duration ≈ the stat-walk
-          // cost, and the next probe is spaced so probing can never take more
-          // than ~1/PROBE_DUTY_FACTOR of serve wall-time. Small repos stay at
-          // the 2s floor; a 100k-file tree self-paces toward the 30s ceiling.
-          if (r.status === 'fresh' || r.status === 'no-snapshot' || r.status === 'locked') {
-            const cost = Date.now() - now;
-            this.probeIntervalMs = Math.min(
-              MAX_PROBE_INTERVAL_MS,
-              Math.max(PROBE_INTERVAL_MS, cost * PROBE_DUTY_FACTOR),
-            );
-          }
+          // Self-tune off the full wall cost of *every* outcome — including a
+          // multi-second incremental rebuild. Previously only probe-only
+          // outcomes (fresh/no-snapshot/locked) backed off, so a 20s rebuild
+          // of a large repo re-armed after the 2s floor and every sequential
+          // tool call blocked on the refresh budget for the whole suite.
+          const cost =
+            r.status === 'refreshed' && typeof r.ms === 'number' ? Math.max(r.ms, Date.now() - now) : Date.now() - now;
+          this.probeIntervalMs = Math.min(
+            MAX_PROBE_INTERVAL_MS,
+            Math.max(PROBE_INTERVAL_MS, cost * PROBE_DUTY_FACTOR),
+          );
         })
         .catch(() => {
           this.failedUntil = Date.now() + FAILURE_COOLDOWN_MS;
@@ -141,8 +172,8 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
   // Recording feeds both the local `vg savings` report and the opt-in upload, so
   // enabling either turns it on. Absent both, `vg serve` records nothing.
   const record = savings || shareStats;
-  // root = the directory containing .vibgrate/ (graphPath = root/.vibgrate/graph.json)
-  const root = path.dirname(path.dirname(source.graphPath));
+  // Prefer GraphSource's explicit root (set by serve from the project cwd).
+  const root = opts.root ?? source.root;
   // Per-session memory of node ids whose full detail was already returned — the
   // basis for opt-in cross-call dedup (`--dedup`). Scoped to this server
   // instance so it never leaks across sessions. Node ids are content-addressed
@@ -236,7 +267,7 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
 }
 
 export async function serveStdio(graphPath: string, opts: ServeOptions = {}): Promise<void> {
-  const source = new GraphSource(graphPath, opts.refresh !== false);
+  const source = new GraphSource(graphPath, opts.refresh !== false, { root: opts.root });
   const server = createServer(source, opts);
   // Start the semantic-model warm-up as soon as the server boots, so the first
   // orient/query_graph doesn't pay a cold download. Non-blocking: navigation

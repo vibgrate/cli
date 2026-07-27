@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibgrate.com/schemas/run-provenance/0",
+  "title": "RunProvenance",
+  "description": "Content-hashed, policy-versioned summary of one VG Code agent run (Fusion Runtime Phase 7). Records model profile, security tier, graph corpus, ranking policy, and blake3 hashes of every mutation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "policyVersion",
+    "rankingVersion",
+    "modelProfileId",
+    "securityTier",
+    "graphCorpusHash",
+    "mutations",
+    "mutationsRootHash"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "run-provenance/0"
+    },
+    "policyVersion": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Pinned context-policy@YYYY.MM.* id; never mutated from a single task."
+    },
+    "rankingVersion": {
+      "type": ["string", "null"]
+    },
+    "modelProfileId": {
+      "type": ["string", "null"]
+    },
+    "securityTier": {
+      "type": ["string", "null"]
+    },
+    "graphCorpusHash": {
+      "type": ["string", "null"]
+    },
+    "mutations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/mutation" }
+    },
+    "mutationsRootHash": {
+      "type": "string",
+      "minLength": 16,
+      "description": "blake3 over the canonical mutations array"
+    },
+    "verification": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/verificationStep" }
+    },
+    "verificationRootHash": {
+      "type": ["string", "null"],
+      "description": "blake3 over the canonical verification array"
+    }
+  },
+  "$defs": {
+    "mutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "op", "beforeHash", "afterHash", "diffHash"],
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "op": { "enum": ["edit", "create", "delete"] },
+        "beforeHash": { "type": ["string", "null"] },
+        "afterHash": { "type": ["string", "null"] },
+        "diffHash": { "type": ["string", "null"] }
+      }
+    },
+    "verificationStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "passed"],
+      "properties": {
+        "kind": { "type": "string" },
+        "command": { "type": ["string", "null"] },
+        "passed": { "type": "boolean" },
+        "diagnosticHash": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

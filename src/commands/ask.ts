@@ -10,6 +10,7 @@ import {
 } from '../engine/embeddings.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { driftCount } from '../engine/freshness.js';
+import { resolveGraphPath } from '../engine/artifacts.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
@@ -45,7 +46,10 @@ export function registerAsk(program: Command): void {
       // custom --graph is an explicit artifact and is never rebuilt over.
       // Fail-soft — a refresh problem falls back to the last built map.
       if (opts.refresh !== false && !global.graph) {
-        const refreshed = await refreshIfStale(root);
+        // Thread the resolved map path so a refresh never re-runs defaultGraphPath
+        // (which shells out to git for the branch-keyed global store).
+        const graphPath = resolveGraphPath(root, global.graph);
+        const refreshed = await refreshIfStale(root, { graphPath });
         if (refreshed.status === 'refreshed' && !global.json) {
           const n = driftCount(refreshed.drift);
           info(c.dim(`  map refreshed — ${n} file(s) drifted (${(refreshed.ms / 1000).toFixed(2)}s)`));

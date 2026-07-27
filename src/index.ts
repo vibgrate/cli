@@ -15,7 +15,14 @@ export type { ResourceLimits } from './engine/limits.js';
 
 export { loadGraph } from './engine/load.js';
 export { serializeGraph, parseGraph, stableStringify } from './engine/serialize.js';
-export { writeArtifacts, defaultGraphPath, vibgrateDir } from './engine/artifacts.js';
+export {
+  writeArtifacts,
+  defaultGraphPath,
+  resolveGraphPath,
+  legacyGraphPath,
+  preferInRepoGraph,
+  vibgrateDir,
+} from './engine/artifacts.js';
 export type { WriteOptions, WrittenArtifacts } from './engine/artifacts.js';
 export { verifyDeterminism } from './engine/verify.js';
 export type { VerifyResult } from './engine/verify.js';
@@ -82,3 +89,24 @@ export type { ExportFormat, ExportContext } from './engine/export.js';
 export { buildEnvelope, redactGraph } from './engine/push.js';
 export type { GraphUploadEnvelope } from './engine/push.js';
 export { grammarsSourceDir } from './engine/grammars.js';
+
+// Fusion — source-bearing Task Capsule (ContextBench / agent-suite lockstep).
+export {
+  buildTaskCapsule,
+  capsuleToCodeContext,
+  summarizeCapsule,
+  TASK_CAPSULE_SCHEMA_VERSION,
+  CAPSULE_RANKING_VERSION,
+  CAPSULE_COMPILER_ID,
+} from './code/capsule.js';
+export type {
+  TaskCapsule,
+  BuildCapsuleOptions,
+  CapsuleSummary,
+  CapsuleSymbolRef,
+  SourceSlice,
+} from './code/capsule.js';
+export { buildCodeContext } from './code/context.js';
+export type { BuildContextOptions } from './code/context.js';
+export { searchSymbols } from './engine/search.js';
+export type { SearchResult, SymbolHit, TextHit } from './engine/search.js';

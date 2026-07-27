@@ -66,6 +66,22 @@ export interface ChatOptions {
   stream?: boolean;
   /** Called with each text delta as it streams in. */
   onToken?: (text: string) => void;
+  /**
+   * Optional GBNF / grammar string for constrained decoding (llama.cpp llm-host).
+   * HTTP providers ignore this. See {@link patchIrGbnf}.
+   */
+  grammar?: string;
+  /** When true, local host must attach grammar or fail (no free-text fallback). */
+  requireGrammar?: boolean;
+  /**
+   * Optional identifier trie from the ActiveGraph for post-sample validation
+   * (and future logit masks). HTTP providers ignore this.
+   */
+  identifierTrie?: import('../runtime/identifier-trie.js').TrieNode;
+  /** Graph-known verbatim spans for speculative draft on local hosts. */
+  draftCandidates?: string[];
+  /** Prompt segments for KV prefix planning on local hosts. */
+  promptSegments?: Array<{ kind: string; text: string }>;
 }
 
 /**

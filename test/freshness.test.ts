@@ -123,7 +123,7 @@ describe('refreshIfStale', () => {
 describe('GraphSource auto-refresh (vg serve)', () => {
   it('serves the rebuilt graph after files change', async () => {
     const graphPath = path.join(dir, '.vibgrate', 'graph.json');
-    const source = new GraphSource(graphPath, true, { probeIntervalMs: 0 });
+    const source = new GraphSource(graphPath, true, { probeIntervalMs: 0, root: dir });
     const first = await source.get();
     expect(first.nodes.some((n) => n.qualifiedName.endsWith('quadruple'))).toBe(false);
 
@@ -134,10 +134,48 @@ describe('GraphSource auto-refresh (vg serve)', () => {
 
   it('with refresh off, keeps serving the map as built', async () => {
     const graphPath = path.join(dir, '.vibgrate', 'graph.json');
-    const source = new GraphSource(graphPath, false);
+    const source = new GraphSource(graphPath, false, { root: dir });
     await source.get();
     editFile(dir, 'src/math.ts', 'export function quintuple(x: number): number { return x * 5; }\n');
     const graph = await source.get();
     expect(graph.nodes.some((n) => n.qualifiedName.endsWith('quintuple'))).toBe(false);
+  });
+
+  it('does not block get() longer than the refresh micro-budget (release-bench regression)', async () => {
+    // 2026.725.3: a multi-second refresh budget let every sequential tool call
+    // on a large repo stall for ~5s while a rebuild ran (ts p50 → 5261ms on
+    // vg-cli-public). The budget is a micro-window so warm probes can land;
+    // heavy work must not pin MCP latency to REFRESH_BUDGET_MS.
+    const graphPath = path.join(dir, '.vibgrate', 'graph.json');
+    const budgetMs = 40;
+    const source = new GraphSource(graphPath, true, {
+      probeIntervalMs: 0,
+      refreshBudgetMs: budgetMs,
+      root: dir,
+      refreshImpl: async () => {
+        await new Promise((r) => setTimeout(r, 1500));
+        return { status: 'fresh' };
+      },
+    });
+    const t0 = Date.now();
+    await source.get();
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeLessThan(budgetMs + 120);
+    expect(elapsed).toBeGreaterThanOrEqual(budgetMs - 5);
+  });
+
+  it('threads graphPath into refresh so writeArtifacts never re-resolves via git', async () => {
+    const graphPath = path.join(dir, '.vibgrate', 'graph.json');
+    let seenPath: string | undefined;
+    const source = new GraphSource(graphPath, true, {
+      probeIntervalMs: 0,
+      root: dir,
+      refreshImpl: async (_root, opts) => {
+        seenPath = opts?.graphPath;
+        return { status: 'fresh' };
+      },
+    });
+    await source.get();
+    expect(seenPath).toBe(graphPath);
   });
 });

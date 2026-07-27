@@ -32,8 +32,9 @@ export function registerCode(program: Command): void {
     .command('code')
     .description('propose a graph-grounded code edit (guided mode with no instruction; dry-run by default)')
     .argument('[instruction...]', 'what to change, in plain language (omit for guided interactive mode)')
-    .option('--provider <id>', 'backend: ollama, lmstudio, openrouter, litellm, openai, together, llama-cpp')
+    .option('--provider <id>', 'backend: ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp')
     .option('--model <id>', 'model id (or set VG_CODE_MODEL). No model is hard-coded — pick the current best.')
+    .option('--mode <mode>', 'Code Mode: spark | flow | forge (preferred over raw model names; auto-fits when omitted and no --model)')
     .option('--model-path <gguf>', 'gguf path for --provider llama-cpp (weights are never auto-downloaded)')
     .option('-f, --file <path>', 'restrict the edit surface to this file (repeatable)', collect, [])
     .option('-b, --budget <n>', 'approx context token budget', '3000')
@@ -46,6 +47,9 @@ export function registerCode(program: Command): void {
     .option('--stream-json', 'machine protocol: NDJSON agent events on stdout, approval decisions on stdin (for host UIs like the VS Code panel)')
     .option('--verify [command]', 'after the agent finishes, run tests and make it fix failures (uses the config testCommand if no command is given)')
     .option('--continue', 'resume the most recent session (recap + restore /undo)')
+    .option('--capsule', 'use a source-bearing Task Capsule for first context (Fusion A/B; exact source ranges from the graph)')
+    .option('--no-capsule', 'disable Task Capsule context even if enabled in .vibgrate/code.json')
+    .option('--security-tier <tier>', 'shell isolation: L0 (host), L1 (Seatbelt/bubblewrap when available), L2/L3 reserved')
     .option('--mock <file>', 'use a scripted reply from <file> instead of a model (offline; for tests/CI)')
     .option('-o, --out <file>', 'write the JSON result to <file> (implies --json shape; for CI/benchmarks)')
     .action(async function (
@@ -54,6 +58,7 @@ export function registerCode(program: Command): void {
       opts: {
         provider?: string;
         model?: string;
+        mode?: string;
         modelPath?: string;
         file: string[];
         budget?: string;
@@ -66,6 +71,8 @@ export function registerCode(program: Command): void {
         streamJson?: boolean;
         verify?: string | boolean;
         continue?: boolean;
+        capsule?: boolean;
+        securityTier?: string;
         mock?: string;
         out?: string;
       },
@@ -76,10 +83,102 @@ export function registerCode(program: Command): void {
       // Project config (.vibgrate/code.json): flags win, then the file, then
       // built-in defaults — so an indie dev sets model/preferences once.
       const config = loadCodeConfig(rootOf(global));
-      const provider = opts.provider ?? config.provider;
-      const model = opts.model ?? config.model;
+      // Code Mode resolution: --mode / config.modelProfile.mode → pack → provider+model
+      // when the user did not pass an explicit --model. Escape hatch: --model still wins.
+      let provider = opts.provider ?? config.provider;
+      let model = opts.model ?? config.model;
+      const modeFlag = opts.mode ?? config.modelProfile?.mode;
+      if (!opts.model && !opts.modelPath && (modeFlag || (!provider && !model))) {
+        try {
+          const { parseMode, resolveMode, readOrchestratorState, activePin, providerForBackend } =
+            await import('../runtime/model-orchestrator.js');
+          const { gatherSystemMemory } = await import('../code/local-runtime.js');
+          const { loadGraph } = await import('../engine/load.js');
+          const state = readOrchestratorState();
+          const mode = parseMode(modeFlag) ?? state.defaultMode ?? undefined;
+          const pin = mode ? activePin(mode, state) : null;
+          let repo: { fileCount?: number; graphNodeCount?: number } = {};
+          try {
+            const g = loadGraph(rootOf(global));
+            if (g) {
+              repo = {
+                fileCount: g.nodes.filter((n) => n.kind === 'file').length,
+                graphNodeCount: g.nodes.length,
+              };
+            }
+          } catch {
+            /* ignore */
+          }
+          const resolved = resolveMode({
+            mode,
+            autoFit: !mode,
+            system: gatherSystemMemory(),
+            repo,
+            pin,
+            defaultMode: state.defaultMode,
+          });
+          if (resolved.fit.label === 'will_not_fit' && !opts.mock) {
+            throw new CliError(
+              `Code Mode ${resolved.mode} will not fit on this machine (${resolved.fit.reasons[0] ?? 'insufficient memory'}). Try \`vg models install spark\` or free RAM.`,
+              ExitCode.ERROR,
+            );
+          }
+          // Approach B: prefer embedded GGUF when on disk; else fall back to Ollama pack entry.
+          const { resolveGgufPath } = await import('../runtime/resolve-gguf.js');
+          const gguf =
+            resolveGgufPath({
+              modelRef: resolved.underlying.weightsRef,
+              modelPath: opts.modelPath,
+            }) ??
+            resolveGgufPath({
+              modelRef: resolved.pack.primary.backend === 'llama.cpp' ? resolved.pack.primary.weightsRef : undefined,
+            });
+          if (gguf && !opts.provider) {
+            provider = 'llama-cpp';
+            model = model ?? gguf.ref ?? resolved.underlying.weightsRef;
+            opts.modelPath = gguf.path;
+            if (!global.json && !global.quiet && !opts.streamJson) {
+              info(
+                `${c.cyan('vg code')} · Code Mode ${c.bold(resolved.mode)} → embedded llama.cpp ${c.dim(gguf.path)} ${c.dim(`(${resolved.fit.label})`)}`,
+              );
+            }
+          } else {
+            const ollamaFb =
+              resolved.underlying.backend === 'ollama'
+                ? resolved.underlying
+                : resolved.pack.fallback?.find((f) => f.backend === 'ollama') ?? resolved.underlying;
+            provider = provider ?? providerForBackend(ollamaFb.backend);
+            model = model ?? ollamaFb.weightsRef;
+          }
+          // Merge pack contract into profile overrides when config did not set budget.
+          if (!config.modelProfile?.capsuleBudgetTokens) {
+            config.modelProfile = {
+              ...config.modelProfile,
+              mode: resolved.mode,
+              capsuleBudgetTokens: resolved.profile.capsuleBudgetTokens,
+              maxRepairRounds: resolved.profile.maxRepairRounds,
+              constrainedDecoding: resolved.profile.constrainedDecoding,
+              securityTier: resolved.profile.securityTier,
+            };
+          } else if (!config.modelProfile?.mode) {
+            config.modelProfile = { ...config.modelProfile, mode: resolved.mode };
+          }
+          if (!global.json && !global.quiet && !opts.streamJson && provider !== 'llama-cpp') {
+            info(
+              `${c.cyan('vg code')} · Code Mode ${c.bold(resolved.mode)} → ${resolved.underlying.weightsRef} ${c.dim(`(${resolved.fit.label})`)}`,
+            );
+          }
+        } catch (e) {
+          if (e instanceof CliError) throw e;
+          // Orchestrator failure must not block --model / mock paths that already set provider.
+          if (!provider && !model && !opts.mock) throw e;
+        }
+      }
       const auto = opts.auto ?? config.auto;
       const maxSteps = opts.maxSteps ? Number(opts.maxSteps) : config.maxSteps;
+      // --capsule / --no-capsule win over config; absent flag → config (default off).
+      const capsule = typeof opts.capsule === 'boolean' ? opts.capsule : !!config.capsule;
+      const securityTier = resolveSecurityTierFlag(opts.securityTier, config.securityTier, !!auto);
       const contextBudget = contextBudgetFor(config);
       // --verify (optionally with a command) → verify config; falls back to the config testCommand.
       const verifyCommand = opts.verify === true ? config.testCommand : typeof opts.verify === 'string' ? opts.verify : undefined;
@@ -114,6 +213,9 @@ export function registerCode(program: Command): void {
             mcpServers: mcp.servers,
             mcpSources: mcp.sources,
             continueSession: opts.continue,
+            capsule,
+            securityTier,
+            modelProfile: config.modelProfile,
           },
           undefined,
         );
@@ -156,6 +258,46 @@ export function registerCode(program: Command): void {
         const { nodeCodeFs } = await import('../code/session.js');
         const readline = await import('node:readline');
         const child = await import('node:child_process');
+        const { loadOrDiscoverFederation } = await import('../runtime/federation.js');
+        const { resolveExecutionEnv } = await import('../runtime/execution-env.js');
+        const { resolveModelExecutionProfile, mergeModelExecutionProfile } = await import('../runtime/model-execution-profile.js');
+        const { startCodeRuntimeSession } = await import('../code/runtime-session.js');
+        const { resolveGraphBackend } = await import('../code/graph-backend.js');
+        const { detectGitRef } = await import('../runtime/git-ref.js');
+        const { repositoryIdFromRoot } = await import('../runtime/paths.js');
+        const { vgdRequest } = await import('../runtime/vgd/index.js');
+        const federation = loadOrDiscoverFederation(root);
+        const modelProfile = mergeModelExecutionProfile(
+          resolveModelExecutionProfile({
+            providerId: primarySlug,
+            model: route.providers[0]?.model,
+            budget: Number(opts.budget) || undefined,
+            securityTier,
+          }),
+          config.modelProfile,
+        );
+        const tier = securityTier ?? modelProfile.securityTier ?? (auto ? 'L1' : 'L0');
+        const writableRoots = federation?.members.map((m) => m.root) ?? [root];
+        const executionEnv = resolveExecutionEnv(tier, { writableRoots });
+        const runtime = await startCodeRuntimeSession({ root });
+        const git = detectGitRef(root);
+        const repositoryId = repositoryIdFromRoot(root);
+        if (runtime.socketPath && git.ref) {
+          try {
+            await vgdRequest(
+              { op: 'put-graph', repositoryId, gitRef: git.ref, graph },
+              { socketPath: runtime.socketPath },
+            );
+          } catch {
+            /* best-effort */
+          }
+        }
+        const graphBackend = resolveGraphBackend({
+          graph,
+          repositoryId,
+          gitRef: git.ref || null,
+          socketPath: runtime.socketPath,
+        });
         const run = (command: string): { stdout: string; exitCode: number } => {
           const res = child.spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
           return { stdout: (res.stdout ?? '') + (res.stderr ? `\n${res.stderr}` : ''), exitCode: res.status ?? 1 };
@@ -163,36 +305,49 @@ export function registerCode(program: Command): void {
         const emit = (line: unknown): void => {
           process.stdout.write(JSON.stringify(line) + '\n');
         };
-        await runCodeStreamJson({
-          graph,
-          root,
-          instruction,
-          providers: route.providers,
-          fsImpl: nodeCodeFs(root),
-          run,
-          auto: !!auto,
-          maxSteps,
-          budget: Number(opts.budget) || undefined,
-          contextBudget,
-          denyCommands: config.denyCommands,
-          testCommand: config.testCommand,
-          stream: true,
-          verify,
-          attribution: { client: 'vg-code', provider: primarySlug, model: route.providers[0]?.model },
-          now: () => Date.now(),
-          emit,
-          bindDecisions: (session) => {
-            const rl = readline.createInterface({ input: process.stdin });
-            rl.on('line', (raw) => {
-              try {
-                const msg = JSON.parse(raw) as { approveId?: number; approve?: boolean };
-                if (typeof msg.approveId === 'number') session.submitDecision(msg.approveId, !!msg.approve);
-              } catch {
-                /* ignore malformed host input */
-              }
-            });
-          },
-        });
+        try {
+          await runCodeStreamJson({
+            graph,
+            root,
+            instruction,
+            providers: route.providers,
+            fsImpl: nodeCodeFs(root),
+            run,
+            executionEnv,
+            graphBackend,
+            modelProfile,
+            auto: !!auto,
+            maxSteps,
+            budget: modelProfile.capsuleBudgetTokens,
+            contextBudget,
+            denyCommands: config.denyCommands,
+            testCommand: config.testCommand,
+            stream: true,
+            verify: verify
+              ? { command: verify.command, maxRounds: modelProfile.maxRepairRounds }
+              : undefined,
+            capsule,
+            files: opts.file.length ? opts.file : undefined,
+            worktreeOverlay: true,
+            advancedMode: !capsule,
+            attribution: { client: 'vg-code', provider: primarySlug, model: route.providers[0]?.model },
+            now: () => Date.now(),
+            emit,
+            bindDecisions: (session) => {
+              const rl = readline.createInterface({ input: process.stdin });
+              rl.on('line', (raw) => {
+                try {
+                  const msg = JSON.parse(raw) as { approveId?: number; approve?: boolean };
+                  if (typeof msg.approveId === 'number') session.submitDecision(msg.approveId, !!msg.approve);
+                } catch {
+                  /* ignore malformed host input */
+                }
+              });
+            },
+          });
+        } finally {
+          await runtime.dispose();
+        }
         return;
       }
 
@@ -228,27 +383,79 @@ export function registerCode(program: Command): void {
           mcpTools = { specs: toolset.specs(), owns: (n: string) => toolset.owns(n), execute: (call: import('../code/types.js').ToolCall) => toolset.execute(call, approve as never) };
         }
         try {
-          const agentResult = await agentTask({
-            root,
-            graph,
-            instruction,
-            providers: route.providers,
-            fsImpl: nodeCodeFs(root),
-            attribution: { client: 'vg-code', provider: primarySlug, model: route.providers[0]?.model },
-            auto: autonomous,
-            maxSteps,
-            budget: Number(opts.budget) || undefined,
-            contextBudget,
-            denyCommands: config.denyCommands,
-            testCommand: config.testCommand,
-            stream: opts.stream,
-            verify,
-            priorSummary,
-            externalTools: mcpTools,
-            prompter,
+          const { loadFederation } = await import('../runtime/federation.js');
+          const { resolveExecutionEnv } = await import('../runtime/execution-env.js');
+          const { resolveModelExecutionProfile, mergeModelExecutionProfile } = await import('../runtime/model-execution-profile.js');
+          const { startCodeRuntimeSession } = await import('../code/runtime-session.js');
+          const { resolveGraphBackend } = await import('../code/graph-backend.js');
+          const { detectGitRef } = await import('../runtime/git-ref.js');
+          const { repositoryIdFromRoot } = await import('../runtime/paths.js');
+          const { vgdRequest } = await import('../runtime/vgd/index.js');
+          const federation = loadFederation(root);
+          const modelProfile = mergeModelExecutionProfile(
+            resolveModelExecutionProfile({
+              providerId: primarySlug,
+              model: route.providers[0]?.model,
+              budget: Number(opts.budget) || undefined,
+              securityTier,
+            }),
+            config.modelProfile,
+          );
+          const tier = securityTier ?? modelProfile.securityTier ?? (autonomous ? 'L1' : 'L0');
+          const executionEnv = resolveExecutionEnv(tier, {
+            writableRoots: federation?.members.map((m) => m.root) ?? [root],
           });
-          if (global.json) json(agentResult);
-          if (agentResult.stopped === 'error') process.exitCode = ExitCode.ERROR;
+          const runtime = await startCodeRuntimeSession({ root });
+          const git = detectGitRef(root);
+          const repositoryId = repositoryIdFromRoot(root);
+          if (runtime.socketPath && git.ref) {
+            try {
+              await vgdRequest(
+                { op: 'put-graph', repositoryId, gitRef: git.ref, graph },
+                { socketPath: runtime.socketPath },
+              );
+            } catch {
+              /* best-effort */
+            }
+          }
+          const graphBackend = resolveGraphBackend({
+            graph,
+            repositoryId,
+            gitRef: git.ref || null,
+            socketPath: runtime.socketPath,
+          });
+          try {
+            const agentResult = await agentTask({
+              root,
+              graph,
+              instruction,
+              providers: route.providers,
+              fsImpl: nodeCodeFs(root),
+              attribution: { client: 'vg-code', provider: primarySlug, model: route.providers[0]?.model },
+              auto: autonomous,
+              maxSteps,
+              budget: modelProfile.capsuleBudgetTokens,
+              contextBudget,
+              denyCommands: config.denyCommands,
+              testCommand: config.testCommand,
+              stream: opts.stream,
+              verify: verify
+                ? { command: verify.command, maxRounds: modelProfile.maxRepairRounds }
+                : undefined,
+              priorSummary,
+              externalTools: mcpTools,
+              prompter,
+              capsule,
+              files: opts.file.length ? opts.file : undefined,
+              executionEnv,
+              graphBackend,
+              modelProfile,
+            });
+            if (global.json) json(agentResult);
+            if (agentResult.stopped === 'error') process.exitCode = ExitCode.ERROR;
+          } finally {
+            await runtime.dispose();
+          }
         } finally {
           await disposeMcp?.();
         }
@@ -279,6 +486,7 @@ export function registerCode(program: Command): void {
         consent,
         files: opts.file.length ? opts.file : undefined,
         budget: Number(opts.budget) || 3000,
+        capsule,
         onPhase,
         now: () => Date.now(),
         attribution: { client: 'vg-code', provider: providerSlug, model: primary?.model },
@@ -334,6 +542,21 @@ function renderHuman(r: CodeSessionResult): void {
 
 function collect(value: string, previous: string[]): string[] {
   return [...previous, value];
+}
+
+/** CLI flag → config → auto-implies-L1 → L0. Invalid flag values throw usage. */
+function resolveSecurityTierFlag(
+  flag: string | undefined,
+  fromConfig: 'L0' | 'L1' | 'L2' | 'L3' | undefined,
+  auto: boolean,
+): 'L0' | 'L1' | 'L2' | 'L3' {
+  if (flag !== undefined) {
+    const t = flag.trim().toUpperCase();
+    if (t === 'L0' || t === 'L1' || t === 'L2' || t === 'L3') return t;
+    throw usageError(`--security-tier must be L0, L1, L2, or L3 (got ${JSON.stringify(flag)})`);
+  }
+  if (fromConfig) return fromConfig;
+  return auto ? 'L1' : 'L0';
 }
 
 function confirm(question: string): Promise<boolean> {

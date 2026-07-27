@@ -21,14 +21,64 @@
  */
 
 import { buildCodeContext } from './context.js';
+import {
+  buildTaskCapsule,
+  capsuleToCodeContext,
+  summarizeCapsule,
+  CAPSULE_RANKING_VERSION,
+  type CapsuleSummary,
+  type TaskCapsule,
+} from './capsule.js';
+import { buildCapsuleDelta, isEmptyCapsuleDelta, type CapsuleDelta } from './capsule-delta.js';
+import {
+  createDiscoveryGateState,
+  gateDiscoveryTool,
+  recordDiscoveryGateOutcome,
+} from './advanced-mode.js';
+import { materializeWorktreeGraph } from './worktree-overlay.js';
 import { buildAgentMessages } from './prompt.js';
 import { AGENT_TOOLS, executeTool, type MutatingAction, type ShellResult, type ToolContext, type ToolResult } from './tools.js';
+import { localGraphBackend, type GraphBackend } from './graph-backend.js';
+import type { ModelExecutionProfile } from '../runtime/model-execution-profile.js';
+import { SessionOverlay } from './overlay.js';
+import { materializeSessionGraph } from './session-graph.js';
+import { compileVerificationLadder, runVerificationLadder } from './verify-ladder.js';
+import { buildFailureCapsule, type FailureCapsule } from './failure-capsule.js';
+import {
+  createTrajectoryCollector,
+  DISCOVERY_TOOLS,
+  MUTATION_TOOLS,
+  type TrajectoryRecord,
+} from './trajectory.js';
+import {
+  buildRunProvenance,
+  CONTEXT_POLICY_VERSION,
+  type RunProvenance,
+} from './run-provenance.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
+import { repositoryIdFromRoot } from '../runtime/paths.js';
 import type { SymbolSpan } from './apply.js';
 import type { CodeFs } from './session.js';
-import type { ChatMessage, FileChange, Provider, ProviderResult, ToolCall, ToolSpec } from './types.js';
+import type { ChatMessage, CodeContext, FileChange, Provider, ProviderResult, ToolCall, ToolSpec } from './types.js';
 import type { VgGraph } from '../schema.js';
 import { redactSecrets } from './providers.js';
+import { patchIrGbnf, shouldUsePatchIrGrammar } from './patch-ir-grammar.js';
+import { buildIdentifierTrieFromGraph } from '../runtime/identifier-trie.js';
+import type { TrieNode } from '../runtime/identifier-trie.js';
+import { graphDraftCandidates, KvBlockRegistry } from '../runtime/kv-cache.js';
+
+export type { CapsuleSummary, RunProvenance };
+export { CONTEXT_POLICY_VERSION };
+
+export interface AgentMetrics {
+  discoveryToolCalls: number;
+  mutationToolCalls: number;
+  shellCommands: number;
+  znsAt1: boolean;
+  usedCapsule: boolean;
+  failureCapsuleBuilt: boolean;
+  trajectory: TrajectoryRecord;
+}
 
 export type AgentEvent =
   | { type: 'assistant'; text: string }
@@ -39,7 +89,13 @@ export type AgentEvent =
   | { type: 'compact'; droppedRounds: number }
   | { type: 'usage'; promptTokens: number; completionTokens: number }
   | { type: 'verify'; command: string; passed: boolean }
-  | { type: 'step'; n: number };
+  | { type: 'ladder'; ok: boolean; summary: string }
+  | { type: 'session-graph'; reparsed: number; dirty: number }
+  | { type: 'step'; n: number }
+  | { type: 'capsule'; summary: CapsuleSummary }
+  | { type: 'capsule-delta'; delta: CapsuleDelta }
+  | { type: 'failure-capsule'; capsule: FailureCapsule }
+  | { type: 'metrics'; metrics: AgentMetrics };
 
 export interface AgentOptions {
   graph: VgGraph;
@@ -47,8 +103,25 @@ export interface AgentOptions {
   instruction: string;
   providers: Provider[];
   fsImpl: CodeFs;
-  /** Run a shell command (injected). */
+  /** Run a shell command (injected). Prefer {@link executionEnv} when set. */
   run: (command: string) => ShellResult;
+  /**
+   * Security ladder substrate for shell (ADR-002). When set, `run_command` and
+   * verify steps use `executionEnv.run` instead of the bare `run` callback.
+   */
+  executionEnv?: { tier: string; label: string; reason: string; run: (command: string, opts: { cwd: string }) => ShellResult };
+  /**
+   * Graph query backend (vgd ActiveGraph when a daemon session is attached).
+   * When omitted, tools use the in-process {@link graph}.
+   */
+  graphBackend?: GraphBackend;
+  /** Resolved Model Execution Profile (capsule budget / repair knobs). */
+  modelProfile?: ModelExecutionProfile;
+  /**
+   * Extra pinned facts for Task Capsules (e.g. high-confidence federation
+   * bridges). Secret-free strings only.
+   */
+  extraPinnedFacts?: string[];
   /** Approval gate for mutating actions. */
   approve: (action: MutatingAction) => Promise<boolean>;
   maxSteps?: number;
@@ -75,6 +148,44 @@ export interface AgentOptions {
   now?: () => number;
   /** Skip the audit record (tests / programmatic dry calls). */
   noAudit?: boolean;
+  /**
+   * When true (default), build an identifier trie from the graph and pass it to
+   * local llama.cpp generations for unknown-identifier annotation.
+   */
+  identifierMask?: boolean;
+  /**
+   * Use a source-bearing Task Capsule for the first context (Fusion Runtime
+   * Phase 0 A/B). When true, exact source ranges from the graph are included so
+   * the model can solve without navigation tool calls (ZNS@1 path). Default
+   * false keeps today's metadata-only context.
+   */
+  capsule?: boolean;
+  /** Restrict context seeds to these files (from `--file`), if given. */
+  files?: string[];
+  /**
+   * Buffer mutations in a session overlay (Phase 5). Reads see uncommitted
+   * edits; the overlay is flushed before shell commands and when the run ends.
+   * Default true under capsule mode, false otherwise. Set false to write the
+   * base fs immediately (legacy).
+   */
+  overlay?: boolean;
+  /**
+   * Run the graph-derived verification ladder on finish (syntax + optional
+   * testCommand). Default true when capsule context is used.
+   */
+  verifyLadder?: boolean;
+  /**
+   * Free use of low-level discovery tools. Default true. When false (typical
+   * with capsule mode), early discovery is soft-nudged then hard-capped until
+   * a mutation or inspect_change (Fusion Phase 4 ZNS@1 path).
+   */
+  advancedMode?: boolean;
+  /**
+   * Reparse git-dirty worktree files into the graph before the agent loop
+   * (base ⊕ worktree). Default false (tests / CI stay offline-fast). Interactive
+   * and stream-json enable this so the map matches uncommitted edits.
+   */
+  worktreeOverlay?: boolean;
 }
 
 export type AgentStop = 'finished' | 'max-steps' | 'no-tools' | 'no-progress' | 'error';
@@ -87,6 +198,17 @@ export interface AgentResult {
   provider: { id: string; model: string; fellBack: boolean };
   /** Total tokens the model reported over the run (for the cost meter). */
   usage: { promptTokens: number; completionTokens: number };
+  /** Trajectory / ZNS metrics for FCS reporting. */
+  metrics?: AgentMetrics;
+  /** Last Failure Capsule built during this run (if any). */
+  failureCapsule?: FailureCapsule | null;
+  /** Capsule summary when capsule mode was used. */
+  capsuleSummary?: CapsuleSummary | null;
+  /**
+   * Run provenance (run-provenance/0): policy pin, ranking, model profile,
+   * security tier, graph corpus, and content-hashed mutations.
+   */
+  provenance?: RunProvenance;
 }
 
 const DEFAULT_MAX_STEPS = 24;
@@ -100,14 +222,70 @@ const NUDGE_AT = 3;
 const STOP_AT = 5;
 
 export async function runAgent(options: AgentOptions): Promise<AgentResult> {
-  const { graph, root, instruction, providers, fsImpl } = options;
+  const { root, instruction, providers } = options;
+  let graph = options.graph;
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
+  // MEP capsule budget can raise the first-context budget when not explicitly set.
+  const budget =
+    options.budget ??
+    options.modelProfile?.capsuleBudgetTokens ??
+    3000;
   const contextBudget = options.contextBudget ?? DEFAULT_CONTEXT_BUDGET;
   const now = options.now ?? (() => 0);
   const onEvent = options.onEvent ?? (() => {});
+  const verifyConfig =
+    options.verify && options.modelProfile?.maxRepairRounds != null && options.verify.maxRounds == null
+      ? { ...options.verify, maxRounds: options.modelProfile.maxRepairRounds }
+      : options.verify;
+
+  // Identifier trie for local constrained backends (Approach B); optional off switch.
+  const identifierTrie: TrieNode | undefined =
+    options.identifierMask === false ? undefined : buildIdentifierTrieFromGraph(graph);
+  // Capsule/system prefix KV plan registry for host-level reuse (planning layer).
+  const kvRegistry = new KvBlockRegistry();
+  // Speculative drafts: verbatim signatures / qualified names the graph already knows.
+  const draftCandidates = graphDraftCandidates(
+    graph.nodes
+      .flatMap((n) => [n.signature, n.qualifiedName, n.name].filter(Boolean) as string[])
+      .filter((s) => s.includes('(') || s.includes('function') || s.includes('class') || s.length > 12),
+    12,
+  );
+
+  // Worktree overlay: reparse git-dirty files so the map matches the working tree.
+  const useWorktree = options.worktreeOverlay === true;
+  if (useWorktree) {
+    try {
+      const wt = await materializeWorktreeGraph(graph, root);
+      if (wt.reparsed.length || wt.deleted.length) {
+        graph = wt.graph;
+        onEvent({
+          type: 'session-graph',
+          reparsed: wt.reparsed.length,
+          dirty: wt.dirtyFiles.length,
+        });
+      }
+    } catch {
+      /* worktree overlay is best-effort */
+    }
+  }
+
+  // Session overlay: tools read/write the overlay; shell + finish flush to base.
+  const useOverlay = options.overlay ?? !!options.capsule;
+  const overlay = useOverlay ? new SessionOverlay(options.fsImpl) : null;
+  const fsImpl: CodeFs = overlay ?? options.fsImpl;
+  const flushOverlay = (): void => {
+    overlay?.flush();
+  };
+
+  // Capsule-first runs default to non-advanced discovery (ZNS@1 path).
+  const advancedMode = options.advancedMode ?? !options.capsule;
+  const discoveryGate = createDiscoveryGateState();
 
   const allTools = [...AGENT_TOOLS, ...(options.externalTools?.specs ?? [])];
-  const context = buildCodeContext(graph, instruction, { budget: options.budget ?? 3000 });
+  const built = buildAgentContext(graph, instruction, { ...options, fsImpl, budget });
+  const context = built.context;
+  let capsule = built.capsule;
+  const useLadder = options.verifyLadder ?? !!capsule;
   const messages: ChatMessage[] = buildAgentMessages(context);
   if (options.priorSummary) {
     messages.push({ role: 'user', content: options.priorSummary });
@@ -121,36 +299,251 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const repeats = new Map<string, number>();
   let recordedSearch = false;
   let commandCount = 0;
-  let verifyRounds = options.verify?.maxRounds ?? 2;
+  let verifyRounds = verifyConfig?.maxRounds ?? 2;
+  let lastVerifyPassed = true;
+  /** Last verification ladder / command outcomes for run provenance. */
+  let lastVerification: Array<{
+    kind: string;
+    command?: string | null;
+    passed: boolean;
+    diagnostic?: string | null;
+  }> = [];
+  let lastFailureCapsule: FailureCapsule | null = null;
   const usage = { promptTokens: 0, completionTokens: 0 };
   let providerInfo = { id: providers[0]?.id ?? 'none', model: providers[0]?.model ?? '', fellBack: false };
+  const trajectory = createTrajectoryCollector();
+  let currentStep = 0;
+  const capsuleSummary = capsule ? summarizeCapsule(capsule) : null;
+  if (capsuleSummary) onEvent({ type: 'capsule', summary: capsuleSummary });
 
-  const ctx: ToolContext = { root, graph, fsImpl, spans, run: options.run, approve: options.approve, auto: options.auto, denyCommands: options.denyCommands };
+  const runShell = (command: string): ShellResult => {
+    if (options.executionEnv) return options.executionEnv.run(command, { cwd: root });
+    return options.run(command);
+  };
 
-  /** Single terminal path: writes the audit record once, then returns. */
+  const ctx: ToolContext = {
+    root,
+    graph,
+    fsImpl,
+    spans,
+    run: runShell,
+    approve: options.approve,
+    auto: options.auto,
+    denyCommands: options.denyCommands,
+    capsule,
+    getTaskCapsule: () => capsule,
+    graphBackend: options.graphBackend,
+    dirtyFiles: () => (overlay ? overlay.dirtyFiles() : []),
+    changedFiles: () => changes.map((c) => c.file),
+    // B3: enforce-before-apply against the live graph trie.
+    identifierTrie: identifierTrie ?? null,
+    enforceIdentifiers: options.identifierMask !== false,
+  };
+
+  /** Recompute the tool-visible graph from the session overlay after mutations. */
+  const refreshSessionGraph = async (): Promise<void> => {
+    if (!overlay || !overlay.isDirty()) return;
+    try {
+      const session = await materializeSessionGraph(graph, overlay);
+      ctx.graph = session.graph;
+      // Uncommitted overlay content is only on the local session graph — not in vgd.
+      ctx.graphBackend = localGraphBackend(session.graph);
+      // Keep enforce trie aligned with session-visible symbols (new symbols from approved edits become legal).
+      if (options.identifierMask !== false) {
+        ctx.identifierTrie = buildIdentifierTrieFromGraph(session.graph);
+      }
+      const next = buildSpanIndex(session.graph);
+      ctx.spans.clear();
+      for (const [k, v] of next) ctx.spans.set(k, v);
+      onEvent({ type: 'session-graph', reparsed: session.reparsed.length, dirty: session.deleted.length + session.rewritten.length });
+      // Capsule delta: recompile from session-visible files when capsule mode is on.
+      if (options.capsule && capsule) {
+        try {
+          const nextCapsule = buildTaskCapsule(session.graph, instruction, {
+            budget,
+            files: options.files,
+            readFile: (rel) => fsImpl.read(rel),
+            repositoryId: repositoryIdFromRoot(root),
+            provenance: {
+              modelProfileId: options.modelProfile?.id ?? null,
+              securityTier: options.executionEnv?.tier ?? options.modelProfile?.securityTier ?? null,
+            },
+          });
+          const delta = buildCapsuleDelta(capsule, nextCapsule);
+          capsule = nextCapsule;
+          ctx.capsule = nextCapsule;
+          if (!isEmptyCapsuleDelta(delta)) {
+            onEvent({ type: 'capsule-delta', delta });
+            messages.push({ role: 'user', content: delta.rendered.slice(0, 6000) });
+          }
+        } catch {
+          /* capsule refresh is best-effort */
+        }
+      }
+    } catch {
+      /* session graph is best-effort — keep baseline map */
+    }
+  };
+
+  const emitFailure = (fc: FailureCapsule): void => {
+    lastFailureCapsule = fc;
+    trajectory.markFailureCapsule();
+    onEvent({ type: 'failure-capsule', capsule: fc });
+  };
+
+  /** Single terminal path: flush overlay, write audit once, then return. */
   const finish = (stopped: AgentStop, finalText: string, steps: number): AgentResult => {
-    const result: AgentResult = { finalText, changes, steps, stopped, provider: providerInfo, usage };
-    if (!options.noAudit) writeAgentAudit(fsImpl, { instruction, providerInfo, changes, commandCount, steps, stopped }, now());
+    flushOverlay();
+    const solved = stopped === 'finished' && lastVerifyPassed;
+    const traj = trajectory.finalize({
+      taskId: options.attribution?.client ? `${options.attribution.client}:${instruction.slice(0, 40)}` : instruction.slice(0, 48),
+      arm: capsule ? 'capsule' : 'metadata',
+      solved,
+      verified: lastVerifyPassed,
+      steps,
+      stopped,
+      inferenceTurns: currentStep || steps,
+      filesChanged: changes.length,
+      usedCapsule: !!capsule,
+      provider: { id: providerInfo.id, model: providerInfo.model },
+    });
+    const metrics: AgentMetrics = {
+      discoveryToolCalls: traj.discoveryToolCalls,
+      mutationToolCalls: traj.mutationToolCalls,
+      shellCommands: traj.shellCommands,
+      znsAt1: traj.znsAt1,
+      usedCapsule: !!capsule,
+      failureCapsuleBuilt: traj.failureCapsuleBuilt,
+      trajectory: traj,
+    };
+    onEvent({ type: 'metrics', metrics });
+    const result: AgentResult = {
+      finalText,
+      changes,
+      steps,
+      stopped,
+      provider: providerInfo,
+      usage,
+      metrics,
+      failureCapsule: lastFailureCapsule,
+      capsuleSummary: capsule ? summarizeCapsule(capsule) : capsuleSummary,
+      provenance: buildRunProvenance({
+        modelProfileId: options.modelProfile?.id ?? capsule?.provenance.modelProfileId ?? null,
+        securityTier:
+          options.executionEnv?.tier ?? options.modelProfile?.securityTier ?? capsule?.provenance.securityTier ?? null,
+        graphCorpusHash: capsule?.provenance.graphCorpusHash ?? graph.provenance?.corpusHash ?? null,
+        rankingVersion: capsule?.provenance.rankingVersion ?? CAPSULE_RANKING_VERSION,
+        policyVersion: capsule?.provenance.policyVersion ?? CONTEXT_POLICY_VERSION,
+        changes,
+        verification: lastVerification,
+      }),
+    };
+    if (!options.noAudit) {
+      writeAgentAudit(
+        options.fsImpl,
+        {
+          instruction,
+          providerInfo,
+          changes,
+          commandCount,
+          steps,
+          stopped,
+          provenance: result.provenance,
+        },
+        now(),
+      );
+    }
     return result;
   };
 
   /**
-   * When the model calls finish: if auto-verify is on, changes were made, and
-   * rounds remain, run the verify command. On failure feed the output back and
-   * return 'retry' (the loop continues so the model fixes it); otherwise 'done'.
+   * On finish: graph-derived ladder (syntax / hints / testCommand), then optional
+   * explicit verify command. Failure feeds a Failure Capsule + retries while rounds remain.
    */
   const verifyOnFinish = (): 'retry' | 'done' => {
-    const v = options.verify;
-    if (!v || verifyRounds <= 0 || changes.length === 0) return 'done';
-    const res = options.run(v.command);
+    if (changes.length === 0) return 'done';
+
+    if (useLadder && capsule) {
+      const steps = compileVerificationLadder(capsule.verificationPlan, {
+        testCommand: verifyConfig?.command ?? options.testCommand,
+      });
+      // Shell steps need real files — flush before the ladder.
+      flushOverlay();
+      const ladder = runVerificationLadder(steps, {
+        readFile: (f) => options.fsImpl.read(f),
+        run: runShell,
+        // Prefer the dedicated verify command path below when both are set, so we
+        // don't double-run the same test command.
+        runCommands: !verifyConfig?.command,
+      });
+      const summary = ladder.steps.map((s) => `${s.ok ? '✔' : '✗'} ${s.message}`).join('\n');
+      onEvent({ type: 'ladder', ok: ladder.ok, summary });
+      lastVerification = ladder.steps.map((s) => ({
+        kind: s.step?.kind ?? 'ladder',
+        command: s.step && 'command' in s.step ? (s.step as { command?: string }).command ?? null : null,
+        passed: !!s.ok,
+        diagnostic: s.message ?? null,
+      }));
+      if (!ladder.ok) {
+        lastVerifyPassed = false;
+        const fc = buildFailureCapsule({
+          ladderSteps: ladder.steps,
+          capsule,
+          changedFiles: changes.map((c) => c.file),
+          modelId: providerInfo.model,
+          policyVersion: CONTEXT_POLICY_VERSION,
+        });
+        emitFailure(fc);
+        if (verifyRounds <= 0) return 'done';
+        verifyRounds--;
+        messages.push({
+          role: 'user',
+          content: `The task isn't finished — verification ladder failed.\n\n${fc.rendered.slice(0, 8000)}\n\nFix the issues, then call finish again.${verifyRounds === 0 ? ' (last verification attempt)' : ''}`,
+        });
+        return 'retry';
+      }
+    }
+
+    const v = verifyConfig;
+    if (!v || verifyRounds <= 0) {
+      lastVerifyPassed = true;
+      return 'done';
+    }
+    flushOverlay();
+    const res = runShell(v.command);
     onEvent({ type: 'verify', command: v.command, passed: res.exitCode === 0 });
-    if (res.exitCode === 0) return 'done';
+    lastVerification = [
+      ...lastVerification,
+      {
+        kind: 'command',
+        command: v.command,
+        passed: res.exitCode === 0,
+        diagnostic: res.stdout?.slice(0, 4000) ?? null,
+      },
+    ];
+    if (res.exitCode === 0) {
+      lastVerifyPassed = true;
+      return 'done';
+    }
+    lastVerifyPassed = false;
+    const fc = buildFailureCapsule({
+      verify: { command: v.command, exitCode: res.exitCode, stdout: res.stdout },
+      capsule,
+      changedFiles: changes.map((c) => c.file),
+      modelId: providerInfo.model,
+      policyVersion: CONTEXT_POLICY_VERSION,
+    });
+    emitFailure(fc);
     verifyRounds--;
-    messages.push({ role: 'user', content: `The task isn't finished — \`${v.command}\` failed (exit ${res.exitCode}):\n${res.stdout.slice(0, 8000)}\n\nFix the failing tests, then call finish again.${verifyRounds === 0 ? ' (last verification attempt)' : ''}` });
+    messages.push({
+      role: 'user',
+      content: `The task isn't finished — \`${v.command}\` failed (exit ${res.exitCode}).\n\n${fc.rendered.slice(0, 8000)}\n\nFix the failing tests, then call finish again.${verifyRounds === 0 ? ' (last verification attempt)' : ''}`,
+    });
     return 'retry';
   };
 
   for (let step = 1; step <= maxSteps; step++) {
+    currentStep = step;
     onEvent({ type: 'step', n: step });
 
     // Keep the transcript under the budget: preserve the cache-stable prefix
@@ -164,7 +557,30 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 
     let result: ProviderResult;
     try {
-      const c = await complete(providers, messages, allTools, onEvent, options.stream);
+      // Mark stable prefix blocks warm after first turn for KV plan metrics (no native KV yet).
+      if (kvRegistry.size() === 0 && messages.length >= 2) {
+        kvRegistry.commit(
+          messages.slice(0, Math.min(3, messages.length)).map((m, i) => ({
+            kind: i === 0 ? 'system' : 'context',
+            text: typeof m.content === 'string' ? m.content : '',
+          })),
+        );
+      }
+      const promptSegments = messages.map((m, i) => ({
+        kind: m.role === 'system' ? 'system' : i < 3 ? 'context' : m.role === 'user' ? 'user' : 'assistant',
+        text: typeof m.content === 'string' ? m.content : '',
+      }));
+      const c = await complete(
+        providers,
+        messages,
+        allTools,
+        onEvent,
+        options.stream,
+        options.modelProfile,
+        identifierTrie,
+        draftCandidates,
+        promptSegments,
+      );
       result = c.result;
       providerInfo = { id: c.provider.id, model: c.provider.model, fellBack: c.fellBack };
     } catch (e) {
@@ -177,6 +593,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     if (result.usage) {
       usage.promptTokens += result.usage.promptTokens ?? 0;
       usage.completionTokens += result.usage.completionTokens ?? 0;
+      trajectory.recordUsage(result.usage.promptTokens ?? 0, result.usage.completionTokens ?? 0);
       onEvent({ type: 'usage', promptTokens: result.usage.promptTokens ?? 0, completionTokens: result.usage.completionTokens ?? 0 });
     }
 
@@ -197,11 +614,39 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         recordSearchSaving(root, context, options.attribution, now());
       }
 
+      // Shell commands see the real tree — flush session overlay first.
+      if (call.name === 'run_command') flushOverlay();
+
+      // Capsule-first discovery policy (soft nudge / hard cap).
+      if (!options.externalTools?.owns(call.name)) {
+        const gate = gateDiscoveryTool(call.name, discoveryGate, { advancedMode });
+        if (!gate.allow) {
+          const blocked = { content: gate.reason, mutated: false };
+          onEvent({ type: 'tool-result', name: call.name, content: blocked.content, mutated: false });
+          messages.push({ role: 'tool', content: blocked.content, toolCallId: call.id, name: call.name });
+          continue;
+        }
+        if (gate.note) {
+          // Note applied after the tool result below.
+          (call as { __gateNote?: string }).__gateNote = gate.note;
+        }
+      }
+
       const toolResult = options.externalTools?.owns(call.name) ? await options.externalTools.execute(call) : await executeTool(call, ctx);
+      if (!options.externalTools?.owns(call.name)) {
+        recordDiscoveryGateOutcome(call.name, discoveryGate, { mutated: toolResult.mutated });
+      }
+      const gateNote = (call as { __gateNote?: string }).__gateNote;
+      if (gateNote) toolResult.content = `${toolResult.content}\n\n${gateNote}`;
       if (call.name === 'run_command' && toolResult.mutated) commandCount++;
       if (toolResult.change) {
         changes.push(toolResult.change);
         onEvent({ type: 'change', change: toolResult.change });
+      }
+      // After an approved mutation, refresh the session graph so subsequent
+      // search_code / graph_impact see uncommitted overlay content.
+      if (toolResult.mutated && !toolResult.finished) {
+        await refreshSessionGraph();
       }
 
       // No-progress guard: a mutating call is progress (reset); a repeated
@@ -218,6 +663,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         else if (n >= NUDGE_AT) content += `\n\n(note: you have called this exact tool call ${n} times with no change — try a different approach, read more context, or call finish.)`;
       }
 
+      trajectory.recordTool(call.name, step, toolResult.mutated);
       onEvent({ type: 'tool-result', name: call.name, content, mutated: toolResult.mutated });
       messages.push({ role: 'tool', content, toolCallId: call.id, name: call.name });
 
@@ -239,13 +685,35 @@ async function complete(
   tools: ToolSpec[],
   onEvent: (e: AgentEvent) => void,
   stream?: boolean,
+  modelProfile?: ModelExecutionProfile,
+  identifierTrie?: TrieNode,
+  draftCandidates?: string[],
+  promptSegments?: Array<{ kind: string; text: string }>,
 ): Promise<{ result: ProviderResult; provider: Provider; fellBack: boolean }> {
   if (providers.length === 0) throw new Error('no model provider available');
   const onToken = stream ? (t: string): void => onEvent({ type: 'token', text: t }) : undefined;
+  const grammar = shouldUsePatchIrGrammar(modelProfile) ? patchIrGbnf() : undefined;
+  // Fail-closed on embedded path when pack requires constrained decoding.
+  const requireGrammar = !!(
+    grammar &&
+    modelProfile?.constrainedDecoding &&
+    providers.some((p) => p.id === 'llama-cpp')
+  );
   let lastErr: unknown;
   for (let i = 0; i < providers.length; i++) {
     try {
-      const result = await providers[i].chat(messages, { temperature: 0, tools, stream, onToken });
+      const result = await providers[i].chat(messages, {
+        temperature: 0,
+        tools,
+        stream,
+        onToken,
+        grammar,
+        // Only require grammar on the llama-cpp provider; HTTP providers ignore it.
+        requireGrammar: requireGrammar && providers[i].id === 'llama-cpp',
+        identifierTrie,
+        draftCandidates,
+        promptSegments,
+      });
       return { result, provider: providers[i], fellBack: i > 0 };
     } catch (e) {
       lastErr = e;
@@ -282,7 +750,41 @@ export function compact(messages: ChatMessage[], budget: number, changes: FileCh
   return { messages: [...head, note, ...kept], droppedRounds: dropped.length };
 }
 
-function recordSearchSaving(root: string, context: ReturnType<typeof buildCodeContext>, attribution: NonNullable<AgentOptions['attribution']>, ts: number): void {
+/**
+ * Assemble the first-turn context. Capsule mode injects exact source ranges
+ * from graph spans (Fusion Runtime); legacy mode is metadata-only.
+ * Returns the capsule when built so the verification ladder can use its plan.
+ */
+function buildAgentContext(
+  graph: VgGraph,
+  instruction: string,
+  options: AgentOptions,
+): { context: CodeContext; capsule: TaskCapsule | null } {
+  const budget = options.budget ?? 3000;
+  const files = options.files;
+  if (!options.capsule) {
+    return { context: buildCodeContext(graph, instruction, { budget, files }), capsule: null };
+  }
+  const capsule = buildTaskCapsule(graph, instruction, {
+    budget,
+    files,
+    readFile: (rel) => options.fsImpl.read(rel),
+    repositoryId: repositoryIdFromRoot(options.root),
+    extraPinnedFacts: options.extraPinnedFacts,
+    provenance: {
+      modelProfileId: options.modelProfile?.id ?? null,
+      securityTier: options.executionEnv?.tier ?? options.modelProfile?.securityTier ?? null,
+      policyVersion: CONTEXT_POLICY_VERSION,
+    },
+  });
+  return { context: capsuleToCodeContext(capsule), capsule };
+}
+
+export { summarizeCapsule } from './capsule.js';
+/** Re-export metric helpers used by tools (discovery set). */
+export { DISCOVERY_TOOLS, MUTATION_TOOLS };
+
+function recordSearchSaving(root: string, context: CodeContext, attribution: NonNullable<AgentOptions['attribution']>, ts: number): void {
   const files = new Set(context.seeds.map((s) => s.node.file).filter(Boolean));
   recordCliCall(
     root,
@@ -302,7 +804,15 @@ function recordSearchSaving(root: string, context: ReturnType<typeof buildCodeCo
 /** An append-only, secret-free audit record for one agent run (no code, no output, no keys). */
 function writeAgentAudit(
   fsImpl: CodeFs,
-  rec: { instruction: string; providerInfo: { id: string; model: string }; changes: FileChange[]; commandCount: number; steps: number; stopped: AgentStop },
+  rec: {
+    instruction: string;
+    providerInfo: { id: string; model: string };
+    changes: FileChange[];
+    commandCount: number;
+    steps: number;
+    stopped: AgentStop;
+    provenance?: RunProvenance;
+  },
   ts: number,
 ): void {
   try {
@@ -317,6 +827,21 @@ function writeAgentAudit(
         stopped: rec.stopped,
         commands: rec.commandCount,
         files: rec.changes.map((c) => ({ file: c.file, statuses: c.outcomes.map((o) => o.status) })),
+        // Content hashes only — never file bodies or secrets.
+        provenance: rec.provenance
+          ? {
+              schemaVersion: rec.provenance.schemaVersion,
+              policyVersion: rec.provenance.policyVersion,
+              rankingVersion: rec.provenance.rankingVersion,
+              modelProfileId: rec.provenance.modelProfileId,
+              securityTier: rec.provenance.securityTier,
+              graphCorpusHash: rec.provenance.graphCorpusHash,
+              mutationsRootHash: rec.provenance.mutationsRootHash,
+              verificationRootHash: rec.provenance.verificationRootHash ?? null,
+              mutationCount: rec.provenance.mutations.length,
+              verificationCount: rec.provenance.verification?.length ?? 0,
+            }
+          : undefined,
       }),
     );
   } catch {

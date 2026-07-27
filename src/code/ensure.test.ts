@@ -1,4 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { ensurePackage, packageName, ensureUnavailableMessage } from './ensure.js';
 
 /**
@@ -7,6 +10,12 @@ import { ensurePackage, packageName, ensureUnavailableMessage } from './ensure.j
  * The installer is injected, so nothing here shells out to npm.
  */
 describe('ensurePackage — consent gating (negative cases)', () => {
+  const prevCache = process.env.XDG_CACHE_HOME;
+  afterEach(() => {
+    if (prevCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = prevCache;
+  });
+
   it('refuses to install under --local/offline', async () => {
     const install = vi.fn(() => true);
     const res = await ensurePackage('some-pkg-that-is-not-installed@1', { local: true, install });
@@ -24,8 +33,13 @@ describe('ensurePackage — consent gating (negative cases)', () => {
   });
 
   it('reports install-failed (and never a partial success) when the installer fails', async () => {
+    process.env.XDG_CACHE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-ensure-'));
     const install = vi.fn(() => false);
-    const res = await ensurePackage('definitely-not-real-vibgrate-pkg@1', { consent: true, install });
+    const res = await ensurePackage('definitely-not-real-vibgrate-pkg@1', {
+      consent: true,
+      interactive: false,
+      install,
+    });
     expect(res.module).toBeNull();
     expect(res.reason).toBe('install-failed');
     expect(install).toHaveBeenCalledTimes(1);
@@ -60,6 +74,6 @@ describe('ensureUnavailableMessage', () => {
       expect(msg).toContain('node-llama-cpp');
       expect(msg.length).toBeGreaterThan(20);
     }
-    expect(ensureUnavailableMessage('no-consent', 'x')).toMatch(/--yes/);
+    expect(ensureUnavailableMessage('no-consent', 'x')).toMatch(/vg models install/);
   });
 });

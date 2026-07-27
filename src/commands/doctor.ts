@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Command } from 'commander';
 import { loadGraph } from '../engine/load.js';
-import { defaultGraphPath } from '../engine/artifacts.js';
+import { resolveGraphPath } from '../engine/artifacts.js';
 import { probeFreshness, driftCount } from '../engine/freshness.js';
 import { loadCatalog, catalogPath } from '../engine/lib.js';
 import { hostedBase } from '../engine/hosted.js';
@@ -15,6 +15,8 @@ import {
   projectCredentialsPath,
 } from '../reporting/credentials.js';
 import { parseDsn } from '../reporting/commands/push.js';
+import { gatherSystemMemory } from '../code/local-runtime.js';
+import { buildLocalInferenceStatus, type LocalInferenceStatus } from '../runtime/local-inference-status.js';
 import { VERSION } from '../version.js';
 import { c, info, json } from '../util/output.js';
 import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.js';
@@ -25,7 +27,8 @@ import { rootOf } from './util.js';
  * would otherwise ask for one item at a time: which config file won, which
  * credential source won, is there a map and is it fresh, can the hosted catalog
  * be reached, what would `vg install` register as the MCP launch, and what the
- * telemetry opt-outs currently say. Prints state; changes nothing.
+ * telemetry opt-outs currently say, and local inference (Code Mode fit, warm
+ * host pool, weight catalog). Prints state; changes nothing.
  *
  * Secrets never appear in the output (GUARDRAILS §1.1): for a configured DSN we
  * show only its source, host, and workspace id — never the key id or secret.
@@ -33,7 +36,9 @@ import { rootOf } from './util.js';
 export function registerDoctor(program: Command): void {
   const cmd = program
     .command('doctor')
-    .description('diagnose your setup: config, credentials, map freshness, hosted reachability, MCP launch')
+    .description(
+      'diagnose your setup: config, credentials, map freshness, hosted reachability, MCP launch, local inference',
+    )
     .action(async function (this: Command) {
       await runDoctor(readGlobal(this));
     });
@@ -67,12 +72,14 @@ interface Diagnosis {
   hosted: { base: string; checked: boolean; reachable: boolean | null };
   mcpLaunch: { command: string; args: string[]; note: string | null };
   telemetry: { optOut: string | null; ci: boolean; endpoint: string };
+  /** Approach B local inference snapshot (P4). */
+  localInference: LocalInferenceStatus;
 }
 
 async function runDoctor(global: GlobalOpts): Promise<void> {
   const root = rootOf(global);
   const local = global.local === true;
-  const graphPath = global.graph ?? defaultGraphPath(root);
+  const graphPath = resolveGraphPath(root, global.graph);
 
   const configFile = CONFIG_BASENAMES.find((f) => fs.existsSync(path.join(root, f))) ?? null;
 
@@ -93,6 +100,11 @@ async function runDoctor(global: GlobalOpts): Promise<void> {
   const reachable = local ? null : await probeReachable(base);
   const launch = detectServeLaunch();
   const optOut = telemetryOptOut();
+  const sys = gatherSystemMemory();
+  const localInference = buildLocalInferenceStatus({
+    system: sys,
+    repo: graph ? { fileCount: graph.nodes?.length ?? 0 } : undefined,
+  });
 
   const d: Diagnosis = {
     version: VERSION,
@@ -115,6 +127,7 @@ async function runDoctor(global: GlobalOpts): Promise<void> {
     hosted: { base, checked: !local, reachable },
     mcpLaunch: { command: launch.command, args: launch.args, note: launch.note ?? null },
     telemetry: { optOut, ci: isCI(), endpoint: statsEndpoint() },
+    localInference,
   };
 
   if (global.json) {
@@ -170,6 +183,43 @@ async function runDoctor(global: GlobalOpts): Promise<void> {
     ? c.green(`opted out via ${d.telemetry.optOut}`)
     : 'off by default — only `vg serve --share-stats` ever uploads';
   info(`  telemetry  ${tel}${d.telemetry.ci ? c.dim(' · CI detected') : ''}`);
+
+  // Local inference (Approach B) — warm host, pack fit, weight catalog.
+  const li = d.localInference;
+  const ramGiB = (n: number) => `${(n / 1024 ** 3).toFixed(1)} GiB`;
+  info(
+    `  inference  isolation ${c.bold(li.isolation)} ${c.dim(`(${li.isolationSource})`)} · recommend ${c.bold(li.recommendedMode)}` +
+      (li.preferOllama ? c.dim(' · prefer Ollama') : ''),
+  );
+  info(
+    `  memory     free RAM ${ramGiB(li.memory.freeRamBytes)} / ${ramGiB(li.memory.totalRamBytes)}` +
+      (typeof li.memory.vramFreeBytes === 'number'
+        ? ` · VRAM free ${ramGiB(li.memory.vramFreeBytes)}`
+        : c.dim(' · VRAM n/a')) +
+      (li.memory.loadedModels ? c.dim(` · ${li.memory.loadedModels} ollama loaded`) : ''),
+  );
+  info(
+    `  weights    catalog ${li.weightCatalog.pinned}/${li.weightCatalog.total} pinned` +
+      (li.weightCatalog.complete ? c.green(' ✓') : c.yellow(` · unpinned: ${li.weightCatalog.unpinned.join(', ')}`)) +
+      ` · cache ${li.weightStore.cachedGgufs} gguf`,
+  );
+  info(
+    `  host pool  ${li.hostPool.size} warm session(s)` +
+      (li.hostPool.sessions[0]
+        ? c.dim(
+            ` · last ${path.basename(li.hostPool.sessions[0].modelPath)} kv=${li.hostPool.sessions[0].kvBlocks}`,
+          )
+        : c.dim(' · none (load via vg code / vgd host-load)')),
+  );
+  if (li.dynamicOnToken || li.dynamicCustomSampler) {
+    info(
+      `  sampler    dynamic ${li.dynamicOnToken ? 'onToken' : ''}${li.dynamicOnToken && li.dynamicCustomSampler ? '+' : ''}${li.dynamicCustomSampler ? 'customSampler' : ''}`,
+    );
+  }
+  for (const h of li.hints.slice(0, 4)) {
+    info(c.dim(`  hint       ${h}`));
+  }
+  info(c.dim('  tip        `vg models mode --apply-recommend` pins the recommended Code Mode'));
 }
 
 function diagnoseCredentials(root: string): Diagnosis['credentials'] {

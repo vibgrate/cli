@@ -331,7 +331,8 @@ export class ScriptedProvider implements Provider {
     readonly model: string,
     private readonly steps: Array<{ text?: string; toolCalls?: ToolCall[] }>,
   ) {}
-  async chat(): Promise<ProviderResult> {
+  // Match Provider.chat so tests can wrap/spy with the full signature.
+  async chat(_messages?: ChatMessage[], _opts?: ChatOptions): Promise<ProviderResult> {
     const step = this.steps[Math.min(this.turn, this.steps.length - 1)];
     this.turn++;
     return { text: step.text ?? '', model: this.model, provider: this.id, toolCalls: step.toolCalls };
@@ -345,6 +346,15 @@ export const OPENAI_COMPATIBLE: Record<string, Omit<OpenAiCompatibleConfig, 'lab
   openai: { baseUrl: 'https://api.openai.com/v1', apiKeyEnv: 'OPENAI_API_KEY', local: false, label: 'OpenAI' },
   together: { baseUrl: 'https://api.together.xyz/v1', apiKeyEnv: 'TOGETHER_API_KEY', local: false, label: 'Together' },
   lmstudio: { baseUrl: process.env.LMSTUDIO_BASE_URL || 'http://127.0.0.1:1234/v1', local: true, label: 'LM Studio (local)' },
+  /**
+   * Microsoft Foundry Local — OpenAI-compatible local endpoint (Windows NPU/GPU).
+   * Default port matches current Foundry Local docs; override with FOUNDRY_LOCAL_BASE_URL.
+   */
+  'foundry-local': {
+    baseUrl: process.env.FOUNDRY_LOCAL_BASE_URL || 'http://127.0.0.1:5272/v1',
+    local: true,
+    label: 'Foundry Local',
+  },
 };
 
 /* ------------------------------------------------------------------ *\
@@ -352,42 +362,126 @@ export const OPENAI_COMPATIBLE: Record<string, Omit<OpenAiCompatibleConfig, 'lab
 \* ------------------------------------------------------------------ */
 
 /**
- * A fully-local inference backend backed by `node-llama-cpp`. This is the one
- * provider that may install a package on first use — and only through
- * {@link ensurePackage} (consent-gated, never under `--local`/offline, never
- * bundled). Model *weights* are never fetched automatically: `modelPath` must
- * point at a gguf the user already has (see `vg models`). When the runtime
- * isn't available it degrades with an actionable note rather than throwing.
+ * A fully-local inference backend backed by the dual-mode llm-host (ADR-005)
+ * and `node-llama-cpp`. Install runtime deps via `vg models install` (or pass
+ * consent so ensurePackage can run once). Model *weights* are never fetched
+ * automatically: `modelPath` must point at a gguf the user already has.
  */
 export class LocalLlamaProvider implements Provider {
   readonly id = 'llama-cpp';
   readonly label = 'llama.cpp (local)';
   readonly local = true;
-  private session: unknown | null = null;
+  /** Process-wide warm binding + path (best-in-breed: no reload per turn). */
+  private static warmBinding: unknown | null = null;
+  private static warmHost: import('../runtime/llm-host/embedded.js').EmbeddedLlmHost | null = null;
+  private static warmPath: string | null = null;
+
   constructor(
     readonly model: string,
     private readonly modelPath: string,
     private readonly ensure: typeof ensurePackage = ensurePackage,
     private readonly consent = false,
+    /** Override isolation (default: env / embedded). */
+    private readonly isolation: 'embedded' | 'process' = 'embedded',
+    private readonly processEndpoint?: string,
   ) {}
   async chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<ProviderResult> {
-    const res = await this.ensure('node-llama-cpp@^3', { consent: this.consent, onUnavailable: () => {} });
-    if (!res.module) {
-      throw new Error(ensureUnavailableMessage(res.reason ?? 'no-consent', 'node-llama-cpp'));
-    }
-    // The concrete llama binding call is intentionally isolated here; the rest of
-    // the subsystem never depends on it. Kept minimal and defensive.
-    const lib: any = res.module;
+    const {
+      createLlmHost,
+      EmbeddedLlmHost,
+      resolveInferenceIsolation,
+      acquireHostSession,
+      generateOnSession,
+      evictIdleSessions,
+    } = await import('../runtime/llm-host/index.js');
+    const isolation = resolveInferenceIsolation(this.isolation);
     try {
-      const llama = await lib.getLlama();
-      const model = await llama.loadModel({ modelPath: this.modelPath });
-      const ctx = await model.createContext();
-      const { LlamaChatSession } = lib;
-      const chat = new LlamaChatSession({ contextSequence: ctx.getSequence() });
-      const prompt = messages.map((m) => `${m.role}: ${m.content}`).join('\n\n');
-      const text: string = await chat.prompt(prompt, { temperature: opts.temperature ?? 0, maxTokens: opts.maxTokens });
-      return { text, model: this.model, provider: this.id };
+      const chatMessages = messages.map((m) => ({
+        role: (m.role === 'tool' ? 'user' : m.role) as 'system' | 'user' | 'assistant',
+        content: m.content,
+      }));
+      const genOpts = {
+        temperature: opts.temperature ?? 0,
+        maxTokens: opts.maxTokens,
+        grammar: opts.grammar,
+        requireGrammar: opts.requireGrammar,
+        identifierTrie: opts.identifierTrie,
+        annotateUnknownIdentifiers: !!opts.identifierTrie,
+        draftCandidates: opts.draftCandidates,
+        promptSegments: opts.promptSegments,
+      };
+
+      if (isolation === 'process') {
+        const host = createLlmHost({ isolation: 'process', endpoint: this.processEndpoint });
+        await host.load(this.modelPath);
+        const out = await host.generate(chatMessages, genOpts);
+        return { text: out.text, model: this.model, provider: this.id };
+      }
+
+      // Warm path: reuse binding + session across turns.
+      if (!LocalLlamaProvider.warmBinding) {
+        const res = await this.ensure('node-llama-cpp@^3', { consent: this.consent, onUnavailable: () => {} });
+        if (!res.module) {
+          throw new Error(ensureUnavailableMessage(res.reason ?? 'no-consent', 'node-llama-cpp'));
+        }
+        LocalLlamaProvider.warmBinding = res.module;
+      }
+      evictIdleSessions(2);
+
+      // Prefer direct session API for metrics-rich generate.
+      const session = await acquireHostSession(LocalLlamaProvider.warmBinding, this.modelPath);
+      const report = await generateOnSession(session, chatMessages, genOpts);
+      return {
+        text: report.text,
+        model: this.model,
+        provider: this.id,
+        usage: {
+          // Surface host metrics in usage extension fields via completionTokens when useful.
+          completionTokens: report.draftAcceptedChars || undefined,
+        },
+      };
     } catch (e) {
+      // Fall back to EmbeddedLlmHost once if session path fails.
+      try {
+        if (LocalLlamaProvider.warmBinding) {
+          if (
+            !LocalLlamaProvider.warmHost ||
+            LocalLlamaProvider.warmPath !== this.modelPath
+          ) {
+            const host = createLlmHost({
+              isolation: 'embedded',
+              binding: LocalLlamaProvider.warmBinding,
+              preferGrammar: !!opts.grammar,
+            });
+            if (host instanceof EmbeddedLlmHost) {
+              LocalLlamaProvider.warmHost = host;
+              LocalLlamaProvider.warmPath = this.modelPath;
+              await host.load(this.modelPath);
+            }
+          }
+          if (LocalLlamaProvider.warmHost) {
+            const out = await LocalLlamaProvider.warmHost.generate(
+              messages.map((m) => ({
+                role: (m.role === 'tool' ? 'user' : m.role) as 'system' | 'user' | 'assistant',
+                content: m.content,
+              })),
+              {
+                temperature: opts.temperature ?? 0,
+                maxTokens: opts.maxTokens,
+                grammar: opts.grammar,
+                requireGrammar: opts.requireGrammar,
+                identifierTrie: opts.identifierTrie,
+                annotateUnknownIdentifiers: !!opts.identifierTrie,
+                draftCandidates: opts.draftCandidates,
+                promptSegments: opts.promptSegments,
+              },
+            );
+            return { text: out.text, model: this.model, provider: this.id };
+          }
+        }
+      } catch {
+        /* rethrow outer */
+      }
       throw new Error(`local llama.cpp inference failed for ${this.modelPath} — ${redactSecrets((e as Error).message)}`);
     }
   }

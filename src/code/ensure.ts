@@ -81,7 +81,7 @@ export function ensureUnavailableMessage(reason: EnsureFailure, spec: string): s
     case 'offline':
       return `${name} is needed for this backend but --local/offline is set — using a backend that needs no install, or drop --local to allow a one-time install.`;
     case 'no-consent':
-      return `${name} is needed for this backend and isn't installed yet. Re-run with --yes to install it once into ${runtimeCacheDir()} (nothing is written into the CLI itself), or pick a backend that needs no install (e.g. --provider ollama).`;
+      return `${name} is needed for this backend and isn't installed yet. Run \`vg models install\` (or \`vg models pull\`) to install runtime deps for the provider into ${runtimeCacheDir()} (nothing is written into the CLI itself), or pick a backend that needs no install (e.g. --provider ollama).`;
     case 'install-failed':
       return `couldn't install ${name} (offline, or npm unavailable) — using a backend that needs no install. It will try again next time.`;
     case 'load-failed':

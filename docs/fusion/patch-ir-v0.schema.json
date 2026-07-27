@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vibgrate.com/schemas/patch-ir/0",
+  "title": "PatchIR",
+  "description": "Validated intermediate representation for model-proposed edits. All model-native formats (search/replace, whole-file, structured JSON) normalize to PatchIR before deterministic apply.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "operations", "assumptions", "requestedVerification", "provenance"],
+  "properties": {
+    "schemaVersion": {
+      "const": "patch-ir/0"
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/operation" }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/assumption" }
+    },
+    "requestedVerification": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/verificationTarget" }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format"],
+      "properties": {
+        "modelId": { "type": ["string", "null"] },
+        "format": {
+          "type": "string",
+          "enum": ["search-replace", "whole-file", "structured-json", "grammar-constrained", "code-edit"]
+        },
+        "raw": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "operation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "file", "start", "end", "replacement"],
+          "properties": {
+            "op": { "const": "replace-range" },
+            "file": { "type": "string" },
+            "start": { "type": "integer", "minimum": 1 },
+            "end": { "type": "integer", "minimum": 1 },
+            "replacement": { "type": "string" },
+            "expectedHash": { "type": ["string", "null"] },
+            "anchorSymbol": { "type": ["string", "null"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "file", "search", "replace"],
+          "properties": {
+            "op": { "const": "replace-text" },
+            "file": { "type": "string" },
+            "search": { "type": "string" },
+            "replace": { "type": "string" },
+            "anchorSymbol": { "type": ["string", "null"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "file", "content"],
+          "properties": {
+            "op": { "const": "create-file" },
+            "file": { "type": "string" },
+            "content": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "file"],
+          "properties": {
+            "op": { "const": "delete-file" },
+            "file": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "symbolId", "replacement"],
+          "properties": {
+            "op": { "const": "replace-symbol" },
+            "symbolId": { "type": "string" },
+            "file": { "type": ["string", "null"] },
+            "replacement": { "type": "string" },
+            "expectedHash": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    },
+    "assumption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "detail"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["file-hash", "symbol-span", "symbol-exists", "text-present", "other"]
+        },
+        "detail": { "type": "string" },
+        "file": { "type": ["string", "null"] },
+        "symbolId": { "type": ["string", "null"] },
+        "expectedHash": { "type": ["string", "null"] }
+      }
+    },
+    "verificationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["syntax", "typecheck", "test", "build", "command"]
+        },
+        "target": { "type": "string" }
+      }
+    }
+  }
+}
