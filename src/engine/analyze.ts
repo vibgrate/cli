@@ -11,7 +11,7 @@ import type { Area, EdgeKind, GraphEdge, GraphNode } from '../schema.js';
  *
  * - **Centrality** blends PageRank + betweenness + eigenvector + degree over the
  *   dependency graph (call/import/extends/implements/references), catching
- *   high-fan-in critical nodes that degree-only ranking (Graphify) misses.
+ *   high-fan-in critical nodes that degree-only ranking misses.
  * - **Communities** via Louvain (`graphology-communities-louvain`, MIT), seeded
  *   and single-pass for determinism. Leiden (via a permissive WASM impl) is a
  *   later enhancement; the cluster mode is reported honestly, never silent.
@@ -23,11 +23,19 @@ import type { Area, EdgeKind, GraphEdge, GraphNode } from '../schema.js';
  */
 
 export type ClusterMode = 'leiden' | 'louvain' | 'none';
+export type AnalysisTier = 'full' | 'large' | 'xl';
 
 export interface AnalyzeOptions {
   cluster?: ClusterMode; // default 'louvain'
   /** Skip betweenness above this node count (O(V·E) — too slow for huge graphs). */
   betweennessLimit?: number;
+  /**
+   * Analysis cost tier. When omitted, auto-selected from node count:
+   *   full  ≤5k nodes  — PR + betweenness + eigenvector + Louvain
+   *   large ≤50k       — PR + eigenvector + Louvain (no betweenness)
+   *   xl    >50k       — PR + degree; Louvain only on file-level contraction
+   */
+  tier?: AnalysisTier;
 }
 
 export interface AnalyzeResult {
@@ -35,6 +43,18 @@ export interface AnalyzeResult {
   edges: GraphEdge[]; // surprise scores attached
   areas: Area[];
   cluster: ClusterMode;
+  tier: AnalysisTier;
+}
+
+/** Node-count thresholds for auto tier selection. */
+export const TIER_LARGE_NODES = 5_000;
+export const TIER_XL_NODES = 50_000;
+
+export function pickAnalysisTier(nodeCount: number, forced?: AnalysisTier): AnalysisTier {
+  if (forced) return forced;
+  if (nodeCount > TIER_XL_NODES) return 'xl';
+  if (nodeCount > TIER_LARGE_NODES) return 'large';
+  return 'full';
 }
 
 // Edges that express dependency/importance (excludes contains/test/coverage).
@@ -50,18 +70,27 @@ export function analyze(
   edges: GraphEdge[],
   options: AnalyzeOptions = {},
 ): AnalyzeResult {
-  const mode = options.cluster ?? 'louvain';
+  const tier = pickAnalysisTier(nodes.length, options.tier);
+  const mode = options.cluster ?? (tier === 'xl' ? 'louvain' : 'louvain');
   // Sorted for deterministic graph construction (Louvain RNG consumption order).
   const ids = [...nodes.map((n) => n.id)].sort((a, b) => a.localeCompare(b));
 
   // --- centrality (directed dependency graph) ---
+  // Tier policy (honest, never silent):
+  //   full  — PR + betweenness (≤limit) + eigenvector + degree
+  //   large — PR + eigenvector + degree (betweenness off)
+  //   xl    — PR + degree (eigenvector off; betweenness off)
   const dg = simpleGraph(ids, edges, DEP_EDGES, 'directed');
   const pr = safeMetric(() => pagerank(dg), ids);
+  const bwLimit = options.betweennessLimit ?? DEFAULT_BETWEENNESS_LIMIT;
   const bw =
-    dg.order <= (options.betweennessLimit ?? DEFAULT_BETWEENNESS_LIMIT)
+    tier === 'full' && dg.order <= bwLimit
       ? safeMetric(() => betweenness(dg), ids)
       : zeros(ids);
-  const ev = safeMetric(() => eigenvector(dg), ids);
+  const ev =
+    tier === 'full' || tier === 'large'
+      ? safeMetric(() => eigenvector(dg), ids)
+      : zeros(ids);
   const deg = degreeMap(dg, ids);
 
   const prN = normalize(pr);
@@ -69,13 +98,21 @@ export function analyze(
   const evN = normalize(ev);
   const degN = normalize(deg);
 
+  // Re-weight when expensive metrics are zeroed so scores stay informative.
+  const weights =
+    tier === 'xl'
+      ? { pagerank: 0.7, betweenness: 0, eigenvector: 0, degree: 0.3 }
+      : tier === 'large'
+        ? { pagerank: 0.5, betweenness: 0, eigenvector: 0.25, degree: 0.25 }
+        : IMPORTANCE_WEIGHTS;
+
   const importance = new Map<string, number>();
   for (const id of ids) {
     const score =
-      IMPORTANCE_WEIGHTS.pagerank * (prN.get(id) ?? 0) +
-      IMPORTANCE_WEIGHTS.betweenness * (bwN.get(id) ?? 0) +
-      IMPORTANCE_WEIGHTS.eigenvector * (evN.get(id) ?? 0) +
-      IMPORTANCE_WEIGHTS.degree * (degN.get(id) ?? 0);
+      weights.pagerank * (prN.get(id) ?? 0) +
+      weights.betweenness * (bwN.get(id) ?? 0) +
+      weights.eigenvector * (evN.get(id) ?? 0) +
+      weights.degree * (degN.get(id) ?? 0);
     importance.set(id, score);
   }
   const importanceN = normalize(importance);
@@ -87,8 +124,12 @@ export function analyze(
   const std = Math.sqrt(variance);
   const hubThreshold = mean + 2 * std;
 
-  // --- communities (undirected cohesion graph) ---
-  const { areaByNode, mode: actualMode } = cluster(ids, edges, mode);
+  // --- communities ---
+  // xl: cluster on file-level contraction (far fewer nodes) then map members back.
+  const { areaByNode, mode: actualMode } =
+    tier === 'xl'
+      ? clusterFileLevel(nodes, edges, mode)
+      : cluster(ids, edges, mode);
 
   const outNodes: GraphNode[] = nodes
     .map((n) => ({
@@ -111,7 +152,56 @@ export function analyze(
   // --- surprise on cross-area dependency edges ---
   const outEdges = scoreSurprise(edges, areaByNode);
 
-  return { nodes: outNodes, edges: outEdges, areas, cluster: actualMode };
+  return { nodes: outNodes, edges: outEdges, areas, cluster: actualMode, tier };
+}
+
+/**
+ * XL clustering: run Louvain only over file nodes + file↔file dependency edges
+ * (contracts the method-level graph), then assign every symbol the area of its file.
+ */
+function clusterFileLevel(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  mode: ClusterMode,
+): { areaByNode: Map<string, number>; mode: ClusterMode } {
+  const fileNodes = nodes.filter((n) => n.kind === 'file');
+  const fileIds = fileNodes.map((n) => n.id).sort((a, b) => a.localeCompare(b));
+  if (fileIds.length === 0) {
+    return { areaByNode: new Map(nodes.map((n) => [n.id, -1])), mode: 'none' };
+  }
+
+  // Map symbol id → file node id.
+  const fileIdByPath = new Map(fileNodes.map((n) => [n.file, n.id]));
+  const fileOf = new Map<string, string>();
+  for (const n of nodes) {
+    if (n.kind === 'file') fileOf.set(n.id, n.id);
+    else if (n.file) {
+      const fid = fileIdByPath.get(n.file);
+      if (fid) fileOf.set(n.id, fid);
+    }
+  }
+
+  // Project dependency edges onto file↔file.
+  const fileEdges: GraphEdge[] = [];
+  const seen = new Set<string>();
+  for (const e of edges) {
+    if (!DEP_EDGES.has(e.kind)) continue;
+    const sf = fileOf.get(e.src);
+    const df = fileOf.get(e.dst);
+    if (!sf || !df || sf === df) continue;
+    const key = `${e.kind}|${sf}|${df}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    fileEdges.push({ ...e, src: sf, dst: df, id: key });
+  }
+
+  const { areaByNode: fileAreas, mode: used } = cluster(fileIds, fileEdges, mode);
+  const areaByNode = new Map<string, number>();
+  for (const n of nodes) {
+    const fid = fileOf.get(n.id);
+    areaByNode.set(n.id, fid ? (fileAreas.get(fid) ?? -1) : -1);
+  }
+  return { areaByNode, mode: used };
 }
 
 // --- graph construction ---

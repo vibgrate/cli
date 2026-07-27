@@ -1,28 +1,17 @@
 import * as fs from 'node:fs';
-import { Command } from 'commander';
 import { buildGraph } from '../engine/build.js';
 import { serializeGraph } from '../engine/serialize.js';
 import { queryGraph } from '../engine/query.js';
 import { discover } from '../engine/discover.js';
 import { resolveLimits, type ResourceLimits } from '../engine/limits.js';
-import { applyGlobalOptions, readGlobal } from '../cli-options.js';
-import { rootOf } from './util.js';
-import { c, info, json } from '../util/output.js';
 import type { VgGraph } from '../schema.js';
 
 /**
- * `vg benchmark` (VG-ENGINE-TEARDOWN §6) — reproducible, cache-aware,
- * honest-estimate benchmark on the current repo:
- *   - cold vs incremental build time, plus throughput (files/s, MB/s);
- *   - memory: peak RSS/heap sampled across the cold build, heap retained by
- *     the loaded graph, serialized artifact size (all labelled approximate —
- *     GC timing and OS accounting make them indicative, not exact);
- *   - determinism (two pinned builds must be byte-identical);
- *   - token reduction: vg's context block vs a grep/read baseline, per question;
- *   - the effective resource limits (VG_MAX_FILE_BYTES etc.) the run built under.
+ * Internal build/memory/token suite for unit tests and release tooling.
+ * Not registered as a public `vg` subcommand.
  *
- * Token figures are clearly-labelled estimates (~4 chars/token), scaling with
- * repo size — never a hero number.
+ * Timings and memory figures are environment-dependent (the graph artifact
+ * stays deterministic; the measurements of producing it are not).
  */
 const PIN = '2020-01-01T00:00:00.000Z';
 
@@ -48,48 +37,7 @@ export interface BenchmarkResult {
   };
 }
 
-export function registerBenchmark(program: Command): void {
-  const cmd = program
-    .command('benchmark')
-    .description('reproducible build + memory + token-reduction benchmark (honest estimates)')
-    .option('--budget <n>', 'token budget for vg answers', '2000')
-    .action(async function (this: Command, opts: { budget?: string }) {
-      const global = readGlobal(this);
-      const root = rootOf(global);
-      const budget = Number(opts.budget) || 2000;
-      const result = await runBenchmarkSuite(root, budget);
-
-      if (global.json) {
-        json(result);
-        return;
-      }
-
-      const { repo, build, throughput, memory, determinism, tokenReduction } = result;
-      info(`${c.cyan('vg benchmark')} · ${repo.files} files · ${repo.nodes} nodes`);
-      info(`  build   cold ${build.coldMs.toFixed(0)}ms · incremental ${build.incrementalMs.toFixed(0)}ms (reused ${build.reusedOnWarm})`);
-      info(`  speed   ${throughput.filesPerSec.toFixed(0)} files/s · ${throughput.mbPerSec.toFixed(1)} MB/s (cold, ${mb(throughput.corpusBytes).toFixed(1)} MB corpus)`);
-      info(
-        `  memory  peak rss ${memory.peakRssMb.toFixed(0)} MB (baseline ${memory.baselineRssMb.toFixed(0)} MB) · ` +
-          `peak heap ${memory.peakHeapMb.toFixed(0)} MB · graph retains ~${memory.retainedHeapMb.toFixed(0)} MB ${c.dim('(approximate)')}`,
-      );
-      info(`  graph   ${mb(memory.graphJsonBytes).toFixed(1)} MB serialized · ${memory.bytesPerNode.toFixed(0)} B/node`);
-      info(`  determinism  ${determinism.byteIdentical ? c.green('byte-identical ✓') : c.red('NON-DETERMINISTIC ✗')}`);
-      if (tokenReduction.questions.length) {
-        info(`  token reduction vs grep/read baseline (${c.dim('estimates')}):`);
-        for (const q of tokenReduction.questions) {
-          info(`    ${pad(`${q.ratio.toFixed(1)}×`, 6)} ${c.dim(`vg ${q.vgTokens} vs ~${q.baselineTokens}`)}  "${q.question}"`);
-        }
-        info(`  ${c.bold(`aggregate ≈ ${tokenReduction.aggregateRatio.toFixed(1)}× fewer tokens`)} ${c.dim('(honest estimate, scales with repo size)')}`);
-      }
-    });
-  applyGlobalOptions(cmd);
-}
-
-/**
- * The benchmark body, exported for tests. Timings and memory figures are
- * environment-dependent by nature (the graph artifact stays deterministic; the
- * measurements of producing it are not).
- */
+/** Internal suite — not a public CLI command. */
 export async function runBenchmarkSuite(root: string, budget: number): Promise<BenchmarkResult> {
   // 1. cold build (no cache), with peak-memory sampling across it.
   const baseline = process.memoryUsage();
@@ -226,7 +174,4 @@ function round(x: number): number {
 }
 function round6(x: number): number {
   return Math.round(x * 1_000_000) / 1_000_000;
-}
-function pad(s: string, n: number): string {
-  return s.padStart(n, ' ');
 }

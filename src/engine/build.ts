@@ -6,7 +6,7 @@ import { resolve } from './resolve.js';
 import { buildModuleResolver } from './module-resolver.js';
 import { tsResolveEdges } from './ts-resolver.js';
 import { decodeScipIndex, scipEdges } from './scip.js';
-import { analyze, type ClusterMode } from './analyze.js';
+import { analyze, type AnalysisTier, type ClusterMode } from './analyze.js';
 import { applyStaticTestLinkage } from './tests.js';
 import { loadCoverage, applyCoverage } from './coverage.js';
 import { buildFacts } from './facts.js';
@@ -23,6 +23,9 @@ import { hashString, hashBytes, canonicalize, shortId } from './hash.js';
 import { grammarSetVersion } from './grammars.js';
 import { classifyEpistemic } from './epistemic.js';
 import { discoverDocs, documentNodesFromDocs } from './docs-ingest.js';
+import { shardTsProjects } from './ts-projects.js';
+import { writeGraphIndex } from './index-db.js';
+import { StageTimer, type StageTimings } from './timing.js';
 import { VERSION } from '../version.js';
 import {
   SCHEMA_VERSION,
@@ -67,6 +70,15 @@ export interface BuildOptions {
   noScip?: boolean;
   /** Skip the in-process TypeScript Compiler API resolver (heuristic floor only). */
   noTsc?: boolean;
+  /**
+   * Fast mode: skip tsc precise resolve (heuristic only). Useful for XL cold
+   * builds when precision can wait for a focused rebuild.
+   */
+  fast?: boolean;
+  /** Force analysis tier (default: auto by node count). */
+  analysisTier?: AnalysisTier;
+  /** Skip writing the SQLite serve index. */
+  noIndex?: boolean;
   /** Pin the artifact timestamp for byte-deterministic output. */
   generatedAt?: string;
   /** Live progress during the parse phase (files done of total). */
@@ -88,29 +100,43 @@ export interface FileStat {
 
 export interface BuildResult {
   graph: VgGraph;
-  timing: { totalMs: number };
+  timing: { totalMs: number; stages: StageTimings };
   reparsed: number;
   reused: number;
+  /** Files skipped via mtime+size fingerprint (subset of reused). */
+  statHits: number;
   totalFiles: number;
   /** Stat+hash of every file in the corpus — input for the freshness snapshot. */
   fileStats: FileStat[];
   resolveStats: ResolveResult['stats'];
   /** Present when the TypeScript Compiler API resolver ran (TS/JS files). */
-  tsc?: { files: number; calls: number; jsx: number; heritage: number; resolved: number };
+  tsc?: {
+    files: number;
+    calls: number;
+    jsx: number;
+    heritage: number;
+    resolved: number;
+    shards?: number;
+  };
   /** Present when a SCIP index was ingested. */
   scip?: { documents: number; references: number; resolved: number; tool?: string };
+  /** SQLite index write result. */
+  index?: { ok: boolean; path?: string; reason?: string };
   warnings: string[];
 }
 
 export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
-  const start = nowMs();
+  const timer = new StageTimer();
+  timer.start('total');
   const root = path.resolve(options.root);
+  timer.start('discover');
   const files = discover({
     root,
     only: options.only,
     exclude: options.exclude,
     paths: options.paths,
   });
+  timer.end('discover');
 
   // Resource safeguards (see limits.ts): stop a pathological corpus before it
   // OOM-kills the process. Skips are deterministic functions of the input.
@@ -132,14 +158,16 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     disabled: options.noCache,
   });
 
-  // Hash every discovered file (cheap) and split into reuse vs reparse. The
-  // stat is taken *before* the read so a mid-read edit shows up as a stat
-  // mismatch on the next freshness probe (never a silently-missed change).
+  // Hash every discovered file (mtime+size fast path → content hash) and split
+  // into reuse vs reparse. The stat is taken *before* the read so a mid-read
+  // edit shows up as a stat mismatch on the next freshness probe.
+  timer.start('hash');
   const hashes = new Map<string, string>();
   const fileStats: FileStat[] = [];
   const toParse: DiscoveredFile[] = [];
   const reused: FileParse[] = [];
   const buildWarnings: string[] = [];
+  let statHits = 0;
   for (const file of files) {
     let stat: fs.Stats;
     try {
@@ -166,6 +194,25 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
       );
       continue;
     }
+
+    // Fast path: unchanged mtime+size → reuse parse without reading bytes.
+    const byStat = options.noCache
+      ? undefined
+      : cache.getByStat(file.rel, stat.mtimeMs, stat.size);
+    if (byStat) {
+      hashes.set(file.rel, byStat.hash);
+      if (byStat.parse.hash !== byStat.hash) byStat.parse.hash = byStat.hash;
+      fileStats.push({
+        rel: file.rel,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        hash: byStat.hash,
+      });
+      reused.push(byStat.parse);
+      statHits++;
+      continue;
+    }
+
     let hash = '';
     try {
       hash = hashBytes(fs.readFileSync(file.abs));
@@ -175,10 +222,16 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     hashes.set(file.rel, hash);
     fileStats.push({ rel: file.rel, size: stat.size, mtimeMs: stat.mtimeMs, hash });
     const cached = cache.get(file.rel, hash);
-    if (cached) reused.push(cached);
-    else toParse.push(file);
+    if (cached) {
+      reused.push(cached);
+      cache.set(file.rel, cached, { mtimeMs: stat.mtimeMs, size: stat.size });
+    } else {
+      toParse.push(file);
+    }
   }
+  timer.end('hash');
 
+  timer.start('parse');
   const parsedNew = await parseFiles(toParse, {
     jobs: options.jobs,
     inline: options.inline,
@@ -186,8 +239,12 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     grammarsDir: options.grammarsDir,
     memoryBudgetMb: limits.memoryBudgetMb,
   });
+  timer.end('parse');
   checkMemoryBudget('parse', limits.memoryBudgetMb);
-  for (const p of parsedNew) cache.set(p.rel, p);
+  for (const p of parsedNew) {
+    const st = fileStats.find((f) => f.rel === p.rel);
+    cache.set(p.rel, p, st ? { mtimeMs: st.mtimeMs, size: st.size } : undefined);
+  }
 
   // Persist the cache for the next incremental build.
   const currentRels = new Set(files.map((f) => f.rel));
@@ -203,8 +260,10 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   // Resolve → nodes/edges. The module resolver follows relative imports plus
   // tsconfig path aliases and workspace-package names (so monorepo cross-package
   // imports resolve, not just relative ones).
+  timer.start('resolve');
   const moduleResolver = buildModuleResolver(root, new Set(parses.map((p) => p.rel)));
   const resolved = resolve(parses, moduleResolver);
+  timer.end('resolve');
   checkMemoryBudget('resolve', limits.memoryBudgetMb);
 
   // Precise resolution rungs sit above the heuristic floor and are authoritative
@@ -224,7 +283,8 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   let tscStats: BuildResult['tsc'];
   // `hashes` holds exactly the parsed corpus — oversized (size-capped) files
   // are excluded here too, so the TS program never loads them.
-  let tsFiles = options.noTsc
+  const skipTsc = options.noTsc || options.fast;
+  let tsFiles = skipTsc
     ? []
     : files
         .filter((f) => (f.lang.id === 'ts' || f.lang.id === 'tsx' || f.lang.id === 'js') && hashes.has(f.rel))
@@ -240,16 +300,47 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     );
     tsFiles = [];
   }
+  timer.start('tsc');
   if (tsFiles.length) {
-    const res = tsResolveEdges(root, tsFiles, resolved.nodes);
-    if (res.stats.files > 0) {
-      edges = mergePreciseEdges(edges, res.edges, res.coveredFiles, nodeFileById);
-      for (const f of res.coveredFiles) preciseCoveredFiles.add(f);
+    // Shard by nearest tsconfig/package.json so monorepos never pay for one
+    // giant Program over every package.
+    const shards = shardTsProjects(root, tsFiles);
+    let filesCovered = 0;
+    let calls = 0;
+    let jsx = 0;
+    let heritage = 0;
+    let resolvedCount = 0;
+    const coveredAll = new Set<string>();
+    const preciseAll: GraphEdge[] = [];
+
+    for (const shard of shards) {
+      const res = tsResolveEdges(root, shard.files, resolved.nodes);
+      if (res.stats.files === 0) continue;
+      filesCovered += res.stats.files;
+      calls += res.stats.calls;
+      jsx += res.stats.jsx;
+      heritage += res.stats.heritage;
+      resolvedCount += res.stats.resolved;
+      for (const f of res.coveredFiles) coveredAll.add(f);
+      preciseAll.push(...res.edges);
+    }
+
+    if (filesCovered > 0) {
+      edges = mergePreciseEdges(edges, preciseAll, coveredAll, nodeFileById);
+      for (const f of coveredAll) preciseCoveredFiles.add(f);
       if (!resolvers.includes('tsc')) resolvers.unshift('tsc');
-      tscStats = res.stats;
+      tscStats = {
+        files: filesCovered,
+        calls,
+        jsx,
+        heritage,
+        resolved: resolvedCount,
+        shards: shards.length,
+      };
     }
     checkMemoryBudget('typescript resolution', limits.memoryBudgetMb);
   }
+  timer.end('tsc');
 
   // Rung 2 — a real SCIP index (if present), the most precise rung for any
   // language an indexer covers.
@@ -289,7 +380,12 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   if (docNodes.length) nodes = [...nodes, ...docNodes];
 
   // Analyse → centrality/areas/surprise (test/coverage edges excluded from these).
-  const analysis = analyze(nodes, linked.edges, { cluster: options.cluster });
+  timer.start('analyze');
+  const analysis = analyze(nodes, linked.edges, {
+    cluster: options.cluster,
+    tier: options.analysisTier,
+  });
+  timer.end('analyze');
   checkMemoryBudget('analysis', limits.memoryBudgetMb);
 
   const languages = [...new Set([...parses.map((p) => p.lang), ...docNodes.map((n) => n.lang)])].sort();
@@ -327,6 +423,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     meta: {
       root: path.basename(root) === '' ? '.' : '.',
       languages,
+      analysisTier: analysis.tier,
       counts: {
         nodes: analysis.nodes.length,
         edges: analysis.edges.length,
@@ -361,16 +458,29 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     if (grounding.length) graph.grounding = grounding;
   }
 
+  let indexResult: BuildResult['index'];
+  if (!options.noIndex) {
+    timer.start('index');
+    const wr = writeGraphIndex(root, graph);
+    indexResult = { ok: wr.ok, path: wr.ok ? wr.path : undefined, reason: wr.reason };
+    timer.end('index');
+  }
+
+  timer.end('total');
+  const stages = timer.snapshot();
+
   return {
     graph,
-    timing: { totalMs: Math.round((nowMs() - start) * 1000) / 1000 },
+    timing: { totalMs: stages.total ?? 0, stages },
     reparsed: parsedNew.length,
     reused: reused.length,
+    statHits,
     totalFiles: files.length,
     fileStats,
     resolveStats: resolved.stats,
     tsc: tscStats,
     scip: scipStats,
+    index: indexResult,
     warnings,
   };
 }

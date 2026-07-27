@@ -1,6 +1,6 @@
 /**
  * Shared, deterministic content for `vg install`: the skill body and the advisory
- * nudge. Posture is deliberately lighter-touch than Graphify — the nudge
+ * nudge. Posture is deliberately lighter-touch — the nudge
  * *suggests* the graph as the faster path, never asserts "MANDATORY"
  * (VG-ASSISTANT-INSTALL §1). On small repos we say searching is fine.
  */

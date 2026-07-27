@@ -41,6 +41,9 @@ export interface Provenance {
   toolchain?: Toolchain; // reproducibility fingerprint (checked by `vg verify`)
 }
 
+/** Analysis cost tier — auto-selected by node count (or forced). Reported honestly. */
+export type AnalysisTier = 'full' | 'large' | 'xl';
+
 export interface GraphMeta {
   root: string; // relative; portable across machines
   languages: string[];
@@ -52,6 +55,8 @@ export interface GraphMeta {
     untested: number;
   };
   cluster: 'leiden' | 'louvain' | 'none';
+  /** Auto-selected (or forced) analysis tier for large maps. */
+  analysisTier?: AnalysisTier;
   edgeKinds: EdgeKind[];
 }
 

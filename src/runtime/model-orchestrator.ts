@@ -333,6 +333,15 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
 
 const GiB = 1024 ** 3;
 
+/**
+ * Static reserves applied on top of *available* RAM.
+ *
+ * Important: `freeRamBytes` is already residual after currently-running
+ * processes (IDE, OS, browsers, …). Subtracting a full IDE/OS footprint again
+ * double-counts and falsely zeros fit on healthy machines. Keep growth
+ * headroom for graph/tests (often not yet resident) + safety, and a modest
+ * fraction of IDE/OS for workspace growth under load.
+ */
 const DEFAULT_RESERVES = {
   ideBytes: 1.5 * GiB,
   osBytes: 2 * GiB,
@@ -340,6 +349,9 @@ const DEFAULT_RESERVES = {
   testsBytes: 0.25 * GiB,
   safetyMarginBytes: 1 * GiB,
 };
+
+/** Fraction of IDE+OS reserves kept as growth headroom on the free-RAM path. */
+const IDE_OS_GROWTH_FRACTION = 0.25;
 
 // ── Pack lookup ───────────────────────────────────────────────────────────────
 
@@ -392,13 +404,16 @@ export function fitPack(input: FitInput): FitResult {
         : 0;
   const graphBytes = r.graphBytes + graphBump;
 
-  const reserved =
-    r.ideBytes + r.osBytes + graphBytes + r.testsBytes + r.safetyMarginBytes;
-  // On unified / CPU path, reserves come out of free RAM; on discrete VRAM,
-  // only model+KV compete for VRAM — reserves stay on host RAM conceptually.
-  const freeAfterReserves = useVram
-    ? Math.max(0, freePool - r.safetyMarginBytes)
-    : Math.max(0, freePool - reserved);
+  // On discrete VRAM, only model+KV compete for VRAM — host reserves stay on RAM.
+  // On unified / CPU path: free/available RAM already excludes current IDE/OS
+  // usage, so only charge growth (graph/tests/safety + modest IDE/OS headroom).
+  const reserved = useVram
+    ? r.safetyMarginBytes
+    : graphBytes +
+      r.testsBytes +
+      r.safetyMarginBytes +
+      IDE_OS_GROWTH_FRACTION * (r.ideBytes + r.osBytes);
+  const freeAfterReserves = Math.max(0, freePool - reserved);
 
   const availableBytes = freeAfterReserves;
   const reasons: string[] = [];
@@ -452,10 +467,11 @@ export function fitPack(input: FitInput): FitResult {
     breakdown: {
       modelBytes,
       kvBytes,
-      ideBytes: r.ideBytes,
-      osBytes: r.osBytes,
-      graphBytes,
-      testsBytes: r.testsBytes,
+      // Report the charged growth headroom (not the full static IDE/OS footprint).
+      ideBytes: useVram ? 0 : IDE_OS_GROWTH_FRACTION * r.ideBytes,
+      osBytes: useVram ? 0 : IDE_OS_GROWTH_FRACTION * r.osBytes,
+      graphBytes: useVram ? 0 : graphBytes,
+      testsBytes: useVram ? 0 : r.testsBytes,
       freeAfterReservesBytes: freeAfterReserves,
     },
     reducedCapsuleBudgetTokens,

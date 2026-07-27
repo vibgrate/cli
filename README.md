@@ -302,7 +302,6 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | Command | Description |
 | --- | --- |
 | `vg ask "<question>"` | Query the map in natural language |
-| `vg benchmark` | Reproducible build + memory + token-reduction benchmark (honest estimates) |
 | `vg build [path]` | Build / update the code map (incremental, deterministic) |
 | `vg bundle` | Build an air-gapped bundle (grammars + graph + library catalog) |
 | `vg code "<instruction>"` | Propose a graph-grounded code edit (dry-run by default; `--apply --yes` to write) |
