@@ -95,6 +95,10 @@ export function parseNvidiaSmi(stdout: string): { totalBytes: number; usedBytes:
 
 export interface SystemMemory {
   totalRamBytes: number;
+  /**
+   * Bytes available for a new allocation right now (reclaim-aware on macOS/Linux —
+   * not bare free pages from `os.freemem()`, which under-reports on macOS).
+   */
   freeRamBytes: number;
   /** GPU total/free if a discrete GPU was detected (else undefined → CPU/unified). */
   vramTotalBytes?: number;

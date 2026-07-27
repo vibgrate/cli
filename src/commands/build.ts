@@ -34,6 +34,9 @@ interface BuildCmdOpts {
   export?: string;
   warm?: boolean;
   grammars?: string;
+  fast?: boolean;
+  index?: boolean;
+  analysisTier?: string;
   attest?: boolean;
   verify?: boolean;
   attestKey?: string;
@@ -55,6 +58,9 @@ export function registerBuild(program: Command): void {
     .option('--scip <file>', 'ingest a SCIP index for precise resolution (default: auto-detect index.scip)')
     .option('--no-scip', 'ignore any SCIP index')
     .option('--no-tsc', 'skip the in-process TypeScript resolver (heuristic floor only)')
+    .option('--fast', 'skip precise tsc resolve (heuristic only — faster XL cold builds)')
+    .option('--no-index', 'do not write the SQLite serve index under .vibgrate/cache/')
+    .option('--analysis-tier <tier>', 'force analysis tier: full | large | xl (default: auto)')
     .option('--no-warm', 'do not warm the semantic index in the background after building')
     .option('--grammars <dir>', 'directory of grammar .wasm files (offline / air-gapped)')
     .option('-o, --export <file>', 'also write the map to a file (format inferred)')
@@ -95,6 +101,12 @@ export async function runBuild(
   }
 
   const only = opts.only ? opts.only.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+  const tierRaw = opts.analysisTier?.toLowerCase();
+  const analysisTier =
+    tierRaw === 'full' || tierRaw === 'large' || tierRaw === 'xl' ? tierRaw : undefined;
+  if (opts.analysisTier && !analysisTier) {
+    throw usageError(`--analysis-tier must be full, large, or xl (got "${opts.analysisTier}")`);
+  }
   let result;
   try {
     result = await buildGraph({
@@ -109,6 +121,9 @@ export async function runBuild(
       scip: typeof opts.scip === 'string' ? opts.scip : undefined,
       noScip: opts.scip === false,
       noTsc: opts.tsc === false,
+      fast: opts.fast === true,
+      noIndex: opts.index === false,
+      analysisTier,
       generatedAt: global.generatedAt,
       onParseProgress: bar ? (done, total) => bar.update(done, total) : undefined,
       grammarsDir: opts.grammars,

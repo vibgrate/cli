@@ -30,7 +30,6 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg push](#vg-push)
 - [Code Graph Commands](#code-graph-commands)
   - [vg ask](#vg-ask)
-  - [vg benchmark](#vg-benchmark)
   - [vg build](#vg-build)
   - [vg bundle](#vg-bundle)
   - [vg code](#vg-code)
@@ -646,22 +645,6 @@ Before answering, `ask` checks whether files changed since the map was last buil
 | `-b, --budget <n>` | `2000` | Approx token budget for returned context |
 | `--no-semantic` | — | Lexical only; skip the local embedding pass |
 | `--no-refresh` | — | Answer from the map as built; skip the auto-rebuild when files changed |
-
----
-
-### vg benchmark
-
-A reproducible build + memory + token-reduction benchmark for this repository — honest, self-measured estimates you can re-run.
-
-```bash
-vg benchmark
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--budget <n>` | `2000` | Approx token budget used when estimating context savings |
-
-Add `--json` for machine-readable output.
 
 ---
 

@@ -8,10 +8,16 @@
 
 import * as os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
+import { availableRamBytes } from './available-memory.js';
 import { parseOllamaPs, parseNvidiaSmi, type SystemMemory } from './capability.js';
 import type { Spinner } from './ui.js';
 
-/** Gather current system memory, loaded models, and (best-effort) GPU VRAM. */
+/**
+ * Gather current system memory, loaded models, and (best-effort) GPU VRAM.
+ *
+ * `freeRamBytes` is *available* RAM (reclaim-aware on macOS/Linux), not bare
+ * free pages from `os.freemem()` — see `available-memory.ts`.
+ */
 export function gatherSystemMemory(): SystemMemory {
   const loaded = safeRun('ollama', ['ps']).map(parseOllamaPs).flat();
   const smi = safeRun('nvidia-smi', ['--query-gpu=memory.total,memory.used', '--format=csv,noheader,nounits'])
@@ -19,7 +25,7 @@ export function gatherSystemMemory(): SystemMemory {
     .find(Boolean);
   const sys: SystemMemory = {
     totalRamBytes: os.totalmem(),
-    freeRamBytes: os.freemem(),
+    freeRamBytes: availableRamBytes(),
     loaded,
   };
   if (smi) {

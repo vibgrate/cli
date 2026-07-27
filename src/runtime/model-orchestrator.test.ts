@@ -46,6 +46,28 @@ describe('fitPack', () => {
     expect(fit.score).toBeLessThanOrEqual(20);
   });
 
+  it('fits spark when available RAM is modest after reclaim-aware free', () => {
+    // Regression: macOS os.freemem() often reports ~0 while Activity Monitor
+    // shows many GiB available. With ~8 GiB available, spark (~2 GiB) must fit
+    // after growth reserves (not a full second IDE/OS footprint).
+    const fit = fitPack({
+      pack: spark,
+      system: mem({ totalRamBytes: 16 * GiB, freeRamBytes: 8 * GiB }),
+    });
+    expect(fit.label).not.toBe('will_not_fit');
+    expect(fit.availableBytes).toBeGreaterThan(fit.needBytes * 0.85);
+  });
+
+  it('does not double-count full IDE/OS against already-free RAM', () => {
+    const fit = fitPack({
+      pack: spark,
+      system: mem({ totalRamBytes: 32 * GiB, freeRamBytes: 6 * GiB }),
+    });
+    // Old formula reserved ~5.25 GiB → ~0.75 free after; spark need ~2 → will_not_fit.
+    // Growth-only reserves leave enough headroom for spark.
+    expect(fit.label).not.toBe('will_not_fit');
+  });
+
   it('suggests reduced capsule when tight', () => {
     const flow = packForMode('flow')!;
     // Need roughly model+kv; set free just above 0.85 * need after reserves.

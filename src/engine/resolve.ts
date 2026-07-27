@@ -10,7 +10,7 @@ import type { EdgeKind, GraphEdge, GraphNode, NodeKind, ResolverKind } from '../
  * and typed, id'd edges.
  *
  * The Phase-0 resolver is the deterministic **heuristic** rung of the ladder
- * (VG-ENGINE-TEARDOWN §3.2). It is already well beyond Graphify's
+ * (VG-ENGINE-TEARDOWN §3.2). It is already well beyond a
  * single-candidate label match: it is scope-aware (same-file first), import-aware
  * (callees reachable through imported files next), and arity/visibility-honest
  * (records its confidence and resolution rung per edge rather than silently
@@ -309,7 +309,7 @@ function bumpUnresolved(
   kind: UnresolvedRef['kind'],
   fromRel: string,
 ): void {
-  const key = `${from} ${kind} ${name}`;
+  const key = `${from}${kind}${name}`;
   const existing = map.get(key);
   if (existing) existing.count++;
   else map.set(key, { from, name, kind, count: 1, fromRel });

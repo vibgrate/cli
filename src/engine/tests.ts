@@ -2,7 +2,7 @@ import { edgeId } from './ids.js';
 import type { GraphEdge, GraphNode } from '../schema.js';
 
 /**
- * Test-awareness (VG-ENGINE-TEARDOWN §3.6) — the wedge Graphify has no answer to.
+ * Test-awareness (VG-ENGINE-TEARDOWN §3.6).
  *
  * Deterministic, two signals:
  *  1. **Static linkage** — calls from a test file into product code become `test`

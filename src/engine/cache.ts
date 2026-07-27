@@ -15,20 +15,28 @@ import type { FileParse } from './types.js';
  * prove this.
  */
 
-// Bumped to /3: FileParse now carries `namespaces` (C# cross-namespace
-// resolution); a cache written before this lacks it and must be re-parsed.
-const CACHE_VERSION = 'vg-parse-cache/3';
+// Bumped to /4: optional mtime+size fingerprint for stat-skip fast path.
+const CACHE_VERSION = 'vg-parse-cache/4';
+
+interface CacheEntry {
+  hash: string;
+  mtimeMs?: number;
+  size?: number;
+  parse: FileParse;
+}
 
 interface CacheFile {
   version: string;
   toolVersion: string;
   grammars: string;
-  entries: Record<string, { hash: string; parse: FileParse }>;
+  entries: Record<string, CacheEntry>;
 }
 
 export interface ParseCache {
   get(rel: string, hash: string): FileParse | undefined;
-  set(rel: string, parse: FileParse): void;
+  /** Fast path: mtime+size match → reuse parse without re-reading bytes. */
+  getByStat(rel: string, mtimeMs: number, size: number): { parse: FileParse; hash: string } | undefined;
+  set(rel: string, parse: FileParse, stat?: { mtimeMs: number; size: number }): void;
   /** Drop entries for files no longer present. */
   prune(currentRels: Set<string>): void;
   save(): void;
@@ -57,15 +65,14 @@ export function loadCache(
   if (!opts.disabled && fs.existsSync(file)) {
     try {
       const loaded = JSON.parse(fs.readFileSync(file, 'utf8')) as CacheFile;
-      // Invalidate wholesale if the tool or grammars changed — those are
-      // determinism inputs, so a stale parse could differ from a fresh one.
+      // Accept v3 → v4 (stat fields optional).
       if (
-        loaded.version === CACHE_VERSION &&
+        (loaded.version === CACHE_VERSION || loaded.version === 'vg-parse-cache/3') &&
         loaded.toolVersion === opts.toolVersion &&
         loaded.grammars === opts.grammars &&
         loaded.entries
       ) {
-        data = loaded;
+        data = { ...loaded, version: CACHE_VERSION };
       }
     } catch {
       /* corrupt cache — start fresh */
@@ -77,8 +84,21 @@ export function loadCache(
       const entry = data.entries[rel];
       return entry && entry.hash === hash ? entry.parse : undefined;
     },
-    set(rel, parse) {
-      data.entries[rel] = { hash: parse.hash, parse };
+    getByStat(rel, mtimeMs, size) {
+      const entry = data.entries[rel];
+      if (!entry) return undefined;
+      if (entry.mtimeMs === mtimeMs && entry.size === size && entry.parse) {
+        return { parse: entry.parse, hash: entry.hash };
+      }
+      return undefined;
+    },
+    set(rel, parse, stat) {
+      data.entries[rel] = {
+        hash: parse.hash,
+        parse,
+        mtimeMs: stat?.mtimeMs,
+        size: stat?.size,
+      };
     },
     prune(currentRels) {
       for (const rel of Object.keys(data.entries)) {

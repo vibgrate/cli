@@ -5,6 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { parseGraph } from '../engine/serialize.js';
+import { loadGraphPreferIndex } from '../engine/index-db.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { TOOLS, warmEmbedderInBackground } from './tools.js';
 import { renderToolResult } from './response.js';
@@ -125,7 +126,11 @@ export class GraphSource {
     if (this.refresh) await this.maybeRefresh();
     const stat = fs.statSync(this.graphPath); // throws if missing → surfaced as tool error
     if (stat.mtimeMs !== this.cachedMtimeMs || !this.cached) {
-      this.cached = parseGraph(fs.readFileSync(this.graphPath, 'utf8'));
+      // Prefer SQLite reconstruct when corpusHash matches (scale past JSON parse).
+      const preferred = loadGraphPreferIndex(this.root, this.graphPath);
+      this.cached = preferred
+        ? preferred.graph
+        : parseGraph(fs.readFileSync(this.graphPath, 'utf8'));
       this.cachedMtimeMs = stat.mtimeMs;
     }
     return this.cached;

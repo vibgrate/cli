@@ -4,7 +4,7 @@
  * Reads a real SCIP index (`index.scip`) produced by a language indexer
  * (scip-typescript, scip-python, scip-java, rust-analyzer→SCIP, …) and turns its
  * precise occurrences into call/reference edges at `resolution: "scip"`,
- * confidence 1.0 — the genuine "real SCIP vs Graphify's fake-SCIP" win. vg does
+ * confidence 1.0 — a real SCIP indexer win. vg does
  * NOT bundle indexers; it consumes an index the user/CI generates (deterministic,
  * offline). The heuristic resolver remains the floor for files SCIP didn't cover.
  *
