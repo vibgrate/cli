@@ -33,6 +33,7 @@ import {
   renderCodingMetricsMarkdown,
 } from '../runtime/coding-metrics.js';
 import { applyRecommendedDefaultMode } from '../runtime/local-inference-status.js';
+import { freeBytesOnVolume, weightStoreDir } from '../runtime/weight-store.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
@@ -428,24 +429,51 @@ export function registerModels(program: Command): void {
 
   // `vg models uninstall <name>` — remove a local model. Destructive: confirm on
   // TTY unless `--yes`; `--dry-run` prints the plan only.
+  // Supports Ollama (`ollama rm`), first-party GGUF weight store, and on-disk
+  // LM Studio / loose GGUF paths discovered by `vg models --raw`.
   const uninstallCmd = cmd
     .command('uninstall')
-    .description('uninstall a locally-installed model via your runtime (Ollama)')
-    .argument('<name>', 'installed model name, e.g. qwen2.5-coder:7b')
-    .option('--runtime <id>', 'runtime to remove from (default: ollama)', 'ollama')
+    .description('uninstall a locally-installed model (Ollama, LM Studio, or GGUF)')
+    .argument('<name>', 'installed model name, e.g. qwen2.5-coder:7b or a .gguf basename')
+    .option('--runtime <id>', 'runtime: ollama | lm-studio | gguf (default: auto-detect from installed fleet)')
     .option('--dry-run', 'print the uninstall plan only — do not delete')
     .option('--yes', 'uninstall without an interactive confirm (required non-interactively)')
-    .action(async function (this: Command, name: string, opts: { runtime: string; dryRun?: boolean; yes?: boolean }) {
+    .action(async function (this: Command, name: string, opts: { runtime?: string; dryRun?: boolean; yes?: boolean }) {
       const global = readGlobal(this);
-      if (opts.runtime !== 'ollama') {
-        throw new CliError(`only the ollama runtime supports uninstall today (got --runtime ${opts.runtime}). LM Studio / gguf models are managed in their own apps.`, ExitCode.USAGE_ERROR);
-      }
       const dryRun = !!opts.dryRun;
-      const plan = { runtime: 'ollama', command: `ollama rm ${name}`, willRemove: !dryRun };
+      const target = resolveUninstallTarget(name, opts.runtime);
+      if (!target) {
+        const hint = opts.runtime
+          ? `no installed model named "${name}" for runtime ${opts.runtime}`
+          : `no installed model named "${name}"`;
+        throw new CliError(
+          `${hint} — check the name with \`vg models --raw\`.`,
+          ExitCode.NOT_FOUND,
+        );
+      }
+
+      const plan =
+        target.runtime === 'ollama'
+          ? {
+              runtime: 'ollama' as const,
+              name: target.name,
+              path: target.path,
+              command: `ollama rm ${target.name}`,
+              willRemove: !dryRun,
+            }
+          : {
+              runtime: target.runtime,
+              name: target.name,
+              path: target.path,
+              command: `rm ${target.path}`,
+              willRemove: !dryRun,
+            };
+
       if (dryRun) {
         if (global.json) json({ ...plan, willRemove: false, note: 'dry-run — re-run without --dry-run to uninstall' });
         else {
           info(`${c.cyan('vg models uninstall')} · would run: ${c.bold(plan.command)}`);
+          info(c.dim(`  ${target.runtime} · ${target.name}`));
           info(c.dim('  dry-run — re-run without --dry-run to uninstall (non-interactive: add --yes)'));
         }
         return;
@@ -454,27 +482,58 @@ export function registerModels(program: Command): void {
       if (!opts.yes) {
         if (!interactive) {
           throw new CliError(
-            `refusing to uninstall "${name}" non-interactively without --yes — re-run with --yes, or pass --dry-run to preview.`,
+            `refusing to uninstall "${target.name}" non-interactively without --yes — re-run with --yes, or pass --dry-run to preview.`,
             ExitCode.USAGE_ERROR,
           );
         }
-        const ok = await confirmYesNo(`Uninstall local model ${name}?`);
+        const ok = await confirmYesNo(`Uninstall local model ${target.name} (${target.runtime})?`);
         if (!ok) {
           if (global.json) json({ ...plan, willRemove: false, cancelled: true });
           else info(c.dim('  cancelled'));
           return;
         }
       }
-      if (!hasBinary('ollama')) {
-        throw new CliError('ollama is not installed or not on PATH — install it from https://ollama.com, then re-run.', ExitCode.NOT_FOUND);
+
+      if (target.runtime === 'ollama') {
+        if (!hasBinary('ollama')) {
+          throw new CliError(
+            'ollama is not installed or not on PATH — install it from https://ollama.com, then re-run.',
+            ExitCode.NOT_FOUND,
+          );
+        }
+        if (!global.json) info(c.dim(`  $ ${plan.command}`));
+        const res = spawnSync('ollama', ['rm', target.name], { stdio: global.json ? 'ignore' : 'inherit' });
+        if (res.status !== 0) {
+          throw new CliError(
+            `\`ollama rm ${target.name}\` failed (exit ${res.status ?? 'signal'}) — check the model name with \`vg models --raw\`.`,
+            ExitCode.ERROR,
+          );
+        }
+      } else {
+        // File-backed fleet (Vibgrate weight store, LM Studio cache, loose GGUF).
+        if (!target.path || !fs.existsSync(target.path)) {
+          throw new CliError(
+            `model file not found at ${target.path || '(unknown path)'} — it may already be removed.`,
+            ExitCode.NOT_FOUND,
+          );
+        }
+        if (!target.path.endsWith('.gguf')) {
+          throw new CliError(
+            `refusing to delete non-GGUF path for ${target.runtime} model "${target.name}"`,
+            ExitCode.USAGE_ERROR,
+          );
+        }
+        if (!global.json) info(c.dim(`  $ rm ${target.path}`));
+        try {
+          fs.unlinkSync(target.path);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          throw new CliError(`could not delete ${target.path}: ${msg}`, ExitCode.ERROR);
+        }
       }
-      if (!global.json) info(c.dim(`  $ ${plan.command}`));
-      const res = spawnSync('ollama', ['rm', name], { stdio: global.json ? 'ignore' : 'inherit' });
-      if (res.status !== 0) {
-        throw new CliError(`\`ollama rm ${name}\` failed (exit ${res.status ?? 'signal'}) — check the model name with \`vg models\`.`, ExitCode.ERROR);
-      }
+
       if (global.json) json({ ...plan, removed: true });
-      else info(c.green(`  ✔ uninstalled ${name}`));
+      else info(c.green(`  ✔ uninstalled ${target.name}`));
     });
   applyGlobalOptions(uninstallCmd);
 
@@ -756,10 +815,13 @@ function buildFullStatus(
   sys: ReturnType<typeof gatherSystemMemory>,
 ): OrchestratorStatus {
   const state = readOrchestratorState();
+  // Free space on the first-party weight store volume (macOS: Library/Caches/Vibgrate).
+  const freeDiskBytes = freeBytesOnVolume(weightStoreDir());
   return buildOrchestratorStatus({
     system: sys,
     repo: repoSignals(root),
     installedNames: models.map((m) => m.name),
+    freeDiskBytes,
     pins: state.pins,
     defaultMode: state.defaultMode,
   });
@@ -782,7 +844,9 @@ function printOrchestratorStatus(orch: OrchestratorStatus): void {
     typeof sys.vramTotalBytes === 'number'
       ? ` · VRAM ${fmt(sys.vramFreeBytes ?? 0)} free / ${fmt(sys.vramTotalBytes)}`
       : '';
-  info(c.dim(`  ${ram}${vram}`));
+  const disk =
+    typeof sys.freeDiskBytes === 'number' ? ` · Disk ${fmt(sys.freeDiskBytes)} free (model cache)` : '';
+  info(c.dim(`  ${ram}${vram}${disk}`));
   if (orch.memoryBreakdown) {
     const b = orch.memoryBreakdown;
     info(
@@ -826,6 +890,74 @@ function confirmYesNo(question: string): Promise<boolean> {
       resolve(/^y(es)?$/i.test(answer.trim()));
     });
   });
+}
+
+/** Normalize `--runtime` aliases to the discoverModels runtime id. */
+function normalizeUninstallRuntime(raw?: string): 'ollama' | 'lm-studio' | 'gguf' | undefined {
+  if (!raw?.trim()) return undefined;
+  const r = raw.trim().toLowerCase();
+  if (r === 'ollama') return 'ollama';
+  if (r === 'lm-studio' || r === 'lmstudio' || r === 'lm_studio') return 'lm-studio';
+  if (r === 'gguf' || r === 'llama-cpp' || r === 'llamacpp' || r === 'vibgrate') return 'gguf';
+  throw new CliError(
+    `unknown --runtime ${raw} (use ollama, lm-studio, or gguf)`,
+    ExitCode.USAGE_ERROR,
+  );
+}
+
+/**
+ * Resolve which discovered model to uninstall. Prefers exact name match, then
+ * basename / path suffix. When `--runtime` is set, only that fleet is searched.
+ */
+function resolveUninstallTarget(
+  name: string,
+  runtimeOpt?: string,
+): { runtime: 'ollama' | 'lm-studio' | 'gguf'; name: string; path: string } | null {
+  const want = name.trim();
+  if (!want) return null;
+  const wantLc = want.toLowerCase();
+  const runtime = normalizeUninstallRuntime(runtimeOpt);
+  const fleet = discoverModels().filter((m) => (runtime ? m.runtime === runtime : true));
+
+  const exact = fleet.filter((m) => m.name.toLowerCase() === wantLc);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) {
+    // Same name on multiple runtimes — prefer ollama, then gguf, then lm-studio.
+    const order = ['ollama', 'gguf', 'lm-studio'] as const;
+    for (const rt of order) {
+      const hit = exact.find((m) => m.runtime === rt);
+      if (hit) return hit;
+    }
+    return exact[0];
+  }
+
+  // Basename / path suffix (LM Studio stores publisher/repo/file.gguf).
+  const base = path.basename(wantLc);
+  const soft = fleet.filter((m) => {
+    const n = m.name.toLowerCase();
+    return n === base || n.endsWith('/' + base) || n.endsWith(wantLc) || path.basename(n) === base;
+  });
+  if (soft.length === 1) return soft[0];
+  if (soft.length > 1) {
+    // Prefer exact basename match over fuzzy path contains.
+    const baseHits = soft.filter((m) => path.basename(m.name).toLowerCase() === base);
+    const pool = baseHits.length ? baseHits : soft;
+    const order = ['ollama', 'gguf', 'lm-studio'] as const;
+    for (const rt of order) {
+      const hit = pool.find((m) => m.runtime === rt);
+      if (hit) return hit;
+    }
+    return pool[0];
+  }
+
+  // Ollama-only fallback: allow uninstall by tag name even if discovery missed
+  // (e.g. ollama installed but manifests not readable in this sandbox).
+  if (!runtime || runtime === 'ollama') {
+    if (want.includes(':') || !want.includes('/') && !want.endsWith('.gguf')) {
+      return { runtime: 'ollama', name: want, path: '' };
+    }
+  }
+  return null;
 }
 
 function printInstallPlanHuman(label: string, plan: import('../runtime/model-install-plan.js').ModelInstallPlan): void {

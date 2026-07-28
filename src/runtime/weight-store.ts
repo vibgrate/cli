@@ -251,9 +251,23 @@ export async function ensureWeightCached(ref: string, options: DownloadWeightOpt
   return work;
 }
 
+/**
+ * Stream a file through sha256. Never `readFileSync` whole weights — Node rejects
+ * buffers larger than ~2 GiB (`File size (…) is greater than 2 GiB`), which broke
+ * Flow/Forge installs even when the download completed.
+ */
 function sha256File(file: string): string {
   const h = createHash('sha256');
-  h.update(fs.readFileSync(file));
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(8 * 1024 * 1024);
+    let n: number;
+    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      h.update(n === buf.length ? buf : buf.subarray(0, n));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
   return h.digest('hex');
 }
 
@@ -308,6 +322,33 @@ export function defaultFetchToFile(url: string, dest: string, onProgress?: (line
     };
     get(url, 0);
   });
+}
+
+/**
+ * Free bytes on the volume that holds `targetPath` (weight store / cache).
+ * Best-effort via `statfsSync` (Node 18.15+); walks parents if path is missing.
+ */
+export function freeBytesOnVolume(targetPath: string): number | undefined {
+  let dir = targetPath;
+  for (let i = 0; i < 10; i++) {
+    try {
+      const st = (
+        fs as typeof fs & {
+          statfsSync?: (p: string) => { bavail: number | bigint; bsize: number | bigint };
+        }
+      ).statfsSync?.(dir);
+      if (st) {
+        const free = Number(st.bavail) * Number(st.bsize);
+        if (Number.isFinite(free) && free >= 0) return free;
+      }
+    } catch {
+      /* try parent */
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
 }
 
 /** List GGUF files already in the first-party store (for discovery). */

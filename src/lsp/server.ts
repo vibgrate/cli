@@ -41,7 +41,14 @@ import { writeSnapshot } from '../engine/freshness.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { manifestHash, loadScanCache, writeScanCache } from './scan-cache.js';
 import { runGraphQuery, type GraphQueryParams, type GraphQueryResult } from './graph-query.js';
-import { enrichVulns, scanWorkspaceVulns, type EnrichResult, type VulnsWorkspaceResult } from './enrich.js';
+import {
+  enrichVulns,
+  scanWorkspaceVulns,
+  type EnrichResult,
+  type Reachability,
+  type VulnTarget,
+  type VulnsWorkspaceResult,
+} from './enrich.js';
 import type { VgGraph } from '../schema.js';
 
 // ── Wire types (the contract every client renders) ─────────────────────────
@@ -604,23 +611,67 @@ export class VibgrateLanguageServer {
    * `vibgrate/vulns` — live OSV.dev pass over every resolved dependency in the
    * current workspace artifact. Powers the Vulnerabilities panel. Empty
    * findings with `source: 'osv'` means checked clean; `offline`/`error` mean
-   * we could not check (absent ≠ zero).
+   * we could not check (absent ≠ zero). Attaches manifest locations, fixed-in
+   * versions, CISA KEV flags, and a best-effort code-map reachability signal.
    */
   private async onVulns(): Promise<VulnsWorkspaceResult> {
     if (this.opts.offline) {
-      return { findings: [], counts: { critical: 0, high: 0, moderate: 0, low: 0, unknown: 0 }, packagesChecked: 0, source: 'offline' };
+      return {
+        findings: [],
+        counts: { critical: 0, high: 0, moderate: 0, low: 0, unknown: 0 },
+        packagesChecked: 0,
+        source: 'offline',
+        kevSource: 'skipped',
+      };
     }
     const a = this.artifact;
     if (!a) {
-      return { findings: [], counts: { critical: 0, high: 0, moderate: 0, low: 0, unknown: 0 }, packagesChecked: 0, source: 'pending' };
+      return {
+        findings: [],
+        counts: { critical: 0, high: 0, moderate: 0, low: 0, unknown: 0 },
+        packagesChecked: 0,
+        source: 'pending',
+        kevSource: 'skipped',
+      };
     }
-    const targets: Array<{ ecosystem: string; package: string; version: string }> = [];
+
+    // Best-effort code-map import set (do not block on a cold build).
+    const reachedPkgs = packageReachSet(this.graph);
+
+    const targets: VulnTarget[] = [];
     for (const proj of a.projects ?? []) {
       const ecosystem = osvEcosystem(proj.type);
       if (!ecosystem) continue;
+      const relManifest = manifestRelativePath(proj);
+      const absManifest = path.resolve(this.opts.root, relManifest);
+      let text: string | null = null;
+      try {
+        if (fs.existsSync(absManifest)) text = fs.readFileSync(absManifest, 'utf8');
+      } catch {
+        text = null;
+      }
+      const kind = manifestKind(absManifest);
       for (const dep of proj.dependencies ?? []) {
         if (!dep.resolvedVersion) continue;
-        targets.push({ ecosystem, package: dep.package, version: dep.resolvedVersion });
+        let line: number | null = null;
+        if (text && kind) {
+          const l = findPackageLine(text, dep.package, kind);
+          if (l >= 0) line = l + 1; // 1-based for the editor
+        }
+        let reachability: Reachability = 'unknown';
+        if (reachedPkgs) {
+          reachability = packageReached(reachedPkgs, dep.package) ? 'reached' : 'not-observed';
+        }
+        targets.push({
+          ecosystem,
+          package: dep.package,
+          version: dep.resolvedVersion,
+          file: relManifest,
+          line,
+          section: dep.section ?? null,
+          latestStable: dep.latestStable ?? null,
+          reachability,
+        });
       }
     }
     return scanWorkspaceVulns(targets, { offline: this.opts.offline });
@@ -770,6 +821,73 @@ function buildBreakdown(drift: DriftScore, projects: ProjectScan[]): BreakdownIt
     });
 
   return items.length > 0 ? items : undefined;
+}
+
+/** Workspace-relative manifest path for a scanned project (for jump-to-line). */
+function manifestRelativePath(proj: ProjectScan): string {
+  const base = proj.path === '.' || proj.path === '' ? '' : proj.path;
+  const join = (name: string) => (base ? path.join(base, name) : name);
+  switch (proj.type) {
+    case 'node':
+    case 'typescript':
+      return join('package.json');
+    case 'python':
+      return join('pyproject.toml');
+    case 'go':
+      return join('go.mod');
+    case 'rust':
+      return join('Cargo.toml');
+    case 'ruby':
+      return join('Gemfile');
+    case 'php':
+      return join('composer.json');
+    case 'java':
+    case 'kotlin':
+    case 'scala':
+    case 'groovy':
+      return join('pom.xml');
+    case 'dotnet':
+      return join(proj.name ? `${proj.name}.csproj` : 'Directory.Build.props');
+    case 'dart':
+      return join('pubspec.yaml');
+    case 'elixir':
+      return join('mix.exs');
+    default:
+      return join('package.json');
+  }
+}
+
+/**
+ * Build a set of dependency names observed as imports/externals in the code map.
+ * Returns null when no graph is loaded — callers then report reachability unknown.
+ */
+function packageReachSet(graph: VgGraph | null | undefined): Set<string> | null {
+  if (!graph?.nodes?.length) return null;
+  const set = new Set<string>();
+  for (const n of graph.nodes) {
+    if (n.kind !== 'external' && n.kind !== 'package' && n.kind !== 'module') continue;
+    const names = [n.name, n.qualifiedName].filter(Boolean) as string[];
+    for (const raw of names) {
+      // npm-style: strip path after package root (`lodash/fp` → `lodash`, `@scope/pkg/x` → `@scope/pkg`).
+      const cleaned = raw.replace(/^node_modules\//, '').replace(/\\/g, '/');
+      if (cleaned.startsWith('@')) {
+        const parts = cleaned.split('/');
+        if (parts.length >= 2) set.add(`${parts[0]}/${parts[1]}`.toLowerCase());
+      } else {
+        set.add(cleaned.split('/')[0]!.toLowerCase());
+      }
+      set.add(cleaned.toLowerCase());
+    }
+  }
+  return set;
+}
+
+function packageReached(set: Set<string>, pkg: string): boolean {
+  const p = pkg.toLowerCase();
+  if (set.has(p)) return true;
+  // Scoped packages already full; also try unscoped root.
+  if (!p.startsWith('@') && set.has(p.split('/')[0]!)) return true;
+  return false;
 }
 
 /** Map a scanned project type to its OSV.dev ecosystem slug (null = no OSV

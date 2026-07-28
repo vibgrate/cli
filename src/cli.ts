@@ -356,12 +356,26 @@ function handleError(err: unknown): never {
     // Unknown command / bad option / missing argument → usage error.
     process.exit(ExitCode.USAGE_ERROR);
   }
+  // Host UIs (`vg code --stream-json`) only render NDJSON on stdout. Mirror the
+  // failure there so the panel is never left hanging after a human stderr line.
+  const streamJsonHost =
+    process.argv.includes('--stream-json') || process.env.VG_CODE_STREAM_JSON === '1';
+  const emitHostError = (message: string): void => {
+    if (!streamJsonHost) return;
+    try {
+      process.stdout.write(JSON.stringify({ event: 'error', message }) + '\n');
+    } catch {
+      /* stdout closed */
+    }
+  };
   if (err instanceof CliError) {
+    emitHostError(err.message);
     info(c.red(`error: ${err.message}`));
     process.exit(err.code);
   }
   const message = err instanceof Error ? err.message : String(err);
   const correlation = Math.random().toString(36).slice(2, 10);
+  emitHostError(message);
   info(c.red(`error: ${message}`));
   info(c.dim(`  (ref ${correlation}) — re-run with --json for detail, or report at https://vibgrate.com/help`));
   process.exit(ExitCode.ERROR);

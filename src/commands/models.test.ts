@@ -98,8 +98,10 @@ describe('vg models uninstall', () => {
       command: string;
       willRemove: boolean;
       removed?: boolean;
+      runtime?: string;
     };
     expect(res.command).toBe('ollama rm qwen2.5-coder:7b');
+    expect(res.runtime).toBe('ollama');
     expect(res.willRemove).toBe(false);
     expect(res.removed).toBeUndefined();
   });
@@ -108,8 +110,14 @@ describe('vg models uninstall', () => {
     await expect(run(['models', 'uninstall', 'qwen2.5-coder:7b', '--json'])).rejects.toBeTruthy();
   });
 
-  it('rejects a non-ollama runtime', async () => {
-    await expect(run(['models', 'uninstall', 'x', '--runtime', 'lmstudio', '--json'])).rejects.toBeTruthy();
+  it('rejects an unknown --runtime value', async () => {
+    await expect(run(['models', 'uninstall', 'x', '--runtime', 'not-a-runtime', '--json'])).rejects.toBeTruthy();
+  });
+
+  it('reports not found for a missing file-backed model', async () => {
+    await expect(
+      run(['models', 'uninstall', 'definitely-not-installed-xyz.gguf', '--runtime', 'gguf', '--dry-run', '--json']),
+    ).rejects.toBeTruthy();
   });
 });
 
