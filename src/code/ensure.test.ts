@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { ensurePackage, packageName, ensureUnavailableMessage } from './ensure.js';
+import { ensurePackage, packageName, ensureUnavailableMessage, cacheWriteFailureDetail } from './ensure.js';
 
 /**
  * Consent gating is a guardrail, so its negative cases get explicit tests: the
@@ -75,5 +75,23 @@ describe('ensureUnavailableMessage', () => {
       expect(msg.length).toBeGreaterThan(20);
     }
     expect(ensureUnavailableMessage('no-consent', 'x')).toMatch(/vg models install/);
+  });
+
+  it('surfaces install-failed detail instead of the vague offline/npm line', () => {
+    const msg = ensureUnavailableMessage(
+      'install-failed',
+      'node-llama-cpp@^3',
+      'cannot write runtime cache at /tmp/x (permission denied)',
+    );
+    expect(msg).toContain('permission denied');
+    expect(msg).not.toMatch(/offline, or npm unavailable/);
+  });
+});
+
+describe('cacheWriteFailureDetail', () => {
+  it('points at chown when EACCES', () => {
+    const msg = cacheWriteFailureDetail('/tmp/vg-rt', Object.assign(new Error('denied'), { code: 'EACCES' }));
+    expect(msg).toMatch(/permission denied|chown/i);
+    expect(msg).toContain('/tmp/vg-rt');
   });
 });

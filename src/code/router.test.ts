@@ -43,8 +43,13 @@ describe('resolveProviders', () => {
   });
 
   it('Code Mode is fail-closed to the Vibgrate manager (no LM Studio / Ollama auto-route)', () => {
+    // Empty weight store so a real on-disk Spark install cannot satisfy Code Mode.
+    const env = { VIBGRATE_CACHE_DIR: '/tmp/vg-no-weights-cache' };
     expect(() =>
-      resolveProviders({ codeMode: true, model: 'qwen2.5-coder-3b-q4_k_m.gguf' }, { env: {}, discover: withOllama }),
+      resolveProviders(
+        { codeMode: true, model: 'qwen2.5-coder-3b-q4_k_m.gguf' },
+        { env, discover: withOllama },
+      ),
     ).toThrow(/Vibgrate model manager|models install/i);
   });
 
@@ -136,6 +141,34 @@ describe('resolveProviders', () => {
       expect(r.providers[0].id).toBe('llama-cpp');
       expect(r.manager).toBe('vibgrate');
       expect(r.reason).toMatch(/Code Mode|Vibgrate/i);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Code Mode with provider=llama-cpp still does not fall back to Ollama', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-route-cm2-'));
+    const file = path.join(dir, 'qwen2.5-coder-3b-q4_k_m.gguf');
+    fs.writeFileSync(file, 'gguf');
+    try {
+      // Mirrors what commands/code.ts does after resolving a Code Mode pack.
+      const r = resolveProviders(
+        {
+          codeMode: true,
+          provider: 'llama-cpp',
+          model: 'qwen2.5-coder-3b-q4_k_m.gguf',
+          modelPath: file,
+        },
+        {
+          env: {},
+          discover: () => [{ runtime: 'ollama', name: 'qwen2.5-coder:3b', path: '/x' }],
+        },
+      );
+      expect(r.providers.map((p) => p.id)).toEqual(['llama-cpp']);
+      expect(r.reason).toMatch(/Code Mode/i);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

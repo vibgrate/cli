@@ -33,11 +33,48 @@ export interface EnrichResult {
   source: 'osv' | 'cache' | 'offline' | 'error';
 }
 
+/** One advisory × package row for the Vulnerabilities panel (flat, severity-ranked). */
+export interface VulnFinding {
+  package: string;
+  version: string;
+  ecosystem: string;
+  /** OSV id (often a GHSA) — stable key for osv.dev links. */
+  id: string;
+  cves: string[];
+  summary: string;
+  severity: VulnSummary['severity'];
+}
+
+export interface VulnsWorkspaceResult {
+  findings: VulnFinding[];
+  counts: Record<VulnSummary['severity'], number>;
+  /** Distinct packages queried (not advisory rows). */
+  packagesChecked: number;
+  /**
+   * `osv` = live check finished; `offline` / `error` / `pending` are honest
+   * absent states (never report "0 vulns" when we could not check).
+   */
+  source: 'osv' | 'offline' | 'error' | 'pending';
+}
+
 const OSV_QUERY_URL = 'https://api.osv.dev/v1/query';
 const cache = new Map<string, EnrichResult>();
 
+/** Critical → low for sort / priority (Snyk-style ordering). */
+const SEVERITY_RANK: Record<VulnSummary['severity'], number> = {
+  critical: 4,
+  high: 3,
+  moderate: 2,
+  low: 1,
+  unknown: 0,
+};
+
 function key(ecosystem: string, name: string, version: string): string {
   return `${ecosystem}:${name}@${version}`;
+}
+
+function emptyCounts(): Record<VulnSummary['severity'], number> {
+  return { critical: 0, high: 0, moderate: 0, low: 0, unknown: 0 };
 }
 
 /** Normalise OSV severity signals (database_specific.severity or a CVSS vector). */
@@ -117,4 +154,83 @@ export async function enrichVulns(
   } catch {
     return { vulns: [], cveCount: 0, source: 'error' };
   }
+}
+
+/**
+ * Live OSV.dev pass over every resolved package in the workspace scan.
+ * Concurrent, session-cached via `enrichVulns`. Flattens to one row per
+ * advisory, sorted Critical → Low (then package name) for the panel.
+ */
+export async function scanWorkspaceVulns(
+  targets: Array<{ ecosystem: string; package: string; version: string }>,
+  opts: { offline: boolean; concurrency?: number } = { offline: false },
+): Promise<VulnsWorkspaceResult> {
+  if (opts.offline) {
+    return { findings: [], counts: emptyCounts(), packagesChecked: 0, source: 'offline' };
+  }
+  if (targets.length === 0) {
+    return { findings: [], counts: emptyCounts(), packagesChecked: 0, source: 'osv' };
+  }
+
+  // Dedupe ecosystem:name@version.
+  const seen = new Set<string>();
+  const unique: typeof targets = [];
+  for (const t of targets) {
+    if (!t.ecosystem || !t.package || !t.version) continue;
+    const k = key(t.ecosystem, t.package, t.version);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    unique.push(t);
+  }
+
+  const concurrency = Math.max(1, Math.min(opts.concurrency ?? 8, 16));
+  const findings: VulnFinding[] = [];
+  let anyOk = false;
+  let anyError = false;
+  let i = 0;
+
+  async function worker(): Promise<void> {
+    for (;;) {
+      const idx = i++;
+      if (idx >= unique.length) return;
+      const t = unique[idx]!;
+      const r = await enrichVulns(t.ecosystem, t.package, t.version, { offline: false });
+      if (r.source === 'osv' || r.source === 'cache') anyOk = true;
+      else if (r.source === 'error') anyError = true;
+      for (const v of r.vulns) {
+        findings.push({
+          package: t.package,
+          version: t.version,
+          ecosystem: t.ecosystem,
+          id: v.id,
+          cves: v.cves,
+          summary: v.summary,
+          severity: v.severity,
+        });
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, unique.length) }, () => worker()));
+
+  findings.sort(
+    (a, b) =>
+      SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] ||
+      a.package.localeCompare(b.package) ||
+      a.id.localeCompare(b.id),
+  );
+
+  const counts = emptyCounts();
+  for (const f of findings) counts[f.severity]++;
+
+  // Honest source: if every query failed, don't claim a clean OSV pass.
+  const source: VulnsWorkspaceResult['source'] =
+    anyOk ? 'osv' : anyError ? 'error' : 'osv';
+
+  return {
+    findings,
+    counts,
+    packagesChecked: unique.length,
+    source,
+  };
 }

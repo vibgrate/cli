@@ -12,6 +12,16 @@ describe('patchIrGbnf', () => {
     expect(g).toContain('grammar-constrained');
     expect(g).toMatch(/^root\s*::=/m);
   });
+
+  it('uses one production per line (llama.cpp rejects multi-line RHS)', () => {
+    const g = patchIrGbnf();
+    for (const line of g.split('\n')) {
+      if (!line.trim()) continue;
+      // Every non-empty line must be a full rule; indented continuations break the parser.
+      expect(line).toMatch(/^\S.*::=/);
+      expect(line.startsWith(' ') || line.startsWith('\t')).toBe(false);
+    }
+  });
 });
 
 describe('shouldUsePatchIrGrammar', () => {

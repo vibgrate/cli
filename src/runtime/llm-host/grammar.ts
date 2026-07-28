@@ -18,11 +18,23 @@ export interface GrammarAttachResult {
   reason?: string;
 }
 
+export interface AttachGrammarOptions {
+  /**
+   * Prefer this llama instance (from the warm session that loaded the model).
+   * node-llama-cpp requires LlamaGrammar and the model to share the same instance.
+   */
+  llama?: unknown;
+}
+
 /**
  * Try to build a grammar object for the injected node-llama-cpp module.
  * Pure best-effort; callers enforce fail-closed via {@link assertGrammarOrThrow}.
  */
-export async function attachGrammar(lib: unknown, gbnf: string | undefined): Promise<GrammarAttachResult> {
+export async function attachGrammar(
+  lib: unknown,
+  gbnf: string | undefined,
+  options: AttachGrammarOptions = {},
+): Promise<GrammarAttachResult> {
   if (!gbnf?.trim()) {
     return { value: null, method: 'none', applied: false, reason: 'no GBNF provided' };
   }
@@ -32,14 +44,17 @@ export async function attachGrammar(lib: unknown, gbnf: string | undefined): Pro
   }
 
   // Preferred: LlamaGrammar class (node-llama-cpp 3.x patterns).
+  const ctorErrors: string[] = [];
   if (l.LlamaGrammar) {
     try {
       if (typeof l.LlamaGrammar === 'function') {
-        let llama: unknown;
-        try {
-          llama = typeof l.getLlama === 'function' ? await l.getLlama() : undefined;
-        } catch {
-          llama = undefined;
+        let llama: unknown = options.llama;
+        if (llama === undefined) {
+          try {
+            llama = typeof l.getLlama === 'function' ? await l.getLlama() : undefined;
+          } catch {
+            llama = undefined;
+          }
         }
         // Common ctor shapes across versions.
         const attempts: Array<() => unknown> = [
@@ -51,14 +66,18 @@ export async function attachGrammar(lib: unknown, gbnf: string | undefined): Pro
           try {
             const g = attempt();
             if (g) return { value: g, method: 'LlamaGrammar', applied: true };
-          } catch {
-            /* try next */
+          } catch (e) {
+            ctorErrors.push(e instanceof Error ? e.message : String(e));
           }
         }
       }
       if (typeof l.LlamaGrammar.fromString === 'function') {
-        const g = await l.LlamaGrammar.fromString(gbnf);
-        if (g) return { value: g, method: 'LlamaGrammar', applied: true };
+        try {
+          const g = await l.LlamaGrammar.fromString(gbnf);
+          if (g) return { value: g, method: 'LlamaGrammar', applied: true };
+        } catch (e) {
+          ctorErrors.push(e instanceof Error ? e.message : String(e));
+        }
       }
     } catch (e) {
       return {
@@ -75,24 +94,23 @@ export async function attachGrammar(lib: unknown, gbnf: string | undefined): Pro
       const g = await l.createGrammar(gbnf);
       if (g) return { value: g, method: 'createGrammar', applied: true };
     } catch (e) {
-      return {
-        value: null,
-        method: 'none',
-        applied: false,
-        reason: `createGrammar failed: ${e instanceof Error ? e.message : String(e)}`,
-      };
+      ctorErrors.push(`createGrammar: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
   // Last resort: some bindings accept a raw GBNF string on prompt opts.
   // We mark applied=true only when the caller opts into string fallback for tests
   // or known-good bindings — production fail-closed should not rely on this alone.
+  const hadApi = !!(l?.LlamaGrammar || typeof l?.createGrammar === 'function');
+  const reason = hadApi
+    ? `LlamaGrammar/createGrammar present but GBNF was rejected` +
+      (ctorErrors[0] ? ` (${ctorErrors[0].split('\n')[0]})` : '')
+    : 'binding has no LlamaGrammar/createGrammar; raw GBNF string is available but not verified as constrained';
   return {
     value: gbnf,
     method: 'string-fallback',
     applied: false,
-    reason:
-      'binding has no LlamaGrammar/createGrammar; raw GBNF string is available but not verified as constrained',
+    reason,
   };
 }
 
