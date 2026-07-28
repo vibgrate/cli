@@ -1091,7 +1091,7 @@ vg models catalog
 | `pin <packId>` / `unpin <mode>` | Pin or clear a reproducible pack (e.g. `flow@2026.07.1`) |
 | `packs` | List qualified Code Mode packs |
 | `pull <name>` | Download via local runtime (default Ollama; `--dry-run` for plan only) |
-| `uninstall <name>` | Uninstall a local model (`--dry-run` plan; TTY confirm or `--yes`) |
+| `uninstall <name>` | Uninstall a local model — Ollama, LM Studio, or GGUF (`--dry-run` plan; TTY confirm or `--yes`; `--runtime` optional auto-detect) |
 | `host-bench` | Approach B measurement arms (`--simulate` default, `--mock`, `--live --model-path`, `--gate`) |
 | `coding-metrics` | Unified host-bench + Fusion FCS/ZNS report (`--out`, `--gate`, `--version`); publish path for release |
 | `catalog` | Live hosted model catalog (cached; not used under `--local`) |
@@ -1104,8 +1104,8 @@ vg models pull qwen2.5-coder:7b --dry-run   # plan only
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `<name>` | — | Model to pull, e.g. `qwen2.5-coder:7b` |
-| `--runtime <id>` | `ollama` | Runtime to pull with |
+| `<name>` | — | Model to pull or uninstall, e.g. `qwen2.5-coder:7b` or a `.gguf` basename |
+| `--runtime <id>` | pull: `ollama` · uninstall: auto | Runtime (`ollama`, `lm-studio`, `gguf`). Uninstall auto-detects from the installed fleet when omitted. |
 | `--dry-run` | — | Print the plan only; do not download or uninstall |
 | `--yes` | — | Skip interactive confirms (required for non-interactive `uninstall`) |
 

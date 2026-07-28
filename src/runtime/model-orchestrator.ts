@@ -110,6 +110,11 @@ export interface FitInput {
   repo?: RepoSignals;
   taskClass?: TaskClass;
   /**
+   * Free space on the volume that holds model weights (weight store / Ollama).
+   * When set, insufficient disk for the GGUF forces {@link FitLabel will_not_fit}.
+   */
+  freeDiskBytes?: number;
+  /**
    * Static reserves (bytes) for IDE / OS / graph / tests.
    * Defaults applied when omitted.
    */
@@ -130,6 +135,10 @@ export interface FitResult {
   score: number;
   needBytes: number;
   availableBytes: number;
+  /** Disk needed to store weights safely (weights + 15% + ≥1 GiB floor). */
+  diskNeedBytes?: number;
+  /** Free disk observed when fit was computed (if provided). */
+  freeDiskBytes?: number;
   /** Breakdown for “memory pie” UX. */
   breakdown: {
     modelBytes: number;
@@ -174,6 +183,8 @@ export interface OrchestratorStatus {
     fitScore: number;
     needBytes: number;
     availableBytes: number;
+    /** Disk budget for storing this pack’s weights (when free disk was known). */
+    diskNeedBytes?: number;
     installed: boolean;
     pinned: boolean;
   }>;
@@ -184,6 +195,8 @@ export interface OrchestratorStatus {
     vramTotalBytes?: number;
     vramFreeBytes?: number;
     loaded: Array<{ name: string; bytes: number }>;
+    /** Free bytes on the model-cache volume (when probed). */
+    freeDiskBytes?: number;
   };
   memoryBreakdown?: FitResult['breakdown'];
 }
@@ -463,6 +476,19 @@ export function fitPack(input: FitInput): FitResult {
     reasons.push('large repository — prefer moderated capsule + graph paging');
   }
 
+  // Disk: downloads need the full GGUF + headroom on the cache volume (not RAM).
+  const diskNeedBytes = Math.round(modelBytes + Math.max(GiB, modelBytes * 0.15));
+  if (typeof input.freeDiskBytes === 'number' && Number.isFinite(input.freeDiskBytes)) {
+    if (input.freeDiskBytes < diskNeedBytes) {
+      if (label !== 'will_not_fit') {
+        label = 'will_not_fit';
+      }
+      reasons.push(
+        `needs ~${fmtGb(diskNeedBytes)} free disk for weights, only ~${fmtGb(input.freeDiskBytes)} free`,
+      );
+    }
+  }
+
   // Score: map ratio into 0–100 with floors for labels.
   let score = Math.max(0, Math.min(100, Math.round(ratio * 50)));
   if (label === 'will_not_fit') score = Math.min(score, 20);
@@ -475,6 +501,8 @@ export function fitPack(input: FitInput): FitResult {
     score,
     needBytes,
     availableBytes,
+    diskNeedBytes,
+    freeDiskBytes: typeof input.freeDiskBytes === 'number' ? input.freeDiskBytes : undefined,
     breakdown: {
       modelBytes,
       kvBytes,
@@ -503,6 +531,8 @@ export interface ResolveModeOptions {
   system: SystemMemory;
   repo?: RepoSignals;
   taskClass?: TaskClass;
+  /** Free disk on the weight-store volume (bytes). */
+  freeDiskBytes?: number;
   /** Installed model names (ollama/lmstudio) for installed: true. */
   installedNames?: string[];
   /** Pin map mode → packId. */
@@ -553,9 +583,13 @@ function tryWeights(
   system: SystemMemory,
   repo?: RepoSignals,
   taskClass?: TaskClass,
+  freeDiskBytes?: number,
 ): { fit: FitResult; underlying: PackWeightsRef } {
   const trial: QualifiedPack = { ...pack, primary: weights };
-  return { fit: fitPack({ system, pack: trial, repo, taskClass }), underlying: weights };
+  return {
+    fit: fitPack({ system, pack: trial, repo, taskClass, freeDiskBytes }),
+    underlying: weights,
+  };
 }
 
 /**
@@ -593,7 +627,7 @@ export function resolveMode(opts: ResolveModeOptions): ResolvedMode {
   let best: { fit: FitResult; underlying: PackWeightsRef } | null = null;
 
   for (const w of candidates) {
-    const trial = tryWeights(pack, w, opts.system, opts.repo, opts.taskClass);
+    const trial = tryWeights(pack, w, opts.system, opts.repo, opts.taskClass, opts.freeDiskBytes);
     if (!best || fitRank(trial.fit) > fitRank(best.fit)) best = trial;
     if (trial.fit.label === 'flies' || trial.fit.label === 'comfortable') {
       best = trial;
@@ -601,7 +635,8 @@ export function resolveMode(opts: ResolveModeOptions): ResolvedMode {
     }
   }
 
-  const chosen = best ?? tryWeights(pack, pack.primary, opts.system, opts.repo, opts.taskClass);
+  const chosen =
+    best ?? tryWeights(pack, pack.primary, opts.system, opts.repo, opts.taskClass, opts.freeDiskBytes);
   const profile = packToProfile(pack, chosen.underlying, chosen.fit);
 
   return {
@@ -669,6 +704,8 @@ export function buildOrchestratorStatus(opts: {
   system: SystemMemory;
   repo?: RepoSignals;
   installedNames?: string[];
+  /** Free bytes on the weight-store volume (factored into fit). */
+  freeDiskBytes?: number;
   /** Single pin (legacy) or full pin map. */
   pin?: { mode: ModelMode; packId: string } | null;
   pins?: Partial<Record<ModelMode, string>>;
@@ -677,6 +714,7 @@ export function buildOrchestratorStatus(opts: {
 }): OrchestratorStatus {
   const packs = opts.packs ?? QUALIFIED_PACKS;
   const installed = new Set((opts.installedNames ?? []).map((n) => n.toLowerCase()));
+  const freeDiskBytes = opts.freeDiskBytes;
   const recommended = recommendMode(opts.system, opts.repo, packs);
   const pinFor = (mode: ModelMode): { mode: ModelMode; packId: string } | null => {
     const fromMap = opts.pins?.[mode];
@@ -690,6 +728,7 @@ export function buildOrchestratorStatus(opts: {
       autoFit: false,
       system: opts.system,
       repo: opts.repo,
+      freeDiskBytes,
       pin: pinFor(mode),
       packs,
     });
@@ -708,6 +747,7 @@ export function buildOrchestratorStatus(opts: {
       fitScore: resolved.fit.score,
       needBytes: resolved.fit.needBytes,
       availableBytes: resolved.fit.availableBytes,
+      diskNeedBytes: resolved.fit.diskNeedBytes,
       installed: installedHit,
       pinned: resolved.pinned,
     };
@@ -717,6 +757,7 @@ export function buildOrchestratorStatus(opts: {
     mode: recommended,
     autoFit: false,
     system: opts.system,
+    freeDiskBytes,
     repo: opts.repo,
     pin: pinFor(recommended),
     packs,
@@ -737,6 +778,7 @@ export function buildOrchestratorStatus(opts: {
       ...(typeof opts.system.vramFreeBytes === 'number'
         ? { vramFreeBytes: opts.system.vramFreeBytes }
         : {}),
+      ...(typeof freeDiskBytes === 'number' ? { freeDiskBytes } : {}),
       loaded: opts.system.loaded.map((l) => ({ name: l.name, bytes: l.bytes })),
     },
     memoryBreakdown: recResolved.fit.breakdown,

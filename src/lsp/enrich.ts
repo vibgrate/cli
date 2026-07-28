@@ -1,5 +1,6 @@
 /**
- * Vulnerability enrichment for the panel accordion, from OSV.dev.
+ * Vulnerability enrichment for the panel accordion and Vulnerabilities panel,
+ * from OSV.dev (+ optional CISA KEV listing for exploit-awareness chips).
  *
  * OSV.dev is the ecosystem-agnostic vulnerability API: one endpoint keyed by an
  * ecosystem slug (npm, PyPI, Go, Maven, crates.io, …) and a version, so a single
@@ -7,13 +8,13 @@
  * NOT Vibgrate's own API — the editor enriches straight from the public source,
  * so nothing about your dependencies is sent to us.
  *
- * Lazy + cached: called only when the user expands a package in the accordion,
- * and each `ecosystem:name@version` result is cached for the session so a
- * re-expand (or the CVE-count overlay) is instant. Honours `--local`: an offline
- * server never reaches the network and reports `offline`.
+ * Lazy + cached: called only when the user expands a package in the accordion
+ * (or when the workspace vulns pass runs), and each `ecosystem:name@version`
+ * result is cached for the session. Honours `--local`: an offline server never
+ * reaches the network and reports `offline`.
  */
 
-/** A single advisory, trimmed to what the accordion shows. */
+/** A single advisory, trimmed to what the accordion / panel shows. */
 export interface VulnSummary {
   /** OSV id (often a GHSA), the stable key. */
   id: string;
@@ -23,6 +24,10 @@ export interface VulnSummary {
   summary: string;
   /** Normalised severity band, best-effort from OSV data. */
   severity: 'critical' | 'high' | 'moderate' | 'low' | 'unknown';
+  /** Fixed versions from OSV affected ranges (upgrade targets). */
+  fixedVersions: string[];
+  /** ISO publish date when present. */
+  published: string | null;
 }
 
 export interface EnrichResult {
@@ -32,6 +37,12 @@ export interface EnrichResult {
   /** Where the answer came from — surfaced for honesty, never a spinner lie. */
   source: 'osv' | 'cache' | 'offline' | 'error';
 }
+
+/**
+ * Confidence that app code reaches this dependency — graph-derived, never proof.
+ * `unknown` when no code map is available.
+ */
+export type Reachability = 'reached' | 'not-observed' | 'unknown';
 
 /** One advisory × package row for the Vulnerabilities panel (flat, severity-ranked). */
 export interface VulnFinding {
@@ -43,6 +54,22 @@ export interface VulnFinding {
   cves: string[];
   summary: string;
   severity: VulnSummary['severity'];
+  fixedVersions: string[];
+  published: string | null;
+  /** True when any CVE alias is listed in CISA KEV (best-effort, online). */
+  kev: boolean;
+  /**
+   * Drift-aware exposure signal from the local code map. Honest about unknowns.
+   */
+  reachability: Reachability;
+  /** Workspace-relative manifest path when known. */
+  file: string | null;
+  /** 1-based line of the package in the manifest, when known. */
+  line: number | null;
+  /** Manifest section (dependencies / devDependencies / …). */
+  section: string | null;
+  /** Latest stable from the scan row when present (currency context). */
+  latestStable: string | null;
 }
 
 export interface VulnsWorkspaceResult {
@@ -55,12 +82,29 @@ export interface VulnsWorkspaceResult {
    * absent states (never report "0 vulns" when we could not check).
    */
   source: 'osv' | 'offline' | 'error' | 'pending';
+  /** Whether KEV enrichment was applied this pass. */
+  kevSource: 'cisa' | 'skipped' | 'error';
+}
+
+export interface VulnTarget {
+  ecosystem: string;
+  package: string;
+  version: string;
+  file?: string | null;
+  line?: number | null;
+  section?: string | null;
+  latestStable?: string | null;
+  /** Precomputed package-level reachability (from the code map). */
+  reachability?: Reachability;
 }
 
 const OSV_QUERY_URL = 'https://api.osv.dev/v1/query';
+const KEV_URL = 'https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json';
 const cache = new Map<string, EnrichResult>();
+let kevCache: { at: number; cves: Set<string> } | null = null;
+const KEV_TTL_MS = 6 * 60 * 60 * 1000;
 
-/** Critical → low for sort / priority (Snyk-style ordering). */
+/** Critical → low for sort / priority (Snyk-style ordering). KEV bumps within band. */
 const SEVERITY_RANK: Record<VulnSummary['severity'], number> = {
   critical: 4,
   high: 3,
@@ -100,7 +144,26 @@ function severityOf(v: Record<string, unknown>): VulnSummary['severity'] {
   return 'unknown';
 }
 
-function toSummary(raw: unknown): VulnSummary {
+/** Extract fixed versions from OSV `affected[].ranges[].events[].fixed`. */
+function fixedVersionsOf(v: Record<string, unknown>, packageName: string): string[] {
+  const affected = Array.isArray(v.affected) ? (v.affected as Record<string, unknown>[]) : [];
+  const lower = packageName.toLowerCase();
+  const out: string[] = [];
+  for (const a of affected) {
+    const pkg = a.package as { name?: string } | undefined;
+    if (pkg?.name && pkg.name.toLowerCase() !== lower) continue;
+    const ranges = Array.isArray(a.ranges) ? (a.ranges as Record<string, unknown>[]) : [];
+    for (const range of ranges) {
+      const events = Array.isArray(range.events) ? (range.events as Record<string, unknown>[]) : [];
+      for (const ev of events) {
+        if (typeof ev.fixed === 'string' && ev.fixed && !out.includes(ev.fixed)) out.push(ev.fixed);
+      }
+    }
+  }
+  return out;
+}
+
+function toSummary(raw: unknown, packageName = ''): VulnSummary {
   const v = (raw ?? {}) as Record<string, unknown>;
   const aliases = Array.isArray(v.aliases) ? v.aliases.map(String) : [];
   const details = typeof v.details === 'string' ? v.details : '';
@@ -113,6 +176,8 @@ function toSummary(raw: unknown): VulnSummary {
     cves: aliases.filter((a) => a.startsWith('CVE-')),
     summary,
     severity: severityOf(v),
+    fixedVersions: fixedVersionsOf(v, packageName),
+    published: typeof v.published === 'string' ? v.published : null,
   };
 }
 
@@ -146,7 +211,7 @@ export async function enrichVulns(
 
     if (!res.ok) return { vulns: [], cveCount: 0, source: 'error' };
     const data = (await res.json()) as { vulns?: unknown[] };
-    const vulns = (data.vulns ?? []).map(toSummary);
+    const vulns = (data.vulns ?? []).map((raw) => toSummary(raw, name));
     const cveCount = new Set(vulns.flatMap((v) => v.cves)).size;
     const result: EnrichResult = { vulns, cveCount, source: 'osv' };
     cache.set(k, result);
@@ -156,25 +221,63 @@ export async function enrichVulns(
   }
 }
 
+/** Best-effort CISA KEV catalog (CVE id set). Cached for the process lifetime + TTL. */
+export async function loadKevCves(opts: { offline: boolean } = { offline: false }): Promise<{
+  cves: Set<string>;
+  source: 'cisa' | 'skipped' | 'error';
+}> {
+  if (opts.offline) return { cves: new Set(), source: 'skipped' };
+  if (kevCache && Date.now() - kevCache.at < KEV_TTL_MS) {
+    return { cves: kevCache.cves, source: 'cisa' };
+  }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12_000);
+    const res = await fetch(KEV_URL, { signal: controller.signal }).finally(() => clearTimeout(timer));
+    if (!res.ok) return { cves: new Set(), source: 'error' };
+    const data = (await res.json()) as { vulnerabilities?: Array<{ cveID?: string }> };
+    const cves = new Set<string>();
+    for (const v of data.vulnerabilities ?? []) {
+      if (v.cveID) cves.add(v.cveID.toUpperCase());
+    }
+    kevCache = { at: Date.now(), cves };
+    return { cves, source: 'cisa' };
+  } catch {
+    return { cves: new Set(), source: 'error' };
+  }
+}
+
 /**
  * Live OSV.dev pass over every resolved package in the workspace scan.
  * Concurrent, session-cached via `enrichVulns`. Flattens to one row per
- * advisory, sorted Critical → Low (then package name) for the panel.
+ * advisory, sorted Critical → Low (KEV first within band, then package name).
  */
 export async function scanWorkspaceVulns(
-  targets: Array<{ ecosystem: string; package: string; version: string }>,
+  targets: VulnTarget[],
   opts: { offline: boolean; concurrency?: number } = { offline: false },
 ): Promise<VulnsWorkspaceResult> {
   if (opts.offline) {
-    return { findings: [], counts: emptyCounts(), packagesChecked: 0, source: 'offline' };
+    return {
+      findings: [],
+      counts: emptyCounts(),
+      packagesChecked: 0,
+      source: 'offline',
+      kevSource: 'skipped',
+    };
   }
   if (targets.length === 0) {
-    return { findings: [], counts: emptyCounts(), packagesChecked: 0, source: 'osv' };
+    return {
+      findings: [],
+      counts: emptyCounts(),
+      packagesChecked: 0,
+      source: 'osv',
+      kevSource: 'skipped',
+    };
   }
 
-  // Dedupe ecosystem:name@version.
+  // Dedupe ecosystem:name@version (keep first location metadata).
   const seen = new Set<string>();
-  const unique: typeof targets = [];
+  const unique: VulnTarget[] = [];
   for (const t of targets) {
     if (!t.ecosystem || !t.package || !t.version) continue;
     const k = key(t.ecosystem, t.package, t.version);
@@ -182,6 +285,8 @@ export async function scanWorkspaceVulns(
     seen.add(k);
     unique.push(t);
   }
+
+  const [kev] = await Promise.all([loadKevCves({ offline: false })]);
 
   const concurrency = Math.max(1, Math.min(opts.concurrency ?? 8, 16));
   const findings: VulnFinding[] = [];
@@ -198,6 +303,7 @@ export async function scanWorkspaceVulns(
       if (r.source === 'osv' || r.source === 'cache') anyOk = true;
       else if (r.source === 'error') anyError = true;
       for (const v of r.vulns) {
+        const kevHit = v.cves.some((c) => kev.cves.has(c.toUpperCase()));
         findings.push({
           package: t.package,
           version: t.version,
@@ -206,6 +312,14 @@ export async function scanWorkspaceVulns(
           cves: v.cves,
           summary: v.summary,
           severity: v.severity,
+          fixedVersions: v.fixedVersions,
+          published: v.published,
+          kev: kevHit,
+          reachability: t.reachability ?? 'unknown',
+          file: t.file ?? null,
+          line: t.line ?? null,
+          section: t.section ?? null,
+          latestStable: t.latestStable ?? null,
         });
       }
     }
@@ -216,6 +330,7 @@ export async function scanWorkspaceVulns(
   findings.sort(
     (a, b) =>
       SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] ||
+      Number(b.kev) - Number(a.kev) ||
       a.package.localeCompare(b.package) ||
       a.id.localeCompare(b.id),
   );
@@ -223,14 +338,13 @@ export async function scanWorkspaceVulns(
   const counts = emptyCounts();
   for (const f of findings) counts[f.severity]++;
 
-  // Honest source: if every query failed, don't claim a clean OSV pass.
-  const source: VulnsWorkspaceResult['source'] =
-    anyOk ? 'osv' : anyError ? 'error' : 'osv';
+  const source: VulnsWorkspaceResult['source'] = anyOk ? 'osv' : anyError ? 'error' : 'osv';
 
   return {
     findings,
     counts,
     packagesChecked: unique.length,
     source,
+    kevSource: kev.source,
   };
 }

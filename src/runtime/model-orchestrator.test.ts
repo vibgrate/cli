@@ -46,6 +46,17 @@ describe('fitPack', () => {
     expect(fit.score).toBeLessThanOrEqual(20);
   });
 
+  it('labels will_not_fit when free disk cannot hold weights', () => {
+    const fit = fitPack({
+      pack: packForMode('flow')!,
+      system: mem({ totalRamBytes: 64 * GiB, freeRamBytes: 40 * GiB }),
+      freeDiskBytes: 1 * GiB, // Flow weights ~4.4 GiB + headroom
+    });
+    expect(fit.label).toBe('will_not_fit');
+    expect(fit.diskNeedBytes).toBeGreaterThan(1 * GiB);
+    expect(fit.reasons.some((r) => /disk/i.test(r))).toBe(true);
+  });
+
   it('fits spark when available RAM is modest after reclaim-aware free', () => {
     // Regression: macOS os.freemem() often reports ~0 while Activity Monitor
     // shows many GiB available. With ~8 GiB available, spark (~2 GiB) must fit

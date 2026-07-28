@@ -276,7 +276,8 @@ export function registerCode(program: Command): void {
         }
       }
 
-      if (!global.json && !global.quiet) {
+      // Host UIs (--stream-json) only parse NDJSON on stdout — keep human chatter off.
+      if (!global.json && !global.quiet && !opts.streamJson) {
         info(`${c.cyan('vg code')} · ${c.dim(route.reason)}`);
         info(`${c.cyan('vg code')} · manager ${c.bold(route.managerLine)}`);
       }
@@ -285,100 +286,125 @@ export function registerCode(program: Command): void {
       // NDJSON agent events on stdout; approval decisions read as JSON lines on
       // stdin. Governance is preserved — the host answers the same approve gate.
       if (opts.streamJson && !opts.mock) {
-        const primarySlug = route.providers[0]?.model.includes('/') ? route.providers[0].model.split('/')[0] : route.providers[0]?.id;
-        const { runCodeStreamJson } = await import('../code/stream-json.js');
-        const { nodeCodeFs } = await import('../code/session.js');
-        const readline = await import('node:readline');
-        const child = await import('node:child_process');
-        const { loadOrDiscoverFederation } = await import('../runtime/federation.js');
-        const { resolveExecutionEnv } = await import('../runtime/execution-env.js');
-        const { resolveModelExecutionProfile, mergeModelExecutionProfile } = await import('../runtime/model-execution-profile.js');
-        const { startCodeRuntimeSession } = await import('../code/runtime-session.js');
-        const { resolveGraphBackend } = await import('../code/graph-backend.js');
-        const { detectGitRef } = await import('../runtime/git-ref.js');
-        const { repositoryIdFromRoot } = await import('../runtime/paths.js');
-        const { vgdRequest } = await import('../runtime/vgd/index.js');
-        const federation = loadOrDiscoverFederation(root);
-        const modelProfile = mergeModelExecutionProfile(
-          resolveModelExecutionProfile({
-            providerId: primarySlug,
-            model: route.providers[0]?.model,
-            budget: Number(opts.budget) || undefined,
-            securityTier,
-          }),
-          config.modelProfile,
-        );
-        const tier = securityTier ?? modelProfile.securityTier ?? (auto ? 'L1' : 'L0');
-        const writableRoots = federation?.members.map((m) => m.root) ?? [root];
-        const executionEnv = resolveExecutionEnv(tier, { writableRoots });
-        const runtime = await startCodeRuntimeSession({ root });
-        const git = detectGitRef(root);
-        const repositoryId = repositoryIdFromRoot(root);
-        if (runtime.socketPath && git.ref) {
-          try {
-            await vgdRequest(
-              { op: 'put-graph', repositoryId, gitRef: git.ref, graph },
-              { socketPath: runtime.socketPath },
-            );
-          } catch {
-            /* best-effort */
-          }
-        }
-        const graphBackend = resolveGraphBackend({
-          graph,
-          repositoryId,
-          gitRef: git.ref || null,
-          socketPath: runtime.socketPath,
-        });
-        const run = (command: string): { stdout: string; exitCode: number } => {
-          const res = child.spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
-          return { stdout: (res.stdout ?? '') + (res.stderr ? `\n${res.stderr}` : ''), exitCode: res.status ?? 1 };
-        };
-        const emit = (line: unknown): void => {
+        const emitStream = (line: unknown): void => {
           process.stdout.write(JSON.stringify(line) + '\n');
         };
         try {
-          await runCodeStreamJson({
+          const primarySlug = route.providers[0]?.model.includes('/')
+            ? route.providers[0].model.split('/')[0]
+            : route.providers[0]?.id;
+          const { runCodeStreamJson } = await import('../code/stream-json.js');
+          const { nodeCodeFs } = await import('../code/session.js');
+          const readline = await import('node:readline');
+          const child = await import('node:child_process');
+          const { loadOrDiscoverFederation } = await import('../runtime/federation.js');
+          const { resolveExecutionEnv } = await import('../runtime/execution-env.js');
+          const { resolveModelExecutionProfile, mergeModelExecutionProfile } = await import(
+            '../runtime/model-execution-profile.js'
+          );
+          const { startCodeRuntimeSession } = await import('../code/runtime-session.js');
+          const { resolveGraphBackend } = await import('../code/graph-backend.js');
+          const { detectGitRef } = await import('../runtime/git-ref.js');
+          const { repositoryIdFromRoot } = await import('../runtime/paths.js');
+          const { vgdRequest } = await import('../runtime/vgd/index.js');
+          const federation = loadOrDiscoverFederation(root);
+          const modelProfile = mergeModelExecutionProfile(
+            resolveModelExecutionProfile({
+              providerId: primarySlug,
+              model: route.providers[0]?.model,
+              budget: Number(opts.budget) || undefined,
+              securityTier,
+            }),
+            config.modelProfile,
+          );
+          const tier = securityTier ?? modelProfile.securityTier ?? (auto ? 'L1' : 'L0');
+          const writableRoots = federation?.members.map((m) => m.root) ?? [root];
+          const executionEnv = resolveExecutionEnv(tier, { writableRoots });
+          const runtime = await startCodeRuntimeSession({ root });
+          const git = detectGitRef(root);
+          const repositoryId = repositoryIdFromRoot(root);
+          if (runtime.socketPath && git.ref) {
+            try {
+              await vgdRequest(
+                { op: 'put-graph', repositoryId, gitRef: git.ref, graph },
+                { socketPath: runtime.socketPath },
+              );
+            } catch {
+              /* best-effort */
+            }
+          }
+          const graphBackend = resolveGraphBackend({
             graph,
-            root,
-            instruction,
-            providers: route.providers,
-            fsImpl: nodeCodeFs(root),
-            run,
-            executionEnv,
-            graphBackend,
-            modelProfile,
-            auto: !!auto,
-            maxSteps,
-            budget: modelProfile.capsuleBudgetTokens,
-            contextBudget,
-            denyCommands: config.denyCommands,
-            testCommand: config.testCommand,
-            stream: true,
-            verify: verify
-              ? { command: verify.command, maxRounds: modelProfile.maxRepairRounds }
-              : undefined,
-            capsule,
-            files: opts.file.length ? opts.file : undefined,
-            worktreeOverlay: true,
-            advancedMode: !capsule,
-            attribution: { client: 'vg-code', provider: primarySlug, model: route.providers[0]?.model },
-            now: () => Date.now(),
-            emit,
-            bindDecisions: (session) => {
-              const rl = readline.createInterface({ input: process.stdin });
-              rl.on('line', (raw) => {
-                try {
-                  const msg = JSON.parse(raw) as { approveId?: number; approve?: boolean };
-                  if (typeof msg.approveId === 'number') session.submitDecision(msg.approveId, !!msg.approve);
-                } catch {
-                  /* ignore malformed host input */
-                }
-              });
-            },
+            repositoryId,
+            gitRef: git.ref || null,
+            socketPath: runtime.socketPath,
           });
-        } finally {
-          await runtime.dispose();
+          const run = (command: string): { stdout: string; exitCode: number } => {
+            const res = child.spawnSync(command, {
+              cwd: root,
+              shell: true,
+              encoding: 'utf8',
+              timeout: 120_000,
+              maxBuffer: 10 * 1024 * 1024,
+            });
+            return {
+              stdout: (res.stdout ?? '') + (res.stderr ? `\n${res.stderr}` : ''),
+              exitCode: res.status ?? 1,
+            };
+          };
+          try {
+            await runCodeStreamJson({
+              graph,
+              root,
+              instruction,
+              providers: route.providers,
+              fsImpl: nodeCodeFs(root),
+              run,
+              executionEnv,
+              graphBackend,
+              modelProfile,
+              auto: !!auto,
+              maxSteps,
+              budget: modelProfile.capsuleBudgetTokens,
+              contextBudget,
+              denyCommands: config.denyCommands,
+              testCommand: config.testCommand,
+              stream: true,
+              verify: verify
+                ? { command: verify.command, maxRounds: modelProfile.maxRepairRounds }
+                : undefined,
+              capsule,
+              files: opts.file.length ? opts.file : undefined,
+              worktreeOverlay: true,
+              advancedMode: !capsule,
+              attribution: {
+                client: 'vg-code',
+                provider: primarySlug,
+                model: route.providers[0]?.model,
+              },
+              now: () => Date.now(),
+              emit: emitStream,
+              bindDecisions: (session) => {
+                const rl = readline.createInterface({ input: process.stdin });
+                rl.on('line', (raw) => {
+                  try {
+                    const msg = JSON.parse(raw) as { approveId?: number; approve?: boolean };
+                    if (typeof msg.approveId === 'number') session.submitDecision(msg.approveId, !!msg.approve);
+                  } catch {
+                    /* ignore malformed host input */
+                  }
+                });
+              },
+            });
+          } finally {
+            await runtime.dispose();
+          }
+        } catch (e) {
+          // Always give the host a terminal error frame — human stderr alone leaves the panel blank.
+          // Do not rethrow: handleError would print a second copy and exit before hosts drain stdout.
+          const message = e instanceof Error ? e.message : String(e);
+          emitStream({ event: 'error', message });
+          process.exitCode = e instanceof CliError ? e.code : ExitCode.ERROR;
         }
         return;
       }
