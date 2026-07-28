@@ -76,6 +76,11 @@ beforeAll(() => {
   // A literal USE of a known symbol (not its definition) — exists to prove that
   // an exact symbol lookup no longer pays a literal sweep to find lines like it.
   fs.writeFileSync(path.join(root, 'src', 'usage.ts'), ['import { BillSayCard } from "./BillSayCard";', 'render(BillSayCard({}));'].join('\n'));
+  // Bare URL for occurrence-locate tests (embedded-NL-ask → extract needle).
+  fs.writeFileSync(
+    path.join(root, 'src', 'cloud.ts'),
+    `export const SIGNUP = 'https://dash.vibgrate.com/signup';\n`,
+  );
   // Binary-by-extension files carrying the needle as text: the listing-time
   // extension skip must exclude them from the corpus (previously they were read
   // in full and, lacking a NUL byte, even matched).
@@ -87,6 +92,40 @@ beforeAll(() => {
 
 afterAll(() => {
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+describe('searchSymbols — bare URL is a literal sweep', () => {
+  it('routes a bare URL through the literal sweep (totalTextMatches is defined)', async () => {
+    const r = await searchSymbols(makeGraph(), root, 'https://example.com/docs', 20);
+    // Symbol-first single names leave totalTextMatches undefined; URL mode must
+    // always report it (0 when the fixture has no such URL).
+    expect(r.totalTextMatches).toBeDefined();
+    expect(r.totalTextMatches).toBe(0);
+  });
+
+  it('extracts an embedded URL from NL framing and finds the bare occurrence', async () => {
+    clearListingCache();
+    const r = await searchSymbols(
+      makeGraph(),
+      root,
+      'https://dash.vibgrate.com/signup does not exist find occurrences',
+      20,
+    );
+    expect(r.totalTextMatches).toBeGreaterThan(0);
+    const text = textHits(r);
+    expect(text.some((h) => h.file === 'src/cloud.ts' && h.line === 1)).toBe(true);
+    // Text hits lead for phrase/URL mode.
+    expect(r.matches[0]?.kind).toBe('text');
+  });
+
+  it('strips a trailing ? from "where is <url>?" and still finds the bare path', async () => {
+    clearListingCache();
+    const r = await searchSymbols(makeGraph(), root, 'where is https://dash.vibgrate.com/signup?', 20);
+    expect(r.totalTextMatches).toBeGreaterThan(0);
+    expect(textHits(r).some((h) => h.file === 'src/cloud.ts')).toBe(true);
+    // Residual "where is" must not invent symbol hits.
+    expect(r.matches.every((m) => m.kind === 'text')).toBe(true);
+  });
 });
 
 describe('searchSymbols — literal phrase sweep', () => {

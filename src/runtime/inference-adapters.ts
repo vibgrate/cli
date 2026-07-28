@@ -7,6 +7,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { discoverModels, type LocalModel } from '../engine/models.js';
+import { hasOllamaBinary } from '../util/resolve-ollama.js';
 import { listCachedWeights } from './weight-store.js';
 
 export type InferenceBackendId = 'ollama' | 'llama.cpp' | 'lm-studio' | 'foundry-local' | 'vibgrate-store';
@@ -31,6 +32,7 @@ export interface ProbeOptions {
 }
 
 function defaultHasBinary(name: string): boolean {
+  if (name === 'ollama' || name === 'ollama.exe') return hasOllamaBinary();
   const res = spawnSync(process.platform === 'win32' ? 'where' : 'which', [name], { stdio: 'ignore' });
   return res.status === 0;
 }

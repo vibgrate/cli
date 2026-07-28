@@ -44,6 +44,15 @@ describe('StreamJsonSession', () => {
     s.cancelPending();
     expect(await p).toBe(false);
   });
+
+  it('round-trips user-question answers', async () => {
+    const out: StreamJsonOut[] = [];
+    const s = new StreamJsonSession((l) => out.push(l), false);
+    const p = s.askUser({ question: 'Which port?', options: ['3000', '8080'] });
+    expect(out[0]).toMatchObject({ event: 'user-question', question: 'Which port?' });
+    s.submitAnswer(1, '8080');
+    expect(await p).toBe('8080');
+  });
 });
 
 describe('runCodeStreamJson', () => {
@@ -81,6 +90,35 @@ describe('runCodeStreamJson', () => {
     const done = out.find((o) => o.event === 'done') as Extract<StreamJsonOut, { event: 'done' }>;
     expect(done.result.stopped).toBe('finished');
     expect(done.result.changes).toHaveLength(1);
+  });
+
+  it('surfaces ask_user and continues after the host answers', async () => {
+    const out: StreamJsonOut[] = [];
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('ask_user', { question: 'Target timeout ms?', options: ['1000', '5000'] }, 'q1')] },
+      { toolCalls: [tc('finish', { summary: '## Done\n\nTimeout set to **5000**.' }, 'f1')] },
+    ]);
+    let session: StreamJsonSession | undefined;
+    const emit = (l: StreamJsonOut): void => {
+      out.push(l);
+      if (l.event === 'user-question') session!.submitAnswer(l.id, '5000');
+    };
+    await runCodeStreamJson({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'set timeout — ask if unsure',
+      providers: [provider],
+      fsImpl: memFs({ 'src/scan.ts': base }),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      emit,
+      bindDecisions: (s) => {
+        session = s;
+      },
+    });
+    expect(out.some((o) => o.event === 'user-question')).toBe(true);
+    const done = out.find((o) => o.event === 'done') as Extract<StreamJsonOut, { event: 'done' }>;
+    expect(done.result.stopped).toBe('finished');
+    expect(done.result.finalText).toMatch(/5000/);
   });
 
   it('emits a terminal error when the provider fails, never throwing', async () => {

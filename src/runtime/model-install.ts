@@ -159,6 +159,10 @@ export async function executeModelInstallPlan(
 }
 
 function defaultOllamaPull(name: string, quiet: boolean): number {
-  const res = spawnSync('ollama', ['pull', name], { stdio: quiet ? 'ignore' : 'inherit' });
+  // Resolve absolute path so Dock-launched hosts (stripped PATH) still work.
+  const { resolveOllamaBinary } = require('../util/resolve-ollama.js') as typeof import('../util/resolve-ollama.js');
+  const ollama = resolveOllamaBinary();
+  if (!ollama) return 127;
+  const res = spawnSync(ollama, ['pull', name], { stdio: quiet ? 'ignore' : 'inherit' });
   return res.status ?? 1;
 }

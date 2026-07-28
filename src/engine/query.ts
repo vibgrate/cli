@@ -44,25 +44,136 @@ const STOPWORDS = new Set([
   // in the repo, none of them the target (VG-LOCATE-FAILURE-ANALYSIS.md).
   'find', 'code', 'responsible', 'need', 'modify', 'me',
   'implementation', 'explain', 'works', 'codebase', 'contains', 'file',
+  // String/URL occurrence scaffolding: "does not exist", "find occurrences of …"
+  // must not light up DoesNot*/NonExisting*/commandExists via weak substrings
+  // (field report: https://…/signup does not exist find occurrences).
+  'not', 'no', 'exist', 'exists', 'existing', 'occurrence', 'occurrences',
+  'occurence', 'occurences', 'every', 'place', 'places', 'string', 'literal',
+  'text', 'search', 'locate', 'look', 'looking', 'show', 'list', 'all',
 ]);
+
+/**
+ * Strip sentence punctuation from a URL match without breaking real query
+ * strings (`?key=value`). A lone trailing `?` / `!` is English punctuation
+ * ("where is https://…/signup?") — leaving it in the needle makes the literal
+ * sweep miss the bare path in source.
+ */
+function cleanUrlNeedle(raw: string): string {
+  let s = raw.trim();
+  // Trailing ) ] } > , ; : ! . from markdown links / sentence ends.
+  s = s.replace(/[.,;:!)\]}>]+$/g, '');
+  // Lone trailing `?` → drop. Keep `?key=…` (content after `?`).
+  if (s.endsWith('?')) {
+    const qi = s.lastIndexOf('?');
+    if (qi === s.length - 1) s = s.slice(0, -1);
+  }
+  return s;
+}
+
+/**
+ * Extract string/URL needles a caller is asking to *locate as text*, not as
+ * bag-of-words symbol terms. URLs and quoted phrases are exact-match material
+ * for the literal sweep (`search_symbols` / `search_code`); feeding their path
+ * segments into lexical symbol ranking produces confidently wrong seeds
+ * (dash → dashboard package, exist → NonExisting, …).
+ */
+export function extractLiteralNeedles(question: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string, kind: 'url' | 'quote') => {
+    let s = raw.trim();
+    s = kind === 'url' ? cleanUrlNeedle(s) : s.replace(/[.,;:!)\]}>?]+$/g, '');
+    if (s.length < 2 || seen.has(s)) return;
+    seen.add(s);
+    out.push(s);
+  };
+  for (const m of question.matchAll(/https?:\/\/[^\s"'`<>]+/gi)) push(m[0]!, 'url');
+  for (const m of question.matchAll(/(["'`])((?:(?!\1)[^\\]|\\.){2,})\1/g)) {
+    push(m[2]!.replace(/\\(.)/g, '$1'), 'quote');
+  }
+  return out;
+}
+
+/** Question text with URL/quoted needles removed so residual tokens can name symbols. */
+export function stripLiteralNeedles(question: string): string {
+  let s = question;
+  // Strip raw URL spans first (may still carry a trailing `?` from the ask).
+  for (const m of question.matchAll(/https?:\/\/[^\s"'`<>]+/gi)) {
+    s = s.split(m[0]!).join(' ');
+  }
+  for (const lit of extractLiteralNeedles(question)) {
+    s = s.split(lit).join(' ');
+  }
+  // Also strip bare quote pairs left behind.
+  s = s.replace(/(["'`])\s*\1/g, ' ');
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Residual ask used for graph symbol ranking when the question embeds a
+ * URL/quote. Empty when only framing words remain ("where is …?") so we do
+ * not light up unrelated symbols like `applyPlan.where`.
+ */
+export function residualForSymbolSearch(question: string): string {
+  const literals = extractLiteralNeedles(question);
+  if (literals.length === 0) return question.trim();
+  const stripped = stripLiteralNeedles(question);
+  return tokenize(stripped).length === 0 ? '' : stripped;
+}
+
+/**
+ * True when the instruction is a string/URL occurrence locate (not an edit).
+ * Used to skip PatchIR grammar and answer from the literal sweep without
+ * dumping constrained-decoding JSON into the VG Code panel.
+ */
+export function isLocateOnlyInstruction(instruction: string): boolean {
+  const q = instruction.trim();
+  if (!q) return false;
+  const needles = extractLiteralNeedles(q);
+  const hasLocateFrame =
+    /\b(where\s+is|where\s+are|find\s+(all\s+|every\s+)?occurrence|find\s+occurrences|does\s+not\s+exist|locate|search\s+for)\b/i.test(
+      q,
+    ) ||
+    (needles.length > 0 && /^https?:\/\//i.test(q));
+  // Strong edit verbs cancel locate-only (ignore "does not exist" as non-edit).
+  const withoutExist = q.replace(/\bdoes\s+not\s+exist\b/gi, ' ');
+  if (
+    /\b(fix|edit|change|replace|implement|refactor|rename|patch|create\s+file|delete\s+file|add\s+a\b|remove\s+the\b)\b/i.test(
+      withoutExist,
+    )
+  ) {
+    return false;
+  }
+  if (needles.some((n) => /^https?:\/\//i.test(n))) return true;
+  return hasLocateFrame && needles.length > 0;
+}
 
 export function queryGraph(graph: VgGraph, question: string, options: QueryOptions = {}): QueryResult {
   const budget = options.budget ?? 2000;
   const limit = options.limit ?? 12;
-  const terms = tokenize(question);
+  // When the ask embeds a URL or quoted string, score symbols only on the
+  // residual framing text. Empty residual → empty matches (honest miss) rather
+  // than path-token false positives that poison Task Capsules.
+  const literals = extractLiteralNeedles(question);
+  const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
+  const terms = tokenize(forTokens);
   const weightOf = termWeights(graph, terms);
   const index = indexFor(graph);
 
   const scored: QueryMatch[] = [];
-  for (const node of graph.nodes) {
-    if (node.kind === 'file' || node.kind === 'external') continue;
-    const { score, why } = scoreNode(node, terms, weightOf);
-    if (score > 0) scored.push({ node, score: round(score * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
+  // Literal-only locate: no identifier terms left after stripping needles → do
+  // not invent symbol seeds from empty/weak residual framing.
+  if (terms.length > 0) {
+    for (const node of graph.nodes) {
+      if (node.kind === 'file' || node.kind === 'external') continue;
+      const { score, why } = scoreNode(node, terms, weightOf);
+      if (score > 0) scored.push({ node, score: round(score * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
+    }
+    scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
   }
-  scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
 
   const seeds = scored.slice(0, limit);
-  const { context, tokensEstimate } = buildContext(graph, index, question, seeds, budget);
+  const { context, tokensEstimate } = buildContext(graph, index, question, seeds, budget, literals);
 
   return { question, matches: seeds, context, tokensEstimate };
 }
@@ -87,39 +198,49 @@ export async function queryGraphSemantic(
 ): Promise<QueryResult> {
   const budget = options.budget ?? 2000;
   const limit = options.limit ?? 12;
-  const terms = tokenize(question);
+  const literals = extractLiteralNeedles(question);
+  const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
+  const terms = tokenize(forTokens);
   const weightOf = termWeights(graph, terms);
   const index = indexFor(graph);
-  const queryVec = await options.embedder.embedQuery(question);
+  // Embed the residual ask (without URL/quote noise) so semantic neighbours
+  // aren't dragged toward package names that share host path segments.
+  const queryVec = await options.embedder.embedQuery(forTokens || question);
 
   // Raw lexical scores (pre-importance) for normalization.
   const lexRaw = new Map<string, number>();
   let lexMax = 0;
   const whyById = new Map<string, string>();
-  for (const node of graph.nodes) {
-    if (node.kind === 'file' || node.kind === 'external') continue;
-    const { score, why } = scoreNode(node, terms, weightOf);
-    lexRaw.set(node.id, score);
-    whyById.set(node.id, why);
-    if (score > lexMax) lexMax = score;
+  if (terms.length > 0) {
+    for (const node of graph.nodes) {
+      if (node.kind === 'file' || node.kind === 'external') continue;
+      const { score, why } = scoreNode(node, terms, weightOf);
+      lexRaw.set(node.id, score);
+      whyById.set(node.id, why);
+      if (score > lexMax) lexMax = score;
+    }
   }
 
   const scored: QueryMatch[] = [];
-  for (const node of graph.nodes) {
-    if (node.kind === 'file' || node.kind === 'external') continue;
-    const lexNorm = lexMax > 0 ? (lexRaw.get(node.id) ?? 0) / lexMax : 0;
-    const vec = options.nodeVectors.get(node.id);
-    const sem = vec ? Math.max(0, cosine(queryVec, vec)) : 0;
-    const hybrid = 0.5 * lexNorm + 0.5 * sem;
-    if (hybrid <= 0) continue;
-    const lexWhy = whyById.get(node.id);
-    const why = lexWhy || (sem > 0.3 ? `semantic match (${sem.toFixed(2)})` : 'weak match');
-    scored.push({ node, score: round(hybrid * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
+  // Literal-only asks: skip the semantic loop entirely — embeddings over
+  // "does not exist find occurrences" still surface unrelated hubs.
+  if (terms.length > 0 || literals.length === 0) {
+    for (const node of graph.nodes) {
+      if (node.kind === 'file' || node.kind === 'external') continue;
+      const lexNorm = lexMax > 0 ? (lexRaw.get(node.id) ?? 0) / lexMax : 0;
+      const vec = options.nodeVectors.get(node.id);
+      const sem = vec && terms.length > 0 ? Math.max(0, cosine(queryVec, vec)) : 0;
+      const hybrid = 0.5 * lexNorm + 0.5 * sem;
+      if (hybrid <= 0) continue;
+      const lexWhy = whyById.get(node.id);
+      const why = lexWhy || (sem > 0.3 ? `semantic match (${sem.toFixed(2)})` : 'weak match');
+      scored.push({ node, score: round(hybrid * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
+    }
+    scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
   }
-  scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
 
   const seeds = scored.slice(0, limit);
-  const { context, tokensEstimate } = buildContext(graph, index, question, seeds, budget);
+  const { context, tokensEstimate } = buildContext(graph, index, question, seeds, budget, literals);
   return { question, matches: seeds, context, tokensEstimate };
 }
 
@@ -267,12 +388,25 @@ function buildContext(
   question: string,
   seeds: QueryMatch[],
   budget: number,
+  literals: string[] = [],
 ): { context: string; tokensEstimate: number } {
   const lines: string[] = [];
   lines.push(`# Context for: ${question}`);
   lines.push('');
+  if (literals.length) {
+    lines.push('## Literal string(s) to locate (exact text, not symbol names)');
+    for (const lit of literals) lines.push(`- \`${lit}\``);
+    lines.push(
+      '_Use a quoted phrase / URL search (`search_symbols` or `search_code` with the exact needle) for occurrences. Graph symbols below (if any) are residual identifier hints only._',
+    );
+    lines.push('');
+  }
   if (seeds.length === 0) {
-    lines.push('_No matching symbols found in the map. Try different terms, or `vg hubs` for the most important code._');
+    lines.push(
+      literals.length
+        ? '_No graph symbols matched residual terms — this is expected for a pure string/URL occurrence search. Run a literal sweep on the needle(s) above._'
+        : '_No matching symbols found in the map. Try different terms, or `vg hubs` for the most important code._',
+    );
     const text = lines.join('\n');
     return { context: text, tokensEstimate: estimateTokens(text) };
   }

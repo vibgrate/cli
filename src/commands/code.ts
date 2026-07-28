@@ -352,6 +352,30 @@ export function registerCode(program: Command): void {
               exitCode: res.status ?? 1,
             };
           };
+          // Always expose local `vg serve` MCP tools + any project-configured servers.
+          const { createVgBuiltinMcpTools, mergeExternalToolsets } = await import('../code/vg-mcp-bridge.js');
+          const vgBuiltin = createVgBuiltinMcpTools({
+            getGraph: () => graph,
+            root,
+            local: global.local === true,
+          });
+          let disposeMcpStream: (() => Promise<void>) | undefined;
+          let projectMcp;
+          // Filled by bindDecisions so non-readonly project MCP tools use the host approve gate.
+          let streamApprove: (a: import('../code/tools.js').MutatingAction) => Promise<boolean> = async () =>
+            !!auto;
+          if (Object.keys(mcp.servers).length) {
+            const { McpToolset, defaultMcpConnect } = await import('../code/mcp-tools.js');
+            const { toolset } = await McpToolset.connect(mcp.servers, defaultMcpConnect);
+            disposeMcpStream = () => toolset.dispose();
+            projectMcp = {
+              specs: toolset.specs(),
+              owns: (n: string) => toolset.owns(n),
+              execute: (call: import('../code/types.js').ToolCall) =>
+                toolset.execute(call, (action) => streamApprove(action)),
+            };
+          }
+          const externalTools = mergeExternalToolsets(vgBuiltin, projectMcp);
           try {
             await runCodeStreamJson({
               graph,
@@ -377,6 +401,7 @@ export function registerCode(program: Command): void {
               files: opts.file.length ? opts.file : undefined,
               worktreeOverlay: true,
               advancedMode: !capsule,
+              externalTools,
               attribution: {
                 client: 'vg-code',
                 provider: primarySlug,
@@ -385,11 +410,18 @@ export function registerCode(program: Command): void {
               now: () => Date.now(),
               emit: emitStream,
               bindDecisions: (session) => {
+                streamApprove = (action) => session.approve(action);
                 const rl = readline.createInterface({ input: process.stdin });
                 rl.on('line', (raw) => {
                   try {
-                    const msg = JSON.parse(raw) as { approveId?: number; approve?: boolean };
+                    const msg = JSON.parse(raw) as {
+                      approveId?: number;
+                      approve?: boolean;
+                      answerId?: number;
+                      answer?: string;
+                    };
                     if (typeof msg.approveId === 'number') session.submitDecision(msg.approveId, !!msg.approve);
+                    if (typeof msg.answerId === 'number') session.submitAnswer(msg.answerId, String(msg.answer ?? ''));
                   } catch {
                     /* ignore malformed host input */
                   }
@@ -397,6 +429,7 @@ export function registerCode(program: Command): void {
               },
             });
           } finally {
+            await disposeMcpStream?.();
             await runtime.dispose();
           }
         } catch (e) {
@@ -431,15 +464,27 @@ export function registerCode(program: Command): void {
           if (prev) priorSummary = summarizeSession(prev);
         }
         const prompter = tty ? new TtyPrompter() : undefined;
-        let mcpTools;
+        const { createVgBuiltinMcpTools, mergeExternalToolsets } = await import('../code/vg-mcp-bridge.js');
+        const vgBuiltin = createVgBuiltinMcpTools({
+          getGraph: () => graph,
+          root,
+          local: global.local === true,
+        });
+        let projectMcp;
         let disposeMcp: (() => Promise<void>) | undefined;
         if (Object.keys(mcp.servers).length) {
           const { McpToolset, defaultMcpConnect } = await import('../code/mcp-tools.js');
           const { toolset } = await McpToolset.connect(mcp.servers, defaultMcpConnect);
           disposeMcp = () => toolset.dispose();
-          const approve = async (a: { kind: string }): Promise<boolean> => autonomous || !!(prompter && a.kind === 'tool' && (await prompter.confirm('Call an external tool?', false)));
-          mcpTools = { specs: toolset.specs(), owns: (n: string) => toolset.owns(n), execute: (call: import('../code/types.js').ToolCall) => toolset.execute(call, approve as never) };
+          const approve = async (a: { kind: string }): Promise<boolean> =>
+            autonomous || !!(prompter && a.kind === 'tool' && (await prompter.confirm('Call an external tool?', false)));
+          projectMcp = {
+            specs: toolset.specs(),
+            owns: (n: string) => toolset.owns(n),
+            execute: (call: import('../code/types.js').ToolCall) => toolset.execute(call, approve as never),
+          };
         }
+        const mcpTools = mergeExternalToolsets(vgBuiltin, projectMcp);
         try {
           const { loadFederation } = await import('../runtime/federation.js');
           const { resolveExecutionEnv } = await import('../runtime/execution-env.js');

@@ -44,6 +44,13 @@ export interface EnrichResult {
  */
 export type Reachability = 'reached' | 'not-observed' | 'unknown';
 
+/** Manifest hit for a resolved package (workspace-relative path + optional line). */
+export interface VulnLocation {
+  file: string;
+  /** 1-based line of the package in the manifest, when known. */
+  line: number | null;
+}
+
 /** One advisory × package row for the Vulnerabilities panel (flat, severity-ranked). */
 export interface VulnFinding {
   package: string;
@@ -62,10 +69,18 @@ export interface VulnFinding {
    * Drift-aware exposure signal from the local code map. Honest about unknowns.
    */
   reachability: Reachability;
-  /** Workspace-relative manifest path when known. */
+  /**
+   * Workspace-relative manifest path when known (first of `locations` for
+   * backward compatibility with older panel code).
+   */
   file: string | null;
-  /** 1-based line of the package in the manifest, when known. */
+  /** 1-based line of the package in the primary manifest, when known. */
   line: number | null;
+  /**
+   * Every manifest in the workspace that pins this package@version — the panel
+   * shows these as open-in-editor links instead of duplicating the advisory.
+   */
+  locations: VulnLocation[];
   /** Manifest section (dependencies / devDependencies / …). */
   section: string | null;
   /** Latest stable from the scan row when present (currency context). */
@@ -92,6 +107,8 @@ export interface VulnTarget {
   version: string;
   file?: string | null;
   line?: number | null;
+  /** Additional manifests for the same package@version (monorepo). */
+  locations?: VulnLocation[];
   section?: string | null;
   latestStable?: string | null;
   /** Precomputed package-level reachability (from the code map). */
@@ -249,8 +266,9 @@ export async function loadKevCves(opts: { offline: boolean } = { offline: false 
 
 /**
  * Live OSV.dev pass over every resolved package in the workspace scan.
- * Concurrent, session-cached via `enrichVulns`. Flattens to one row per
- * advisory, sorted Critical → Low (KEV first within band, then package name).
+ * Concurrent, session-cached via `enrichVulns`. Emits one row per advisory ×
+ * package@version (never per-manifest), with every pin location merged onto
+ * the row. Sorted Critical → Low (KEV first within band, then package name).
  */
 export async function scanWorkspaceVulns(
   targets: VulnTarget[],
@@ -275,16 +293,43 @@ export async function scanWorkspaceVulns(
     };
   }
 
-  // Dedupe ecosystem:name@version (keep first location metadata).
-  const seen = new Set<string>();
-  const unique: VulnTarget[] = [];
+  // Dedupe ecosystem:name@version and merge every manifest location.
+  const byKey = new Map<string, VulnTarget & { locations: VulnLocation[] }>();
   for (const t of targets) {
     if (!t.ecosystem || !t.package || !t.version) continue;
     const k = key(t.ecosystem, t.package, t.version);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    unique.push(t);
+    const locs: VulnLocation[] = [];
+    if (t.locations?.length) {
+      for (const loc of t.locations) {
+        if (loc?.file) locs.push({ file: loc.file, line: loc.line ?? null });
+      }
+    } else if (t.file) {
+      locs.push({ file: t.file, line: t.line ?? null });
+    }
+    const existing = byKey.get(k);
+    if (!existing) {
+      byKey.set(k, {
+        ...t,
+        file: t.file ?? locs[0]?.file ?? null,
+        line: t.line ?? locs[0]?.line ?? null,
+        locations: locs,
+      });
+      continue;
+    }
+    for (const loc of locs) {
+      if (!existing.locations.some((x) => x.file === loc.file && x.line === loc.line)) {
+        existing.locations.push(loc);
+      }
+    }
+    // Prefer "reached" over weaker signals when merging monorepo hits.
+    if (t.reachability === 'reached') existing.reachability = 'reached';
+    else if (t.reachability === 'not-observed' && existing.reachability === 'unknown') {
+      existing.reachability = 'not-observed';
+    }
+    if (!existing.latestStable && t.latestStable) existing.latestStable = t.latestStable;
+    if (!existing.section && t.section) existing.section = t.section;
   }
+  const unique = [...byKey.values()];
 
   const [kev] = await Promise.all([loadKevCves({ offline: false })]);
 
@@ -302,7 +347,17 @@ export async function scanWorkspaceVulns(
       const r = await enrichVulns(t.ecosystem, t.package, t.version, { offline: false });
       if (r.source === 'osv' || r.source === 'cache') anyOk = true;
       else if (r.source === 'error') anyError = true;
+      const locations = t.locations.length
+        ? t.locations
+        : t.file
+          ? [{ file: t.file, line: t.line ?? null }]
+          : [];
+      // One row per advisory × package@version — never one row per manifest hit.
+      // Locations ride along so the panel can list every file without duplicating.
+      const seenIds = new Set<string>();
       for (const v of r.vulns) {
+        if (seenIds.has(v.id)) continue;
+        seenIds.add(v.id);
         const kevHit = v.cves.some((c) => kev.cves.has(c.toUpperCase()));
         findings.push({
           package: t.package,
@@ -316,8 +371,9 @@ export async function scanWorkspaceVulns(
           published: v.published,
           kev: kevHit,
           reachability: t.reachability ?? 'unknown',
-          file: t.file ?? null,
-          line: t.line ?? null,
+          file: locations[0]?.file ?? t.file ?? null,
+          line: locations[0]?.line ?? t.line ?? null,
+          locations,
           section: t.section ?? null,
           latestStable: t.latestStable ?? null,
         });
