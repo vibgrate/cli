@@ -85,7 +85,7 @@ export async function executeModelInstallPlan(
         plan,
         installedDeps,
         pulledWeights,
-        error: ensureUnavailableMessage(res.reason ?? 'install-failed', spec),
+        error: ensureUnavailableMessage(res.reason ?? 'install-failed', spec, res.detail),
       };
     }
     installedDeps.push(spec);

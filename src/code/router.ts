@@ -93,7 +93,9 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
   }
 
   // Code Modes: Vibgrate manager only (embedded GGUF). No third-party auto-route.
-  if (opts.codeMode && !opts.provider) {
+  // Even when code.ts pins provider=llama-cpp, never chain Ollama/LM Studio — a
+  // grammar or load failure must surface the real error, not "couldn't reach Ollama".
+  if (opts.codeMode && (!opts.provider || opts.provider === 'llama-cpp' || opts.provider === 'vibgrate')) {
     const gguf = resolveGgufPath({
       modelPath: opts.modelPath || env.VG_CODE_MODEL_PATH,
       modelRef: opts.model,
@@ -115,6 +117,10 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
   // Explicit provider wins.
   if (opts.provider) {
     const provider = buildExplicit(opts.provider, opts, env, discover);
+    // Code Mode + explicit custom backend (ollama, lmstudio, …): still no surprise chain.
+    if (opts.codeMode) {
+      return finish([provider], `Code Mode → explicit --provider ${opts.provider} (no auto-fallback)`);
+    }
     // Custom path: only fall through to other *local* adapters when --local, never LM Studio unless chosen.
     const fallbacks =
       opts.local || provider.local

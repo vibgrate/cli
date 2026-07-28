@@ -38,7 +38,11 @@ export function registerLlmHost(program: Command): void {
       } else if (opts.yes || !global.local) {
         // Soft: host can still start; generate will error until binding present.
         if (!global.json) {
-          info(c.dim(`  binding unavailable: ${ensureUnavailableMessage(ensured.reason ?? 'install-failed', 'node-llama-cpp@^3')}`));
+          info(
+            c.dim(
+              `  binding unavailable: ${ensureUnavailableMessage(ensured.reason ?? 'install-failed', 'node-llama-cpp@^3', ensured.detail)}`,
+            ),
+          );
         }
       }
 

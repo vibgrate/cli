@@ -110,6 +110,8 @@ export interface HostGenerateReport extends LlmGenerateResult {
 interface WarmSession {
   key: string;
   lib: any;
+  /** Same getLlama() instance used to load the model — required for LlamaGrammar. */
+  llama: any;
   modelPath: string;
   model: any;
   context: any;
@@ -198,6 +200,7 @@ export async function acquireHostSession(lib: unknown, modelPath: string): Promi
   const sess: WarmSession = {
     key,
     lib: l,
+    llama,
     modelPath,
     model,
     context,
@@ -276,7 +279,8 @@ export async function generateOnSession(
   let text = '';
 
   const stringOk = allowGrammarStringFallback(env);
-  const grammar = await attachGrammar(session.lib, extras.grammar);
+  // Pass the session's llama instance — LlamaGrammar must share it with the model.
+  const grammar = await attachGrammar(session.lib, extras.grammar, { llama: session.llama });
   assertGrammarOrThrow(grammar, {
     requireGrammar: extras.requireGrammar,
     allowStringFallback: stringOk,

@@ -41,7 +41,7 @@ import { writeSnapshot } from '../engine/freshness.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { manifestHash, loadScanCache, writeScanCache } from './scan-cache.js';
 import { runGraphQuery, type GraphQueryParams, type GraphQueryResult } from './graph-query.js';
-import { enrichVulns, type EnrichResult } from './enrich.js';
+import { enrichVulns, scanWorkspaceVulns, type EnrichResult, type VulnsWorkspaceResult } from './enrich.js';
 import type { VgGraph } from '../schema.js';
 
 // ── Wire types (the contract every client renders) ─────────────────────────
@@ -276,6 +276,7 @@ export class VibgrateLanguageServer {
     this.conn.onRequest('vibgrate/graph/query', (_m, params) => this.onGraphQuery(params));
     this.conn.onRequest('vibgrate/score/forFile', (_m, params) => this.onScoreForFile(params));
     this.conn.onRequest('vibgrate/enrich', (_m, params) => this.onEnrich(params));
+    this.conn.onRequest('vibgrate/vulns', (_m, _params) => this.onVulns());
 
     this.conn.onRequest('workspace/executeCommand', (_m, params) => {
       const p = params as { command?: string };
@@ -597,6 +598,32 @@ export class VibgrateLanguageServer {
   private onEnrich(params: unknown): Promise<EnrichResult> {
     const p = (params ?? {}) as { ecosystem?: string | null; package?: string; version?: string | null };
     return enrichVulns(p.ecosystem ?? null, p.package ?? '', p.version ?? null, { offline: this.opts.offline });
+  }
+
+  /**
+   * `vibgrate/vulns` — live OSV.dev pass over every resolved dependency in the
+   * current workspace artifact. Powers the Vulnerabilities panel. Empty
+   * findings with `source: 'osv'` means checked clean; `offline`/`error` mean
+   * we could not check (absent ≠ zero).
+   */
+  private async onVulns(): Promise<VulnsWorkspaceResult> {
+    if (this.opts.offline) {
+      return { findings: [], counts: { critical: 0, high: 0, moderate: 0, low: 0, unknown: 0 }, packagesChecked: 0, source: 'offline' };
+    }
+    const a = this.artifact;
+    if (!a) {
+      return { findings: [], counts: { critical: 0, high: 0, moderate: 0, low: 0, unknown: 0 }, packagesChecked: 0, source: 'pending' };
+    }
+    const targets: Array<{ ecosystem: string; package: string; version: string }> = [];
+    for (const proj of a.projects ?? []) {
+      const ecosystem = osvEcosystem(proj.type);
+      if (!ecosystem) continue;
+      for (const dep of proj.dependencies ?? []) {
+        if (!dep.resolvedVersion) continue;
+        targets.push({ ecosystem, package: dep.package, version: dep.resolvedVersion });
+      }
+    }
+    return scanWorkspaceVulns(targets, { offline: this.opts.offline });
   }
 
   private onScoreForFile(params: unknown): ScoreNotification | null {

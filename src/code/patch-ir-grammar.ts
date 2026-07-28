@@ -8,70 +8,36 @@
  * The grammar is intentionally permissive on string contents (file paths, code)
  * while fixing the structural keys and op enum — highest leverage for zero
  * retry loops without needing a full JSON Schema compiler in-process.
+ *
+ * **llama.cpp GBNF constraint:** each production must be a single line. Indented
+ * continuations are parsed as new (invalid) rules and fail with
+ * `failed to parse grammar` — which aborts Spark's requireGrammar path.
  */
 
 /** GBNF that constrains the model to a PatchIR-shaped JSON object (schema patch-ir/0). */
 export function patchIrGbnf(): string {
-  // GBNF subset understood by llama.cpp-style engines.
-  return String.raw`root ::= ws patch
-ws ::= [ \t\n]*
-patch ::= "{" ws
-  "\"schemaVersion\"" ws ":" ws "\"patch-ir/0\"" ws "," ws
-  "\"operations\"" ws ":" ws operations ws "," ws
-  "\"assumptions\"" ws ":" ws array-any ws "," ws
-  "\"requestedVerification\"" ws ":" ws array-any ws "," ws
-  "\"provenance\"" ws ":" ws provenance
-  ws "}"
-operations ::= "[" ws operation (ws "," ws operation)* ws "]"
-operation ::= replace-range | replace-text | create-file | delete-file | replace-symbol
-replace-range ::= "{" ws
-  "\"op\"" ws ":" ws "\"replace-range\"" ws "," ws
-  "\"file\"" ws ":" ws string ws "," ws
-  "\"start\"" ws ":" ws number ws "," ws
-  "\"end\"" ws ":" ws number ws "," ws
-  "\"replacement\"" ws ":" ws string
-  (ws "," ws "\"expectedHash\"" ws ":" ws (string | null) )?
-  (ws "," ws "\"anchorSymbol\"" ws ":" ws (string | null) )?
-  ws "}"
-replace-text ::= "{" ws
-  "\"op\"" ws ":" ws "\"replace-text\"" ws "," ws
-  "\"file\"" ws ":" ws string ws "," ws
-  "\"search\"" ws ":" ws string ws "," ws
-  "\"replace\"" ws ":" ws string
-  (ws "," ws "\"anchorSymbol\"" ws ":" ws (string | null) )?
-  ws "}"
-create-file ::= "{" ws
-  "\"op\"" ws ":" ws "\"create-file\"" ws "," ws
-  "\"file\"" ws ":" ws string ws "," ws
-  "\"content\"" ws ":" ws string
-  ws "}"
-delete-file ::= "{" ws
-  "\"op\"" ws ":" ws "\"delete-file\"" ws "," ws
-  "\"file\"" ws ":" ws string
-  ws "}"
-replace-symbol ::= "{" ws
-  "\"op\"" ws ":" ws "\"replace-symbol\"" ws "," ws
-  "\"symbolId\"" ws ":" ws string ws "," ws
-  "\"replacement\"" ws ":" ws string
-  (ws "," ws "\"file\"" ws ":" ws (string | null) )?
-  (ws "," ws "\"expectedHash\"" ws ":" ws (string | null) )?
-  ws "}"
-provenance ::= "{" ws
-  "\"format\"" ws ":" ws format
-  (ws "," ws "\"modelId\"" ws ":" ws (string | null) )?
-  (ws "," ws "\"raw\"" ws ":" ws (string | null) )?
-  ws "}"
-format ::= "\"search-replace\"" | "\"whole-file\"" | "\"structured-json\"" | "\"grammar-constrained\"" | "\"code-edit\""
-array-any ::= "[" ws (value (ws "," ws value)*)? ws "]"
-value ::= object | array-any | string | number | "true" | "false" | null
-object ::= "{" ws (string ws ":" ws value (ws "," ws string ws ":" ws value)*)? ws "}"
-string ::= "\"" (
-  [^"\\] |
-  "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
-)* "\""
-number ::= "-"? ("0" | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)?
-null ::= "null"
-`;
+  // One production per line — required by llama.cpp / node-llama-cpp GBNF parser.
+  return [
+    'root ::= ws patch',
+    'ws ::= [ \\t\\n]*',
+    'patch ::= "{" ws "\\"schemaVersion\\"" ws ":" ws "\\"patch-ir/0\\"" ws "," ws "\\"operations\\"" ws ":" ws operations ws "," ws "\\"assumptions\\"" ws ":" ws array-any ws "," ws "\\"requestedVerification\\"" ws ":" ws array-any ws "," ws "\\"provenance\\"" ws ":" ws provenance ws "}"',
+    'operations ::= "[" ws operation (ws "," ws operation)* ws "]"',
+    'operation ::= replace-range | replace-text | create-file | delete-file | replace-symbol',
+    'replace-range ::= "{" ws "\\"op\\"" ws ":" ws "\\"replace-range\\"" ws "," ws "\\"file\\"" ws ":" ws string ws "," ws "\\"start\\"" ws ":" ws number ws "," ws "\\"end\\"" ws ":" ws number ws "," ws "\\"replacement\\"" ws ":" ws string (ws "," ws "\\"expectedHash\\"" ws ":" ws (string | null) )? (ws "," ws "\\"anchorSymbol\\"" ws ":" ws (string | null) )? ws "}"',
+    'replace-text ::= "{" ws "\\"op\\"" ws ":" ws "\\"replace-text\\"" ws "," ws "\\"file\\"" ws ":" ws string ws "," ws "\\"search\\"" ws ":" ws string ws "," ws "\\"replace\\"" ws ":" ws string (ws "," ws "\\"anchorSymbol\\"" ws ":" ws (string | null) )? ws "}"',
+    'create-file ::= "{" ws "\\"op\\"" ws ":" ws "\\"create-file\\"" ws "," ws "\\"file\\"" ws ":" ws string ws "," ws "\\"content\\"" ws ":" ws string ws "}"',
+    'delete-file ::= "{" ws "\\"op\\"" ws ":" ws "\\"delete-file\\"" ws "," ws "\\"file\\"" ws ":" ws string ws "}"',
+    'replace-symbol ::= "{" ws "\\"op\\"" ws ":" ws "\\"replace-symbol\\"" ws "," ws "\\"symbolId\\"" ws ":" ws string ws "," ws "\\"replacement\\"" ws ":" ws string (ws "," ws "\\"file\\"" ws ":" ws (string | null) )? (ws "," ws "\\"expectedHash\\"" ws ":" ws (string | null) )? ws "}"',
+    'provenance ::= "{" ws "\\"format\\"" ws ":" ws format (ws "," ws "\\"modelId\\"" ws ":" ws (string | null) )? (ws "," ws "\\"raw\\"" ws ":" ws (string | null) )? ws "}"',
+    'format ::= "\\"search-replace\\"" | "\\"whole-file\\"" | "\\"structured-json\\"" | "\\"grammar-constrained\\"" | "\\"code-edit\\""',
+    'array-any ::= "[" ws (value (ws "," ws value)*)? ws "]"',
+    'value ::= object | array-any | string | number | "true" | "false" | null',
+    'object ::= "{" ws (string ws ":" ws value (ws "," ws string ws ":" ws value)*)? ws "}"',
+    'string ::= "\\"" ( [^"\\\\] | "\\\\" (["\\\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]) )* "\\""',
+    'number ::= "-"? ("0" | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)?',
+    'null ::= "null"',
+    '',
+  ].join('\n');
 }
 
 /**

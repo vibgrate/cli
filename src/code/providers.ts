@@ -423,7 +423,7 @@ export class LocalLlamaProvider implements Provider {
       if (!LocalLlamaProvider.warmBinding) {
         const res = await this.ensure('node-llama-cpp@^3', { consent: this.consent, onUnavailable: () => {} });
         if (!res.module) {
-          throw new Error(ensureUnavailableMessage(res.reason ?? 'no-consent', 'node-llama-cpp'));
+          throw new Error(ensureUnavailableMessage(res.reason ?? 'no-consent', 'node-llama-cpp', res.detail));
         }
         LocalLlamaProvider.warmBinding = res.module;
       }

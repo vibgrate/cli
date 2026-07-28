@@ -24,6 +24,7 @@ import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { whichOnPath } from '../util/cli-invocation.js';
 
 /** Why a package could not be made available — for calm, actionable messaging. */
 export type EnsureFailure = 'offline' | 'no-consent' | 'install-failed' | 'load-failed';
@@ -47,6 +48,12 @@ export interface EnsureResult {
   /** The runtime dir the package was resolved from (for diagnostics). */
   dir: string;
   reason?: EnsureFailure;
+  /**
+   * Optional one-line cause when `reason` is install-failed (EACCES, npm
+   * missing, npm stderr tail). Prefer {@link ensureUnavailableMessage} so
+   * callers always get the full actionable line.
+   */
+  detail?: string;
 }
 
 /**
@@ -75,7 +82,7 @@ export function isPackageInstalled(spec: string): boolean {
  * A one-line, actionable explanation of why a runtime dependency isn't available
  * — always names the off switch and the fix, never alarms (GUARDRAILS §1.3).
  */
-export function ensureUnavailableMessage(reason: EnsureFailure, spec: string): string {
+export function ensureUnavailableMessage(reason: EnsureFailure, spec: string, detail?: string): string {
   const name = packageName(spec);
   switch (reason) {
     case 'offline':
@@ -83,6 +90,9 @@ export function ensureUnavailableMessage(reason: EnsureFailure, spec: string): s
     case 'no-consent':
       return `${name} is needed for this backend and isn't installed yet. Run \`vg models install\` (or \`vg models pull\`) to install runtime deps for the provider into ${runtimeCacheDir()} (nothing is written into the CLI itself), or pick a backend that needs no install (e.g. --provider ollama).`;
     case 'install-failed':
+      if (detail?.trim()) {
+        return `couldn't install ${name}: ${detail.trim()}`;
+      }
       return `couldn't install ${name} (offline, or npm unavailable) — using a backend that needs no install. It will try again next time.`;
     case 'load-failed':
     default:
@@ -99,9 +109,9 @@ export function ensureUnavailableMessage(reason: EnsureFailure, spec: string): s
  */
 export async function ensurePackage(spec: string, options: EnsureOptions = {}): Promise<EnsureResult> {
   const dir = runtimeCacheDir();
-  const fail = (reason: EnsureFailure): EnsureResult => {
+  const fail = (reason: EnsureFailure, detail?: string): EnsureResult => {
     options.onUnavailable?.(reason, spec);
-    return { module: null, dir, reason };
+    return { module: null, dir, reason, detail };
   };
 
   // Already present → just load it (no network, no consent needed).
@@ -122,12 +132,24 @@ export async function ensurePackage(spec: string, options: EnsureOptions = {}): 
   try {
     fs.mkdirSync(dir, { recursive: true });
     ensureRuntimeManifest(dir);
-  } catch {
-    return fail('install-failed');
+  } catch (err) {
+    return fail('install-failed', cacheWriteFailureDetail(dir, err));
   }
-  const installer = options.install ?? defaultInstaller;
-  const ok = installer(spec, dir);
-  if (!ok || !isPackageInstalled(spec)) return fail('install-failed');
+
+  if (options.install) {
+    const ok = options.install(spec, dir);
+    if (!ok || !isPackageInstalled(spec)) {
+      return fail('install-failed', !ok ? 'installer returned failure' : `${packageName(spec)} not resolvable after install`);
+    }
+  } else {
+    const inst = runDefaultInstaller(spec, dir);
+    if (!inst.ok || !isPackageInstalled(spec)) {
+      return fail(
+        'install-failed',
+        inst.detail ?? (!inst.ok ? 'npm install failed' : `${packageName(spec)} not resolvable after install`),
+      );
+    }
+  }
 
   const mod = await load(spec, dir);
   return mod ? { module: mod, dir } : fail('load-failed');
@@ -156,13 +178,89 @@ async function load(spec: string, dir: string): Promise<unknown | null> {
   }
 }
 
-/** `npm install --prefix <dir> <spec>` with no scripts, quiet. */
-function defaultInstaller(spec: string, dir: string): boolean {
-  const res = spawnSync('npm', ['install', '--prefix', dir, '--no-audit', '--no-fund', '--ignore-scripts', spec], {
-    stdio: 'ignore',
+/** Human detail when the runtime cache cannot be created or written. */
+export function cacheWriteFailureDetail(dir: string, err: unknown): string {
+  const code = err && typeof err === 'object' && 'code' in err ? String((err as { code?: unknown }).code) : '';
+  if (code === 'EACCES' || code === 'EPERM') {
+    const parent = path.dirname(dir);
+    return (
+      `cannot write runtime cache at ${dir} (permission denied). ` +
+      `If ${parent} is root-owned (often from a past sudo run), fix with: ` +
+      `sudo chown -R "$(whoami)" ${parent} — then re-run \`vg models install\``
+    );
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return `cannot prepare runtime cache at ${dir}: ${msg}`;
+}
+
+/**
+ * Resolve `npm` for install. GUI apps (Dock-launched VS Code) often have a
+ * stripped PATH without Homebrew; fall back to common install locations.
+ */
+export function resolveNpmBinary(): string | null {
+  const names = process.platform === 'win32' ? ['npm.cmd', 'npm'] : ['npm'];
+  for (const name of names) {
+    const hit = whichOnPath(name);
+    if (hit) return hit;
+  }
+  const candidates =
+    process.platform === 'win32'
+      ? []
+      : [
+          '/opt/homebrew/bin/npm',
+          '/usr/local/bin/npm',
+          path.join(os.homedir(), '.npm-global', 'bin', 'npm'),
+          path.join(os.homedir(), '.local', 'bin', 'npm'),
+        ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
+/** `npm install --prefix <dir> <spec>` with no scripts; capture failure detail. */
+function runDefaultInstaller(spec: string, dir: string): { ok: boolean; detail?: string } {
+  const npm = resolveNpmBinary();
+  if (!npm) {
+    return {
+      ok: false,
+      detail:
+        'npm not found on PATH (common when VS Code is launched from the Dock). ' +
+        'Install Node.js, or run `vg models install` from a terminal where `npm` works',
+    };
+  }
+  const res = spawnSync(npm, ['install', '--prefix', dir, '--no-audit', '--no-fund', '--ignore-scripts', spec], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 180_000,
   });
-  return res.status === 0;
+  if (res.error) {
+    const code = 'code' in res.error ? String((res.error as NodeJS.ErrnoException).code ?? '') : '';
+    if (code === 'ENOENT') {
+      return {
+        ok: false,
+        detail: `npm binary not executable at ${npm} — install Node.js or fix PATH, then re-run \`vg models install\``,
+      };
+    }
+    return { ok: false, detail: res.error.message };
+  }
+  if (res.status === 0) return { ok: true };
+  const tail = [res.stderr, res.stdout]
+    .filter(Boolean)
+    .join('\n')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(-4)
+    .join(' · ');
+  return {
+    ok: false,
+    detail: tail || `npm install exited ${res.status ?? 'null'} (offline network, or registry error)`,
+  };
 }
 
 /** Strip a version range from a spec → the bare package name (scoped-safe). */
