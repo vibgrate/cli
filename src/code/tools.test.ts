@@ -55,6 +55,7 @@ describe('AGENT_TOOLS', () => {
       'inspect_task',
       'inspect_change',
       'verify_change',
+      'ask_user',
       'finish',
       'abort',
     ]);
@@ -67,6 +68,46 @@ describe('read-only tools (auto, no approval)', () => {
     expect(r.mutated).toBe(false);
     expect(r.content).toContain('scanDir');
     expect(r.content).toContain('src/scan.ts');
+  });
+
+  it('search_code literal-sweeps a URL needle against the workspace tree', async () => {
+    const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const root = mkdtempSync(join(tmpdir(), 'vg-search-url-'));
+    try {
+      mkdirSync(join(root, 'src'), { recursive: true });
+      writeFileSync(join(root, 'src', 'a.ts'), 'const u = "https://dash.vibgrate.com/signup";\n');
+      writeFileSync(join(root, 'src', 'b.ts'), '// no link here\n');
+      const r = await executeTool(
+        call('search_code', { query: 'https://dash.vibgrate.com/signup' }),
+        ctx({ root }),
+      );
+      expect(r.mutated).toBe(false);
+      expect(r.content).toMatch(/src\/a\.ts:1/);
+      expect(r.content).toMatch(/literal match/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('search_code reports zero hits honestly for a missing URL', async () => {
+    const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const root = mkdtempSync(join(tmpdir(), 'vg-search-url-miss-'));
+    try {
+      mkdirSync(join(root, 'src'), { recursive: true });
+      writeFileSync(join(root, 'src', 'a.ts'), 'export const x = 1;\n');
+      const r = await executeTool(
+        call('search_code', { query: 'https://dash.vibgrate.com/signup does not exist find occurrences' }),
+        ctx({ root }),
+      );
+      expect(r.content).toMatch(/no symbol or text match/i);
+      expect(r.content).not.toMatch(/DoesNot|NonExisting|commandExists/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('read_file returns file content and honors a line range', async () => {
@@ -296,6 +337,26 @@ describe('library_docs', () => {
     const r = await executeTool(call('library_docs', { name: 'left-pad' }), ctx());
     expect(r.mutated).toBe(false);
     expect(r.content).toMatch(/no bundled docs|left-pad/);
+  });
+});
+
+describe('ask_user', () => {
+  it('returns the human answer when askUser is wired', async () => {
+    const r = await executeTool(call('ask_user', { question: 'Which port?', options: ['3000', '8080'] }), {
+      ...ctx(),
+      askUser: async (req) => {
+        expect(req.question).toBe('Which port?');
+        expect(req.options).toEqual(['3000', '8080']);
+        return '8080';
+      },
+    });
+    expect(r.mutated).toBe(false);
+    expect(r.content).toContain('8080');
+  });
+
+  it('does not block when no host is available', async () => {
+    const r = await executeTool(call('ask_user', { question: 'Continue?' }), ctx());
+    expect(r.content).toMatch(/No interactive host|assumptions/i);
   });
 });
 

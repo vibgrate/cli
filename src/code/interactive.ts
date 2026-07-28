@@ -228,16 +228,37 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
     } else prompter.note(c.dim('no previous session to continue'));
   }
 
-  // Connect external MCP tools (from config), if any.
+  // Live graph holder: filled each turn; MCP builtins always read the current map.
+  const graphHolder: { current: import('../schema.js').VgGraph | null } = { current: null };
+
+  // Always expose local `vg serve` MCP tools; merge any project-configured servers.
+  const { createVgBuiltinMcpTools, mergeExternalToolsets } = await import('./vg-mcp-bridge.js');
+  const vgBuiltin = createVgBuiltinMcpTools({
+    getGraph: () => {
+      if (!graphHolder.current) throw new Error('graph not loaded yet');
+      return graphHolder.current;
+    },
+    root,
+    local: global.local === true,
+  });
   let mcp: McpToolset | undefined;
   if (opts.mcpServers && Object.keys(opts.mcpServers).length) {
     const sp = prompter.spinner('Connecting MCP tools…');
     const { toolset, warnings } = await McpToolset.connect(opts.mcpServers, opts.mcpConnect ?? defaultMcpConnect);
     mcp = toolset;
     const from = opts.mcpSources?.length ? ` (from ${opts.mcpSources.join(', ')})` : '';
-    sp.stop(`MCP tools: ${toolset.specs().length} from ${Object.keys(opts.mcpServers).length} server(s)${from}`);
+    sp.stop(
+      `MCP tools: ${toolset.specs().length} project + ${vgBuiltin.specs.length} local vg` +
+        ` (${Object.keys(opts.mcpServers).length} server(s)${from})`,
+    );
     for (const w of warnings) prompter.note(c.yellow(`  ${w}`));
+  } else {
+    prompter.note(c.dim(`MCP · ${vgBuiltin.specs.length} local vg tools (mcp__vibgrate__*) always available`));
   }
+  const externalToolsMerged = mergeExternalToolsets(
+    vgBuiltin,
+    mcp ? mcpExternalTools(mcp, agentApprove(opts, prompter)) : undefined,
+  );
 
   // Fusion Runtime: attach to (or own) a local vgd session instead of spawning
   // `vg serve` as GraphProcess. Failure degrades to in-process graph only.
@@ -355,6 +376,7 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
 
       const branchLoad = branchGraphs.ensureCurrent();
       const graph = branchLoad.graph;
+      graphHolder.current = graph;
       if (!graph) {
         prompter.note(c.red('the code map disappeared — run `vg` to rebuild'));
         break;
@@ -416,7 +438,7 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
           ? { ...opts.verify, maxRounds: opts.verify.maxRounds ?? modelProfile.maxRepairRounds }
           : undefined,
         priorSummary,
-        externalTools: mcp ? mcpExternalTools(mcp, agentApprove(opts, prompter)) : undefined,
+        externalTools: externalToolsMerged,
         meter,
         prompter,
         capsule: opts.capsule,

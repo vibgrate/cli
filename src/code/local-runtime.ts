@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { availableRamBytes } from './available-memory.js';
 import { parseOllamaPs, parseNvidiaSmi, type SystemMemory } from './capability.js';
+import { hasOllamaBinary, resolveOllamaBinary } from '../util/resolve-ollama.js';
 import type { Spinner } from './ui.js';
 
 /**
@@ -19,7 +20,8 @@ import type { Spinner } from './ui.js';
  * free pages from `os.freemem()` — see `available-memory.ts`.
  */
 export function gatherSystemMemory(): SystemMemory {
-  const loaded = safeRun('ollama', ['ps']).map(parseOllamaPs).flat();
+  const ollama = resolveOllamaBinary();
+  const loaded = ollama ? safeRun(ollama, ['ps']).map(parseOllamaPs).flat() : [];
   const smi = safeRun('nvidia-smi', ['--query-gpu=memory.total,memory.used', '--format=csv,noheader,nounits'])
     .map(parseNvidiaSmi)
     .find(Boolean);
@@ -35,14 +37,16 @@ export function gatherSystemMemory(): SystemMemory {
   return sys;
 }
 
-/** True if the `ollama` binary is on PATH. */
+/** True if the `ollama` binary is on PATH or a known install location. */
 export function hasOllama(): boolean {
-  return spawnSync(process.platform === 'win32' ? 'where' : 'which', ['ollama'], { stdio: 'ignore' }).status === 0;
+  return hasOllamaBinary();
 }
 
 /** Unload a running model to free memory. Returns true on success. */
 export function stopModel(name: string): boolean {
-  return spawnSync('ollama', ['stop', name], { stdio: 'ignore' }).status === 0;
+  const ollama = resolveOllamaBinary();
+  if (!ollama) return false;
+  return spawnSync(ollama, ['stop', name], { stdio: 'ignore' }).status === 0;
 }
 
 /**
@@ -52,7 +56,12 @@ export function stopModel(name: string): boolean {
  */
 export function pullModelClean(name: string, spinner: Spinner): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn('ollama', ['pull', name]);
+    const ollama = resolveOllamaBinary();
+    if (!ollama) {
+      resolve(false);
+      return;
+    }
+    const child = spawn(ollama, ['pull', name]);
     const onData = (buf: Buffer): void => {
       const line = lastMeaningfulLine(buf.toString());
       if (line) spinner.update(`pulling ${name} — ${line}`);

@@ -80,4 +80,17 @@ describe('buildTaskCapsule', () => {
     expect(ctx.rendered).toBe(capsule.rendered);
     expect(ctx.seeds.some((s) => s.node.qualifiedName === 'scanDir')).toBe(true);
   });
+
+  it('does not invent primary symbols from a URL occurrence locate (field report)', () => {
+    const capsule = buildTaskCapsule(
+      fixtureGraph(),
+      'https://dash.vibgrate.com/signup does not exist find occurrences',
+      { readFile: readFixture },
+    );
+    expect(capsule.provenance.rankingVersion).toBe(CAPSULE_RANKING_VERSION);
+    expect(capsule.primary).toHaveLength(0);
+    expect(capsule.pinnedFacts.some((f) => f.includes('https://dash.vibgrate.com/signup'))).toBe(true);
+    expect(capsule.rendered).toMatch(/literal-locate|exact string/i);
+  });
 });
+

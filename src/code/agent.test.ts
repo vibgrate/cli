@@ -31,6 +31,41 @@ const tc = (name: string, args: Record<string, unknown>, id = 'c'): ToolCall => 
 describe('runAgent — the agentic loop', () => {
   const baseFile = 'export function scanDir() {\n  const timeout = 0;\n  return timeout;\n}\n';
 
+  it('answers a pure URL locate without calling the model (no PatchIR dump)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-agent-locate-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'src'));
+      fs.writeFileSync(
+        path.join(dir, 'src', 'extension.ts'),
+        `void open('https://dash.vibgrate.com/signup');\n`,
+      );
+      const provider = new ScriptedProvider('m', [
+        { text: '{"schemaVersion":"patch-ir/0","operations":[]}', toolCalls: [] },
+      ]);
+      const events: AgentEvent[] = [];
+      const result = await runAgent({
+        graph: fixtureGraph(),
+        root: dir,
+        instruction: 'where is https://dash.vibgrate.com/signup?',
+        providers: [provider],
+        fsImpl: memFs(),
+        run: () => ({ stdout: '', exitCode: 0 }),
+        approve: async () => true,
+        onEvent: (e) => events.push(e),
+        noAudit: true,
+      });
+      expect(result.stopped).toBe('finished');
+      expect(result.provider.id).toBe('deterministic-locate');
+      expect(result.finalText).toContain('extension.ts:1');
+      expect(result.finalText).not.toContain('patch-ir');
+      expect(result.finalText).not.toContain('unknown identifiers');
+      // Model was never consulted.
+      expect(events.some((e) => e.type === 'assistant' && e.text.includes('Found'))).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('runs a full search → read → edit → run → finish session', async () => {
     // A scripted "model" that drives a realistic tool sequence.
     const provider = new ScriptedProvider('m', [
@@ -108,7 +143,7 @@ describe('runAgent — the agentic loop', () => {
     expect(result.steps).toBe(3);
   });
 
-  it('ends when the model replies with text and no tool calls', async () => {
+  it('treats clean free-text answers as finished (task-space Q&A)', async () => {
     const provider = new ScriptedProvider('m', [{ text: 'I need more detail about which timeout.' }]);
     const result = await runAgent({
       graph: fixtureGraph(),
@@ -119,8 +154,27 @@ describe('runAgent — the agentic loop', () => {
       run: () => ({ stdout: '', exitCode: 0 }),
       approve: async () => true,
     });
-    expect(result.stopped).toBe('no-tools');
+    expect(result.stopped).toBe('finished');
     expect(result.finalText).toContain('more detail');
+  });
+
+  it('sanitizes raw PatchIR dumps into a clean task-space message (no JSON in the panel)', async () => {
+    const provider = new ScriptedProvider('m', [
+      { text: '{"schemaVersion":"patch-ir/0","operations":[{"op":"replace-text","file":"a.ts","search":"x","replace":"y"}]}' },
+    ]);
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'change something',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      noAudit: true,
+    });
+    expect(result.finalText).not.toContain('operations');
+    expect(result.finalText).not.toContain('patch-ir');
+    expect(result.finalText.length).toBeGreaterThan(20);
   });
 
   it('writes a secret-free audit record at the end of a run', async () => {

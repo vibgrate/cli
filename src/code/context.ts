@@ -11,7 +11,7 @@
  * is fully offline-testable and benchmarkable.
  */
 
-import { queryGraph } from '../engine/query.js';
+import { extractLiteralNeedles, queryGraph } from '../engine/query.js';
 import { indexFor } from '../engine/relations.js';
 import { impactOf } from '../engine/impact.js';
 import type { CodeContext } from './types.js';
@@ -44,6 +44,8 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
   // Retrieval seeds: reuse the deterministic lexical/structural retrieval that
   // backs `vg ask`. When `--file` narrows the surface, keep only seeds in those
   // files (but still let impact reach outside them, so the review is honest).
+  // URL / quoted-string needles are stripped inside queryGraph so path tokens
+  // cannot poison seeds (dash→dashboard, exist→NonExisting, …).
   const q = queryGraph(graph, instruction, { budget: Math.floor(budget * 0.6), limit: seedLimit * 2 });
   let seeds = q.matches.map((m) => ({ node: m.node, why: m.why }));
   if (options.files && options.files.length) {
@@ -74,7 +76,10 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
   // Pinned facts: declared invariants/contracts that touch the seeds. These are
   // hard constraints; they are surfaced explicitly and never summarized away.
   const seedIds = new Set(seeds.map((s) => s.node.id));
-  const pinnedFacts = pinnedFactsFor(graph, seedIds);
+  const pinnedFacts = [
+    ...literalNeedleFacts(instruction),
+    ...pinnedFactsFor(graph, seedIds),
+  ];
 
   const rendered = render(instruction, seeds, [...impacted.values()], targetFiles, pinnedFacts, index, budget);
   return {
@@ -86,6 +91,16 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
     rendered,
     tokensEstimate: estimateTokens(rendered),
   };
+}
+
+/** Pin URL / quoted needles so the agent does not treat path tokens as symbols. */
+function literalNeedleFacts(instruction: string): string[] {
+  const needles = extractLiteralNeedles(instruction);
+  if (!needles.length) return [];
+  return needles.map(
+    (n) =>
+      `literal-locate: search the workspace for the exact string \`${n}\` (use search_code with the quoted needle). This is not a graph symbol name. If there are zero hits, report that honestly and finish — do not invent an edit.`,
+  );
 }
 
 function pinnedFactsFor(graph: VgGraph, seedIds: Set<string>): string[] {

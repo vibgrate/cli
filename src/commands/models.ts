@@ -40,6 +40,7 @@ import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { c, info, json } from '../util/output.js';
+import { hasOllamaBinary, resolveOllamaBinary } from '../util/resolve-ollama.js';
 
 /**
  * `vg models` (VG-CLI-SPEC §5 / VG-CLI-CODE §6) — Code Modes + local fleet.
@@ -495,17 +496,30 @@ export function registerModels(program: Command): void {
       }
 
       if (target.runtime === 'ollama') {
-        if (!hasBinary('ollama')) {
+        const ollama = resolveOllamaBinary();
+        if (!ollama) {
           throw new CliError(
-            'ollama is not installed or not on PATH — install it from https://ollama.com, then re-run.',
+            'ollama is not installed or not on PATH — install it from https://ollama.com, then re-run. ' +
+              '(Dock-launched editors often miss Homebrew; open a terminal and try `which ollama`, or add /opt/homebrew/bin to PATH.)',
             ExitCode.NOT_FOUND,
           );
         }
         if (!global.json) info(c.dim(`  $ ${plan.command}`));
-        const res = spawnSync('ollama', ['rm', target.name], { stdio: global.json ? 'ignore' : 'inherit' });
+        const res = spawnSync(ollama, ['rm', target.name], {
+          encoding: 'utf8',
+          stdio: global.json ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+        });
         if (res.status !== 0) {
+          const tail = [res.stderr, res.stdout]
+            .filter(Boolean)
+            .join('\n')
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .slice(-3)
+            .join(' · ');
           throw new CliError(
-            `\`ollama rm ${target.name}\` failed (exit ${res.status ?? 'signal'}) — check the model name with \`vg models --raw\`.`,
+            `\`ollama rm ${target.name}\` failed (exit ${res.status ?? 'signal'})${tail ? `: ${tail}` : ''} — check the model name with \`vg models --raw\`.`,
             ExitCode.ERROR,
           );
         }
@@ -794,6 +808,7 @@ export function registerModels(program: Command): void {
 }
 
 function hasBinary(bin: string): boolean {
+  if (bin === 'ollama' || bin === 'ollama.exe') return hasOllamaBinary();
   const probe = spawnSync(process.platform === 'win32' ? 'where' : 'which', [bin], { stdio: 'ignore' });
   return probe.status === 0;
 }

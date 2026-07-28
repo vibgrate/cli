@@ -39,4 +39,16 @@ describe('buildCodeContext', () => {
     const b = buildCodeContext(fixtureGraph(), 'add a timeout to scanDir').rendered;
     expect(a).toBe(b);
   });
+
+  it('pins URL needles and does not invent unrelated symbol seeds for occurrence locates', () => {
+    const ctx = buildCodeContext(
+      fixtureGraph(),
+      'https://dash.vibgrate.com/signup does not exist find occurrences',
+    );
+    expect(ctx.seeds).toHaveLength(0);
+    expect(ctx.pinnedFacts.some((f) => f.includes('https://dash.vibgrate.com/signup'))).toBe(true);
+    expect(ctx.pinnedFacts.some((f) => f.includes('literal-locate'))).toBe(true);
+    expect(ctx.rendered).toContain('https://dash.vibgrate.com/signup');
+  });
 });
+

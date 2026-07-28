@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { findNodes } from './lookup.js';
 import { scanCandidates } from './literal-scan.js';
+import { extractLiteralNeedles, residualForSymbolSearch } from './query.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
 /**
@@ -105,49 +106,79 @@ export async function searchSymbols(graph: VgGraph, root: string, query: string,
   const quoted = /^(["'`])(.+)\1$/.exec(q);
   if (quoted && quoted[2]!.trim()) q = quoted[2]!.trim();
 
-  // Literal-sweep routing. Three shapes can never name one graph symbol:
+  // Embedded URL / quoted needles inside a natural-language ask
+  // ("https://dash…/signup does not exist find occurrences"). The literal
+  // sweep must search for the *needle*, not the whole sentence — otherwise
+  // extension.ts:955 (bare URL) is a complete miss while only test fixtures
+  // that paste the full ask match.
+  const embeddedNeedles = extractLiteralNeedles(q);
+  const scanNeedle =
+    embeddedNeedles.length === 0
+      ? q
+      : embeddedNeedles.length === 1 && embeddedNeedles[0] === q
+        ? q
+        : [...embeddedNeedles].sort((a, b) => b.length - a.length)[0]!;
+  // Symbol pass: residual framing only, and empty when residual is pure
+  // scaffolding ("where is …?") so we do not rank applyPlan.where etc.
+  const symbolQuery =
+    embeddedNeedles.length > 0 ? residualForSymbolSearch(q) : q;
+
+  // Literal-sweep routing. Shapes that can never name one graph symbol:
   //  - internal whitespace ("find every place that says X");
   //  - explicit quotes (stripped above — quoting IS the sweep signal);
+  //  - a URL (`https://…`) — host/path tokens are not identifiers; without this
+  //    branch a bare URL stayed symbol-first and never ran the literal sweep
+  //    (field report: find occurrences of https://dash…/signup);
+  //  - embedded URL/quote inside NL framing (scanNeedle ≠ full query);
   //  - a slash path with no `:` and no glob chars ("opportunities/mine",
   //    "api/users/mine") — a route/path STRING. Its tokens previously fell into
   //    the per-token symbol union, where a single loose token ("mine") produced
   //    a confidently-ranked, completely unrelated symbol instead of a clean
-  //    literal answer. (`:`-bearing queries stay symbol-first: file:line and
-  //    qualified names look like paths too; globs keep the glob tier.)
+  //    literal answer. (`:`-bearing non-URL queries stay symbol-first: file:line
+  //    and qualified names look like paths too; globs keep the glob tier.)
   // Single-name lookups (the hot path) keep symbol-first behaviour unchanged.
-  const isPhrase = Boolean(quoted) || /\s/.test(q) || (/[/\\]/.test(q) && !q.includes(':') && !/[*?]/.test(q));
+  const isUrl = /^https?:\/\//i.test(scanNeedle) || embeddedNeedles.some((n) => /^https?:\/\//i.test(n));
+  const isPhrase =
+    Boolean(quoted) ||
+    isUrl ||
+    embeddedNeedles.length > 0 ||
+    /\s/.test(q) ||
+    (/[/\\]/.test(q) && !q.includes(':') && !/[*?]/.test(q));
 
   // Pass 1 — graph name index (already ranked by importance).
-  let nodes = findNodes(graph, q).filter((n) => n.kind !== 'file');
-  // File-path tier: a query that IS a repo path ("src/services/OrderService.ts")
-  // used to dead-end — the name index only knows the file NODE (filtered out as
-  // uninteresting) and the literal scan only finds the path where it appears as
-  // text. The useful answer is the symbols DEFINED in that file, ranked.
-  if (nodes.length === 0) {
-    nodes = fileSymbolNodes(graph, q);
-  }
-  // Reconstructed-identifier fallthrough: a humanized/spaced query ("get id",
-  // "use team", "f 0304") is frequently a *single* identifier whose original
-  // separators (camelCase boundary, `_`) were lost in humanization, not a
-  // multi-word phrase. Try the two mechanical rejoins — concatenated (recovers
-  // camelCase: "get id" -> "getid" == "getId") and underscore-joined (recovers
-  // snake_case: "f 0304" -> "f_0304") — against the exact/case-insensitive name
-  // index before falling through to the noisy per-token substring union below,
-  // which has no way to re-associate short tokens back into one identifier and
-  // silently drops single-character tokens ("f") that carry real information
-  // (VG-LOCATE-FAILURE-ANALYSIS.md).
-  if (nodes.length === 0 && isPhrase) {
-    nodes = reconstructedIdentifierNodes(graph, q);
-  }
-  // Multi-word fallthrough: an agent that types a phrase ("NewScan modal
-  // component", "dsn install command") gets nothing from the whole-string name
-  // index and nothing from the whole-string literal scan — a dead end. When the
-  // exact query finds no symbol AND the query is multiple words, union the
-  // per-token matches and rank by how many distinct query tokens each symbol
-  // covers (then importance).
-  if (nodes.length === 0) {
-    const tokens = queryTokens(q);
-    if (tokens.length >= 2) nodes = multiTokenNodes(graph, tokens);
+  let nodes: GraphNode[] = [];
+  if (symbolQuery.trim()) {
+    nodes = findNodes(graph, symbolQuery).filter((n) => n.kind !== 'file');
+    // File-path tier: a query that IS a repo path ("src/services/OrderService.ts")
+    // used to dead-end — the name index only knows the file NODE (filtered out as
+    // uninteresting) and the literal scan only finds the path where it appears as
+    // text. The useful answer is the symbols DEFINED in that file, ranked.
+    if (nodes.length === 0) {
+      nodes = fileSymbolNodes(graph, symbolQuery);
+    }
+    // Reconstructed-identifier fallthrough: a humanized/spaced query ("get id",
+    // "use team", "f 0304") is frequently a *single* identifier whose original
+    // separators (camelCase boundary, `_`) were lost in humanization, not a
+    // multi-word phrase. Try the two mechanical rejoins — concatenated (recovers
+    // camelCase: "get id" -> "getid" == "getId") and underscore-joined (recovers
+    // snake_case: "f 0304" -> "f_0304") — against the exact/case-insensitive name
+    // index before falling through to the noisy per-token substring union below,
+    // which has no way to re-associate short tokens back into one identifier and
+    // silently drops single-character tokens ("f") that carry real information
+    // (VG-LOCATE-FAILURE-ANALYSIS.md).
+    if (nodes.length === 0 && isPhrase) {
+      nodes = reconstructedIdentifierNodes(graph, symbolQuery);
+    }
+    // Multi-word fallthrough: an agent that types a phrase ("NewScan modal
+    // component", "dsn install command") gets nothing from the whole-string name
+    // index and nothing from the whole-string literal scan — a dead end. When the
+    // exact query finds no symbol AND the query is multiple words, union the
+    // per-token matches and rank by how many distinct query tokens each symbol
+    // covers (then importance).
+    if (nodes.length === 0) {
+      const tokens = queryTokens(symbolQuery);
+      if (tokens.length >= 2) nodes = multiTokenNodes(graph, tokens);
+    }
   }
   // For a phrase, cap the symbol section to a fraction of the budget so it can
   // never crowd out the literal scan; the string hits lead, the loosely-matching
@@ -166,6 +197,7 @@ export async function searchSymbols(graph: VgGraph, root: string, query: string,
   // the budget the symbol cap freed up and a full count of what's out there
   // (`countAll`), so the caller can trust it for a complete sweep. A single name
   // only falls through on spare budget and stops at the budget, as before.
+  // Scan `scanNeedle` (extracted URL/quote when present), not the full NL ask.
   const spare = limit - symbolHits.length;
   const textHits: TextHit[] = [];
   let truncatedScan = false;
@@ -177,21 +209,26 @@ export async function searchSymbols(graph: VgGraph, root: string, query: string,
   // sweep (the 16s-per-call trace on a large repo). Occurrence sweeps stay one
   // explicit call away (quote it / add whitespace, or use impact_of/get_node
   // callers for reference lists). Non-exact fallthroughs are unchanged.
-  const skipScan = !isPhrase && hasExactSymbolMatch(nodes, q);
+  const skipScan = !isPhrase && hasExactSymbolMatch(nodes, symbolQuery || q);
   if (spare > 0 && !skipScan) {
     const seen = new Set(symbolHits.map((h) => `${h.file}:${h.line}`));
-    const scan = await scanFiles(root, q, spare, seen, textHits, isPhrase);
+    const scan = await scanFiles(root, scanNeedle, spare, seen, textHits, isPhrase);
     truncatedScan = scan.truncated;
     if (isPhrase) totalTextMatches = scan.total;
   }
 
-  const matches = [...symbolHits, ...textHits];
+  // Phrase/URL occurrence answers lead with text hits; symbols are secondary.
+  const matches = isPhrase ? [...textHits, ...symbolHits] : [...symbolHits, ...textHits];
   if (matches.length === 0) {
-    return {
+    const empty: SearchResult = {
       matches,
       moreAvailable: false,
       hint: 'no symbol or text match — for meaning-level questions (symptoms, relationships, what-breaks-if) use query_graph',
     };
+    // Phrase/URL sweeps still report totalTextMatches (including 0) so callers
+    // can tell a complete miss from a symbol-only empty without re-scanning.
+    if (totalTextMatches !== undefined) empty.totalTextMatches = totalTextMatches;
+    return empty;
   }
 
   const literalTruncated = totalTextMatches !== undefined && totalTextMatches > textHits.length;

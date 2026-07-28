@@ -14,6 +14,7 @@
  */
 
 import { loadCatalog, resolveLib, readDoc, localPackageDocs, resolveVersion } from '../engine/lib.js';
+import { searchSymbols } from '../engine/search.js';
 import { applyEdit, type SymbolSpan } from './apply.js';
 import { applyPatchIR, locatorsFromGraph } from './apply-patch-ir.js';
 import { PATCH_IR_SCHEMA_VERSION, validatePatchIR, type PatchIR } from './patch-ir.js';
@@ -58,6 +59,13 @@ export interface ShellResult {
   exitCode: number;
 }
 
+/** Clarifying question for the human (Claude Code / Codex-style follow-up). */
+export interface AskUserRequest {
+  question: string;
+  /** Optional multiple-choice labels (free text always allowed in the host). */
+  options?: string[];
+}
+
 export interface ToolContext {
   root: string;
   graph: VgGraph;
@@ -67,6 +75,11 @@ export interface ToolContext {
   run: (command: string) => ShellResult;
   /** Approval gate for a mutating action. Resolve false to refuse. */
   approve: (action: MutatingAction) => Promise<boolean>;
+  /**
+   * Ask the human a clarifying question and wait for their answer.
+   * Host UIs (VS Code) surface a prompt card; CLI may use stdin / auto default.
+   */
+  askUser?: (req: AskUserRequest) => Promise<string>;
   /** Autonomous mode — enforce the command denylist since no human reviews each call. */
   auto?: boolean;
   /** Project-configured extra denylist rules for autonomous commands. */
@@ -118,8 +131,18 @@ const MAX_OUTPUT = 12_000;
 export const AGENT_TOOLS: ToolSpec[] = [
   {
     name: 'search_code',
-    description: 'Search the codebase by concept or identifier using the deterministic code graph (preferred over reading files blindly). Returns the most relevant symbols with file:line.',
-    parameters: { type: 'object', properties: { query: { type: 'string', description: 'What to find, e.g. "where auth failures are handled"' } }, required: ['query'] },
+    description:
+      'Search the codebase by identifier, concept, or exact string/URL. Uses the deterministic code graph for symbols, plus a literal text sweep for phrases, quoted strings, and URLs (preferred over reading files blindly). For "find every occurrence of …", pass the exact needle (optionally quoted).',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'What to find, e.g. "scanDir", "where auth failures are handled", or a URL / "exact phrase"',
+        },
+      },
+      required: ['query'],
+    },
   },
   {
     name: 'read_file',
@@ -215,13 +238,41 @@ export const AGENT_TOOLS: ToolSpec[] = [
     },
   },
   {
+    name: 'ask_user',
+    description:
+      'Ask the human a clarifying question when intent, scope, or preferred approach is ambiguous. Prefer this over guessing. The host shows the question and returns their answer. Do not use for pure code facts you can look up with search_code/read_file.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'Clear question for the user' },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional short multiple-choice options (user may still type free text)',
+        },
+      },
+      required: ['question'],
+    },
+  },
+  {
     name: 'finish',
-    description: 'Finish the task. Call this when the change is complete, with a short summary of what you did.',
-    parameters: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] },
+    description:
+      'Finish the task. Pass a user-facing summary in Markdown: what changed (or what you found), key file:line refs, and any follow-ups. For Q&A / locate tasks, the summary IS the answer.',
+    parameters: {
+      type: 'object',
+      properties: {
+        summary: {
+          type: 'string',
+          description: 'Markdown summary or answer shown in the VG Code panel',
+        },
+      },
+      required: ['summary'],
+    },
   },
   {
     name: 'abort',
-    description: 'Stop the task without further edits. Use when the request is impossible or the user intent is unclear.',
+    description:
+      'Stop without further edits when the request is impossible. Prefer ask_user when intent is merely unclear.',
     parameters: {
       type: 'object',
       properties: { reason: { type: 'string', description: 'Why the task is aborted' } },
@@ -261,6 +312,8 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
         return inspectChangeTool(ctx, a);
       case 'verify_change':
         return verifyChange(ctx, str(a.command) || undefined);
+      case 'ask_user':
+        return askUser(ctx, str(a.question), arrStr(a.options));
       case 'finish':
         return { content: 'done', mutated: false, finished: true, finalSummary: str(a.summary) || 'done' };
       case 'abort':
@@ -280,8 +333,83 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
 
 /* ── read-only tools (auto-approved) ─────────────────────────────────────── */
 
+async function askUser(ctx: ToolContext, question: string, options?: string[]): Promise<ToolResult> {
+  if (!question.trim()) return { content: 'ask_user needs a question', mutated: false };
+  if (!ctx.askUser) {
+    return {
+      content:
+        'No interactive host for ask_user (headless). Proceed with your best judgment, state assumptions, and call finish — or abort if you cannot continue safely.',
+      mutated: false,
+    };
+  }
+  if (ctx.auto) {
+    return {
+      content:
+        'Autonomous mode: no human available. Proceed with the safest default, state assumptions clearly in finish, and do not block on clarification.',
+      mutated: false,
+    };
+  }
+  try {
+    const answer = await ctx.askUser({
+      question: question.trim(),
+      options: options?.map((o) => o.trim()).filter(Boolean).slice(0, 8),
+    });
+    const text = (answer ?? '').trim();
+    if (!text) {
+      return {
+        content: 'User dismissed the question without answering. Ask once more only if essential; otherwise finish with open questions listed.',
+        mutated: false,
+      };
+    }
+    return { content: `User answered:\n${text}`, mutated: false };
+  } catch (e) {
+    return { content: `ask_user failed: ${(e as Error).message}`, mutated: false };
+  }
+}
+
+function arrStr(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  return v.map((x) => (typeof x === 'string' ? x : String(x ?? ''))).filter(Boolean);
+}
+
 async function search(ctx: ToolContext, query: string): Promise<ToolResult> {
   if (!query) return { content: 'search_code needs a query', mutated: false };
+
+  // Hybrid path (same engine as MCP `search_symbols`): graph name index +
+  // literal phrase/URL sweep. Without this, a URL occurrence search only ran
+  // lexical symbol ranking and returned confidently wrong hubs (field report).
+  if (ctx.root) {
+    try {
+      const hybrid = await searchSymbols(ctx.graph, ctx.root, query, 20);
+      if (hybrid.matches.length > 0) {
+        const lines = hybrid.matches.map((m) => {
+          if ('preview' in m) {
+            return `- text ${m.file}:${m.line}  ${m.preview}`;
+          }
+          return `- ${m.name} (${m.kind}) ${m.file}:${m.line}  score ${m.score}`;
+        });
+        const parts = [`Matches for "${query}":`, ...lines];
+        if (hybrid.totalTextMatches !== undefined) {
+          parts.push(
+            `(${hybrid.totalTextMatches} literal match(es) in tree${hybrid.moreAvailable ? '; list truncated — raise limit or narrow the needle' : ''})`,
+          );
+        }
+        if (hybrid.hint) parts.push(hybrid.hint);
+        return { content: parts.join('\n'), mutated: false };
+      }
+      // Honest empty for a pure string locate (prefer this over graph false positives).
+      if (hybrid.totalTextMatches === 0 || /\s|https?:\/\//i.test(query) || /^["'`]/.test(query.trim())) {
+        const hint = hybrid.hint ? `\n${hybrid.hint}` : '';
+        return {
+          content: `no symbol or text match for "${query}".${hint}`,
+          mutated: false,
+        };
+      }
+    } catch {
+      // Fall through to graph-only backend (e.g. root not a real tree in unit tests).
+    }
+  }
+
   const backend = ctx.graphBackend ?? localGraphBackend(ctx.graph);
   const res = await backend.search(query, { limit: 10 });
   if (res.matches.length === 0) return { content: `no symbols matched "${query}"`, mutated: false };

@@ -37,7 +37,15 @@ import {
 } from './advanced-mode.js';
 import { materializeWorktreeGraph } from './worktree-overlay.js';
 import { buildAgentMessages } from './prompt.js';
-import { AGENT_TOOLS, executeTool, type MutatingAction, type ShellResult, type ToolContext, type ToolResult } from './tools.js';
+import {
+  AGENT_TOOLS,
+  executeTool,
+  type AskUserRequest,
+  type MutatingAction,
+  type ShellResult,
+  type ToolContext,
+  type ToolResult,
+} from './tools.js';
 import { localGraphBackend, type GraphBackend } from './graph-backend.js';
 import type { ModelExecutionProfile } from '../runtime/model-execution-profile.js';
 import { SessionOverlay } from './overlay.js';
@@ -63,6 +71,11 @@ import type { ChatMessage, CodeContext, FileChange, Provider, ProviderResult, To
 import type { VgGraph } from '../schema.js';
 import { redactSecrets } from './providers.js';
 import { patchIrGbnf, shouldUsePatchIrGrammar } from './patch-ir-grammar.js';
+import {
+  answerLocateInstruction,
+  isLocateOnlyInstruction,
+  sanitizeAgentDisplayText,
+} from './locate-answer.js';
 import { buildIdentifierTrieFromGraph } from '../runtime/identifier-trie.js';
 import type { TrieNode } from '../runtime/identifier-trie.js';
 import { graphDraftCandidates, KvBlockRegistry } from '../runtime/kv-cache.js';
@@ -124,6 +137,11 @@ export interface AgentOptions {
   extraPinnedFacts?: string[];
   /** Approval gate for mutating actions. */
   approve: (action: MutatingAction) => Promise<boolean>;
+  /**
+   * Clarifying question for the human (VS Code / stream-json). When omitted,
+   * ask_user tells the model to proceed with assumptions.
+   */
+  askUser?: (req: AskUserRequest) => Promise<string>;
   maxSteps?: number;
   budget?: number;
   /** Approx token budget for the running transcript before it is compacted. */
@@ -140,8 +158,16 @@ export interface AgentOptions {
   stream?: boolean;
   /** A recap of earlier tasks (from `--continue`) to seed continuity. */
   priorSummary?: string;
-  /** External MCP tools the model may also call (already approval-bound). */
-  externalTools?: { specs: ToolSpec[]; owns: (name: string) => boolean; execute: (call: ToolCall) => Promise<ToolResult> };
+  /**
+   * External / built-in MCP tools the model may also call (approval-bound for
+   * non-read-only remote tools). Always include local `vg serve` tools via
+   * {@link createVgBuiltinMcpTools} so the agent has the installed CLI surface.
+   */
+  externalTools?: {
+    specs: ToolSpec[];
+    owns: (name: string) => boolean;
+    execute: (call: ToolCall, live?: { graph: VgGraph }) => Promise<ToolResult>;
+  };
   onEvent?: (e: AgentEvent) => void;
   /** Per-model savings attribution for graph-backed (`search_code`) calls. */
   attribution?: { client: string; provider?: string; model?: string };
@@ -186,6 +212,11 @@ export interface AgentOptions {
    * and stream-json enable this so the map matches uncommitted edits.
    */
   worktreeOverlay?: boolean;
+  /**
+   * When true (default), pure locate/URL-occurrence asks answer from the hybrid
+   * literal sweep without calling the model — avoids PatchIR dumps in the panel.
+   */
+  deterministicLocate?: boolean;
 }
 
 export type AgentStop = 'finished' | 'max-steps' | 'no-tools' | 'no-progress' | 'error';
@@ -293,6 +324,9 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   if (options.testCommand) {
     messages.push({ role: 'user', content: `When you want to verify a change, the project's test command is: \`${options.testCommand}\`` });
   }
+  // Locate-only (URL / "where is …?"): never force PatchIR grammar — the model
+  // would dump JSON edits into the panel. Prefer a deterministic literal answer.
+  const locateOnly = isLocateOnlyInstruction(instruction);
   const spans = buildSpanIndex(graph);
 
   const changes: FileChange[] = [];
@@ -316,6 +350,61 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const capsuleSummary = capsule ? summarizeCapsule(capsule) : null;
   if (capsuleSummary) onEvent({ type: 'capsule', summary: capsuleSummary });
 
+  // Deterministic locate short-circuit: correct file:line without model noise
+  // (and without PatchIR / identifier-annotation dumps in the VG Code panel).
+  if (locateOnly && options.deterministicLocate !== false) {
+    try {
+      const locate = await answerLocateInstruction(graph, root, instruction, 30);
+      providerInfo = { id: 'deterministic-locate', model: 'literal-sweep', fellBack: false };
+      onEvent({ type: 'assistant', text: locate.summary });
+      const traj = trajectory.finalize({
+        taskId: instruction.slice(0, 48),
+        arm: capsule ? 'capsule' : 'metadata',
+        solved: true,
+        verified: true,
+        steps: 0,
+        stopped: 'finished',
+        inferenceTurns: 0,
+        filesChanged: 0,
+        usedCapsule: !!capsule,
+        provider: { id: 'deterministic-locate', model: 'literal-sweep' },
+      });
+      const earlyMetrics: AgentMetrics = {
+        discoveryToolCalls: 0,
+        mutationToolCalls: 0,
+        shellCommands: 0,
+        znsAt1: true,
+        usedCapsule: !!capsule,
+        failureCapsuleBuilt: false,
+        trajectory: traj,
+      };
+      onEvent({ type: 'metrics', metrics: earlyMetrics });
+      return {
+        finalText: locate.summary,
+        changes: [],
+        steps: 0,
+        stopped: 'finished',
+        provider: providerInfo,
+        usage,
+        metrics: earlyMetrics,
+        failureCapsule: null,
+        capsuleSummary,
+        provenance: buildRunProvenance({
+          modelProfileId: options.modelProfile?.id ?? capsule?.provenance.modelProfileId ?? null,
+          securityTier:
+            options.executionEnv?.tier ?? options.modelProfile?.securityTier ?? capsule?.provenance.securityTier ?? null,
+          graphCorpusHash: capsule?.provenance.graphCorpusHash ?? graph.provenance?.corpusHash ?? null,
+          rankingVersion: capsule?.provenance.rankingVersion ?? CAPSULE_RANKING_VERSION,
+          policyVersion: capsule?.provenance.policyVersion ?? CONTEXT_POLICY_VERSION,
+          changes: [],
+          verification: [],
+        }),
+      };
+    } catch {
+      /* fall through to the model loop if the tree scan fails */
+    }
+  }
+
   const runShell = (command: string): ShellResult => {
     if (options.executionEnv) return options.executionEnv.run(command, { cwd: root });
     return options.run(command);
@@ -328,6 +417,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     spans,
     run: runShell,
     approve: options.approve,
+    askUser: options.askUser,
     auto: options.auto,
     denyCommands: options.denyCommands,
     capsule,
@@ -580,6 +670,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         identifierTrie,
         draftCandidates,
         promptSegments,
+        /* skipPatchIrGrammar */ locateOnly,
       );
       result = c.result;
       providerInfo = { id: c.provider.id, model: c.provider.model, fellBack: c.fellBack };
@@ -597,12 +688,18 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       onEvent({ type: 'usage', promptTokens: result.usage.promptTokens ?? 0, completionTokens: result.usage.completionTokens ?? 0 });
     }
 
-    if (result.text) onEvent({ type: 'assistant', text: result.text });
+    const displayText = sanitizeAgentDisplayText(result.text ?? '');
+    if (displayText) onEvent({ type: 'assistant', text: displayText });
 
     const toolCalls = result.toolCalls ?? [];
     if (toolCalls.length === 0) {
       messages.push({ role: 'assistant', content: result.text });
-      return finish('no-tools', result.text, step);
+      // Clean prose/Markdown answer (Q&A, explanations) is a successful finish —
+      // same as Claude Code free-text, not a failed no-tools dump.
+      if (isUserFacingProse(displayText)) {
+        return finish('finished', displayText, step);
+      }
+      return finish('no-tools', displayText || 'done', step);
     }
 
     messages.push({ role: 'assistant', content: result.text, toolCalls });
@@ -632,7 +729,9 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         }
       }
 
-      const toolResult = options.externalTools?.owns(call.name) ? await options.externalTools.execute(call) : await executeTool(call, ctx);
+      const toolResult = options.externalTools?.owns(call.name)
+        ? await options.externalTools.execute(call, { graph: ctx.graph })
+        : await executeTool(call, ctx);
       if (!options.externalTools?.owns(call.name)) {
         recordDiscoveryGateOutcome(call.name, discoveryGate, { mutated: toolResult.mutated });
       }
@@ -689,10 +788,13 @@ async function complete(
   identifierTrie?: TrieNode,
   draftCandidates?: string[],
   promptSegments?: Array<{ kind: string; text: string }>,
+  skipPatchIrGrammar = false,
 ): Promise<{ result: ProviderResult; provider: Provider; fellBack: boolean }> {
   if (providers.length === 0) throw new Error('no model provider available');
   const onToken = stream ? (t: string): void => onEvent({ type: 'token', text: t }) : undefined;
-  const grammar = shouldUsePatchIrGrammar(modelProfile) ? patchIrGbnf() : undefined;
+  // Locate/Q&A must not use PatchIR GBNF — that forces edit JSON into the panel.
+  const grammar =
+    !skipPatchIrGrammar && shouldUsePatchIrGrammar(modelProfile) ? patchIrGbnf() : undefined;
   // Fail-closed on embedded path when pack requires constrained decoding.
   const requireGrammar = !!(
     grammar &&
@@ -847,6 +949,16 @@ function writeAgentAudit(
   } catch {
     /* audit is best-effort — never fail a run on a logging problem */
   }
+}
+
+/** True when model text is a real answer, not empty/PatchIR/tool JSON. */
+function isUserFacingProse(text: string): boolean {
+  const t = (text ?? '').trim();
+  if (t.length < 12) return false;
+  if (/"schemaVersion"\s*:\s*"patch-ir\/0"/i.test(t)) return false;
+  if (/^\s*\{[\s\S]*"operations"\s*:/.test(t)) return false;
+  if (!/[A-Za-z]{4,}/.test(t)) return false;
+  return true;
 }
 
 /** Deterministic argument signature for the repeat guard (order-independent). */

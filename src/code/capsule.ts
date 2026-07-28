@@ -22,7 +22,8 @@ import { buildCodeContext, type BuildContextOptions } from './context.js';
 
 export const TASK_CAPSULE_SCHEMA_VERSION = 'task-capsule/0' as const;
 /** Frozen ranking policy id — bump when the heuristic changes (benchmark gate). */
-export const CAPSULE_RANKING_VERSION = 'capsule-rank@2026.07.0' as const;
+/** Bumped 2026.07.1: strip URL/quoted needles from seed ranking (no path-token false positives). */
+export const CAPSULE_RANKING_VERSION = 'capsule-rank@2026.07.1' as const;
 export const CAPSULE_COMPILER_ID = 'vg-task-capsule/0' as const;
 
 export interface BuildCapsuleOptions extends BuildContextOptions {
