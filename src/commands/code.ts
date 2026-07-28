@@ -83,14 +83,19 @@ export function registerCode(program: Command): void {
       // Project config (.vibgrate/code.json): flags win, then the file, then
       // built-in defaults — so an indie dev sets model/preferences once.
       const config = loadCodeConfig(rootOf(global));
-      // Code Mode resolution: --mode / config.modelProfile.mode → pack → provider+model
-      // when the user did not pass an explicit --model. Escape hatch: --model still wins.
+      // Code Mode resolution: --mode / config.modelProfile.mode → pack → Vibgrate manager.
+      // Explicit --provider / --model is the custom escape hatch (Ollama, LM Studio, hosted).
       let provider = opts.provider ?? config.provider;
       let model = opts.model ?? config.model;
       const modeFlag = opts.mode ?? config.modelProfile?.mode;
-      if (!opts.model && !opts.modelPath && (modeFlag || (!provider && !model))) {
+      /** True when this run is a Code Mode (spark|flow|forge) on the Vibgrate manager. */
+      let codeModeActive = false;
+      /** True when the user (or config) explicitly chose a non-mode provider/model. */
+      const customSelection = !!(opts.provider || opts.model || opts.modelPath || config.provider || config.model);
+      // Code Mode only when the user did not pick a custom provider/model (flags or config).
+      if (!customSelection && (modeFlag || (!provider && !model))) {
         try {
-          const { parseMode, resolveMode, readOrchestratorState, activePin, providerForBackend } =
+          const { parseMode, resolveMode, readOrchestratorState, activePin } =
             await import('../runtime/model-orchestrator.js');
           const { gatherSystemMemory } = await import('../code/local-runtime.js');
           const { loadGraph } = await import('../engine/load.js');
@@ -123,32 +128,37 @@ export function registerCode(program: Command): void {
               ExitCode.ERROR,
             );
           }
-          // Approach B: prefer embedded GGUF when on disk; else fall back to Ollama pack entry.
+          // Code Modes always use the first-party Vibgrate manager (embedded GGUF).
           const { resolveGgufPath } = await import('../runtime/resolve-gguf.js');
+          const primaryRef =
+            resolved.pack.primary.backend === 'llama.cpp'
+              ? resolved.pack.primary.weightsRef
+              : resolved.underlying.weightsRef;
           const gguf =
             resolveGgufPath({
-              modelRef: resolved.underlying.weightsRef,
+              modelRef: primaryRef,
               modelPath: opts.modelPath,
             }) ??
             resolveGgufPath({
-              modelRef: resolved.pack.primary.backend === 'llama.cpp' ? resolved.pack.primary.weightsRef : undefined,
+              modelRef: resolved.underlying.weightsRef,
+              modelPath: opts.modelPath,
             });
-          if (gguf && !opts.provider) {
+          if (!gguf && !opts.mock) {
+            throw new CliError(
+              `Code Mode ${resolved.mode} uses the Vibgrate model manager — weights not installed. Run \`vg models install ${resolved.mode}\` then retry. (Custom Ollama/LM Studio: pass --provider explicitly.)`,
+              ExitCode.NOT_FOUND,
+            );
+          }
+          if (gguf) {
+            codeModeActive = true;
             provider = 'llama-cpp';
-            model = model ?? gguf.ref ?? resolved.underlying.weightsRef;
+            model = model ?? gguf.ref ?? primaryRef;
             opts.modelPath = gguf.path;
             if (!global.json && !global.quiet && !opts.streamJson) {
               info(
-                `${c.cyan('vg code')} · Code Mode ${c.bold(resolved.mode)} → embedded llama.cpp ${c.dim(gguf.path)} ${c.dim(`(${resolved.fit.label})`)}`,
+                `${c.cyan('vg code')} · Code Mode ${c.bold(resolved.mode)} → Vibgrate manager ${c.dim(gguf.path)} ${c.dim(`(${resolved.fit.label})`)}`,
               );
             }
-          } else {
-            const ollamaFb =
-              resolved.underlying.backend === 'ollama'
-                ? resolved.underlying
-                : resolved.pack.fallback?.find((f) => f.backend === 'ollama') ?? resolved.underlying;
-            provider = provider ?? providerForBackend(ollamaFb.backend);
-            model = model ?? ollamaFb.weightsRef;
           }
           // Merge pack contract into profile overrides when config did not set budget.
           if (!config.modelProfile?.capsuleBudgetTokens) {
@@ -162,11 +172,6 @@ export function registerCode(program: Command): void {
             };
           } else if (!config.modelProfile?.mode) {
             config.modelProfile = { ...config.modelProfile, mode: resolved.mode };
-          }
-          if (!global.json && !global.quiet && !opts.streamJson && provider !== 'llama-cpp') {
-            info(
-              `${c.cyan('vg code')} · Code Mode ${c.bold(resolved.mode)} → ${resolved.underlying.weightsRef} ${c.dim(`(${resolved.fit.label})`)}`,
-            );
           }
         } catch (e) {
           if (e instanceof CliError) throw e;
@@ -239,14 +244,41 @@ export function registerCode(program: Command): void {
           model,
           modelPath: opts.modelPath,
           local: global.local,
-          consent: opts.yes,
+          consent: opts.yes || codeModeActive || customSelection,
           mockReply,
+          codeMode: codeModeActive,
+          preferEmbedded: codeModeActive || undefined,
         },
         {},
       );
 
+      // Ensure installable runtime packages for the chosen manager (silent when
+      // Code Mode or user-selected custom backend; never installs desktop apps).
+      if (!opts.mock && route.providers[0]) {
+        const { ensureManagerRuntime } = await import('../runtime/model-manager.js');
+        const ensure = await ensureManagerRuntime({
+          providerId: route.providers[0].id,
+          model: route.providers[0].model,
+          offline: !!global.local,
+          // Code Mode / explicit custom selection / --yes count as consent for
+          // npm runtime deps (and ollama pull when the binary is already present).
+          consent: !!(opts.yes || codeModeActive || customSelection || process.stdin.isTTY),
+          onProgress: (line) => {
+            if (!global.json && !global.quiet && !opts.streamJson) info(c.dim(`  ${line}`));
+          },
+        });
+        if (!ensure.ok) {
+          throw new CliError(ensure.error ?? 'model manager runtime not ready', ExitCode.ERROR);
+        }
+        if (!global.json && !global.quiet && !opts.streamJson && (ensure.installed.length || ensure.pulled.length)) {
+          for (const s of ensure.installed) info(c.dim(`  installed ${s}`));
+          for (const s of ensure.pulled) info(c.dim(`  pulled ${s}`));
+        }
+      }
+
       if (!global.json && !global.quiet) {
         info(`${c.cyan('vg code')} · ${c.dim(route.reason)}`);
+        info(`${c.cyan('vg code')} · manager ${c.bold(route.managerLine)}`);
       }
 
       // `--stream-json`: the machine protocol for host UIs (the VS Code panel).

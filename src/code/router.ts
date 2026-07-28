@@ -15,11 +15,19 @@
  *   - **`--local` stays local.** Under `--local` only on-device backends are
  *     eligible; if none are available it fails with an actionable message rather
  *     than silently reaching the network.
+ *   - **Code Modes stay on the Vibgrate manager.** When {@link RouteOptions.codeMode}
+ *     is set, routing is fail-closed to embedded llama.cpp (first-party GGUF).
+ *     Ollama / LM Studio are never auto-selected for Code Modes.
  */
 
 import { CliError, ExitCode } from '../util/exit.js';
 import { discoverModels, type LocalModel } from '../engine/models.js';
 import { resolveGgufPath } from '../runtime/resolve-gguf.js';
+import {
+  formatManagerBadgeLine,
+  managerFromProviderId,
+  type ModelManagerId,
+} from '../runtime/model-manager.js';
 import {
   LocalLlamaProvider,
   MockProvider,
@@ -43,9 +51,14 @@ export interface RouteOptions {
   modelPath?: string;
   /**
    * Prefer embedded llama.cpp when a GGUF is resolvable (Code Mode preferredInference).
-   * Still falls back to Ollama/LM Studio.
+   * When false, Ollama may be tried first (VG_PREFER_OLLAMA).
    */
   preferEmbedded?: boolean;
+  /**
+   * Code Mode path (spark|flow|forge): fail-closed to the Vibgrate model manager.
+   * Never auto-routes to Ollama / LM Studio / hosted.
+   */
+  codeMode?: boolean;
   /** A scripted reply → force the deterministic MockProvider (tests/`--mock`). */
   mockReply?: string;
 }
@@ -60,6 +73,10 @@ export interface RouteResult {
   providers: Provider[];
   /** A short, human explanation of the choice (for the run header / --json). */
   reason: string;
+  /** Manager identity for the primary provider (badge / UX). */
+  manager: ModelManagerId;
+  /** e.g. "[Vibgrate] Code Mode · first-party model manager …" */
+  managerLine: string;
 }
 
 const HOSTED_IDS = new Set(['openrouter', 'litellm', 'openai', 'together']);
@@ -71,26 +88,51 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
 
   // Deterministic offline floor — used by tests, the benchmark, and `--mock`.
   if (opts.mockReply !== undefined) {
-    return { providers: [new MockProvider(opts.model ?? 'mock-1', opts.mockReply)], reason: 'mock provider (scripted, offline)' };
+    const providers = [new MockProvider(opts.model ?? 'mock-1', opts.mockReply)];
+    return finish(providers, 'mock provider (scripted, offline)');
+  }
+
+  // Code Modes: Vibgrate manager only (embedded GGUF). No third-party auto-route.
+  if (opts.codeMode && !opts.provider) {
+    const gguf = resolveGgufPath({
+      modelPath: opts.modelPath || env.VG_CODE_MODEL_PATH,
+      modelRef: opts.model,
+      env,
+      discover,
+    });
+    if (!gguf) {
+      throw new CliError(
+        'Code Mode needs the Vibgrate model manager weights on disk. Run `vg models install spark|flow|forge` (or pass --model-path to a GGUF). Custom Ollama/LM Studio backends are only used when you set --provider explicitly.',
+        ExitCode.NOT_FOUND,
+      );
+    }
+    const providers = [
+      new LocalLlamaProvider(opts.model ?? basename(gguf.path), gguf.path, undefined, !!opts.consent),
+    ];
+    return finish(providers, `Code Mode → Vibgrate model manager (embedded llama.cpp · ${gguf.path})`);
   }
 
   // Explicit provider wins.
   if (opts.provider) {
     const provider = buildExplicit(opts.provider, opts, env, discover);
-    const fallbacks = opts.local || provider.local ? localFallbacks(opts, env, discover, provider.id) : [];
-    return { providers: [provider, ...fallbacks], reason: `explicit --provider ${opts.provider}` };
+    // Custom path: only fall through to other *local* adapters when --local, never LM Studio unless chosen.
+    const fallbacks =
+      opts.local || provider.local
+        ? localFallbacks(opts, env, discover, provider.id, { allowLmStudio: opts.provider === 'lmstudio' })
+        : [];
+    return finish([provider, ...fallbacks], `explicit --provider ${opts.provider}`);
   }
 
-  // --local: on-device only, in preference order.
+  // --local: on-device only, in preference order (embedded → ollama; no surprise LM Studio).
   if (opts.local) {
-    const locals = localFallbacks(opts, env, discover, '');
+    const locals = localFallbacks(opts, env, discover, '', { allowLmStudio: false });
     if (locals.length === 0) {
       throw new CliError(
-        'no local model backend available for --local. Start Ollama (`ollama serve` + `ollama pull <model>`), run LM Studio, or point --provider llama-cpp at a gguf. See `vg models`.',
+        'no local model backend available for --local. Install a Code Mode (`vg models install spark`), start Ollama (`ollama serve` + pull), or point --provider llama-cpp at a gguf. See `vg models`.',
         ExitCode.NOT_FOUND,
       );
     }
-    return { providers: locals, reason: '--local (on-device backends only)' };
+    return finish(locals, '--local (on-device backends only)');
   }
 
   // No explicit selection: choose from signals already present, best first.
@@ -98,29 +140,43 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
   if (env.OPENROUTER_API_KEY) {
     const model = resolveHostedModel(opts, env, 'openrouter');
     const primary = buildHosted('openrouter', model);
-    return { providers: [primary, ...localFallbacks(opts, env, discover, 'openrouter')], reason: 'OPENROUTER_API_KEY is set → OpenRouter (with local fallback)' };
+    return finish(
+      [primary, ...localFallbacks(opts, env, discover, 'openrouter', { allowLmStudio: false })],
+      'OPENROUTER_API_KEY is set → OpenRouter (with local fallback)',
+    );
   }
-  // 2) A locally-pulled model.
-  const locals = localFallbacks(opts, env, discover, '');
-  if (locals.length) return { providers: locals, reason: 'a local model is available → on-device (no key needed)' };
+  // 2) A locally-pulled model (embedded first; never auto LM Studio).
+  const locals = localFallbacks(opts, env, discover, '', { allowLmStudio: false });
+  if (locals.length) return finish(locals, 'a local model is available → on-device (no key needed)');
   // 3) Any other configured hosted key.
   for (const id of ['litellm', 'openai', 'together'] as const) {
     const keyEnv = OPENAI_COMPATIBLE[id].apiKeyEnv;
     if (keyEnv && env[keyEnv]) {
       const model = resolveHostedModel(opts, env, id);
-      return { providers: [buildHosted(id, model)], reason: `${keyEnv} is set → ${OPENAI_COMPATIBLE[id].label}` };
+      return finish([buildHosted(id, model)], `${keyEnv} is set → ${OPENAI_COMPATIBLE[id].label}`);
     }
   }
 
   throw new CliError(
-    'no model backend configured. Do one of: set OPENROUTER_API_KEY for the hosted router, run Ollama locally (`ollama serve`), or use --local with a local model. Set the model with --model or VG_CODE_MODEL. (No models are installed by default.)',
+    'no model backend configured. Do one of: set OPENROUTER_API_KEY for the hosted router, run `vg models install spark` for the Vibgrate manager, run Ollama locally, or use --local with a local model. Set the model with --model or VG_CODE_MODEL.',
     ExitCode.NOT_FOUND,
   );
 }
 
+function finish(providers: Provider[], reason: string): RouteResult {
+  const primary = providers[0];
+  const manager = managerFromProviderId(primary?.id);
+  return {
+    providers,
+    reason,
+    manager,
+    managerLine: formatManagerBadgeLine(manager, primary?.model),
+  };
+}
+
 function buildExplicit(id: string, opts: RouteOptions, env: NodeJS.ProcessEnv, discover: () => LocalModel[]): Provider {
   if (id === 'ollama') return new OllamaProvider(resolveLocalModel(opts, discover, 'ollama'), env.OLLAMA_HOST);
-  if (id === 'llama-cpp') {
+  if (id === 'llama-cpp' || id === 'vibgrate') {
     const resolved = resolveGgufPath({
       modelPath: opts.modelPath || env.VG_CODE_MODEL_PATH,
       modelRef: opts.model,
@@ -152,8 +208,19 @@ function buildHosted(id: string, model: string): OpenAiCompatibleProvider {
   return new OpenAiCompatibleProvider(model, config);
 }
 
+interface LocalFallbackOpts {
+  /** Only include LM Studio when the user explicitly asked for it. */
+  allowLmStudio: boolean;
+}
+
 /** On-device backends in preference order, skipping the one already chosen as primary. */
-function localFallbacks(opts: RouteOptions, env: NodeJS.ProcessEnv, discover: () => LocalModel[], exclude: string): Provider[] {
+function localFallbacks(
+  opts: RouteOptions,
+  env: NodeJS.ProcessEnv,
+  discover: () => LocalModel[],
+  exclude: string,
+  fb: LocalFallbackOpts,
+): Provider[] {
   const out: Provider[] = [];
   const models = safeDiscover(discover);
 
@@ -164,7 +231,7 @@ function localFallbacks(opts: RouteOptions, env: NodeJS.ProcessEnv, discover: ()
     env.VIBGRATE_PREFER_OLLAMA === '1' ||
     opts.preferEmbedded === false;
   const gguf =
-    exclude === 'llama-cpp'
+    exclude === 'llama-cpp' || exclude === 'vibgrate'
       ? null
       : resolveGgufPath({
           modelPath: opts.modelPath || env.VG_CODE_MODEL_PATH,
@@ -179,9 +246,13 @@ function localFallbacks(opts: RouteOptions, env: NodeJS.ProcessEnv, discover: ()
 
   const ollamaModel = opts.model ?? firstOfRuntime(models, 'ollama');
   if (exclude !== 'ollama' && ollamaModel) out.push(new OllamaProvider(ollamaModel, env.OLLAMA_HOST));
-  // LM Studio serves an OpenAI-compatible endpoint locally; include if a model id is known.
-  const lmModel = opts.model ?? firstOfRuntime(models, 'lm-studio');
-  if (exclude !== 'lmstudio' && lmModel) out.push(buildHosted('lmstudio', lmModel));
+
+  // LM Studio only when explicitly allowed (user chose --provider lmstudio).
+  if (fb.allowLmStudio && exclude !== 'lmstudio') {
+    const lmModel = opts.model ?? firstOfRuntime(models, 'lm-studio');
+    if (lmModel) out.push(buildHosted('lmstudio', lmModel));
+  }
+
   // Foundry Local when server/env is configured.
   if (exclude !== 'foundry-local' && exclude !== 'foundry' && (env.FOUNDRY_LOCAL_BASE_URL || env.VG_CODE_PROVIDER === 'foundry-local')) {
     try {

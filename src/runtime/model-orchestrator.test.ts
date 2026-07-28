@@ -139,8 +139,13 @@ describe('resolveMode / recommendMode', () => {
     const spark = status.modes.find((m) => m.mode === 'spark')!;
     expect(spark.installed).toBe(true);
     expect(spark.backend).toBe('llama.cpp');
+    const forge = packForMode('forge')!;
+    expect(forge.primary.backend).toBe('llama.cpp');
+    expect(forge.primary.weightsRef).toMatch(/14b/);
+    expect(forge.contract.preferredInference).toBe('llama.cpp');
   });
 });
+
 
 describe('pin registry', () => {
   let tmp: string;

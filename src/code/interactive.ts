@@ -188,7 +188,29 @@ async function preflightAndPull(selection: WizardResult, prompter: Prompter): Pr
 /** The coding REPL: a graph-grounded agent per task, plus slash-commands (/help, /undo, …). */
 async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOptions, selection: WizardResult, prompter: Prompter): Promise<void> {
   let sel = selection;
-  let route = resolveProviders({ provider: sel.provider, model: sel.model, local: sel.kind === 'local' || global.local });
+  let route = resolveProviders({
+    provider: sel.provider,
+    model: sel.model,
+    local: sel.kind === 'local' || global.local,
+    consent: true, // interactive selection is consent for manager runtime deps
+  });
+  try {
+    const { ensureManagerRuntime } = await import('../runtime/model-manager.js');
+    const ensure = await ensureManagerRuntime({
+      providerId: route.providers[0]?.id ?? sel.provider,
+      model: route.providers[0]?.model ?? sel.model,
+      offline: !!global.local,
+      consent: true,
+    });
+    if (!ensure.ok) prompter.note(c.yellow(ensure.error ?? 'model manager not ready'));
+    else if (ensure.installed.length || ensure.pulled.length) {
+      for (const s of ensure.installed) prompter.note(c.dim(`installed ${s}`));
+      for (const s of ensure.pulled) prompter.note(c.dim(`pulled ${s}`));
+    }
+    prompter.note(c.dim(`manager ${route.managerLine}`));
+  } catch {
+    /* non-fatal — route still usable */
+  }
   const fsImpl = nodeCodeFs(root);
   const meter = new SessionMeter();
   let lastChanges: FileChange[] = [];
@@ -312,7 +334,12 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
           const swapped = await reselectModel(root, global, prompter);
           if (swapped) {
             sel = swapped;
-            route = resolveProviders({ provider: sel.provider, model: sel.model, local: sel.kind === 'local' || global.local });
+            route = resolveProviders({
+              provider: sel.provider,
+              model: sel.model,
+              local: sel.kind === 'local' || global.local,
+              consent: true,
+            });
             prompter.note(c.green(`now using ${sel.providerSlug}/${sel.model}`));
           }
         } else if (cmd === 'cost') {

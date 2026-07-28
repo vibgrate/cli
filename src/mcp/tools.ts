@@ -532,9 +532,15 @@ export const TOOLS: VgTool[] = [
   {
     name: 'get_facts',
     description: 'Deterministic facts for a node (contract / invariant / characterization).',
-    inputSchema: obj({ name: { type: 'string' } }, ['name']),
+    inputSchema: obj(
+      {
+        name: { type: 'string' },
+        pick: { type: 'number', description: 'nth candidate if ambiguous' },
+      },
+      ['name'],
+    ),
     handler: (graph, args) => {
-      const { node, candidates } = resolveOne(graph, String(args.name ?? ''));
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
       if (!node) return unresolved(candidates);
       if (!graph.facts) {
         return {
@@ -549,9 +555,15 @@ export const TOOLS: VgTool[] = [
   {
     name: 'guide_node',
     description: 'Cited standards/practices for a node (OWASP/CWE).',
-    inputSchema: obj({ name: { type: 'string' } }, ['name']),
+    inputSchema: obj(
+      {
+        name: { type: 'string' },
+        pick: { type: 'number', description: 'nth candidate if ambiguous' },
+      },
+      ['name'],
+    ),
     handler: (graph, args) => {
-      const { node, candidates } = resolveOne(graph, String(args.name ?? ''));
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
       if (!node) return unresolved(candidates);
       const entries = new Map(FREE_PACK.entries.map((e) => [e.id, e]));
       return {
@@ -763,17 +775,30 @@ export const TOOLS: VgTool[] = [
           : 'balanced';
       const budget = numOrU(args.max_tokens) ?? numOrU(args.tokens) ?? VERBOSITY_BUDGET[verbosity];
       const ver = resolveVersion(ctx.root, id);
-      const render = (readme: string, libName: string) => {
-        const apiSurface = localApiSurface(ctx.root, libName);
-        const sel = selectForBudget({ readme, query, apiSurface, budget });
-        // Quality gate (D18): assess the FULL local extraction (README + API surface), not the
-        // budget-trimmed slice — this decides whether the local doc can answer at all. When it
-        // can't (no example / stub / query keywords absent), the hosted-catalog escalation
-        // below answers instead (unless the server runs air-gapped with --local).
-        const quality = assessDocQuality([readme, apiSurface].filter(Boolean).join('\n\n'), {
+      // Focused question for quality/API slicing: strip a leading package id so
+      // "hono createMiddleware" still looks for createMiddleware in types.
+      const focusQuery = (() => {
+        const q = query.trim();
+        if (!q) return q;
+        const bare = id.replace(/^@[^/]+\//, '').toLowerCase();
+        const parts = q.split(/\s+/);
+        if (parts.length > 1 && parts[0].toLowerCase().replace(/^@[^/]+\//, '') === bare) {
+          return parts.slice(1).join(' ');
+        }
+        return q;
+      })();
+      const render = (readme: string, libName: string, readmeOnly?: boolean) => {
+        // Query-aware .d.ts surface so focused API questions pull matching signatures.
+        const apiSurface = localApiSurface(ctx.root, libName, focusQuery || undefined);
+        const sel = selectForBudget({ readme, query: focusQuery || query, apiSurface, budget });
+        // Quality gate (D18): assess what we actually serve (selected slice) so
+        // agents are not told "sufficient" for a truncated README that never
+        // answered the question. Escalation still uses this verdict.
+        const quality = assessDocQuality(sel.text, {
           name: libName,
-          query,
+          query: focusQuery || query || undefined,
           symbols: symbolsFromApi(apiSurface),
+          readmeOnly: readmeOnly === true && !apiSurface,
         });
         return {
           content: sel.text,
@@ -792,7 +817,7 @@ export const TOOLS: VgTool[] = [
       let answer: Record<string, unknown> | null = null;
       let sufficient = false;
       if (entry) {
-        const r = render(readDoc(ctx.root, entry), entry.name);
+        const r = render(readDoc(ctx.root, entry), entry.name, false);
         sufficient = r.metadata.quality.sufficient;
         answer = {
           targetId: entry.id,
@@ -806,9 +831,9 @@ export const TOOLS: VgTool[] = [
           metadata: r.metadata,
         };
       } else {
-        const local = localPackageDocs(ctx.root, id);
+        const local = localPackageDocs(ctx.root, id, { query: focusQuery || query || undefined });
         if (local) {
-          const r = render(local.docs, id);
+          const r = render(local.docs, id, local.readmeOnly);
           sufficient = r.metadata.quality.sufficient;
           answer = {
             targetId: id,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { assessDocQuality } from '../src/engine/quality.js';
+import { assessDocQuality, identifierTerms } from '../src/engine/quality.js';
 
 /** A rich, on-topic README: name + runnable example + real prose + the queried symbol. */
 function richReadme(): string {
@@ -18,7 +18,8 @@ function richReadme(): string {
 
 describe('assessDocQuality — the local→hosted fall-through gate', () => {
   it('passes a rich, on-topic README (code + length + name + query)', () => {
-    const q = assessDocQuality(richReadme(), { name: 'acme-client', query: 'send a request' });
+    // Query terms that actually appear in the README (send + streaming).
+    const q = assessDocQuality(richReadme(), { name: 'acme-client', query: 'send streaming' });
     expect(q.sufficient).toBe(true);
     expect(q.reasons).toEqual([]);
     expect(q.score).toBeGreaterThan(3);
@@ -65,5 +66,56 @@ describe('assessDocQuality — the local→hosted fall-through gate', () => {
     const a = assessDocQuality(richReadme(), { name: 'acme-client', query: 'send' });
     const b = assessDocQuality(richReadme(), { name: 'acme-client', query: 'send' });
     expect(a).toEqual(b);
+  });
+
+  it('fails when an identifier-shaped API term is missing (createMiddleware)', () => {
+    // Generic README mentions "middleware" but never createMiddleware.
+    const readme = [
+      '# hono',
+      'Ultrafast web framework.',
+      '```ts',
+      'import { Hono } from "hono"',
+      'const app = new Hono()',
+      'app.use("*", async (c, next) => { await next() })',
+      '```',
+      'It has middleware helpers and JWT utilities described at a high level only.',
+      'Plenty of prose so we clear the token floor for the quality gate.',
+    ].join('\n');
+    const q = assessDocQuality(readme, { name: 'hono', query: 'createMiddleware' });
+    expect(q.sufficient).toBe(false);
+    expect(q.reasons.some((r) => r.includes('createMiddleware') || r.includes('API symbol'))).toBe(true);
+  });
+
+  it('does not green-light a multi-term query on a single word overlap', () => {
+    const readme = [
+      '# hono',
+      'Ultrafast web framework with middleware support.',
+      '```ts',
+      'import { Hono } from "hono"',
+      'const app = new Hono()',
+      '```',
+      'Middleware runs in order. Nothing here covers bearer tokens or signed cookies.',
+      'More filler text to clear the token floor for the quality gate assessment.',
+    ].join('\n');
+    // "middleware" is present; "websocket" is not → strict majority of 2 fails.
+    const q = assessDocQuality(readme, { name: 'hono', query: 'websocket middleware' });
+    expect(q.sufficient).toBe(false);
+    expect(q.reasons.some((r) => r.includes('query terms weak') || r.includes('absent'))).toBe(true);
+  });
+
+  it('README-only + focused API query is never sufficient', () => {
+    const q = assessDocQuality(richReadme(), {
+      name: 'acme-client',
+      query: 'createMiddleware',
+      readmeOnly: true,
+    });
+    expect(q.sufficient).toBe(false);
+    expect(q.score).toBeLessThanOrEqual(4);
+    expect(q.reasons.some((r) => r.includes('README-only') || r.includes('API symbol'))).toBe(true);
+  });
+
+  it('identifierTerms extracts camelCase API symbols', () => {
+    expect(identifierTerms('hono createMiddleware JWT')).toContain('createMiddleware');
+    expect(identifierTerms('send a request')).toEqual([]);
   });
 });

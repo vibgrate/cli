@@ -38,8 +38,31 @@ describe('resolveProviders', () => {
     try {
       resolveProviders({}, { env: {}, discover: noModels });
     } catch (e) {
-      expect((e as Error).message).toMatch(/OPENROUTER_API_KEY|Ollama|--local/);
+      expect((e as Error).message).toMatch(/OPENROUTER_API_KEY|models install|Ollama|--local/i);
     }
+  });
+
+  it('Code Mode is fail-closed to the Vibgrate manager (no LM Studio / Ollama auto-route)', () => {
+    expect(() =>
+      resolveProviders({ codeMode: true, model: 'qwen2.5-coder-3b-q4_k_m.gguf' }, { env: {}, discover: withOllama }),
+    ).toThrow(/Vibgrate model manager|models install/i);
+  });
+
+  it('never auto-selects LM Studio even when lm-studio GGUFs are discovered', () => {
+    const withLm = (): LocalModel[] => [
+      { runtime: 'lm-studio', name: 'someone/model.gguf', path: '/lm/model.gguf' },
+      { runtime: 'ollama', name: 'qwen2.5-coder:7b', path: '/x' },
+    ];
+    const r = resolveProviders({}, { env: {}, discover: withLm });
+    expect(r.providers.every((p) => p.id !== 'lmstudio')).toBe(true);
+    expect(r.manager).toBe('ollama');
+    expect(r.managerLine).toMatch(/\[Ollama\]/);
+  });
+
+  it('exposes a manager badge for explicit custom providers', () => {
+    const r = resolveProviders({ provider: 'ollama' }, { env: {}, discover: withOllama });
+    expect(r.manager).toBe('ollama');
+    expect(r.managerLine).toMatch(/\[Ollama\]/);
   });
 
   it('--local with no local backend fails rather than reaching the network', () => {
@@ -84,9 +107,39 @@ describe('resolveProviders', () => {
         },
       );
       expect(r.providers[0].id).toBe('llama-cpp');
+      expect(r.manager).toBe('vibgrate');
+      expect(r.managerLine).toMatch(/\[Vibgrate\]/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Code Mode with a resolvable GGUF uses only the Vibgrate manager', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-route-cm-'));
+    const file = path.join(dir, 'qwen2.5-coder-3b-q4_k_m.gguf');
+    fs.writeFileSync(file, 'gguf');
+    try {
+      const r = resolveProviders(
+        { codeMode: true, model: 'qwen2.5-coder-3b-q4_k_m.gguf', modelPath: file },
+        {
+          env: {},
+          discover: () => [
+            { runtime: 'ollama', name: 'qwen2.5-coder:3b', path: '/x' },
+            { runtime: 'lm-studio', name: 'other.gguf', path: '/lm/x.gguf' },
+          ],
+        },
+      );
+      expect(r.providers).toHaveLength(1);
+      expect(r.providers[0].id).toBe('llama-cpp');
+      expect(r.manager).toBe('vibgrate');
+      expect(r.reason).toMatch(/Code Mode|Vibgrate/i);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });
+
 

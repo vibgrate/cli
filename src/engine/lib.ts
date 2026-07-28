@@ -244,6 +244,12 @@ export interface LocalDocs {
   version?: string;
   /** Cited on-disk source, relative to root (e.g. `node_modules/react/README.md`). */
   source: string;
+  /**
+   * True when the payload is only a package README / description — no package
+   * `docs/` markdown was merged in. Used by the quality gate to refuse
+   * overconfident answers on focused API queries.
+   */
+  readmeOnly?: boolean;
 }
 
 /** Find an installed npm package directory, walking up for hoisted `node_modules`. */
@@ -259,28 +265,111 @@ function npmPackageDir(root: string, name: string): string | undefined {
   return undefined;
 }
 
+const README_CANDIDATES = ['llms.txt', 'README.md', 'README.mdx', 'README', 'readme.md'] as const;
+
+/** Collect package `docs/` markdown files, optionally filtered by query terms. */
+function packageDocsMarkdown(dir: string, query?: string): { text: string; files: string[] } | undefined {
+  const docsDir = path.join(dir, 'docs');
+  if (!fs.existsSync(docsDir) || !fs.statSync(docsDir).isDirectory()) return undefined;
+  const files: string[] = [];
+  const walk = (d: string, depth: number): void => {
+    if (depth > 3 || files.length >= 40) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const e of entries) {
+      if (files.length >= 40) return;
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+        walk(full, depth + 1);
+      } else if (e.isFile() && /\.(md|mdx)$/i.test(e.name)) {
+        files.push(full);
+      }
+    }
+  };
+  walk(docsDir, 0);
+  if (!files.length) return undefined;
+
+  const terms = (query ?? '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length > 2);
+  const scored = files.map((f) => {
+    let body = '';
+    try {
+      body = fs.readFileSync(f, 'utf8');
+    } catch {
+      return { f, body: '', score: -1 };
+    }
+    const lc = `${path.basename(f)}\n${body}`.toLowerCase();
+    const score = terms.length ? terms.filter((t) => lc.includes(t)).length : 1;
+    return { f, body, score };
+  });
+  // Prefer query-relevant docs; when no query, take a deterministic head of the tree.
+  const picked = (terms.length ? scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score || a.f.localeCompare(b.f)) : scored)
+    .filter((s) => s.body.trim())
+    .slice(0, terms.length ? 8 : 5);
+  if (!picked.length) return undefined;
+  const text = picked
+    .map((s) => `<!-- ${path.relative(dir, s.f).split(path.sep).join('/')} -->\n${s.body.trim()}`)
+    .join('\n\n');
+  return {
+    text,
+    files: picked.map((s) => path.relative(dir, s.f).split(path.sep).join('/')),
+  };
+}
+
 /**
  * Local-first resolution ladder (VG-LIB-SUPERSET-PLAN A.2.3): when a library isn't
  * in the committed catalog, read its docs **from the
  * installed package on disk**, version-correct by construction and offline. Prefers
- * `llms.txt`, then the README, then the package.json description. First slice: npm
- * (`node_modules`); other ecosystems (site-packages, …) follow the same shape.
+ * `llms.txt`, then the README, then package `docs/` markdown (query-filtered when
+ * provided), then the package.json description. First slice: npm (`node_modules`).
  */
-export function localPackageDocs(root: string, name: string): LocalDocs | undefined {
+export function localPackageDocs(root: string, name: string, opts?: { query?: string }): LocalDocs | undefined {
   const dir = npmPackageDir(root, name);
   if (!dir) return undefined;
   const version = resolveVersion(root, name).served;
-  for (const f of ['llms.txt', 'README.md', 'README.mdx', 'README', 'readme.md']) {
+  let primary: { docs: string; source: string } | undefined;
+  for (const f of README_CANDIDATES) {
     const p = path.join(dir, f);
     try {
       const docs = fs.readFileSync(p, 'utf8');
       if (docs.trim()) {
-        return { docs, version, source: path.relative(root, p).split(path.sep).join('/') };
+        primary = { docs, source: path.relative(root, p).split(path.sep).join('/') };
+        break;
       }
     } catch {
       /* next candidate */
     }
   }
+
+  const extra = packageDocsMarkdown(dir, opts?.query);
+  if (primary && extra) {
+    return {
+      docs: `${primary.docs.trim()}\n\n## Package docs\n\n${extra.text}`,
+      version,
+      source: `${primary.source}+docs/`,
+      readmeOnly: false,
+    };
+  }
+  if (primary) {
+    return { ...primary, version, readmeOnly: true };
+  }
+  if (extra) {
+    return {
+      docs: extra.text,
+      version,
+      source: path.relative(root, path.join(dir, 'docs')).split(path.sep).join('/') + '/',
+      readmeOnly: false,
+    };
+  }
+
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) as {
       description?: string;
@@ -291,6 +380,7 @@ export function localPackageDocs(root: string, name: string): LocalDocs | undefi
         docs: `# ${name}\n\n${pkg.description}`,
         version: version ?? pkg.version,
         source: path.relative(root, path.join(dir, 'package.json')).split(path.sep).join('/'),
+        readmeOnly: true,
       };
     }
   } catch {
@@ -299,33 +389,106 @@ export function localPackageDocs(root: string, name: string): LocalDocs | undefi
   return undefined;
 }
 
-/** Locate a package's TypeScript declaration entry (`types`/`typings`, else conventional paths). */
+type PkgJson = {
+  types?: string;
+  typings?: string;
+  exports?: unknown;
+};
+
+/** Resolve a relative types path from package.json (including exports map). */
+function typesFromPkg(dir: string, pkg: PkgJson): string | undefined {
+  const tryRel = (rel: unknown): string | undefined => {
+    if (typeof rel !== 'string') return undefined;
+    const p = path.join(dir, rel);
+    return fs.existsSync(p) ? p : undefined;
+  };
+  const top = tryRel(pkg.types) ?? tryRel(pkg.typings);
+  if (top) return top;
+  const exp = pkg.exports;
+  if (!exp || typeof exp !== 'object') return undefined;
+  // Prefer the "." export; fall back to any types condition we can find.
+  const roots: unknown[] = [];
+  if ('.' in (exp as Record<string, unknown>)) roots.push((exp as Record<string, unknown>)['.']);
+  else roots.push(...Object.values(exp as Record<string, unknown>));
+  for (const entry of roots) {
+    if (typeof entry === 'string') {
+      const hit = tryRel(entry.endsWith('.d.ts') ? entry : undefined);
+      if (hit) return hit;
+      continue;
+    }
+    if (entry && typeof entry === 'object') {
+      const o = entry as Record<string, unknown>;
+      for (const key of ['types', 'typings', 'import', 'require', 'default']) {
+        const v = o[key];
+        if (typeof v === 'string') {
+          const hit = tryRel(v.endsWith('.ts') || v.endsWith('.d.ts') || v.endsWith('.mts') || v.endsWith('.cts') ? v : undefined);
+          if (hit) return hit;
+        } else if (v && typeof v === 'object' && typeof (v as { types?: string }).types === 'string') {
+          const hit = tryRel((v as { types: string }).types);
+          if (hit) return hit;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Locate a package's TypeScript declaration entry (`types`/`typings`/exports, else conventional paths). */
 function dtsEntry(dir: string): string | undefined {
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) as {
-      types?: string;
-      typings?: string;
-    };
-    const rel = pkg.types ?? pkg.typings;
-    if (typeof rel === 'string') {
-      const p = path.join(dir, rel);
-      if (fs.existsSync(p)) return p;
-    }
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) as PkgJson;
+    const fromPkg = typesFromPkg(dir, pkg);
+    if (fromPkg) return fromPkg;
   } catch {
     /* fall through to conventional paths */
   }
-  for (const c of ['index.d.ts', 'dist/index.d.ts', 'lib/index.d.ts', 'types/index.d.ts']) {
+  for (const c of [
+    'index.d.ts',
+    'dist/index.d.ts',
+    'dist/types/index.d.ts',
+    'lib/index.d.ts',
+    'types/index.d.ts',
+    'build/index.d.ts',
+  ]) {
     const p = path.join(dir, c);
     if (fs.existsSync(p)) return p;
   }
   return undefined;
 }
 
+const MAX_DTS_FILES = 30;
+const MAX_DTS_BYTES = 512_000;
+
+/** Bounded walk for `.d.ts` files under a package (for query-focused symbol lookup). */
+function collectDtsFiles(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (d: string, depth: number): void => {
+    if (depth > 4 || out.length >= MAX_DTS_FILES) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const e of entries) {
+      if (out.length >= MAX_DTS_FILES) return;
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) walk(full, depth + 1);
+      else if (e.isFile() && /\.d\.(ts|mts|cts)$/.test(e.name)) out.push(full);
+    }
+  };
+  walk(dir, 0);
+  return out;
+}
+
 /**
  * Extract exported declaration signatures from a `.d.ts` source. Declaration files
  * are body-less, so a brace-depth scanner is deterministic and robust: capture each
  * top-level `export …` statement from the keyword through its terminating `;` or
- * matching `}` (skipping `export {…}` / `export *` / `export default` re-exports).
+ * matching `}`. Also keeps named re-export lines (`export { foo } from '…'`) so
+ * modern barrel packages still surface API names.
  */
 export function extractDtsApi(src: string, maxDecls = 200): string[] {
   const out: string[] = [];
@@ -333,6 +496,12 @@ export function extractDtsApi(src: string, maxDecls = 200): string[] {
   let capture: string[] | null = null;
   for (const raw of src.split('\n')) {
     const line = raw.trim();
+    // Named re-exports: keep the line so symbols like createMiddleware appear.
+    if (capture === null && depth === 0 && /^export\s+\{[^}]+\}/.test(line)) {
+      out.push(raw.trim());
+      if (out.length >= maxDecls) break;
+      continue;
+    }
     if (
       capture === null &&
       depth === 0 &&
@@ -355,25 +524,93 @@ export function extractDtsApi(src: string, maxDecls = 200): string[] {
   return out;
 }
 
-/** Version-correct typed API surface (exported signatures) from a package's `.d.ts`, if present. */
-export function localApiSurface(root: string, name: string): string | undefined {
+/** Names mentioned in `export { a, b as c }` lines. */
+function reExportNames(decl: string): string[] {
+  const m = /^export\s*\{([^}]+)\}/.exec(decl.trim());
+  if (!m) return [];
+  const names: string[] = [];
+  for (const part of m[1].split(',')) {
+    const n = part.trim().split(/\s+as\s+/i).pop()?.trim();
+    if (n && /^[A-Za-z_$][\w$]*$/.test(n)) names.push(n);
+  }
+  return names;
+}
+
+/**
+ * Version-correct typed API surface from a package's `.d.ts` files.
+ * When `query` is set, prefer declarations that mention query terms (so
+ * `library_docs({ query: "createMiddleware" })` returns the matching signature,
+ * not only a truncated README).
+ */
+export function localApiSurface(root: string, name: string, query?: string): string | undefined {
   const dir = npmPackageDir(root, name);
   if (!dir) return undefined;
-  const dts = dtsEntry(dir);
-  if (!dts) return undefined;
-  let src: string;
-  try {
-    src = fs.readFileSync(dts, 'utf8');
-  } catch {
-    return undefined;
+
+  const entry = dtsEntry(dir);
+  const files = entry ? [entry, ...collectDtsFiles(dir).filter((f) => f !== entry)] : collectDtsFiles(dir);
+  if (!files.length) return undefined;
+
+  const allDecls: string[] = [];
+  const seen = new Set<string>();
+  for (const f of files) {
+    let src: string;
+    try {
+      const st = fs.statSync(f);
+      if (st.size > MAX_DTS_BYTES) continue;
+      src = fs.readFileSync(f, 'utf8');
+    } catch {
+      continue;
+    }
+    for (const d of extractDtsApi(src)) {
+      if (seen.has(d)) continue;
+      seen.add(d);
+      allDecls.push(d);
+      if (allDecls.length >= 400) break;
+    }
+    if (allDecls.length >= 400) break;
   }
-  const decls = extractDtsApi(src);
-  return decls.length ? decls.join('\n\n') : undefined;
+  if (!allDecls.length) return undefined;
+
+  const terms = (query ?? '')
+    .split(/[^A-Za-z0-9_$]+/)
+    .filter((w) => w.length > 2);
+  if (terms.length) {
+    const lcTerms = terms.map((t) => t.toLowerCase());
+    const matched = allDecls.filter((d) => {
+      const lc = d.toLowerCase();
+      return lcTerms.some((t) => lc.includes(t));
+    });
+    // Expand bare re-export lines to fuller decls of the same name when possible.
+    const expanded: string[] = [];
+    const expandedSeen = new Set<string>();
+    for (const d of matched) {
+      const names = reExportNames(d);
+      if (names.length) {
+        for (const n of names) {
+          const fuller = allDecls.find(
+            (x) => !/^export\s*\{/.test(x) && new RegExp(`\\b${n}\\b`).test(x),
+          );
+          const pick = fuller ?? d;
+          if (!expandedSeen.has(pick)) {
+            expandedSeen.add(pick);
+            expanded.push(pick);
+          }
+        }
+      } else if (!expandedSeen.has(d)) {
+        expandedSeen.add(d);
+        expanded.push(d);
+      }
+    }
+    if (expanded.length) return expanded.slice(0, 40).join('\n\n');
+  }
+
+  // No query (or no match): return entry-file decls first, then a capped head.
+  return allDecls.slice(0, 80).join('\n\n');
 }
 
 /** Append the typed API surface (if any) as a fenced section — composed into served docs. */
-export function withApiSurface(root: string, name: string, docs: string): string {
-  const api = localApiSurface(root, name);
+export function withApiSurface(root: string, name: string, docs: string, query?: string): string {
+  const api = localApiSurface(root, name, query);
   return api ? `${docs}\n\n## API (types)\n\n\`\`\`ts\n${api}\n\`\`\`\n` : docs;
 }
 
