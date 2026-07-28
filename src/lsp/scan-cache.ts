@@ -72,6 +72,24 @@ export function manifestHash(root: string): string {
   return hashString(canonicalize(files));
 }
 
+/**
+ * Is this a file a drift scan actually reads — a manifest (`package.json`,
+ * `go.mod`, `*.csproj`, …) or a lockfile (`package-lock.json`,
+ * `packages.lock.json`, …) — sitting outside every skipped tree
+ * (`node_modules`, `bin`/`obj`, `.git`, …)? Exactly the population
+ * {@link manifestHash} digests, applied to a single path, so "would this
+ * change flip the cache key?" and "should this change trigger a rescan?"
+ * cannot drift apart. Paths outside `root` are never scan input: false.
+ */
+export function isDependencyFile(root: string, filePath: string): boolean {
+  const rel = path.relative(path.resolve(root), path.resolve(filePath));
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return false;
+  const parts = rel.split(path.sep);
+  if (parts.slice(0, -1).some((dir) => SKIP_DIRS.has(dir))) return false;
+  const base = parts[parts.length - 1]!.toLowerCase();
+  return isManifest(filePath) || SKIP_FILES.has(base);
+}
+
 export interface ScanCacheEntry {
   manifestHash: string;
   artifact: ScanArtifact;

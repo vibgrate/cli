@@ -39,7 +39,7 @@ import { loadGraph } from '../engine/load.js';
 import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
 import { refreshIfStale } from '../engine/refresh.js';
-import { manifestHash, loadScanCache, writeScanCache } from './scan-cache.js';
+import { manifestHash, loadScanCache, writeScanCache, isDependencyFile } from './scan-cache.js';
 import { runGraphQuery, type GraphQueryParams, type GraphQueryResult } from './graph-query.js';
 import {
   enrichVulns,
@@ -270,6 +270,22 @@ export class VibgrateLanguageServer {
       const uri = p.textDocument?.uri;
       if (!uri || !this.docs.has(uri)) return;
       this.scheduleScan(400);
+    });
+
+    // External writers — a terminal `vg fix`, a `git checkout`, a package
+    // manager install — change manifests without ever producing a `didSave`
+    // (that only fires for saves made inside the editor). Without this, the
+    // last artifact's decorations stay anchored to the updated text and the
+    // editor keeps showing "behind" on a line that is now current. The client
+    // watches dependency files and forwards changes here; a false positive is
+    // near-free because `scan()` gates on the manifest hash and replays the
+    // cache when nothing a scan reads actually changed.
+    this.conn.onNotification('workspace/didChangeWatchedFiles', (_m, params) => {
+      const p = params as { changes?: { uri?: string }[] };
+      const relevant = (p.changes ?? []).some(
+        (c) => c.uri && isDependencyFile(this.opts.root, uriToPath(c.uri)),
+      );
+      if (relevant) this.scheduleScan(400); // same debounce as didSave
     });
 
     this.conn.onNotification('textDocument/didClose', (_m, params) => {
