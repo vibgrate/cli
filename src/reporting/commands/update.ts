@@ -9,6 +9,7 @@ import { VERSION } from '../version.js';
 import { fetchLatestVersion } from '../utils/update-check.js';
 import { pathExists } from '../utils/fs.js';
 import { liveStatsDir, reapOtherVersionServers, type ReapedServer } from '../../mcp/live-stats.js';
+import { restartVgdIfRunning } from '../../commands/daemon.js';
 
 export type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'bun';
 
@@ -331,8 +332,37 @@ export const updateCommand = new Command('update')
       // on the one just installed. Without this the update lands on disk but a
       // long-lived assistant-spawned server keeps answering from the old code.
       if (opts.reap !== false) reapAndReport(cwd, latest);
+
+      // Same story for the Fusion Runtime daemon: a vgd started before the
+      // update keeps running the old build until something restarts it.
+      if (opts.reap !== false) await restartVgdAndReport();
     },
   );
+
+/**
+ * Restart a running vgd so it picks up the just-installed build. Best-effort
+ * and never throws — a daemon problem must not fail a successful update.
+ */
+async function restartVgdAndReport(): Promise<void> {
+  let result: Awaited<ReturnType<typeof restartVgdIfRunning>>;
+  try {
+    result = await restartVgdIfRunning();
+  } catch {
+    return;
+  }
+  if (result === 'not-running') return; // nothing to restart, say nothing
+  if (result === 'restarted') {
+    console.log(chalk.dim('Restarted the vgd daemon on the new version.'));
+  } else if (result === 'refused') {
+    console.log(
+      chalk.dim('A vgd embedded in another process (e.g. vg code) is running — restart that session to pick up the update.'),
+    );
+  } else {
+    console.log(
+      chalk.dim('Could not restart the vgd daemon automatically — run "vg daemon restart" to pick up the update.'),
+    );
+  }
+}
 
 /**
  * Signal every running vg serve in `cwd`'s repo that is NOT on `keepVersion`,

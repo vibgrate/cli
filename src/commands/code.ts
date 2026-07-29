@@ -32,7 +32,7 @@ export function registerCode(program: Command): void {
     .command('code')
     .description('propose a graph-grounded code edit (guided mode with no instruction; dry-run by default)')
     .argument('[instruction...]', 'what to change, in plain language (omit for guided interactive mode)')
-    .option('--provider <id>', 'backend: ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp')
+    .option('--provider <id>', 'backend: vibgrate-relay (Vibgrate Relay), ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp')
     .option('--model <id>', 'model id (or set VG_CODE_MODEL). No model is hard-coded — pick the current best.')
     .option('--mode <mode>', 'Code Mode: spark | flow | forge (preferred over raw model names; auto-fits when omitted and no --model)')
     .option('--model-path <gguf>', 'gguf path for --provider llama-cpp (weights are never auto-downloaded)')
@@ -45,6 +45,7 @@ export function registerCode(program: Command): void {
     .option('--single', 'one-shot planner (single edit) instead of the multi-step agent')
     .option('--stream', 'stream the model output live')
     .option('--stream-json', 'machine protocol: NDJSON agent events on stdout, approval decisions on stdin (for host UIs like the VS Code panel)')
+    .option('--session', 'with --stream-json: stay open for further turns (warm graph and tools) instead of exiting after one')
     .option('--verify [command]', 'after the agent finishes, run tests and make it fix failures (uses the config testCommand if no command is given)')
     .option('--continue', 'resume the most recent session (recap + restore /undo)')
     .option('--capsule', 'use a source-bearing Task Capsule for first context (Fusion A/B; exact source ranges from the graph)')
@@ -69,6 +70,7 @@ export function registerCode(program: Command): void {
         single?: boolean;
         stream?: boolean;
         streamJson?: boolean;
+        session?: boolean;
         verify?: string | boolean;
         continue?: boolean;
         capsule?: boolean;
@@ -293,7 +295,7 @@ export function registerCode(program: Command): void {
           const primarySlug = route.providers[0]?.model.includes('/')
             ? route.providers[0].model.split('/')[0]
             : route.providers[0]?.id;
-          const { runCodeStreamJson } = await import('../code/stream-json.js');
+          const { runCodeStreamJson, parseHostMessage } = await import('../code/stream-json.js');
           const { nodeCodeFs } = await import('../code/session.js');
           const readline = await import('node:readline');
           const child = await import('node:child_process');
@@ -376,58 +378,215 @@ export function registerCode(program: Command): void {
             };
           }
           const externalTools = mergeExternalToolsets(vgBuiltin, projectMcp);
-          try {
-            await runCodeStreamJson({
-              graph,
-              root,
-              instruction,
-              providers: route.providers,
-              fsImpl: nodeCodeFs(root),
-              run,
-              executionEnv,
-              graphBackend,
-              modelProfile,
-              auto: !!auto,
-              maxSteps,
-              budget: modelProfile.capsuleBudgetTokens,
-              contextBudget,
-              denyCommands: config.denyCommands,
-              testCommand: config.testCommand,
-              stream: true,
-              verify: verify
-                ? { command: verify.command, maxRounds: modelProfile.maxRepairRounds }
-                : undefined,
-              capsule,
-              files: opts.file.length ? opts.file : undefined,
-              worktreeOverlay: true,
-              advancedMode: !capsule,
-              externalTools,
-              attribution: {
-                client: 'vg-code',
-                provider: primarySlug,
-                model: route.providers[0]?.model,
-              },
-              now: () => Date.now(),
-              emit: emitStream,
-              bindDecisions: (session) => {
-                streamApprove = (action) => session.approve(action);
-                const rl = readline.createInterface({ input: process.stdin });
-                rl.on('line', (raw) => {
-                  try {
-                    const msg = JSON.parse(raw) as {
-                      approveId?: number;
-                      approve?: boolean;
-                      answerId?: number;
-                      answer?: string;
-                    };
-                    if (typeof msg.approveId === 'number') session.submitDecision(msg.approveId, !!msg.approve);
-                    if (typeof msg.answerId === 'number') session.submitAnswer(msg.answerId, String(msg.answer ?? ''));
-                  } catch {
-                    /* ignore malformed host input */
-                  }
-                });
-              },
+          // Checkpoints: snapshot the tree when the user approves a change, so
+          // it can be undone. Refs live under refs/vibgrate/checkpoints/ and the
+          // staging goes through a private index, so the user's own index,
+          // branch and HEAD are untouched.
+          const { createCheckpoint } = await import('../code/checkpoint.js');
+          const os = await import('node:os');
+          const pathMod = await import('node:path');
+          const checkpointIndex = pathMod.join(
+            fs.mkdtempSync(pathMod.join(os.tmpdir(), 'vg-code-cp-')),
+            'index',
+          );
+          const gitRunner = (gitArgs: string[], gitEnv?: Record<string, string>) => {
+            const res = child.spawnSync('git', gitArgs, {
+              cwd: root,
+              encoding: 'utf8',
+              env: { ...process.env, ...(gitEnv ?? {}) },
+              timeout: 30_000,
+              maxBuffer: 32 * 1024 * 1024,
             });
+            return { stdout: res.stdout ?? '', exitCode: res.status ?? 1 };
+          };
+          // Namespaces this run's checkpoint refs. Independent of the session
+          // store id: refs are git state, sessions are panel state.
+          const checkpointSessionId = `r${Date.now().toString(36)}`;
+          let checkpointSeq = 0;
+          const takeCheckpoint = (files: string[]) =>
+            createCheckpoint(gitRunner, {
+              sessionId: checkpointSessionId,
+              seq: ++checkpointSeq,
+              files,
+              indexFile: checkpointIndex,
+            });
+
+
+          const { loadProjectRules, nodeRulesReader } = await import('../code/rules.js');
+          const projectRules = loadProjectRules(nodeRulesReader(root));
+          if (projectRules.sources.length && !global.quiet) {
+            emitStream({
+              event: 'event',
+              type: 'notice',
+              text: `project instructions: ${projectRules.sources.join(', ')}`,
+            } as never);
+          }
+          // Everything above is built once. In session mode it is reused for
+          // every turn — that reuse is the point: no cold graph load, no MCP
+          // reconnect, no overlay rebuild between messages.
+          const baseAgentOptions = {
+            graph,
+            root,
+            providers: route.providers,
+            fsImpl: nodeCodeFs(root),
+            run,
+            executionEnv,
+            graphBackend,
+            modelProfile,
+            auto: !!auto,
+            maxSteps,
+            budget: modelProfile.capsuleBudgetTokens,
+            contextBudget,
+            denyCommands: config.denyCommands,
+            testCommand: config.testCommand,
+            stream: true,
+            verify: verify
+              ? { command: verify.command, maxRounds: modelProfile.maxRepairRounds }
+              : undefined,
+            capsule,
+            files: opts.file.length ? opts.file : undefined,
+            worktreeOverlay: true,
+            advancedMode: !capsule,
+            externalTools,
+            attribution: {
+              client: 'vg-code',
+              provider: primarySlug,
+              model: route.providers[0]?.model,
+            },
+            now: () => Date.now(),
+            projectRules: projectRules.rendered || undefined,
+            checkpoint: takeCheckpoint,
+          };
+          try {
+            if (opts.session) {
+              const { runCodeStreamJsonSession } = await import('../code/stream-json.js');
+              const { runAgent } = await import('../code/agent.js');
+              const {
+                loadLatestSession,
+                newSession,
+                recordTask,
+                saveSession,
+                summarizeSession,
+              } = await import('../code/session-store.js');
+
+              const resumedRecord = opts.continue ? loadLatestSession(root) : undefined;
+              let record =
+                resumedRecord ??
+                newSession(
+                  `s${Date.now().toString(36)}`,
+                  primarySlug ?? route.providers[0]?.id ?? 'unknown',
+                  route.providers[0]?.model ?? 'unknown',
+                  Date.now(),
+                );
+
+              // One stdin reader for the whole session: approvals and answers go
+              // to the live turn, `submit` queues the next one.
+              const pendingTurns: string[] = [];
+              let wakeTurn: ((instruction: string | null) => void) | undefined;
+              let ended = false;
+              const pushTurn = (instruction: string | null): void => {
+                if (wakeTurn) {
+                  const wake = wakeTurn;
+                  wakeTurn = undefined;
+                  wake(instruction);
+                } else if (instruction !== null) {
+                  pendingTurns.push(instruction);
+                }
+              };
+              const nextTurn = (): Promise<string | null> => {
+                if (ended) return Promise.resolve(null);
+                const queued = pendingTurns.shift();
+                if (queued !== undefined) return Promise.resolve(queued);
+                return new Promise<string | null>((resolve) => {
+                  wakeTurn = resolve;
+                });
+              };
+
+              await runCodeStreamJsonSession({
+                emit: emitStream,
+                auto: !!auto,
+                sessionId: record.id,
+                resumed: !!resumedRecord,
+                instruction,
+                nextTurn,
+                bindDecisions: (session) => {
+                  streamApprove = (action) => session.approve(action);
+                  const rl = readline.createInterface({ input: process.stdin });
+                  rl.on('line', (raw) => {
+                    const msg = parseHostMessage(raw);
+                    if (!msg) return;
+                    if (msg.kind === 'approve') session.submitDecision(msg.id, msg.approve);
+                    else if (msg.kind === 'answer') session.submitAnswer(msg.id, msg.answer);
+                    else if (msg.kind === 'submit') pushTurn(msg.instruction);
+                    else if (msg.kind === 'restore') {
+                      // Undo an approved change. Scoped to the files that change
+                      // touched — never a sweeping restore of the tree.
+                      void import('../code/checkpoint.js').then(({ restoreCheckpoint }) => {
+                        const outcome = restoreCheckpoint(gitRunner, {
+                          commit: msg.commit,
+                          files: msg.files,
+                        });
+                        emitStream({ event: 'checkpoint-restored', commit: msg.commit, ...outcome });
+                      });
+                    }
+                    else if (msg.kind === 'cancel') session.cancelTurn();
+                    else if (msg.kind === 'end') {
+                      ended = true;
+                      pushTurn(null);
+                    }
+                  });
+                  // Host went away (panel closed, window reloaded): end cleanly
+                  // rather than leaving an orphaned process holding the graph.
+                  rl.on('close', () => {
+                    ended = true;
+                    session.cancelTurn();
+                    pushTurn(null);
+                  });
+                },
+                runTurn: ({ instruction: turnInstruction, priorSummary, signal, session }) =>
+                  runAgent({
+                    ...baseAgentOptions,
+                    instruction: turnInstruction,
+                    priorSummary,
+                    signal,
+                    approve: session.approve,
+                    askUser: session.askUser,
+                    onEvent: session.onEvent,
+                  }),
+                onTurnEnd: (turn) => {
+                  // Persist a summary only — never file bodies or transcripts.
+                  record = recordTask(
+                    record,
+                    {
+                      instruction: turn.instruction,
+                      summary: turn.result?.finalText ?? 'turn failed',
+                      changes: turn.result?.changes ?? [],
+                      stopped: turn.result?.stopped ?? 'error',
+                    },
+                    Date.now(),
+                  );
+                  saveSession(root, record);
+                  return summarizeSession(record);
+                },
+              });
+            } else {
+              await runCodeStreamJson({
+                ...baseAgentOptions,
+                instruction,
+                emit: emitStream,
+                bindDecisions: (session) => {
+                  streamApprove = (action) => session.approve(action);
+                  const rl = readline.createInterface({ input: process.stdin });
+                  rl.on('line', (raw) => {
+                    const msg = parseHostMessage(raw);
+                    if (!msg) return;
+                    if (msg.kind === 'approve') session.submitDecision(msg.id, msg.approve);
+                    else if (msg.kind === 'answer') session.submitAnswer(msg.id, msg.answer);
+                    else if (msg.kind === 'cancel') session.cancelTurn();
+                  });
+                },
+              });
+            }
           } finally {
             await disposeMcpStream?.();
             await runtime.dispose();

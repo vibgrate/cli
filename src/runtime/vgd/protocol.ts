@@ -39,6 +39,8 @@ export interface GraphSlotSummary {
 export type VgdRequest =
   | { op: 'ping' }
   | { op: 'status' }
+  /** Ask the daemon to exit cleanly (honoured only by a standalone `vg daemon start`). */
+  | { op: 'shutdown' }
   | { op: 'list' }
   | { op: 'register'; root: string; label?: string; role?: 'primary' | 'member' }
   | { op: 'unregister'; root: string }
@@ -50,6 +52,13 @@ export type VgdRequest =
   | { op: 'list-graph-slots'; repositoryId?: string }
   | { op: 'select-git-ref'; repositoryId: string; gitRef: string }
   | { op: 'put-graph'; repositoryId: string; gitRef: string; graph: unknown }
+  /**
+   * Load the workspace's on-disk code map into ActiveGraph inside the daemon
+   * (binary snapshot first, JSON fallback). The fast-path alternative to
+   * shipping the whole graph over the socket with put-graph — use it whenever
+   * the map already exists on disk.
+   */
+  | { op: 'load-graph'; root: string; gitRef?: string; graphPath?: string }
   /** Lexical/structural query against the ActiveGraph for a repository. */
   | { op: 'query-graph'; repositoryId: string; query: string; limit?: number; gitRef?: string }
   /** Blast-radius impact for a symbol id or qualified name. */
@@ -107,6 +116,7 @@ export type VgdResponse =
   | { ok: true; workspace: WorkspaceRecord }
   | { ok: true; workspaces: WorkspaceRecord[]; federation: true }
   | { ok: true; removed: boolean }
+  | { ok: true; stopping: true }
   | { ok: true; slots: GraphSlotSummary[] }
   | { ok: true; selected: true; repositoryId: string; gitRef: string }
   | { ok: true; stored: true; repositoryId: string; gitRef: string; nodeCount: number }
@@ -173,7 +183,7 @@ export function parseRequest(line: string): VgdRequest | { error: string } {
   }
   if (!raw || typeof raw !== 'object') return { error: 'request must be an object' };
   const op = (raw as { op?: unknown }).op;
-  if (op === 'ping' || op === 'status' || op === 'list') return { op };
+  if (op === 'ping' || op === 'status' || op === 'shutdown' || op === 'list') return { op };
   if (op === 'list-graph-slots') {
     const repositoryId = (raw as { repositoryId?: unknown }).repositoryId;
     return {
@@ -196,6 +206,18 @@ export function parseRequest(line: string): VgdRequest | { error: string } {
     if (typeof gitRef !== 'string' || !gitRef.trim()) return { error: 'put-graph requires gitRef' };
     if (!graph || typeof graph !== 'object') return { error: 'put-graph requires graph object' };
     return { op: 'put-graph', repositoryId: repositoryId.trim(), gitRef: gitRef.trim(), graph };
+  }
+  if (op === 'load-graph') {
+    const root = (raw as { root?: unknown }).root;
+    const gitRef = (raw as { gitRef?: unknown }).gitRef;
+    const graphPath = (raw as { graphPath?: unknown }).graphPath;
+    if (typeof root !== 'string' || !root.trim()) return { error: 'load-graph requires a non-empty root' };
+    return {
+      op: 'load-graph',
+      root: root.trim(),
+      gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
+      graphPath: typeof graphPath === 'string' && graphPath.trim() ? graphPath.trim() : undefined,
+    };
   }
   if (op === 'query-graph') {
     const repositoryId = (raw as { repositoryId?: unknown }).repositoryId;

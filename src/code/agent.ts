@@ -108,6 +108,7 @@ export type AgentEvent =
   | { type: 'capsule'; summary: CapsuleSummary }
   | { type: 'capsule-delta'; delta: CapsuleDelta }
   | { type: 'failure-capsule'; capsule: FailureCapsule }
+  | { type: 'checkpoint'; ref: string; commit: string; seq: number; files: string[] }
   | { type: 'metrics'; metrics: AgentMetrics };
 
 export interface AgentOptions {
@@ -158,6 +159,25 @@ export interface AgentOptions {
   stream?: boolean;
   /** A recap of earlier tasks (from `--continue`) to seed continuity. */
   priorSummary?: string;
+  /**
+   * Rendered project instructions (AGENTS.md / CLAUDE.md / .vibgrate/rules).
+   * Advisory only — see {@link loadProjectRules}; they never widen permissions.
+   */
+  projectRules?: string;
+  /**
+   * Take a checkpoint just before an approved change is written, so it can be
+   * undone later. Injected, so the loop stays free of git plumbing and testable
+   * without a repository. Returning null (no repo, git failure) is normal and
+   * never blocks the change.
+   */
+  checkpoint?: (files: string[]) => { ref: string; commit: string; seq: number } | null;
+  /**
+   * Cooperative cancellation (VG-CLI-CODE §18.2). Checked between steps, so a
+   * host can stop a turn without killing a long-lived session process. Work
+   * already approved and applied is kept — this stops the loop, it does not
+   * roll back; use a checkpoint to undo.
+   */
+  signal?: { aborted: boolean };
   /**
    * External / built-in MCP tools the model may also call (approval-bound for
    * non-read-only remote tools). Always include local `vg serve` tools via
@@ -219,7 +239,7 @@ export interface AgentOptions {
   deterministicLocate?: boolean;
 }
 
-export type AgentStop = 'finished' | 'max-steps' | 'no-tools' | 'no-progress' | 'error';
+export type AgentStop = 'finished' | 'max-steps' | 'no-tools' | 'no-progress' | 'error' | 'cancelled';
 
 export interface AgentResult {
   finalText: string;
@@ -318,6 +338,11 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   let capsule = built.capsule;
   const useLadder = options.verifyLadder ?? !!capsule;
   const messages: ChatMessage[] = buildAgentMessages(context);
+  // Project instructions sit after the repo context and before the recap: the
+  // model should read house style before it reads what it already did.
+  if (options.projectRules) {
+    messages.push({ role: 'user', content: options.projectRules });
+  }
   if (options.priorSummary) {
     messages.push({ role: 'user', content: options.priorSummary });
   }
@@ -410,13 +435,40 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     return options.run(command);
   };
 
+  /** Files a mutating action will touch, for the checkpoint record. */
+  const actionFiles = (action: MutatingAction): string[] => {
+    if (action.kind === 'patch') return action.files.map((f) => f.file);
+    return 'file' in action && action.file ? [action.file] : [];
+  };
+
+  /**
+   * Approval gate, plus a checkpoint. The snapshot is taken *after* the user
+   * consents and *before* the write lands, so restoring returns the tree to
+   * the state it was in just before this change — which is what "undo this
+   * edit" has to mean. Snapshots only happen for changes that touch files;
+   * a command approval has nothing to restore.
+   */
+  const approveAndCheckpoint = async (action: MutatingAction): Promise<boolean> => {
+    const approved = await options.approve(action);
+    if (!approved || !options.checkpoint) return approved;
+    const files = actionFiles(action);
+    if (!files.length) return approved;
+    try {
+      const cp = options.checkpoint(files);
+      if (cp) onEvent({ type: 'checkpoint', ...cp, files });
+    } catch {
+      /* a checkpoint is a convenience — never fail an approved change over it */
+    }
+    return approved;
+  };
+
   const ctx: ToolContext = {
     root,
     graph,
     fsImpl,
     spans,
     run: runShell,
-    approve: options.approve,
+    approve: approveAndCheckpoint,
     askUser: options.askUser,
     auto: options.auto,
     denyCommands: options.denyCommands,
@@ -633,6 +685,11 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   };
 
   for (let step = 1; step <= maxSteps; step++) {
+    // Cooperative cancel: checked before any model call or tool, so a stopped
+    // turn never starts new work. Applied mutations stay applied.
+    if (options.signal?.aborted) {
+      return finish('cancelled', 'stopped at your request', step - 1);
+    }
     currentStep = step;
     onEvent({ type: 'step', n: step });
 

@@ -66,6 +66,158 @@ describe('runAgent — the agentic loop', () => {
     }
   });
 
+  it('stops between steps when the host cancels, keeping work already applied', async () => {
+    // Step 1 applies an edit; the host cancels before step 2 would run.
+    const signal = { aborted: false };
+    const provider = new ScriptedProvider('m', [
+      {
+        toolCalls: [
+          tc('edit_file', { path: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 5000;' }, 't1'),
+        ],
+      },
+      { toolCalls: [tc('edit_file', { path: 'src/scan.ts', search: '5000', replace: '9999' }, 't2')] },
+      { toolCalls: [tc('finish', { summary: 'never reached' }, 't3')] },
+    ]);
+    const fsImpl = memFs({ 'src/scan.ts': baseFile });
+
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'raise the request timeout',
+      providers: [provider],
+      fsImpl,
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => {
+        // The user hits Stop while reviewing the first edit.
+        signal.aborted = true;
+        return true;
+      },
+      signal,
+    });
+
+    expect(result.stopped).toBe('cancelled');
+    expect(result.finalText).toMatch(/stopped at your request/i);
+    // The approved edit stands — cancel stops the loop, it does not roll back.
+    expect(fsImpl.files['src/scan.ts']).toContain('5000');
+    expect(fsImpl.files['src/scan.ts']).not.toContain('9999');
+  });
+
+  it('does not start any step when cancelled before the first', async () => {
+    const provider = new ScriptedProvider('m', [{ toolCalls: [tc('finish', { summary: 'x' }, 't1')] }]);
+    const chat = vi.spyOn(provider, 'chat');
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'anything',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      signal: { aborted: true },
+    });
+    expect(result.stopped).toBe('cancelled');
+    expect(result.steps).toBe(0);
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it('checkpoints an approved change before it is written, and reports the files', async () => {
+    const taken: Array<{ files: string[]; contentAtSnapshot: string | null }> = [];
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('edit_file', { path: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 5000;' }, 't1')] },
+      { toolCalls: [tc('finish', { summary: 'done' }, 't2')] },
+    ]);
+    const fsImpl = memFs({ 'src/scan.ts': baseFile });
+    const events: AgentEvent[] = [];
+
+    await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'raise the timeout',
+      providers: [provider],
+      fsImpl,
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      onEvent: (e) => events.push(e),
+      checkpoint: (files) => {
+        // The snapshot must happen before the write lands.
+        taken.push({ files, contentAtSnapshot: fsImpl.files['src/scan.ts'] });
+        return { ref: 'refs/vibgrate/checkpoints/s1/1', commit: 'c1', seq: taken.length };
+      },
+    });
+
+    expect(taken).toHaveLength(1);
+    expect(taken[0].files).toEqual(['src/scan.ts']);
+    expect(taken[0].contentAtSnapshot).toContain('const timeout = 0;');
+    const cp = events.find((e) => e.type === 'checkpoint');
+    expect(cp).toMatchObject({ ref: 'refs/vibgrate/checkpoints/s1/1', commit: 'c1', seq: 1, files: ['src/scan.ts'] });
+  });
+
+  it('does not checkpoint a declined change', async () => {
+    const taken: string[][] = [];
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('edit_file', { path: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 5000;' }, 't1')] },
+      { toolCalls: [tc('finish', { summary: 'declined' }, 't2')] },
+    ]);
+    await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'x',
+      providers: [provider],
+      fsImpl: memFs({ 'src/scan.ts': baseFile }),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => false,
+      checkpoint: (files) => {
+        taken.push(files);
+        return { ref: 'r', commit: 'c', seq: 1 };
+      },
+    });
+    expect(taken).toEqual([]);
+  });
+
+  it('does not checkpoint a command approval — there is nothing to restore', async () => {
+    const taken: string[][] = [];
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('run_command', { command: 'npm test' }, 't1')] },
+      { toolCalls: [tc('finish', { summary: 'ran tests' }, 't2')] },
+    ]);
+    await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'run the tests',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: 'ok', exitCode: 0 }),
+      approve: async () => true,
+      checkpoint: (files) => {
+        taken.push(files);
+        return { ref: 'r', commit: 'c', seq: 1 };
+      },
+    });
+    expect(taken).toEqual([]);
+  });
+
+  it('applies the change even when the checkpoint fails or throws', async () => {
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('edit_file', { path: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 5000;' }, 't1')] },
+      { toolCalls: [tc('finish', { summary: 'done' }, 't2')] },
+    ]);
+    const fsImpl = memFs({ 'src/scan.ts': baseFile });
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'raise the timeout',
+      providers: [provider],
+      fsImpl,
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      checkpoint: () => {
+        throw new Error('git exploded');
+      },
+    });
+    expect(result.stopped).toBe('finished');
+    expect(fsImpl.files['src/scan.ts']).toContain('5000');
+  });
+
   it('runs a full search → read → edit → run → finish session', async () => {
     // A scripted "model" that drives a realistic tool sequence.
     const provider = new ScriptedProvider('m', [

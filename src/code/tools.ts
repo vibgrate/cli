@@ -19,6 +19,7 @@ import { applyEdit, type SymbolSpan } from './apply.js';
 import { applyPatchIR, locatorsFromGraph } from './apply-patch-ir.js';
 import { PATCH_IR_SCHEMA_VERSION, validatePatchIR, type PatchIR } from './patch-ir.js';
 import { unifiedDiff } from './diff.js';
+import { previewSides, type PreviewSides } from './preview-sides.js';
 import { isSecretPath, secretRefusal, redactText, secretEgressRefusal } from './secrets.js';
 import { dangerousCommand } from './safety.js';
 import { networkCommandRefusal } from './network-policy.js';
@@ -42,11 +43,13 @@ export type PatchFileAction = {
   diff?: string;
   /** Byte size for creates. */
   bytes?: number;
+  /** Whole sides, when small enough, so a host can open a real diff editor. */
+  sides?: PreviewSides;
 };
 
 /** A state-changing action the agent wants to take — shown to the gate for approval. */
 export type MutatingAction =
-  | { kind: 'edit'; file: string; diff: string }
+  | { kind: 'edit'; file: string; diff: string; sides?: PreviewSides }
   | { kind: 'create'; file: string; bytes: number }
   | { kind: 'delete'; file: string }
   | { kind: 'run'; command: string }
@@ -506,7 +509,7 @@ async function editFile(ctx: ToolContext, path: string, search: string, replace:
     return { content: `edit not applied (${outcome.status}): ${outcome.reason ?? ''}`, mutated: false };
   }
   const diff = unifiedDiff(before, after, path);
-  if (!(await ctx.approve({ kind: 'edit', file: path, diff }))) {
+  if (!(await ctx.approve({ kind: 'edit', file: path, diff, sides: previewSides(before, after) }))) {
     return { content: `edit to ${path} was declined by the user`, mutated: false };
   }
   ctx.fsImpl.write(path, after ?? '');
@@ -605,11 +608,12 @@ async function applyPatchTool(ctx: ToolContext, raw: unknown): Promise<ToolResul
   }
 
   const files: PatchFileAction[] = planned.map((p) => {
-    if (p.op === 'delete') return { file: p.file, op: 'delete', diff: p.diff };
+    const sides = previewSides(p.before, p.after);
+    if (p.op === 'delete') return { file: p.file, op: 'delete', diff: p.diff, sides };
     if (p.op === 'create') {
-      return { file: p.file, op: 'create', bytes: Buffer.byteLength(p.after ?? ''), diff: p.diff };
+      return { file: p.file, op: 'create', bytes: Buffer.byteLength(p.after ?? ''), diff: p.diff, sides };
     }
-    return { file: p.file, op: 'edit', diff: p.diff };
+    return { file: p.file, op: 'edit', diff: p.diff, sides };
   });
 
   if (!(await ctx.approve({ kind: 'patch', files }))) {
