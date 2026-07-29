@@ -86,15 +86,22 @@ function writeArtifact(dependencies: unknown[]): void {
   fs.writeFileSync(path.join(dir, '.vibgrate', 'scan_result.json'), JSON.stringify(artifact));
 }
 
+const prevCredsEnv = process.env.VIBGRATE_CREDENTIALS;
+
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-fix-'));
   process.env.VIBGRATE_DSN = DSN;
+  // Isolate from any real login: resolveDsn falls back to the stored credential
+  // store, so point it at a file that never exists.
+  process.env.VIBGRATE_CREDENTIALS = path.join(dir, 'no-credentials.json');
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
 afterEach(() => {
   delete process.env.VIBGRATE_DSN;
+  if (prevCredsEnv === undefined) delete process.env.VIBGRATE_CREDENTIALS;
+  else process.env.VIBGRATE_CREDENTIALS = prevCredsEnv;
   logSpy.mockRestore();
   errSpy.mockRestore();
   vi.unstubAllGlobals();
