@@ -124,6 +124,13 @@ export interface DependencyRow {
   currentSpec: string;
   resolvedVersion: string | null;
   latestStable: string | null;
+  /**
+   * Latest stable release that still satisfies `currentSpec` — the newest
+   * version an install alone could reach without editing the manifest. Null
+   * when the registry list is unavailable (offline) or nothing satisfies.
+   * Populated by scanners that resolve ranges (npm today); absent elsewhere.
+   */
+  latestSatisfying?: string | null;
   majorsBehind: number | null;
   drift: 'current' | 'minor-behind' | 'major-behind' | 'unknown';
   /** Declared license evidence (populated by ecosystem scanners). */

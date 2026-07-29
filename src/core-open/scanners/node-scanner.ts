@@ -354,13 +354,25 @@ async function scanOnePackageJson(
   const resolved = await Promise.all(metaPromises);
 
   for (const { pkg, section, spec, meta } of resolved) {
-    // Prefer the lockfile's EXACT installed version (authoritative + works offline); otherwise fall
-    // back to the registry's best match for the declared range.
-    const lockedVersion = lockIndex?.resolve(pkg, spec) ?? null;
-    const registryResolved = meta.stableVersions.length > 0
+    // Latest stable release that still satisfies the declared range — the best
+    // version an install could bring in without editing the manifest.
+    const latestSatisfying = meta.stableVersions.length > 0
       ? semver.maxSatisfying(meta.stableVersions, spec) ?? null
       : null;
-    const resolvedVersion = (lockedVersion && semver.valid(lockedVersion)) ? lockedVersion : registryResolved;
+    // Prefer the lockfile's EXACT installed version (authoritative + works
+    // offline) — but only while it still satisfies the declared range. Once the
+    // user edits the spec past the lock (bumped package.json, not yet
+    // installed), the lock entry describes the OLD dependency; keeping it would
+    // freeze the reported drift until the next install. An unparseable range
+    // keeps the lock (satisfaction is undecidable, and the lock is still the
+    // installed truth).
+    const lockedVersion = lockIndex?.resolve(pkg, spec) ?? null;
+    const range = semver.validRange(spec);
+    const lockUsable =
+      !!lockedVersion &&
+      !!semver.valid(lockedVersion) &&
+      (!range || semver.satisfies(lockedVersion, range, { includePrerelease: true }));
+    const resolvedVersion = lockUsable ? lockedVersion : latestSatisfying;
 
     const latestStable = meta.latestStableOverall;
 
@@ -408,6 +420,7 @@ async function scanOnePackageJson(
       currentSpec: spec,
       resolvedVersion,
       latestStable,
+      latestSatisfying,
       majorsBehind,
       drift,
       license: buildDependencyLicense(meta.license, 'registry'),

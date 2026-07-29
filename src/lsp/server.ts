@@ -21,6 +21,7 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import * as semver from 'semver';
 
 import { runCoreScan } from '../core-open/index.js';
 import type { ScanArtifact, ScanOptions, DependencyRow, ProjectScan, DriftScore } from '../core-open/index.js';
@@ -929,10 +930,30 @@ function osvEcosystem(type: ProjectScan['type']): string | null {
   }
 }
 
+/**
+ * The newest in-range update still open to this dependency — `latestSatisfying`
+ * when it is a real step up from the resolved version, else null. Sized as
+ * `minor`/`patch` so the label can name the step honestly.
+ */
+function inRangeStep(dep: DependencyRow): { version: string; size: 'minor' | 'patch' } | null {
+  const target = dep.latestSatisfying;
+  if (!target || !dep.resolvedVersion) return null;
+  if (!semver.valid(target) || !semver.valid(dep.resolvedVersion)) return null;
+  if (!semver.gt(target, dep.resolvedVersion)) return null;
+  const diff = semver.diff(dep.resolvedVersion, target);
+  return { version: target, size: diff === 'patch' || diff === 'prepatch' ? 'patch' : 'minor' };
+}
+
 /** The end-of-line decoration text. Terse: it sits in the user's code. */
 function inlineLabel(dep: DependencyRow): string {
   const bits: string[] = [];
   if (dep.drift === 'major-behind') {
+    // A range anchored below the latest major can still have room inside it:
+    // name the in-range target first (what an install alone can reach), then
+    // the major journey — never a "minor behind" label next to a new-major
+    // version number.
+    const step = inRangeStep(dep);
+    if (step) bits.push(`${step.size} behind`, step.version);
     const n = dep.majorsBehind ?? 1;
     bits.push(`${n} major behind`);
   } else if (dep.drift === 'minor-behind') {
@@ -1017,6 +1038,10 @@ function hoverMarkdown(dep: DependencyRow, contribution: number | null): string 
     lines.push(`| | |`);
     lines.push(`|---|---|`);
     lines.push(`| yours | \`${yours}\` |`);
+    const step = inRangeStep(dep);
+    if (step && step.version !== dep.latestStable) {
+      lines.push(`| latest in range | \`${step.version}\` |`);
+    }
     lines.push(`| latest | \`${dep.latestStable}\` |`);
     const journey = versionJourney(yours, dep.latestStable);
     if (journey) lines.push(`| journey | ${journey} |`);
