@@ -4,8 +4,34 @@ import { vgdSocketPath } from './paths.js';
 
 export interface VgdClientOptions {
   socketPath?: string;
-  /** Connect timeout in ms (default 2000). */
+  /** End-to-end response timeout in ms (default: per-op, see {@link defaultVgdTimeoutMs}). */
   timeoutMs?: number;
+}
+
+/**
+ * Default response timeout per operation.
+ *
+ * The timer spans the whole round trip — writing the request, the daemon
+ * handling it, and the reply. Liveness probes must fail fast, but a flat 2s
+ * default guaranteed false "vgd did not respond" failures on large repos:
+ * `put-graph` ships the entire code map as one JSON line (tens of MB for a
+ * 40k-file workspace), and the single-threaded daemon needs seconds to read
+ * and store it. Ops that ride on a busy daemon's event loop get headroom too.
+ */
+export function defaultVgdTimeoutMs(op: VgdRequest['op']): number {
+  switch (op) {
+    case 'ping':
+    case 'status':
+      return 2000; // liveness probes — fail fast
+    case 'put-graph':
+    case 'load-graph':
+    case 'host-load':
+      return 120_000; // large payload / disk load / model load
+    case 'host-generate':
+      return 300_000; // local model generation
+    default:
+      return 10_000; // registry + graph queries — may queue behind a put-graph
+  }
 }
 
 /**
@@ -14,7 +40,7 @@ export interface VgdClientOptions {
  */
 export function vgdRequest(request: VgdRequest, options: VgdClientOptions = {}): Promise<VgdResponse> {
   const socketPath = options.socketPath ?? vgdSocketPath();
-  const timeoutMs = options.timeoutMs ?? 2000;
+  const timeoutMs = options.timeoutMs ?? defaultVgdTimeoutMs(request.op);
 
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);

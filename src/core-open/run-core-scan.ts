@@ -263,8 +263,31 @@ export async function runCoreScan(
   }
   progress.completeStep('walk', `${treeCount.totalFiles.toLocaleString()} files indexed`);
 
+  // ── Per-ecosystem fact collection ──
+  // Every ecosystem scanner starts NOW, concurrently: they are independent,
+  // I/O-bound (file reads + registry lookups), and registry traffic is already
+  // globally capped by the shared Semaphore — so on a polyglot repo the wall
+  // clock is the slowest scanner, not the sum of all of them. Results are then
+  // folded in the fixed order below so progress steps, dedup precedence, and
+  // serialized output stay byte-deterministic.
+  const nodeProjectsP = scanNodeProjects(rootDir, npmCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const dotnetProjectsP = scanDotnetProjects(rootDir, nugetCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const pythonProjectsP = scanPythonProjects(rootDir, pypiCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const javaProjectsP = scanJavaProjects(rootDir, mavenCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const rubyProjectsP = scanRubyProjects(rootDir, rubygemsCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const swiftProjectsP = scanSwiftProjects(rootDir, swiftCache, fileCache, projectScanTimeoutMs);
+  const goProjectsP = scanGoProjects(rootDir, goCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const rustProjectsP = scanRustProjects(rootDir, cargoCache, fileCache, projectScanTimeoutMs);
+  const phpProjectsP = scanPhpProjects(rootDir, composerCache, fileCache, projectScanTimeoutMs);
+  const dartProjectsP = scanDartProjects(rootDir, pubCache, fileCache, projectScanTimeoutMs);
+  const elixirProjectsP = scanElixirProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const dockerProjectsP = scanDockerProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const helmProjectsP = scanHelmProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const terraformProjectsP = scanTerraformProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const polyglotProjectsP = scanPolyglotProjects(rootDir, fileCache);
+
   // ── Step: Node projects ──
-  const nodeProjects = await scanNodeProjects(rootDir, npmCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const nodeProjects = await nodeProjectsP;
   if (nodeProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'node', label: 'Found Node projects', weight: 4 });
     progress.startStep('node');
@@ -278,7 +301,7 @@ export async function runCoreScan(
   }
 
   // ── Step: .NET projects ──
-  const dotnetProjects = await scanDotnetProjects(rootDir, nugetCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const dotnetProjects = await dotnetProjectsP;
   if (dotnetProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'dotnet', label: 'Found .NET projects', weight: 2 });
     progress.startStep('dotnet');
@@ -292,7 +315,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Python projects ──
-  const pythonProjects = await scanPythonProjects(rootDir, pypiCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const pythonProjects = await pythonProjectsP;
   if (pythonProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'python', label: 'Found Python projects', weight: 3 });
     progress.startStep('python');
@@ -306,7 +329,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Java projects ──
-  const javaProjects = await scanJavaProjects(rootDir, mavenCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const javaProjects = await javaProjectsP;
   if (javaProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'java', label: 'Found Java projects', weight: 3 });
     progress.startStep('java');
@@ -320,7 +343,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Ruby projects ──
-  const rubyProjects = await scanRubyProjects(rootDir, rubygemsCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const rubyProjects = await rubyProjectsP;
   if (rubyProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'ruby', label: 'Found Ruby projects', weight: 2 });
     progress.startStep('ruby');
@@ -334,7 +357,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Swift projects ──
-  const swiftProjects = await scanSwiftProjects(rootDir, swiftCache, fileCache, projectScanTimeoutMs);
+  const swiftProjects = await swiftProjectsP;
   if (swiftProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'swift', label: 'Found Swift projects', weight: 2 });
     progress.startStep('swift');
@@ -348,7 +371,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Go projects ──
-  const goProjects = await scanGoProjects(rootDir, goCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const goProjects = await goProjectsP;
   if (goProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'go', label: 'Found Go projects', weight: 2 });
     progress.startStep('go');
@@ -362,7 +385,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Rust projects ──
-  const rustProjects = await scanRustProjects(rootDir, cargoCache, fileCache, projectScanTimeoutMs);
+  const rustProjects = await rustProjectsP;
   if (rustProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'rust', label: 'Found Rust projects', weight: 2 });
     progress.startStep('rust');
@@ -376,7 +399,7 @@ export async function runCoreScan(
   }
 
   // ── Step: PHP projects ──
-  const phpProjects = await scanPhpProjects(rootDir, composerCache, fileCache, projectScanTimeoutMs);
+  const phpProjects = await phpProjectsP;
   if (phpProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'php', label: 'Found PHP projects', weight: 2 });
     progress.startStep('php');
@@ -390,7 +413,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Dart projects ──
-  const dartProjects = await scanDartProjects(rootDir, pubCache, fileCache, projectScanTimeoutMs);
+  const dartProjects = await dartProjectsP;
   if (dartProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'dart', label: 'Found Dart projects', weight: 2 });
     progress.startStep('dart');
@@ -404,7 +427,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Elixir projects ──
-  const elixirProjects = await scanElixirProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const elixirProjects = await elixirProjectsP;
   if (elixirProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'elixir', label: 'Found Elixir projects', weight: 2 });
     progress.startStep('elixir');
@@ -418,7 +441,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Docker images ──
-  const dockerProjects = await scanDockerProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const dockerProjects = await dockerProjectsP;
   if (dockerProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'docker', label: 'Found Docker images', weight: 2 });
     progress.startStep('docker');
@@ -431,7 +454,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Helm charts ──
-  const helmProjects = await scanHelmProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const helmProjects = await helmProjectsP;
   if (helmProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'helm', label: 'Found Helm charts', weight: 2 });
     progress.startStep('helm');
@@ -445,7 +468,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Terraform configs ──
-  const terraformProjects = await scanTerraformProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const terraformProjects = await terraformProjectsP;
   if (terraformProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'terraform', label: 'Found Terraform configs', weight: 2 });
     progress.startStep('terraform');
@@ -458,7 +481,7 @@ export async function runCoreScan(
   }
 
   // ── Step: Additional language projects ──
-  const polyglotProjects = await scanPolyglotProjects(rootDir, fileCache);
+  const polyglotProjects = await polyglotProjectsP;
   if (polyglotProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'polyglot', label: 'Found additional language projects', weight: 2 });
     progress.startStep('polyglot');

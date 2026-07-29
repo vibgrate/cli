@@ -1306,6 +1306,8 @@ Most developers never need this directly — Vibgrate for VS Code and `vg code` 
 vg daemon status
 vg daemon ensure
 vg daemon start
+vg daemon stop
+vg daemon restart
 vg daemon register
 vg daemon list
 vg daemon federation
@@ -1320,10 +1322,12 @@ vg daemon graphs
 | `status` | Whether the daemon is running and how many workspaces it tracks |
 | `start` | Run in the foreground (Ctrl-C to stop) |
 | `ensure` | Start in the background if not already running (idempotent; for hosts and agents) |
+| `stop` | Stop the running daemon (idempotent — succeeds if none is running) |
+| `restart` | Stop the daemon if running, then start it in the background (`vg update` does this automatically after installing a new version) |
 | `register [root]` | Register the current (or given) repository with a running daemon |
 | `list` | List registered workspaces |
 | `federation [root]` | Register a multi-root federation from `.vibgrate/federation.json` (or primary cwd) |
-| `publish [root]` | Load the workspace code map into the daemon active graph (run `vg build` first) |
+| `publish [root]` | Load the workspace code map into the daemon active graph (run `vg build` first). The daemon reads the map from disk itself, binary snapshot first — nothing heavy crosses the socket |
 | `query <query...>` | Lexical/structural query against the active graph |
 | `impact <symbol>` | Blast radius for a symbol in the active graph |
 | `graphs` | List multi-branch graph slots currently resident |

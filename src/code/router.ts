@@ -39,7 +39,7 @@ import {
 import type { Provider } from './types.js';
 
 export interface RouteOptions {
-  /** Explicit `--provider` (ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp). */
+  /** Explicit `--provider` (vibgrate-relay, ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp). */
   provider?: string;
   /** Explicit `--model`. */
   model?: string;
@@ -79,7 +79,7 @@ export interface RouteResult {
   managerLine: string;
 }
 
-const HOSTED_IDS = new Set(['openrouter', 'litellm', 'openai', 'together']);
+const HOSTED_IDS = new Set(['vibgrate-relay', 'openrouter', 'litellm', 'openai', 'together']);
 
 /** Resolve the ordered provider list for a run. Throws an actionable CliError when nothing is eligible. */
 export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): RouteResult {
@@ -142,7 +142,18 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
   }
 
   // No explicit selection: choose from signals already present, best first.
-  // 1) A configured hosted router key (OpenRouter is the reference best-in-breed router).
+  // 1) Vibgrate Relay — the first-party hosted router, preferred when the user
+  // has signed in. Nothing is dialled without their token, so this stays inside
+  // the no-surprise-egress rule above.
+  if (env.VIBGRATE_RELAY_TOKEN) {
+    const model = resolveHostedModel(opts, env, 'vibgrate-relay');
+    const primary = buildHosted('vibgrate-relay', model);
+    return finish(
+      [primary, ...localFallbacks(opts, env, discover, 'vibgrate-relay', { allowLmStudio: false })],
+      'VIBGRATE_RELAY_TOKEN is set → Vibgrate Relay (with local fallback)',
+    );
+  }
+  // 2) Another configured hosted router key.
   if (env.OPENROUTER_API_KEY) {
     const model = resolveHostedModel(opts, env, 'openrouter');
     const primary = buildHosted('openrouter', model);
@@ -151,10 +162,10 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
       'OPENROUTER_API_KEY is set → OpenRouter (with local fallback)',
     );
   }
-  // 2) A locally-pulled model (embedded first; never auto LM Studio).
+  // 3) A locally-pulled model (embedded first; never auto LM Studio).
   const locals = localFallbacks(opts, env, discover, '', { allowLmStudio: false });
   if (locals.length) return finish(locals, 'a local model is available → on-device (no key needed)');
-  // 3) Any other configured hosted key.
+  // 4) Any other configured hosted key.
   for (const id of ['litellm', 'openai', 'together'] as const) {
     const keyEnv = OPENAI_COMPATIBLE[id].apiKeyEnv;
     if (keyEnv && env[keyEnv]) {
@@ -164,7 +175,7 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
   }
 
   throw new CliError(
-    'no model backend configured. Do one of: set OPENROUTER_API_KEY for the hosted router, run `vg models install spark` for the Vibgrate manager, run Ollama locally, or use --local with a local model. Set the model with --model or VG_CODE_MODEL.',
+    'no model backend configured. Do one of: sign in to Vibgrate Relay (VIBGRATE_RELAY_TOKEN), set OPENROUTER_API_KEY for the hosted router, run `vg models install spark` for the Vibgrate manager, run Ollama locally, or use --local with a local model. Set the model with --model or VG_CODE_MODEL.',
     ExitCode.NOT_FOUND,
   );
 }
@@ -203,7 +214,7 @@ function buildExplicit(id: string, opts: RouteOptions, env: NodeJS.ProcessEnv, d
   }
   if (HOSTED_IDS.has(id)) return buildHosted(id, resolveHostedModel(opts, env, id));
   throw new CliError(
-    `unknown --provider "${id}". Known: ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp.`,
+    `unknown --provider "${id}". Known: vibgrate-relay, ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp.`,
     ExitCode.USAGE_ERROR,
   );
 }

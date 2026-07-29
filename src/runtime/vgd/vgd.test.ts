@@ -1,12 +1,14 @@
 import * as fs from 'node:fs';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseRequest, VGD_PROTOCOL_VERSION } from './protocol.js';
 import { WorkspaceRegistry } from './registry.js';
 import { startVgdServer } from './server.js';
-import { vgdIsRunning, vgdRequest } from './client.js';
+import { defaultVgdTimeoutMs, vgdIsRunning, vgdRequest } from './client.js';
 import { fixtureGraph } from '../../code/graph-fixture.js';
+import { serializeGraph } from '../../engine/serialize.js';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -22,6 +24,7 @@ function tmp(): string {
 describe('parseRequest', () => {
   it('accepts known ops and rejects junk', () => {
     expect(parseRequest('{"op":"ping"}')).toEqual({ op: 'ping' });
+    expect(parseRequest('{"op":"shutdown"}')).toEqual({ op: 'shutdown' });
     expect(parseRequest('{"op":"register","root":"/a"}')).toEqual({ op: 'register', root: '/a' });
     expect(parseRequest('{"op":"query-graph","repositoryId":"r","query":"auth"}')).toEqual({
       op: 'query-graph',
@@ -56,7 +59,129 @@ describe('WorkspaceRegistry', () => {
   });
 });
 
+describe('defaultVgdTimeoutMs', () => {
+  it('keeps liveness probes fast and gives heavy ops headroom', () => {
+    // Liveness probes must fail fast so `vgdIsRunning` stays cheap.
+    expect(defaultVgdTimeoutMs('ping')).toBe(2000);
+    expect(defaultVgdTimeoutMs('status')).toBe(2000);
+    // put-graph ships the whole code map in one JSON line — a 2s default
+    // guaranteed false "vgd did not respond" failures on large repos.
+    expect(defaultVgdTimeoutMs('put-graph')).toBeGreaterThanOrEqual(60_000);
+    expect(defaultVgdTimeoutMs('load-graph')).toBeGreaterThanOrEqual(60_000);
+    expect(defaultVgdTimeoutMs('host-load')).toBeGreaterThanOrEqual(60_000);
+    expect(defaultVgdTimeoutMs('host-generate')).toBeGreaterThanOrEqual(60_000);
+    // Everything else can queue behind a put-graph on the daemon's event loop.
+    expect(defaultVgdTimeoutMs('register')).toBeGreaterThan(2000);
+    expect(defaultVgdTimeoutMs('query-graph')).toBeGreaterThan(2000);
+  });
+});
+
 describe('vgd server + client', () => {
+  it('put-graph survives a daemon that takes longer than the old 2s flat timeout', async () => {
+    // Regression: on large repos the daemon needs seconds to absorb a
+    // put-graph, and the client used to give up at a flat 2000ms with
+    // "vgd did not respond within 2000ms". Simulate a slow daemon.
+    const dir = tmp();
+    const socketPath = path.join(dir, 'vgd.sock');
+    const slow = net.createServer((socket) => {
+      socket.setEncoding('utf8');
+      let buffer = '';
+      socket.on('data', (chunk: string) => {
+        buffer += chunk;
+        if (!buffer.includes('\n')) return;
+        setTimeout(() => {
+          socket.write(
+            JSON.stringify({ ok: true, stored: true, repositoryId: 'r', gitRef: 'main', nodeCount: 1 }) + '\n',
+          );
+        }, 2300);
+      });
+    });
+    await new Promise<void>((resolve) => slow.listen(socketPath, resolve));
+    try {
+      const put = await vgdRequest(
+        { op: 'put-graph', repositoryId: 'r', gitRef: 'main', graph: fixtureGraph() },
+        { socketPath },
+      );
+      expect(put.ok).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => slow.close(() => resolve()));
+    }
+  }, 10_000);
+
+  it('refuses shutdown without a hook (embedded daemon) and honours it with one', async () => {
+    // Embedded (no hook — e.g. the in-process vgd inside `vg code`): refuse,
+    // so another process can never take down the owning session.
+    const dir = tmp();
+    const embedded = await startVgdServer({
+      socketPath: path.join(dir, 'vgd.sock'),
+      pidPath: path.join(dir, 'vgd.pid'),
+    });
+    try {
+      const res = await vgdRequest({ op: 'shutdown' }, { socketPath: embedded.socketPath });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.code).toBe('shutdown_unsupported');
+    } finally {
+      await embedded.close();
+    }
+
+    // Standalone (`vg daemon start` passes the hook): acknowledge, then invoke.
+    const dir2 = tmp();
+    let shutdownRequested = false;
+    const standalone = await startVgdServer({
+      socketPath: path.join(dir2, 'vgd.sock'),
+      pidPath: path.join(dir2, 'vgd.pid'),
+      onShutdownRequest: () => {
+        shutdownRequested = true;
+      },
+    });
+    try {
+      const res = await vgdRequest({ op: 'shutdown' }, { socketPath: standalone.socketPath });
+      expect(res.ok).toBe(true);
+      expect(res.ok && 'stopping' in res && res.stopping).toBe(true);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(shutdownRequested).toBe(true);
+    } finally {
+      await standalone.close();
+    }
+  });
+
+  it('load-graph loads the on-disk map inside the daemon (no graph over the socket)', async () => {
+    const dir = tmp();
+    const socketPath = path.join(dir, 'vgd.sock');
+    const server = await startVgdServer({ socketPath, pidPath: path.join(dir, 'vgd.pid') });
+    try {
+      const root = path.join(dir, 'workspace');
+      fs.mkdirSync(root);
+      const graphPath = path.join(dir, 'graph.json');
+      fs.writeFileSync(graphPath, serializeGraph(fixtureGraph()));
+
+      const loaded = await vgdRequest({ op: 'load-graph', root, gitRef: 'main', graphPath }, { socketPath });
+      expect(loaded.ok).toBe(true);
+      if (loaded.ok && 'stored' in loaded) {
+        expect(loaded.gitRef).toBe('main');
+        expect(loaded.nodeCount).toBeGreaterThan(0);
+      }
+
+      const q = await vgdRequest(
+        { op: 'query-graph', repositoryId: loaded.ok && 'stored' in loaded ? loaded.repositoryId : '', query: 'scanDir' },
+        { socketPath },
+      );
+      expect(q.ok).toBe(true);
+
+      // No map on disk → actionable no_map, never a stored=true.
+      const missingRoot = path.join(dir, 'empty');
+      fs.mkdirSync(missingRoot);
+      const missing = await vgdRequest(
+        { op: 'load-graph', root: missingRoot, graphPath: path.join(dir, 'nope.json') },
+        { socketPath },
+      );
+      expect(missing.ok).toBe(false);
+      if (!missing.ok) expect(missing.code).toBe('no_map');
+    } finally {
+      await server.close();
+    }
+  });
+
   it('answers ping, register, list, and status over the socket', async () => {
     const dir = tmp();
     const socketPath = path.join(dir, 'vgd.sock');

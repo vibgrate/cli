@@ -4,8 +4,8 @@ import * as path from 'node:path';
 import { VGD_PROTOCOL_VERSION, parseRequest, type VgdResponse } from './protocol.js';
 import { WorkspaceRegistry } from './registry.js';
 import { vgdPidPath, vgdSocketPath } from './paths.js';
-import { parseGraph } from '../../engine/serialize.js';
 import { queryGraph } from '../../engine/query.js';
+import { loadGraph } from '../../engine/load.js';
 import { impactOf } from '../../engine/impact.js';
 import { resolveOne } from '../../engine/lookup.js';
 import { getVgdHostBroker, type VgdHostBroker } from './host-broker.js';
@@ -22,6 +22,13 @@ export interface VgdServerOptions {
   pid?: number;
   /** Inject host broker (tests); default process-wide broker. */
   hostBroker?: VgdHostBroker;
+  /**
+   * Invoked (shortly after the reply is written) when a client sends the
+   * `shutdown` op. Only a standalone `vg daemon start` passes this — an
+   * in-process vgd (e.g. inside `vg code`) leaves it unset, and the op is
+   * refused so another process can never take down the owning session.
+   */
+  onShutdownRequest?: () => void;
 }
 
 export interface VgdServer {
@@ -41,6 +48,7 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
   const pidPath = options.pidPath ?? vgdPidPath();
   const registry = options.registry ?? new WorkspaceRegistry();
   const hostBroker = options.hostBroker ?? getVgdHostBroker();
+  const onShutdownRequest = options.onShutdownRequest;
   const now = options.now ?? (() => new Date());
   const pid = options.pid ?? process.pid;
   const startedAt = Date.now();
@@ -67,7 +75,9 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
         const line = buffer.slice(0, nl).trim();
         buffer = buffer.slice(nl + 1);
         if (!line) continue;
-        void Promise.resolve(handleLine(line, { registry, hostBroker, now, pid, startedAt, socketPath })).then(
+        void Promise.resolve(
+          handleLine(line, { registry, hostBroker, now, pid, startedAt, socketPath, onShutdownRequest }),
+        ).then(
           (response) => {
             socket.write(JSON.stringify(response) + '\n');
           },
@@ -122,6 +132,7 @@ async function handleLine(
     pid: number;
     startedAt: number;
     socketPath: string;
+    onShutdownRequest?: () => void;
   },
 ): Promise<VgdResponse> {
   const req = parseRequest(line);
@@ -140,6 +151,20 @@ async function handleLine(
         version: VGD_PROTOCOL_VERSION,
         socketPath: ctx.socketPath,
       };
+    case 'shutdown': {
+      if (!ctx.onShutdownRequest) {
+        return {
+          ok: false,
+          error:
+            'this vgd is embedded in another process (e.g. vg code) and cannot be stopped remotely — stop the owning process instead',
+          code: 'shutdown_unsupported',
+        };
+      }
+      // Let the reply flush to the client before the listener goes away.
+      const hook = ctx.onShutdownRequest;
+      setTimeout(() => hook(), 150);
+      return { ok: true, stopping: true };
+    }
     case 'host-status':
       return { ok: true, host: ctx.hostBroker.status() };
     case 'host-load': {
@@ -201,7 +226,10 @@ async function handleLine(
     }
     case 'put-graph': {
       try {
-        const graph = parseGraph(JSON.stringify(req.graph));
+        // The wire line was already JSON.parse'd by parseRequest — re-encoding a
+        // large repo's graph (`parseGraph(JSON.stringify(...))`) blocked the
+        // daemon's event loop for seconds, timing out every concurrent client.
+        const graph = req.graph as VgGraph;
         ctx.registry.putGraph(req.repositoryId, req.gitRef, graph);
         return {
           ok: true,
@@ -213,6 +241,30 @@ async function handleLine(
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : 'invalid graph', code: 'bad_graph' };
       }
+    }
+    case 'load-graph': {
+      // Load from disk inside the daemon: the snapshot-first loader decodes
+      // the binary sidecar (msgpack) when fresh — no multi-MB JSON line ever
+      // crosses the socket, which is what made put-graph publishes slow on
+      // large repos.
+      const record = ctx.registry.register(req.root, ctx.now, { gitRef: req.gitRef });
+      const gitRef = req.gitRef ?? record.gitRef ?? 'HEAD';
+      const graph = loadGraph(req.root, req.graphPath);
+      if (!graph) {
+        return {
+          ok: false,
+          error: `no code map found for ${req.root} — run \`vg build\` (or bare \`vg\`) first`,
+          code: 'no_map',
+        };
+      }
+      ctx.registry.putGraph(record.id, gitRef, graph);
+      return {
+        ok: true,
+        stored: true,
+        repositoryId: record.id,
+        gitRef,
+        nodeCount: graph.nodes?.length ?? 0,
+      };
     }
     case 'query-graph': {
       const resolved = ctx.registry.resolveGraph(req.repositoryId, req.gitRef);

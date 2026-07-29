@@ -1,8 +1,9 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
-import { startVgdServer, vgdIsRunning, vgdRequest, vgdSocketPath, VGD_PROTOCOL_VERSION } from '../runtime/vgd/index.js';
+import { startVgdServer, vgdIsRunning, vgdPidPath, vgdRequest, vgdSocketPath, VGD_PROTOCOL_VERSION } from '../runtime/vgd/index.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { c, info, json } from '../util/output.js';
@@ -57,7 +58,10 @@ export function registerDaemon(program: Command): void {
       if (await vgdIsRunning({ socketPath })) {
         throw new CliError(`vgd is already running at ${socketPath}`, ExitCode.ERROR);
       }
-      const server = await startVgdServer({ socketPath });
+      // The shutdown closure needs the server; the server needs the hook.
+      // Bridge with a mutable ref so `vg daemon stop` can reach us.
+      let requestShutdown: () => void = () => {};
+      const server = await startVgdServer({ socketPath, onShutdownRequest: () => requestShutdown() });
       if (!global.quiet) {
         info(`vgd · listening on ${c.dim(server.socketPath)} (${VGD_PROTOCOL_VERSION})`);
         info(c.dim('  register a workspace: vg daemon register'));
@@ -69,6 +73,7 @@ export function registerDaemon(program: Command): void {
         if (!global.quiet) info(c.dim('vgd · stopped'));
         process.exit(0);
       };
+      requestShutdown = () => void shutdown();
       process.on('SIGINT', () => void shutdown());
       process.on('SIGTERM', () => void shutdown());
       // Keep the event loop alive until signal.
@@ -97,32 +102,74 @@ export function registerDaemon(program: Command): void {
         return;
       }
 
-      // Spawn a detached child that runs `daemon start` with the same CLI entry.
-      const child = spawnDetachedDaemonStart(socketPath);
-      child.unref();
-
-      // Wait briefly for the socket to answer ping.
-      const deadline = Date.now() + 8_000;
-      let ready = false;
-      while (Date.now() < deadline) {
-        await sleep(100);
-        if (await vgdIsRunning({ socketPath })) {
-          ready = true;
-          break;
-        }
-      }
-      if (!ready) {
-        throw new CliError(`vgd failed to become ready at ${socketPath}`, ExitCode.ERROR);
-      }
+      const child = await startDetachedVgd(socketPath);
       const res = await vgdRequest({ op: 'status' }, { socketPath });
       if (global.json) {
         json({ running: true, ensured: true, ...(res.ok ? res : { socketPath }) });
       } else if (!global.quiet) {
-        const pid = res.ok && 'pid' in res ? res.pid : child.pid;
+        const pid = res.ok && 'pid' in res ? res.pid : child;
         info(`vgd · started in background pid ${pid} · ${c.dim(socketPath)}`);
       }
     });
   applyGlobalOptions(ensure);
+
+  const stop = cmd
+    .command('stop')
+    .description('stop the running vgd (idempotent — succeeds if none is running)')
+    .action(async function (this: Command) {
+      const global = readGlobal(this);
+      const socketPath = socketOf(this);
+      const result = await stopVgd(socketPath);
+      if (global.json) {
+        json({ stopped: result === 'stopped', result, socketPath });
+      } else if (!global.quiet) {
+        if (result === 'stopped') info(`vgd · stopped ${c.dim(socketPath)}`);
+        else if (result === 'not-running') info(c.dim(`vgd · not running (${socketPath})`));
+      }
+      if (result === 'refused') {
+        throw new CliError(
+          'this vgd is embedded in another process (e.g. vg code) — stop that process instead',
+          ExitCode.ERROR,
+        );
+      }
+      if (result === 'failed') {
+        throw new CliError(
+          `vgd did not stop within 5s (${socketPath}) — check \`vg daemon status\` and stop the process manually`,
+          ExitCode.ERROR,
+        );
+      }
+    });
+  applyGlobalOptions(stop);
+
+  const restart = cmd
+    .command('restart')
+    .description('restart vgd (stop if running, then start in the background)')
+    .action(async function (this: Command) {
+      const global = readGlobal(this);
+      const socketPath = socketOf(this);
+      const stopResult = await stopVgd(socketPath);
+      if (stopResult === 'refused') {
+        throw new CliError(
+          'this vgd is embedded in another process (e.g. vg code) — stop that process instead',
+          ExitCode.ERROR,
+        );
+      }
+      if (stopResult === 'failed') {
+        throw new CliError(
+          `vgd did not stop within 5s (${socketPath}) — check \`vg daemon status\` and stop the process manually`,
+          ExitCode.ERROR,
+        );
+      }
+      await startDetachedVgd(socketPath);
+      const res = await vgdRequest({ op: 'status' }, { socketPath });
+      if (global.json) {
+        json({ running: true, restarted: true, ...(res.ok ? res : { socketPath }) });
+      } else if (!global.quiet) {
+        const pid = res.ok && 'pid' in res ? res.pid : '?';
+        info(`vgd · restarted pid ${pid} · ${c.dim(socketPath)}`);
+      }
+    });
+  applyGlobalOptions(restart);
 
   const register = cmd
     .command('register')
@@ -218,30 +265,44 @@ export function registerDaemon(program: Command): void {
       if (!(await vgdIsRunning({ socketPath }))) {
         throw new CliError(`vgd is not running — start it with \`vg daemon ensure\` (${socketPath})`, ExitCode.NOT_FOUND);
       }
-      const { loadGraph } = await import('../engine/load.js');
-      const { detectGitRef } = await import('../runtime/git-ref.js');
-      const { repositoryIdFromRoot } = await import('../runtime/paths.js');
       const opts = this.opts() as { gitRef?: string };
-      const graph = loadGraph(root, global.graph);
-      if (!graph) {
-        throw new CliError(
-          `no code map found for ${root} — run \`vg build\` (or bare \`vg\`) first`,
-          ExitCode.NOT_FOUND,
-        );
-      }
-      // Ensure workspace is registered so list shows the root.
-      const reg = await vgdRequest({ op: 'register', root }, { socketPath });
-      if (!reg.ok) throw new CliError(reg.error, ExitCode.ERROR);
-      const git = opts.gitRef?.trim() || detectGitRef(root).ref || 'HEAD';
-      const repositoryId =
-        reg.ok && 'workspace' in reg ? reg.workspace.id : repositoryIdFromRoot(root);
-      const put = await vgdRequest(
-        { op: 'put-graph', repositoryId, gitRef: git, graph },
+      // Fast path: the daemon loads the map from disk itself (binary snapshot
+      // first) — nothing heavy crosses the socket.
+      const loaded = await vgdRequest(
+        { op: 'load-graph', root, gitRef: opts.gitRef?.trim() || undefined, graphPath: global.graph },
         { socketPath },
       );
-      if (!put.ok) throw new CliError(put.error, ExitCode.ERROR);
+      let put = loaded;
+      if (!loaded.ok && loaded.code === 'no_map') {
+        throw new CliError(loaded.error, ExitCode.NOT_FOUND);
+      }
+      if (!loaded.ok) {
+        // Older daemon without load-graph — legacy path: load locally and ship
+        // the graph over the socket with put-graph.
+        const { loadGraph } = await import('../engine/load.js');
+        const { detectGitRef } = await import('../runtime/git-ref.js');
+        const { repositoryIdFromRoot } = await import('../runtime/paths.js');
+        const graph = loadGraph(root, global.graph);
+        if (!graph) {
+          throw new CliError(
+            `no code map found for ${root} — run \`vg build\` (or bare \`vg\`) first`,
+            ExitCode.NOT_FOUND,
+          );
+        }
+        // Ensure workspace is registered so list shows the root.
+        const reg = await vgdRequest({ op: 'register', root }, { socketPath });
+        if (!reg.ok) throw new CliError(reg.error, ExitCode.ERROR);
+        const git = opts.gitRef?.trim() || detectGitRef(root).ref || 'HEAD';
+        const repositoryId =
+          reg.ok && 'workspace' in reg ? reg.workspace.id : repositoryIdFromRoot(root);
+        put = await vgdRequest(
+          { op: 'put-graph', repositoryId, gitRef: git, graph },
+          { socketPath },
+        );
+        if (!put.ok) throw new CliError(put.error, ExitCode.ERROR);
+      }
       if (global.json) json(put);
-      else if ('stored' in put) {
+      else if (put.ok && 'stored' in put) {
         info(`vgd · published graph · ${put.nodeCount} node(s) · ref ${put.gitRef}`);
         info(c.dim(`  repositoryId ${put.repositoryId}`));
       }
@@ -389,6 +450,87 @@ function spawnDetachedDaemonStart(socketPath: string): ReturnType<typeof spawn> 
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Spawn a detached background `daemon start` and wait for it to answer ping.
+ * Returns the child pid; throws when the socket never becomes ready.
+ */
+async function startDetachedVgd(socketPath: string): Promise<number | undefined> {
+  const child = spawnDetachedDaemonStart(socketPath);
+  child.unref();
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    await sleep(100);
+    if (await vgdIsRunning({ socketPath })) return child.pid;
+  }
+  throw new CliError(`vgd failed to become ready at ${socketPath}`, ExitCode.ERROR);
+}
+
+/**
+ * Stop a running vgd: polite `shutdown` op first, SIGTERM via the pid file for
+ * daemons that predate the op, then wait (≤5s) for the socket to go quiet.
+ *
+ * `refused` means the daemon is embedded in another process (`vg code`) that
+ * declined remote shutdown — never escalate that to a pid-file kill, because
+ * the pid file belongs to the owning process.
+ */
+export async function stopVgd(socketPath: string): Promise<'stopped' | 'not-running' | 'refused' | 'failed'> {
+  if (!(await vgdIsRunning({ socketPath }))) return 'not-running';
+  let acknowledged = false;
+  try {
+    const res = await vgdRequest({ op: 'shutdown' }, { socketPath });
+    if (res.ok) acknowledged = true;
+    else if (res.code === 'shutdown_unsupported') return 'refused';
+    // Any other refusal (an older daemon answers `unknown op`) → pid fallback.
+  } catch {
+    /* connection dropped mid-shutdown or slow daemon — fall through to pid */
+  }
+  if (!acknowledged) {
+    const pid = readVgdPid();
+    if (pid == null) return 'failed';
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      return 'failed';
+    }
+  }
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    await sleep(100);
+    if (!(await vgdIsRunning({ socketPath }))) return 'stopped';
+  }
+  return 'failed';
+}
+
+/**
+ * Restart the local vgd if (and only if) one is running — used by `vg update`
+ * so a freshly installed CLI does not keep serving from a daemon still running
+ * the old build. Best-effort: never throws.
+ */
+export async function restartVgdIfRunning(
+  socketPath: string = vgdSocketPath(),
+): Promise<'restarted' | 'not-running' | 'refused' | 'failed'> {
+  try {
+    const stopResult = await stopVgd(socketPath);
+    if (stopResult === 'not-running') return 'not-running';
+    if (stopResult === 'refused') return 'refused';
+    if (stopResult === 'failed') return 'failed';
+    await startDetachedVgd(socketPath);
+    return 'restarted';
+  } catch {
+    return 'failed';
+  }
+}
+
+function readVgdPid(): number | null {
+  try {
+    const raw = fs.readFileSync(vgdPidPath(), 'utf8').trim();
+    const pid = Number.parseInt(raw, 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Resolve repository id for cwd: register if needed, return workspace id. */

@@ -41,6 +41,7 @@ import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { manifestHash, loadScanCache, writeScanCache, isDependencyFile } from './scan-cache.js';
+import { recordScore, lastEntry, deltaFrom, recentHistory, type ScoreHistoryEntry } from './score-history.js';
 import { runGraphQuery, type GraphQueryParams, type GraphQueryResult } from './graph-query.js';
 import {
   enrichVulns,
@@ -70,6 +71,13 @@ export interface ScoreNotification {
   counts: { behind: number; eol: number; unmaintained: number; total: number };
   rootPath: string;
   scannedAt: string;
+  /**
+   * Drift diff (plan §5.8): signed change from the previously recorded score,
+   * engine-computed, same-methodology only. Absent — never 0 — when there is
+   * no comparable previous score. Clients render `⌁ +4` / `⌁ -3`; they never
+   * subtract two scores themselves.
+   */
+  delta?: number;
   /**
    * Per-package contribution breakdown for the panel accordion — the packages
    * actually driving the score (drift > 0), ranked worst-first. Built from the
@@ -299,6 +307,14 @@ export class VibgrateLanguageServer {
 
     this.conn.onRequest('vibgrate/graph/query', (_m, params) => this.onGraphQuery(params));
     this.conn.onRequest('vibgrate/score/forFile', (_m, params) => this.onScoreForFile(params));
+    // Trend data for the panel sparkline (plan §5.6). Entries carry their
+    // methodology so the client can break the line across a change — the one
+    // trend rule v3 imposes. Empty history is an empty array, not an error.
+    this.conn.onRequest('vibgrate/score/history', (_m, params) => {
+      const p = params as { days?: number } | undefined;
+      const days = typeof p?.days === 'number' && p.days > 0 && p.days <= 365 ? p.days : 90;
+      return { days, entries: recentHistory(this.opts.root, days) };
+    });
     this.conn.onRequest('vibgrate/enrich', (_m, params) => this.onEnrich(params));
     this.conn.onRequest('vibgrate/vulns', (_m, _params) => this.onVulns());
 
@@ -414,6 +430,18 @@ export class VibgrateLanguageServer {
     // speaking v3 and need no change when the engine catches up.
     const band = (a.drift.riskLevel ?? 'low') as Band;
 
+    // History + drift diff (plan §5.6/§5.8): diff against the last recorded
+    // entry, then record this one. Both engine-side — clients only render.
+    const historyEntry: ScoreHistoryEntry = {
+      ts: a.timestamp,
+      score: a.drift.score,
+      band,
+      mode: a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated'),
+      methodology: a.drift.methodologyVersion ?? 'unknown',
+    };
+    const delta = deltaFrom(lastEntry(this.opts.root), historyEntry);
+    recordScore(this.opts.root, historyEntry);
+
     const payload: ScoreNotification = {
       score: a.drift.score,
       band,
@@ -421,12 +449,13 @@ export class VibgrateLanguageServer {
       // offline marker. An air-gapped scan against a dated snapshot is Verified.
       // The score now carries the authoritative provenance (driftscore-3.0
       // envelope); fall back to the artifact heuristic for pre-v3 engines.
-      mode: a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated'),
-      methodology: a.drift.methodologyVersion ?? 'unknown',
+      mode: historyEntry.mode,
+      methodology: historyEntry.methodology,
       scale: '0 best, 100 worst',
       counts: { behind, eol, unmaintained, total },
       rootPath: a.rootPath,
       scannedAt: a.timestamp,
+      ...(delta !== undefined ? { delta } : {}),
       ...(buildBreakdown(a.drift, a.projects ?? []) ? { breakdown: buildBreakdown(a.drift, a.projects ?? []) } : {}),
     };
 

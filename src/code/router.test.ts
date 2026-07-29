@@ -176,3 +176,59 @@ describe('resolveProviders', () => {
 });
 
 
+
+describe('Vibgrate Relay', () => {
+  const base = { model: 'anthropic/claude-sonnet-5' };
+
+  it('is preferred over OpenRouter when the user has signed in', () => {
+    const route = resolveProviders(base, {
+      env: { VIBGRATE_RELAY_TOKEN: 'vtm_abc', OPENROUTER_API_KEY: 'sk-or-x' },
+      discover: () => [],
+    });
+    expect(route.providers[0].id).toBe('vibgrate-relay');
+    expect(route.reason).toMatch(/VIBGRATE_RELAY_TOKEN/);
+  });
+
+  it('leaves OpenRouter working for users who have not signed in', () => {
+    const route = resolveProviders(base, {
+      env: { OPENROUTER_API_KEY: 'sk-or-x' },
+      discover: () => [],
+    });
+    expect(route.providers[0].id).toBe('openrouter');
+  });
+
+  it('is never dialled without a token — no surprise egress', () => {
+    // A bare --model still makes local Ollama a candidate (loopback, not egress).
+    // The property that matters is that Relay is never reached for unless the
+    // user signed in.
+    const route = resolveProviders(base, { env: {}, discover: () => [] });
+    expect(route.providers.map((p) => p.id)).not.toContain('vibgrate-relay');
+    // And with nothing at all configured, the run stops with an actionable error.
+    expect(() =>
+      resolveProviders({}, { env: {}, discover: () => [] }),
+    ).toThrow(/no model backend/i);
+  });
+
+  it('can be chosen explicitly', () => {
+    const route = resolveProviders(
+      { ...base, provider: 'vibgrate-relay' },
+      { env: { VIBGRATE_RELAY_TOKEN: 'vtm_abc' }, discover: () => [] },
+    );
+    expect(route.providers[0].id).toBe('vibgrate-relay');
+  });
+
+  it('is listed among known providers when an unknown one is given', () => {
+    expect(() =>
+      resolveProviders({ ...base, provider: 'nope' }, { env: {}, discover: () => [] }),
+    ).toThrow(/vibgrate/);
+  });
+
+  it('still requires an explicit model, like every hosted provider', () => {
+    expect(() =>
+      resolveProviders(
+        { provider: 'vibgrate-relay' },
+        { env: { VIBGRATE_RELAY_TOKEN: 'vtm_abc' }, discover: () => [] },
+      ),
+    ).toThrow(/model/i);
+  });
+});
