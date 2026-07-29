@@ -5,6 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { parseGraph } from '../engine/serialize.js';
+import { mapFileStat } from '../engine/snapshot.js';
 import { loadGraphPreferIndex } from '../engine/index-db.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { TOOLS, warmEmbedderInBackground } from './tools.js';
@@ -124,7 +125,9 @@ export class GraphSource {
   /** Current graph: auto-refreshed if the tree drifted, reloaded if the file changed. */
   async get(): Promise<VgGraph> {
     if (this.refresh) await this.maybeRefresh();
-    const stat = fs.statSync(this.graphPath); // throws if missing → surfaced as tool error
+    // JSON when present, else the standalone snapshot (global-store mode);
+    // throws if neither exists → surfaced as tool error.
+    const stat = mapFileStat(this.graphPath);
     if (stat.mtimeMs !== this.cachedMtimeMs || !this.cached) {
       // Prefer SQLite reconstruct when corpusHash matches (scale past JSON parse).
       const preferred = loadGraphPreferIndex(this.root, this.graphPath);

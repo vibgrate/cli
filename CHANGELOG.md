@@ -14,6 +14,28 @@ backward compatible.
 
 ### Added
 
+- **Global-store maps are now snapshot-only** — builds that write to the
+  global application store (the default layout) skip the large pretty-JSON
+  serialize entirely and write just the binary snapshot: ~1s faster XL builds
+  and ~60% less disk per branch-keyed map. Everywhere a human or git can see
+  the artifact — `vg share`, `VIBGRATE_GRAPH_IN_REPO=1`, an explicit
+  `--graph` path — the canonical `graph.json` is still written exactly as
+  before, and `vg bundle`/`vg export` materialize JSON from the snapshot on
+  demand, so every sharing and interchange surface stays JSON. A stale
+  `graph.json` left in the store by an older CLI is cleaned up so downgrades
+  can never serve an outdated map.
+
+- **Binary graph snapshot for fast loads** — builds now write a compact binary
+  sidecar (`graph.snap`, MessagePack) beside `graph.json`, and every loader
+  (`vg ask`/`show`/`impact`, `vg serve`, `vg code`) prefers it: ~2.6× faster
+  cold graph loads and ~40% of the on-disk size on large maps, with a lower
+  peak-memory load path. `graph.json` is unchanged and stays the canonical,
+  committed, shareable artifact — the snapshot is a derived cache that is
+  checksummed, invalidated automatically whenever `graph.json` changes (or the
+  CLI version does), regenerated transparently on the next load (existing
+  JSON-only map directories self-heal, no migration needed), and ignored by
+  git alongside the other local artifacts.
+
 - **Vue/Svelte/Astro single-file components are now part of the code graph** —
   `.vue`, `.svelte`, and `.astro` files were previously invisible to the map,
   so `vg impact` (and every other navigation command) missed callers that live

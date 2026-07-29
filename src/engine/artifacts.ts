@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { serializeGraph } from './serialize.js';
+import { mapFileExists, snapshotPathFor, writeGraphSnapshot } from './snapshot.js';
 import { renderReport } from './report.js';
 import { renderHtml } from './html.js';
 import { globalGraphPath, globalGraphPathForRef, repositoryStoreDir } from '../runtime/paths.js';
@@ -88,10 +89,10 @@ export function resolveGraphPath(root: string, override?: string, env: NodeJS.Pr
   const { ref, kind } = detectGitRef(root);
   if (kind !== 'none' && ref) {
     const branchPath = globalGraphPathForRef(root, ref, env);
-    if (fs.existsSync(branchPath)) return branchPath;
+    if (mapFileExists(branchPath)) return branchPath;
   }
   const globalPath = globalGraphPath(root, 'current', env);
-  if (fs.existsSync(globalPath)) return globalPath;
+  if (mapFileExists(globalPath)) return globalPath;
   const legacy = legacyGraphPath(root);
   if (fs.existsSync(legacy)) return legacy;
   return defaultGraphPath(root, env);
@@ -122,6 +123,7 @@ const DEFAULT_GITIGNORE = [
   '.gitignore',
   'cache/',
   'graph.json',
+  'graph.snap',
   'graph.html',
   'GRAPH_REPORT.md',
   'facts.jsonl',
@@ -164,19 +166,44 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
     ensureVibgrateGitignore(options.root);
   }
 
-  // Atomic write (temp + rename): `vg serve` hot-reloads graph.json on mtime
-  // change, so a rebuild — including its own in-process auto-refresh — must
-  // never expose a half-written file to a concurrent reader.
-  const tmp = `${graphPath}.${process.pid}.tmp`;
-  try {
-    fs.writeFileSync(tmp, serializeGraph(graph));
-    fs.renameSync(tmp, graphPath);
-  } catch (err) {
-    fs.rmSync(tmp, { force: true });
-    throw err;
+  // Global-store maps are machine-consumed only, so the snapshot IS the map
+  // there — skipping the pretty-JSON serialize is the bulk of the write cost
+  // on large repos. Everywhere a human (or git) can see the file — legacy
+  // in-repo layout, VIBGRATE_GRAPH_IN_REPO, `vg share`, an explicit --graph
+  // path — the canonical graph.json is still written, with the snapshot as a
+  // sidecar cache.
+  const storeMode = isPathInside(graphPath, repositoryStoreDir(options.root));
+
+  if (storeMode) {
+    if (!writeGraphSnapshot(graphPath, graph, { standalone: true })) {
+      // Store not writable for the binary — fall back to the JSON write below
+      // rather than losing the build.
+    } else {
+      // Drop any JSON left by an older CLI at this path so a downgrade can
+      // never silently serve a stale map from beside a newer snapshot.
+      fs.rmSync(graphPath, { force: true });
+    }
   }
 
-  const written: WrittenArtifacts = { graphPath };
+  if (!storeMode || !fs.existsSync(snapshotPathFor(graphPath))) {
+    // Atomic write (temp + rename): `vg serve` hot-reloads the map on mtime
+    // change, so a rebuild — including its own in-process auto-refresh — must
+    // never expose a half-written file to a concurrent reader.
+    const tmp = `${graphPath}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, serializeGraph(graph));
+      fs.renameSync(tmp, graphPath);
+    } catch (err) {
+      fs.rmSync(tmp, { force: true });
+      throw err;
+    }
+    // Binary sidecar cache for fast loads; best-effort, JSON stays canonical.
+    writeGraphSnapshot(graphPath, graph);
+  }
+
+  const written: WrittenArtifacts = {
+    graphPath: storeMode && !fs.existsSync(graphPath) ? snapshotPathFor(graphPath) : graphPath,
+  };
 
   if (options.report !== false) {
     const reportPath = path.join(companions, 'GRAPH_REPORT.md');

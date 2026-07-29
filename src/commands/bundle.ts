@@ -4,7 +4,8 @@ import { Command } from 'commander';
 import { resolvedGrammarFiles, grammarSetVersion } from '../engine/grammars.js';
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { catalogPath, libDir } from '../engine/lib.js';
-import { stableStringify } from '../engine/serialize.js';
+import { serializeGraph, stableStringify } from '../engine/serialize.js';
+import { loadGraphFileWithSnapshot } from '../engine/snapshot.js';
 import { VERSION } from '../version.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
@@ -46,10 +47,19 @@ export function registerBundle(program: Command): void {
 
       const included: string[] = [`grammars/ (${grammarCount} .wasm)`];
 
+      // Bundles are an interchange surface, so the graph always ships as
+      // canonical JSON — materialized from the binary snapshot when the
+      // global store holds only that (store-mode builds skip the JSON write).
       const graphSrc = resolveGraphPath(root, global.graph);
       if (fs.existsSync(graphSrc)) {
         fs.copyFileSync(graphSrc, path.join(outDir, 'graph.json'));
         included.push('graph.json');
+      } else {
+        const graph = loadGraphFileWithSnapshot(graphSrc);
+        if (graph) {
+          fs.writeFileSync(path.join(outDir, 'graph.json'), serializeGraph(graph));
+          included.push('graph.json');
+        }
       }
 
       const cat = catalogPath(root);
