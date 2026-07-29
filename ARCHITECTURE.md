@@ -60,6 +60,8 @@ src/
 │   ├── query.ts, queries.ts, lookup.ts, test-query.ts   Query layer
 │   ├── impact.ts, paths.ts                              Graph algorithms
 │   ├── cache.ts, artifacts.ts                           On-disk artifacts
+│   ├── snapshot.ts       Binary snapshot (graph.snap): sidecar cache beside a
+│   │                     committed graph.json; THE map in the global store
 │   ├── graph-model.ts, types.ts                         Core data model
 │   └── lib.ts, drift.ts, report.ts, coverage.ts, scip.ts, ...
 │

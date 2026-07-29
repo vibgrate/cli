@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import { Command } from 'commander';
 import { resolveGraphPath } from '../engine/artifacts.js';
+import { mapFileExists } from '../engine/snapshot.js';
 import { serveStdio, createServer, GraphSource, type ServeOptions } from '../mcp/server.js';
 import { StatsSharer, statsEndpoint, telemetryOptOut } from '../engine/stats-share.js';
 import { refreshIfStale } from '../engine/refresh.js';
@@ -168,7 +169,7 @@ export async function ensureServableGraph(
   opts: { inline?: boolean; awaitStaleRefresh?: boolean } = {},
 ): Promise<void> {
   if (refresh) {
-    if (!fs.existsSync(graphPath)) {
+    if (!mapFileExists(graphPath)) {
       info(c.dim('vg · no map found — building it before serving…'));
       await runBuild(
         [],
@@ -199,7 +200,7 @@ export async function ensureServableGraph(
     }
   }
 
-  if (!fs.existsSync(graphPath)) {
+  if (!mapFileExists(graphPath)) {
     throw new CliError(
       `no map found at ${graphPath} — run \`vg\` to build one first`,
       ExitCode.NOT_FOUND,

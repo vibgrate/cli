@@ -14,6 +14,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { cacheDir } from './cache.js';
+import { loadGraphFileWithSnapshot } from './snapshot.js';
 import type {
   Area,
   EpistemicTier,
@@ -356,14 +357,10 @@ export function loadGraphPreferIndex(
   root: string,
   graphJsonPath: string,
 ): { graph: VgGraph; source: 'index' | 'json' } | null {
-  let jsonGraph: VgGraph | null = null;
-  if (fs.existsSync(graphJsonPath)) {
-    try {
-      jsonGraph = JSON.parse(fs.readFileSync(graphJsonPath, 'utf8')) as VgGraph;
-    } catch {
-      jsonGraph = null;
-    }
-  }
+  // Snapshot-first: skips the large-string JSON.parse when a fresh binary
+  // snapshot exists (sidecar or store-mode standalone), and self-heals the
+  // sidecar when not (see engine/snapshot.ts).
+  const jsonGraph: VgGraph | null = loadGraphFileWithSnapshot(graphJsonPath);
 
   const fromIndex = loadGraphFromIndex(root);
   if (fromIndex) {

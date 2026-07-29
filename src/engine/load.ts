@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import { resolveGraphPath } from './artifacts.js';
-import { parseGraph } from './serialize.js';
+import { loadGraphFileWithSnapshot } from './snapshot.js';
 import { loadGraphPreferIndex } from './index-db.js';
 import type { VgGraph } from '../schema.js';
 
@@ -20,6 +20,5 @@ export function loadGraph(root: string, graphPath?: string): VgGraph | null {
     const preferred = loadGraphPreferIndex(root, file);
     if (preferred) return preferred.graph;
   }
-  if (!fs.existsSync(file)) return null;
-  return parseGraph(fs.readFileSync(file, 'utf8'));
+  return loadGraphFileWithSnapshot(file);
 }
