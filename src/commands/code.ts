@@ -292,6 +292,7 @@ export function registerCode(program: Command): void {
           process.stdout.write(JSON.stringify(line) + '\n');
         };
         try {
+          const { RunOutcomeRecorder, newOneShotRunId, turnRunId } = await import('../code/run-outcome.js');
           const primarySlug = route.providers[0]?.model.includes('/')
             ? route.providers[0].model.split('/')[0]
             : route.providers[0]?.id;
@@ -325,6 +326,22 @@ export function registerCode(program: Command): void {
           const runtime = await startCodeRuntimeSession({ root });
           const git = detectGitRef(root);
           const repositoryId = repositoryIdFromRoot(root);
+          // Local, append-only run-outcome record (docs/VG-RUN-OUTCOME-EVENTS-SPEC.md)
+          // — the shared instrumentation the verify loop and Relay's routing
+          // telemetry both build on. A silent observer: it never changes what's
+          // written to stdout, only what's appended to .vibgrate/run-outcomes.jsonl.
+          const runOutcome = new RunOutcomeRecorder(
+            root,
+            repositoryId,
+            git.ref || null,
+            { mode: codeModeActive ? modeFlag : undefined, provider: primarySlug, model: route.providers[0]?.model },
+            tier,
+            !!auto,
+          );
+          const emitAndRecord = (line: unknown): void => {
+            runOutcome.observe(line as Parameters<typeof runOutcome.observe>[0]);
+            emitStream(line);
+          };
           if (runtime.socketPath && git.ref) {
             try {
               await vgdRequest(
@@ -502,8 +519,9 @@ export function registerCode(program: Command): void {
                 });
               };
 
+              let turnIndex = 0;
               await runCodeStreamJsonSession({
-                emit: emitStream,
+                emit: emitAndRecord,
                 auto: !!auto,
                 sessionId: record.id,
                 resumed: !!resumedRecord,
@@ -515,7 +533,10 @@ export function registerCode(program: Command): void {
                   rl.on('line', (raw) => {
                     const msg = parseHostMessage(raw);
                     if (!msg) return;
-                    if (msg.kind === 'approve') session.submitDecision(msg.id, msg.approve);
+                    if (msg.kind === 'approve') {
+                      session.submitDecision(msg.id, msg.approve);
+                      runOutcome.noteDecision(msg.id, msg.approve);
+                    }
                     else if (msg.kind === 'answer') session.submitAnswer(msg.id, msg.answer);
                     else if (msg.kind === 'submit') pushTurn(msg.instruction);
                     else if (msg.kind === 'restore') {
@@ -529,7 +550,7 @@ export function registerCode(program: Command): void {
                         emitStream({ event: 'checkpoint-restored', commit: msg.commit, ...outcome });
                       });
                     }
-                    else if (msg.kind === 'cancel') session.cancelTurn();
+                    else if (msg.kind === 'cancel') { session.cancelTurn(); runOutcome.cancelPending(); }
                     else if (msg.kind === 'end') {
                       ended = true;
                       pushTurn(null);
@@ -540,11 +561,14 @@ export function registerCode(program: Command): void {
                   rl.on('close', () => {
                     ended = true;
                     session.cancelTurn();
+                    runOutcome.cancelPending();
                     pushTurn(null);
                   });
                 },
-                runTurn: ({ instruction: turnInstruction, priorSummary, signal, session }) =>
-                  runAgent({
+                runTurn: ({ instruction: turnInstruction, priorSummary, signal, session }) => {
+                  turnIndex++;
+                  runOutcome.beginRun(turnRunId(record.id, turnIndex), turnInstruction);
+                  return runAgent({
                     ...baseAgentOptions,
                     instruction: turnInstruction,
                     priorSummary,
@@ -552,7 +576,8 @@ export function registerCode(program: Command): void {
                     approve: session.approve,
                     askUser: session.askUser,
                     onEvent: session.onEvent,
-                  }),
+                  });
+                },
                 onTurnEnd: (turn) => {
                   // Persist a summary only — never file bodies or transcripts.
                   record = recordTask(
@@ -570,20 +595,25 @@ export function registerCode(program: Command): void {
                 },
               });
             } else {
+              runOutcome.beginRun(newOneShotRunId(), instruction);
               await runCodeStreamJson({
                 ...baseAgentOptions,
                 instruction,
-                emit: emitStream,
+                emit: emitAndRecord,
                 bindDecisions: (session) => {
                   streamApprove = (action) => session.approve(action);
                   const rl = readline.createInterface({ input: process.stdin });
                   rl.on('line', (raw) => {
                     const msg = parseHostMessage(raw);
                     if (!msg) return;
-                    if (msg.kind === 'approve') session.submitDecision(msg.id, msg.approve);
+                    if (msg.kind === 'approve') {
+                      session.submitDecision(msg.id, msg.approve);
+                      runOutcome.noteDecision(msg.id, msg.approve);
+                    }
                     else if (msg.kind === 'answer') session.submitAnswer(msg.id, msg.answer);
-                    else if (msg.kind === 'cancel') session.cancelTurn();
+                    else if (msg.kind === 'cancel') { session.cancelTurn(); runOutcome.cancelPending(); }
                   });
+                  rl.on('close', () => runOutcome.cancelPending());
                 },
               });
             }

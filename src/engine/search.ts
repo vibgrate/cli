@@ -58,7 +58,7 @@ export interface SearchResult {
 }
 
 const IGNORE_DIRS = new Set([
-  '.git', '.vibgrate', 'node_modules', 'dist', 'build', 'out', 'target', 'vendor', '__pycache__',
+  '.git', '.claude', '.vibgrate', 'node_modules', 'dist', 'build', 'out', 'target', 'vendor', '__pycache__',
   // .NET intermediate output and coverage reports: purely generated trees that a
   // C#/coverage-heavy repo pays for on every literal sweep. `bin` is deliberately
   // NOT here — plenty of repos keep real scripts in bin/ (rails, node CLIs), and

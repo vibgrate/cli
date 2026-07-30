@@ -10,6 +10,7 @@ import { detectVcs } from './vcs.js';
 const SKIP_DIRS = new Set([
   'node_modules',
   '.git',
+  '.claude',
   '.vibgrate',
   '.wrangler',
   '.next',

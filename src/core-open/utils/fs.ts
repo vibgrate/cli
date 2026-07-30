@@ -35,6 +35,8 @@ export const SKIP_DIRS = new Set([
   // ── Version control, IDE & tool metadata (never billable source) ──
   '.git', '.svn', '.hg',
   '.idea', '.vscode', '.vs',
+  // Claude Code agent state / worktrees (full monorepo copies under .claude/worktrees/)
+  '.claude',
   '.vibgrate', '.wrangler', '.turbo', '.cache',
 
   // ── JavaScript / Node — installed dependency trees ──

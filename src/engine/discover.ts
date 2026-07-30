@@ -22,6 +22,8 @@ export const SKIP_DIRS = new Set<string>([
   // Version control, IDE & tool metadata
   '.git', '.svn', '.hg',
   '.idea', '.vscode', '.vs',
+  // Claude Code agent state / worktrees (full monorepo copies under .claude/worktrees/)
+  '.claude',
   '.vibgrate', '.wrangler', '.turbo', '.cache',
   // Migration / tool backup trees (NativeScript, codemods, agent worktrees)
   '.migration_backup', '.update_backup', '.backup', '.bak',
