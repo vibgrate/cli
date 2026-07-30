@@ -41,6 +41,7 @@ import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { manifestHash, loadScanCache, writeScanCache, isDependencyFile } from './scan-cache.js';
+import { SKIP_DIRS } from '../engine/discover.js';
 import { recordScore, lastEntry, deltaFrom, recentHistory, type ScoreHistoryEntry } from './score-history.js';
 import { runGraphQuery, type GraphQueryParams, type GraphQueryResult } from './graph-query.js';
 import {
@@ -87,6 +88,24 @@ export interface ScoreNotification {
    * lazily on expand, not carried here.
    */
   breakdown?: BreakdownItem[];
+  /**
+   * Upcoming/overdue runtime end-of-life dates (plan §5.6 "EOL horizon"),
+   * soonest/most-overdue first. Built only from real endoflife.date cycles
+   * already resolved onto each project (`ProjectScan.runtimeEolDate`) — never
+   * the major-version-lag proxy, and never a client-side estimate. Absent when
+   * no project has a known EOL date (e.g. an unmapped runtime, or offline).
+   */
+  eolHorizon?: EolHorizonItem[];
+}
+
+/** One runtime's real EOL date and distance from today, for the panel's horizon. */
+export interface EolHorizonItem {
+  /** Human label, e.g. "Node.js 18" — not the raw project path. */
+  runtime: string;
+  /** ISO end-of-life date from the Runtime Catalog (endoflife.date). */
+  eolDate: string;
+  /** Negative = already past EOL by this many days. */
+  daysUntil: number;
 }
 
 /** One dependency's contribution to the score, for the panel accordion. */
@@ -214,6 +233,12 @@ export class VibgrateLanguageServer {
   private artifact: ScanArtifact | null = null;
   private scanning = false;
   private queued = false;
+  /**
+   * Sticky until the next `scan()` runs: set by explicit "Rescan Workspace"
+   * (and preserved if a non-force schedule races the debounce). Bypasses the
+   * LSP scan cache so config/SKIP_DIRS changes actually re-score.
+   */
+  private forceNextScan = false;
   private debounce: NodeJS.Timeout | null = null;
   private shuttingDown = false;
   private graph: VgGraph | null = null;
@@ -321,7 +346,10 @@ export class VibgrateLanguageServer {
     this.conn.onRequest('workspace/executeCommand', (_m, params) => {
       const p = params as { command?: string };
       if (p.command === 'vibgrate.rescan') {
-        this.scheduleScan(0);
+        // Explicit "Rescan Workspace" must re-run the engine, not replay the
+        // LSP scan cache (config/exclude/SKIP_DIRS changes don't alter the
+        // manifest hash, so a cache hit would look like "nothing happened").
+        this.scheduleScan(0, { force: true });
         return { ok: true };
       }
       return null;
@@ -340,7 +368,8 @@ export class VibgrateLanguageServer {
 
   // ── Scanning ─────────────────────────────────────────────────────────────
 
-  private scheduleScan(delayMs: number): void {
+  private scheduleScan(delayMs: number, opts?: { force?: boolean }): void {
+    if (opts?.force) this.forceNextScan = true;
     if (this.debounce) clearTimeout(this.debounce);
     this.debounce = setTimeout(() => void this.scan(), delayMs);
   }
@@ -351,6 +380,8 @@ export class VibgrateLanguageServer {
       return;
     }
     this.scanning = true;
+    const force = this.forceNextScan;
+    this.forceNextScan = false;
 
     try {
       // The expensive part of a scan is the per-package registry lookups, not
@@ -359,11 +390,14 @@ export class VibgrateLanguageServer {
       // about has changed since the last successful scan on this machine.
       // `toolVersion`/`offline` are part of the key too: an engine upgrade or a
       // flip of `vibgrate.offline` must not replay a scan from before it.
+      // Explicit Rescan Workspace sets `forceNextScan` and always re-runs.
       const cacheKey = { manifestHash: manifestHash(this.opts.root), toolVersion: VERSION, offline: this.opts.offline };
-      const cached = loadScanCache(this.opts.root, cacheKey);
+      const cached = force ? null : loadScanCache(this.opts.root, cacheKey);
 
       if (cached) {
-        this.artifact = cached.artifact;
+        // Drop projects under pruned trees (e.g. `.claude/worktrees`) even when
+        // replaying a cache written before those dirs were excluded.
+        this.artifact = pruneArtifactProjects(cached.artifact);
       } else {
         const scanOpts: ScanOptions = {
           format: 'json',
@@ -378,7 +412,7 @@ export class VibgrateLanguageServer {
         // Same hook `vg scan` uses, so the number the editor shows is the number
         // the CLI shows — by construction, not by coincidence (plan §8.3).
         const advanced = await loadAdvancedScanHook();
-        this.artifact = await runCoreScan(this.opts.root, scanOpts, advanced);
+        this.artifact = pruneArtifactProjects(await runCoreScan(this.opts.root, scanOpts, advanced));
         writeScanCache(this.opts.root, cacheKey, this.artifact);
       }
 
@@ -398,6 +432,7 @@ export class VibgrateLanguageServer {
       this.scanning = false;
       if (this.queued) {
         this.queued = false;
+        // forceNextScan may have been set while we were busy; keep it sticky.
         this.scheduleScan(0);
       }
     }
@@ -457,6 +492,7 @@ export class VibgrateLanguageServer {
       scannedAt: a.timestamp,
       ...(delta !== undefined ? { delta } : {}),
       ...(buildBreakdown(a.drift, a.projects ?? []) ? { breakdown: buildBreakdown(a.drift, a.projects ?? []) } : {}),
+      ...(buildEolHorizon(a.projects ?? []) ? { eolHorizon: buildEolHorizon(a.projects ?? []) } : {}),
     };
 
     this.conn.notify('vibgrate/score', payload);
@@ -686,6 +722,11 @@ export class VibgrateLanguageServer {
 
     const targets: VulnTarget[] = [];
     for (const proj of a.projects ?? []) {
+      // Stale LSP caches / older engines may still carry agent worktrees.
+      // Never surface them in the Vulnerabilities panel.
+      if (isPrunedWorkspacePath(proj.path) || isPrunedWorkspacePath(manifestRelativePath(proj))) {
+        continue;
+      }
       const ecosystem = osvEcosystem(proj.type);
       if (!ecosystem) continue;
       const relManifest = manifestRelativePath(proj);
@@ -740,6 +781,36 @@ function uriToPath(uri: string): string {
   } catch {
     return uri;
   }
+}
+
+/**
+ * True when a workspace-relative path sits under a tree the scanner must never
+ * bill or score — `SKIP_DIRS` (node_modules, .git, …) plus Claude agent state
+ * (`.claude/worktrees` full-repo copies). Used to scrub stale LSP cache hits
+ * and to keep the Vulnerabilities panel honest even when the artifact is old.
+ */
+function isPrunedWorkspacePath(relPath: string | null | undefined): boolean {
+  if (!relPath || relPath === '.' || relPath === '') return false;
+  const parts = relPath.split(/[/\\]/).filter(Boolean);
+  // Always prune Claude agent trees — also listed in SKIP_DIRS once engines
+  // ship that entry; hard-coded here so older caches/engines still filter.
+  if (parts.includes('.claude')) return true;
+  return parts.some((p) => SKIP_DIRS.has(p));
+}
+
+/** Drop pruned projects/findings from a scan artifact (cache scrub + safety net). */
+function pruneArtifactProjects(a: ScanArtifact): ScanArtifact {
+  const projects = (a.projects ?? []).filter(
+    (p) => !isPrunedWorkspacePath(p.path) && !isPrunedWorkspacePath(manifestRelativePath(p)),
+  );
+  if (projects.length === (a.projects ?? []).length) {
+    // Still scrub findings that point into pruned trees (e.g. only location is under .claude).
+    const findings = (a.findings ?? []).filter((f) => !isPrunedWorkspacePath(f.location));
+    if (findings.length === (a.findings ?? []).length) return a;
+    return { ...a, findings };
+  }
+  const findings = (a.findings ?? []).filter((f) => !isPrunedWorkspacePath(f.location));
+  return { ...a, projects, findings };
 }
 
 /**
@@ -815,7 +886,49 @@ function scoreForProject(a: ScanArtifact, proj: ProjectScan): ScoreNotification 
     rootPath: proj.path,
     scannedAt: a.timestamp,
     ...(buildBreakdown(proj.drift, [proj]) ? { breakdown: buildBreakdown(proj.drift, [proj]) } : {}),
+    ...(buildEolHorizon([proj]) ? { eolHorizon: buildEolHorizon([proj]) } : {}),
   };
+}
+
+/**
+ * Runtime label for a project, e.g. "Node.js 20" — mirrors the label used in
+ * the EOL/lag findings above, so the horizon reads consistently with them.
+ */
+function runtimeHorizonLabel(project: ProjectScan): string {
+  const kind =
+    project.type === 'node' ? 'Node.js' :
+    project.type === 'dotnet' ? '.NET' :
+    project.type === 'python' ? 'Python' :
+    project.type === 'java' ? 'Java' : project.type;
+  return project.runtime ? `${kind} ${project.runtime}` : kind;
+}
+
+/**
+ * EOL horizon (plan §5.6): the runtimes with a known, real end-of-life date,
+ * nearest first — whether that date is still ahead ("EOL in 42 days", advance
+ * warning) or already behind (most-overdue reads first, same urgency order as
+ * a negative-first sort gives naturally). Built only from
+ * `ProjectScan.runtimeEolDate`, which the scanners populate from the Runtime
+ * Catalog (endoflife.date) — never invented, never the major-lag proxy. One
+ * entry per distinct runtime label (a monorepo with five Node 18 projects
+ * shows one horizon line, not five).
+ */
+function buildEolHorizon(projects: ProjectScan[], now = Date.now()): EolHorizonItem[] | undefined {
+  const byLabel = new Map<string, EolHorizonItem>();
+  for (const p of projects) {
+    if (!p.runtimeEolDate) continue;
+    const t = Date.parse(p.runtimeEolDate);
+    if (!Number.isFinite(t)) continue;
+    const label = runtimeHorizonLabel(p);
+    if (byLabel.has(label)) continue; // first occurrence wins; they share a date
+    byLabel.set(label, {
+      runtime: label,
+      eolDate: p.runtimeEolDate,
+      daysUntil: Math.round((t - now) / (24 * 60 * 60 * 1000)),
+    });
+  }
+  if (byLabel.size === 0) return undefined;
+  return [...byLabel.values()].sort((a, b) => a.daysUntil - b.daysUntil).slice(0, 5);
 }
 
 /** Band for a 0–100 drift number — the reconciled score bands (§6.5). The

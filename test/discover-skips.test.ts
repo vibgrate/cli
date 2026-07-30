@@ -46,6 +46,10 @@ describe('discover skips package folders and lockfiles', () => {
       'DerivedData/Build/x.swift': 'func x() {}',
       '.migration_backup/webpack.config.js': 'module.exports = {};',
       'platforms/android/app.js': 'function platform(){}',
+      // Claude Code worktrees are full repo copies — must never be scanned
+      '.claude/worktrees/agent/src/Application/Application.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"></Project>',
+      '.claude/worktrees/agent/src/app.ts': 'export const leaked = 1;',
     });
     const rels = discover({ root }).map((f) => f.rel);
     expect(rels).toEqual(['src/app.ts']);

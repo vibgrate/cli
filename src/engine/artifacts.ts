@@ -128,6 +128,13 @@ const DEFAULT_GITIGNORE = [
   'GRAPH_REPORT.md',
   'facts.jsonl',
   'mcp-navigation.json',
+  // Machine-local telemetry the LSP/`vg code` accrue over time — never meant
+  // for git: score-history.jsonl is per-machine trend data (lsp/score-history.ts),
+  // run-outcomes.jsonl is per-machine agent-run telemetry (code/run-outcome.ts).
+  // Neither is a snapshot artifact like scan_result.json/baseline.json, which
+  // are intentionally left out of this list for a user to commit if they choose.
+  'score-history.jsonl',
+  'run-outcomes.jsonl',
 ];
 
 export function ensureVibgrateGitignore(root: string): void {

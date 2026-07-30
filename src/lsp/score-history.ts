@@ -18,6 +18,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { ensureVibgrateGitignore } from '../engine/artifacts.js';
 
 export interface ScoreHistoryEntry {
   /** RFC3339 scan time (the artifact's timestamp, not the write time). */
@@ -112,6 +113,10 @@ export function recordScore(root: string, entry: ScoreHistoryEntry): void {
     }
     const file = historyPath(root);
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    // First writer into .vibgrate/ in this repo creates its .gitignore (create-once,
+    // never overwritten) — so this file is protected even when `vg lsp` runs before
+    // any `vg scan`/`vg build`/`vg install`.
+    ensureVibgrateGitignore(root);
     fs.appendFileSync(file, `${JSON.stringify(entry)}\n`);
 
     // Bound the file. Rewrite is rare (every ~500 recorded changes).
