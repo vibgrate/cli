@@ -25,6 +25,7 @@ import * as semver from 'semver';
 
 import { runCoreScan } from '../core-open/index.js';
 import type { ScanArtifact, ScanOptions, DependencyRow, ProjectScan, DriftScore } from '../core-open/index.js';
+import { perDependencyDrift } from '../core-open/scoring/dependency-drift-v3.js';
 import { loadAdvancedScanHook } from '../reporting/advanced-hook.js';
 import { VERSION } from '../version.js';
 import { Connection } from './protocol.js';
@@ -80,12 +81,12 @@ export interface ScoreNotification {
    */
   delta?: number;
   /**
-   * Per-package contribution breakdown for the panel accordion — the packages
-   * actually driving the score (drift > 0), ranked worst-first. Built from the
-   * driftscore-3.0 envelope (`drift.dependencyDrift.top`) enriched with the row
-   * detail. Absent when nothing is drifting (e.g. an offline scan that can't
-   * resolve latest versions). Vulnerability + registry enrichment is fetched
-   * lazily on expand, not carried here.
+   * Full dependency inventory for the Dependencies panel — every scoreable
+   * package in scope, ranked worst-first (current packages included at drift 0).
+   * Built with the same per-dependency scorer as the DriftScore aggregate so the
+   * panel number and the row numbers never disagree. Absent when there are no
+   * scoreable dependencies. Vulnerability enrichment is fetched lazily on
+   * expand, not carried here.
    */
   breakdown?: BreakdownItem[];
   /**
@@ -96,6 +97,25 @@ export interface ScoreNotification {
    * no project has a known EOL date (e.g. an unmapped runtime, or offline).
    */
   eolHorizon?: EolHorizonItem[];
+  /**
+   * Scanned projects in this workspace (monorepo inventory). Clients use this
+   * for a Snyk-style project picker: whole workspace vs one package path.
+   * Absent or empty when the scan found nothing scoreable.
+   */
+  projects?: ProjectRef[];
+}
+
+/** One scanned package/project for the monorepo scope picker. */
+export interface ProjectRef {
+  /** Workspace-relative project path (`.` for the repo root package). */
+  path: string;
+  /** Human label — package name when known, else the path basename. */
+  name: string;
+  /** Per-project DriftScore when the engine scored this project. */
+  score?: number;
+  band?: Band;
+  /** `estimated` → badge/tooltip use a leading `~` (same as the status bar). */
+  mode?: 'verified' | 'estimated';
 }
 
 /** One runtime's real EOL date and distance from today, for the panel's horizon. */
@@ -332,6 +352,7 @@ export class VibgrateLanguageServer {
 
     this.conn.onRequest('vibgrate/graph/query', (_m, params) => this.onGraphQuery(params));
     this.conn.onRequest('vibgrate/score/forFile', (_m, params) => this.onScoreForFile(params));
+    this.conn.onRequest('vibgrate/score/forProject', (_m, params) => this.onScoreForProject(params));
     // Trend data for the panel sparkline (plan §5.6). Entries carry their
     // methodology so the client can break the line across a change — the one
     // trend rule v3 imposes. Empty history is an empty array, not an error.
@@ -493,6 +514,7 @@ export class VibgrateLanguageServer {
       ...(delta !== undefined ? { delta } : {}),
       ...(buildBreakdown(a.drift, a.projects ?? []) ? { breakdown: buildBreakdown(a.drift, a.projects ?? []) } : {}),
       ...(buildEolHorizon(a.projects ?? []) ? { eolHorizon: buildEolHorizon(a.projects ?? []) } : {}),
+      ...(buildProjectRefs(a.projects ?? []) ? { projects: buildProjectRefs(a.projects ?? []) } : {}),
     };
 
     this.conn.notify('vibgrate/score', payload);
@@ -771,6 +793,18 @@ export class VibgrateLanguageServer {
     const project = projectForFile(this.opts.root, a, uriToPath(p.uri));
     return project ? scoreForProject(a, project) : null;
   }
+
+  /**
+   * `vibgrate/score/forProject` — monorepo scope picker. Returns the same
+   * shape as the whole-repo score, scoped to one scanned project path.
+   */
+  private onScoreForProject(params: unknown): ScoreNotification | null {
+    const p = params as { path?: string };
+    const a = this.artifact;
+    if (!a || typeof p.path !== 'string') return null;
+    const project = projectByPath(a, p.path);
+    return project ? scoreForProject(a, project) : null;
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -811,6 +845,38 @@ function pruneArtifactProjects(a: ScanArtifact): ScanArtifact {
   }
   const findings = (a.findings ?? []).filter((f) => !isPrunedWorkspacePath(f.location));
   return { ...a, projects, findings };
+}
+
+/** Find a scanned project by its workspace-relative path (scope picker). */
+function projectByPath(a: ScanArtifact, projectPath: string): ProjectScan | undefined {
+  const want = path.normalize(projectPath === '' ? '.' : projectPath);
+  for (const proj of a.projects ?? []) {
+    const got = path.normalize(proj.path === '' ? '.' : proj.path);
+    if (got === want) return proj;
+  }
+  return undefined;
+}
+
+/** Compact monorepo project list for the panel scope picker. */
+function buildProjectRefs(projects: ProjectScan[]): ProjectRef[] | undefined {
+  if (projects.length === 0) return undefined;
+  return projects
+    .map((p): ProjectRef => {
+      const rel = p.path === '' ? '.' : p.path;
+      const base = rel === '.' ? '.' : path.basename(rel);
+      return {
+        path: rel,
+        name: p.name || base,
+        ...(p.drift
+          ? {
+              score: p.drift.score,
+              band: (p.drift.riskLevel ?? 'low') as Band,
+              mode: (p.drift.mode ?? 'verified') as 'verified' | 'estimated',
+            }
+          : {}),
+      };
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
 }
 
 /**
@@ -883,10 +949,11 @@ function scoreForProject(a: ScanArtifact, proj: ProjectScan): ScoreNotification 
     methodology: proj.drift.methodologyVersion ?? a.drift.methodologyVersion ?? 'unknown',
     scale: '0 best, 100 worst',
     counts: { behind, eol, unmaintained, total },
-    rootPath: proj.path,
+    rootPath: proj.path === '' ? '.' : proj.path,
     scannedAt: a.timestamp,
     ...(buildBreakdown(proj.drift, [proj]) ? { breakdown: buildBreakdown(proj.drift, [proj]) } : {}),
     ...(buildEolHorizon([proj]) ? { eolHorizon: buildEolHorizon([proj]) } : {}),
+    ...(buildProjectRefs(a.projects ?? []) ? { projects: buildProjectRefs(a.projects ?? []) } : {}),
   };
 }
 
@@ -940,45 +1007,48 @@ function bandForScore(n: number): Band {
 }
 
 /**
- * The per-package contribution breakdown for the panel accordion. Built from the
- * driftscore-3.0 envelope's ranked `top` (authoritative — the same per-dependency
- * drift the aggregate used), enriched with the row detail (spec, resolved,
- * latest, age). Only contributing packages (drift > 0); empty when nothing
- * drifts (e.g. offline, where latest versions can't be resolved).
+ * Full dependency inventory for the Dependencies panel. Scores every unique
+ * package with the same `perDependencyDrift` scorer the DriftScore aggregate
+ * uses (so row numbers match the portfolio score), then ranks worst-first.
+ * Current packages stay in the list at drift 0 — Snyk-style inventory, not
+ * only the offenders. Excluded placeholder stubs are omitted.
  */
-function buildBreakdown(drift: DriftScore, projects: ProjectScan[]): BreakdownItem[] | undefined {
-  const top = drift.dependencyDrift?.top;
-  if (!top || top.length === 0) return undefined;
-
+function buildBreakdown(_drift: DriftScore, projects: ProjectScan[]): BreakdownItem[] | undefined {
   const byPkg = new Map<string, { row: DependencyRow; ecosystem: string | null }>();
   for (const p of projects) {
     const ecosystem = osvEcosystem(p.type);
-    for (const d of p.dependencies ?? []) if (!byPkg.has(d.package)) byPkg.set(d.package, { row: d, ecosystem });
+    for (const d of p.dependencies ?? []) {
+      if (!byPkg.has(d.package)) byPkg.set(d.package, { row: d, ecosystem });
+    }
+  }
+  if (byPkg.size === 0) return undefined;
+
+  const items: BreakdownItem[] = [];
+  for (const [, { row, ecosystem }] of byPkg) {
+    const scored = perDependencyDrift(row, {
+      unsupported: row.unsupported === true,
+      abandoned: row.abandoned === true,
+    });
+    if (scored.excluded) continue;
+    items.push({
+      package: row.package,
+      section: row.section ?? 'dependencies',
+      ecosystem,
+      drift: scored.drift,
+      band: bandForScore(scored.drift),
+      currentSpec: row.currentSpec ?? '',
+      resolvedVersion: row.resolvedVersion ?? null,
+      latestStable: row.latestStable ?? null,
+      majorsBehind: row.majorsBehind ?? null,
+      ageDays: row.ageDays ?? null,
+      mode: scored.mode,
+      unsupported: scored.unsupported || row.unsupported === true,
+      abandoned: scored.flags.includes('abandoned-floor') || row.abandoned === true,
+      flags: scored.flags,
+    });
   }
 
-  const items = top
-    .filter((t) => t.drift > 0)
-    .map((t): BreakdownItem => {
-      const found = byPkg.get(t.package);
-      const row = found?.row;
-      return {
-        package: t.package,
-        section: row?.section ?? 'dependencies',
-        ecosystem: found?.ecosystem ?? null,
-        drift: t.drift,
-        band: bandForScore(t.drift),
-        currentSpec: row?.currentSpec ?? '',
-        resolvedVersion: row?.resolvedVersion ?? null,
-        latestStable: row?.latestStable ?? null,
-        majorsBehind: row?.majorsBehind ?? null,
-        ageDays: row?.ageDays ?? null,
-        mode: t.mode,
-        unsupported: t.unsupported,
-        abandoned: t.flags.includes('abandoned-floor'),
-        flags: t.flags,
-      };
-    });
-
+  items.sort((a, b) => b.drift - a.drift || a.package.localeCompare(b.package));
   return items.length > 0 ? items : undefined;
 }
 
@@ -1162,7 +1232,7 @@ function versionJourney(yours: string, latest: string): string | null {
  * existing ranked, vendor-neutral remediation menu (`routeFix.ts`) — per the
  * wireframe's own design notes, that is explicitly not a "Fix" button, so it
  * does not conflict with "no fix affordance" (plan §0.1). "Explain this
- * drift" focuses the panel and expands this dependency's breakdown row,
+ * drift" focuses the Dependencies panel and expands this package's row,
  * which already carries the full explanation (guards, floors, age).
  */
 function hoverMarkdown(dep: DependencyRow, contribution: number | null): string {
