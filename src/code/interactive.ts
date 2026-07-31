@@ -18,7 +18,7 @@ import { refreshIfStale } from '../engine/refresh.js';
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { BranchGraphSession } from '../runtime/branch-graph-session.js';
 import { discoverModels } from '../engine/models.js';
-import { runBuild } from '../commands/build.js';
+import { ensureCodeMap } from './ensure-map.js';
 import { printCodeLogo } from '../util/logo.js';
 import { c, info, out } from '../util/output.js';
 import type { GlobalOpts } from '../cli-options.js';
@@ -113,8 +113,7 @@ async function ensureMap(root: string, global: GlobalOpts, prompter: Prompter): 
   if (!existing) {
     const sp = prompter.spinner('Building the code map…');
     try {
-      // quiet:true suppresses the map's own banner/progress so our UI stays clean.
-      await runBuild([root], {}, { ...global, quiet: true });
+      await ensureCodeMap(root, global);
       sp.stop('Code map built');
     } catch (e) {
       sp.fail(`couldn't build the code map: ${(e as Error).message}`);

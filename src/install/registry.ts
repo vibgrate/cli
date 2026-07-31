@@ -271,6 +271,36 @@ export function uninstallAssistant(a: Assistant, root: string, purge: boolean): 
   return removed;
 }
 
+/**
+ * True when this assistant already has Vibgrate Graph / AI Context wiring in
+ * `root` (skill file, MCP `vg` entry, or our nudge block/file).
+ */
+export function isAssistantInstalled(a: Assistant, root: string): boolean {
+  if (a.skill && fs.existsSync(path.join(root, a.skill))) return true;
+  if (a.mcp) {
+    const file = path.join(root, a.mcp.file);
+    if (fs.existsSync(file)) {
+      try {
+        const config = readJson(file);
+        const bag = config[a.mcp.key];
+        if (bag && typeof bag === 'object' && bag !== null && 'vg' in (bag as object)) return true;
+      } catch {
+        /* unreadable — treat as not installed */
+      }
+    }
+  }
+  if (a.nudge) {
+    const file = path.join(root, a.nudge.file);
+    if (!fs.existsSync(file)) return false;
+    const text = readTextSafe(file);
+    if (!text) return false;
+    if (a.nudge.kind === 'block') return text.includes(NUDGE_BEGIN);
+    // File-kind nudge: ours when version-marked or carrying generated headings.
+    return installedContentVersion(text) !== null || text.includes('# vg') || text.includes('Vibgrate');
+  }
+  return false;
+}
+
 // --- writers ---
 
 function writeFileEnsured(file: string, content: string): void {

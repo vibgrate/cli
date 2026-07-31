@@ -55,6 +55,20 @@ describe('discover skips package folders and lockfiles', () => {
     expect(rels).toEqual(['src/app.ts']);
   });
 
+  it('excludes custom-named virtualenvs and site-packages trees', () => {
+    const root = project({
+      'src/app.ts': 'export function main(){ return 1; }',
+      // Custom uv/poetry virtualenv names that are not exact `.venv` / `venv`.
+      '.venv-contextbench/lib/python3.13/site-packages/numpy/f2py/tests/src/cli/x.py':
+        'def leaked(): pass',
+      'venv-tools/lib/python3.13/site-packages/foo/bar.py': 'x = 1',
+      // Nested install tree under a real project path.
+      'tools/site-packages/pkg/mod.py': 'y = 2',
+    });
+    const rels = discover({ root }).map((f) => f.rel);
+    expect(rels).toEqual(['src/app.ts']);
+  });
+
   it('excludes lockfiles and generated dependency manifests (case-insensitive)', () => {
     const root = project({
       'index.ts': 'export const ok = 1;',

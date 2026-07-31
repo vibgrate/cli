@@ -171,6 +171,13 @@ export interface EolHorizonItem {
   daysUntil: number;
 }
 
+/** Manifest hit for a dependency (workspace-relative path + optional line). */
+export interface BreakdownLocation {
+  file: string;
+  /** 1-based line of the package in the manifest, when known. */
+  line: number | null;
+}
+
 /** One dependency's contribution to the score, for the panel accordion. */
 export interface BreakdownItem {
   package: string;
@@ -195,6 +202,11 @@ export interface BreakdownItem {
   abandoned: boolean;
   /** Data-quality guards that fired (canary-latest, scheme-jump, high-cadence…). */
   flags: string[];
+  /**
+   * Every project manifest that pins this package — the Dependencies panel
+   * lists these as open-in-editor links (same pattern as the Vulnerabilities panel).
+   */
+  locations: BreakdownLocation[];
 }
 
 /** One coloured end-of-line decoration. `vibgrate/inline`, pushed per open manifest. */
@@ -556,7 +568,9 @@ export class VibgrateLanguageServer {
       rootPath: a.rootPath,
       scannedAt: a.timestamp,
       ...(delta !== undefined ? { delta } : {}),
-      ...(buildBreakdown(a.drift, a.projects ?? []) ? { breakdown: buildBreakdown(a.drift, a.projects ?? []) } : {}),
+      ...(buildBreakdown(this.opts.root, a.projects ?? [])
+        ? { breakdown: buildBreakdown(this.opts.root, a.projects ?? []) }
+        : {}),
       ...(buildEolHorizon(a.projects ?? []) ? { eolHorizon: buildEolHorizon(a.projects ?? []) } : {}),
       ...(buildProjectRefs(this.opts.root, a.projects ?? [])
         ? { projects: buildProjectRefs(this.opts.root, a.projects ?? []) }
@@ -919,7 +933,8 @@ function uriToPath(uri: string): string {
 
 /**
  * True when a workspace-relative path sits under a tree the scanner must never
- * bill or score — `SKIP_DIRS` (node_modules, .git, …) plus Claude agent state
+ * bill or score — `SKIP_DIRS` (node_modules, .git, …), custom virtualenvs
+ * (`.venv-*`), Python install trees (`site-packages`), and Claude agent state
  * (`.claude/worktrees` full-repo copies). Used to scrub stale LSP cache hits
  * and to keep the Vulnerabilities panel honest even when the artifact is old.
  */
@@ -929,7 +944,13 @@ function isPrunedWorkspacePath(relPath: string | null | undefined): boolean {
   // Always prune Claude agent trees — also listed in SKIP_DIRS once engines
   // ship that entry; hard-coded here so older caches/engines still filter.
   if (parts.includes('.claude')) return true;
-  return parts.some((p) => SKIP_DIRS.has(p));
+  return parts.some((p) => {
+    if (SKIP_DIRS.has(p)) return true;
+    // Custom-named virtualenvs and Python install trees (not always exact-name
+    // members of SKIP_DIRS; still never billable / never scoreable source).
+    if (p.startsWith('.venv') || p.startsWith('venv-') || p === 'site-packages') return true;
+    return false;
+  });
 }
 
 /** Drop pruned projects/findings from a scan artifact (cache scrub + safety net). */
@@ -957,17 +978,99 @@ function projectByPath(a: ScanArtifact, projectPath: string): ProjectScan | unde
   return undefined;
 }
 
+/**
+ * True when the project's own directory contains a lockfile or a .NET project
+ * file (*.csproj / *.fsproj / *.vbproj). Used by the monorepo scope picker so
+ * we only list real package folders — not every discovered subfolder, and not
+ * packages that only inherit a workspace-root lockfile.
+ */
+function projectHasLocalLockOrCsproj(rootDir: string, proj: ProjectScan): boolean {
+  const base = proj.path === '.' || proj.path === '' ? '' : proj.path;
+  const dirAbs = base ? path.join(rootDir, base) : rootDir;
+  // Lockfile names by ecosystem (checked only in the project directory itself).
+  const lockNames: string[] = (() => {
+    switch (proj.type) {
+      case 'node':
+      case 'typescript':
+        return ['pnpm-lock.yaml', 'yarn.lock', 'package-lock.json', 'bun.lockb', 'bun.lock'];
+      case 'python':
+        return ['poetry.lock', 'uv.lock', 'Pipfile.lock'];
+      case 'go':
+        return ['go.sum'];
+      case 'rust':
+        return ['Cargo.lock'];
+      case 'ruby':
+        return ['Gemfile.lock'];
+      case 'php':
+        return ['composer.lock'];
+      case 'dotnet':
+        return ['packages.lock.json'];
+      case 'dart':
+        return ['pubspec.lock'];
+      case 'java':
+      case 'kotlin':
+      case 'scala':
+      case 'groovy':
+        return ['gradle.lockfile'];
+      default:
+        // Unknown type — still accept common lock names so we don't hide real packages.
+        return [
+          'pnpm-lock.yaml',
+          'yarn.lock',
+          'package-lock.json',
+          'bun.lockb',
+          'poetry.lock',
+          'uv.lock',
+          'Cargo.lock',
+          'go.sum',
+          'Gemfile.lock',
+          'composer.lock',
+          'packages.lock.json',
+          'pubspec.lock',
+        ];
+    }
+  })();
+  for (const name of lockNames) {
+    try {
+      if (fs.existsSync(path.join(dirAbs, name))) return true;
+    } catch {
+      /* unreadable — try next */
+    }
+  }
+  // .NET project files live in the project folder (no universal lockfile).
+  try {
+    if (fs.existsSync(dirAbs)) {
+      const entries = fs.readdirSync(dirAbs);
+      if (entries.some((e) => /\.(csproj|fsproj|vbproj)$/i.test(e))) return true;
+    }
+  } catch {
+    /* unreadable */
+  }
+  // Infer from scanned type + name when the manifest path itself is a csproj.
+  const manifest = manifestRelativePath(proj);
+  if (/\.(csproj|fsproj|vbproj)$/i.test(manifest)) {
+    try {
+      if (fs.existsSync(path.join(rootDir, manifest))) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
+}
+
 /** Compact monorepo project list for the panel scope picker. */
 function buildProjectRefs(rootDir: string, projects: ProjectScan[]): ProjectRef[] | undefined {
   if (projects.length === 0) return undefined;
-  return projects
+  const refs = projects
+    .filter((p) => projectHasLocalLockOrCsproj(rootDir, p))
     .map((p): ProjectRef => {
       const rel = p.path === '' ? '.' : p.path;
-      const base = rel === '.' ? '.' : path.basename(rel);
+      // Folder name only — the scope picker shows basename, not package path.
+      const base = rel === '.' || rel === '' ? 'root' : path.basename(rel);
       const lockfilePath = lockfileRelativePath(rootDir, p);
       return {
         path: rel,
-        name: p.name || base,
+        name: base,
         manifestPath: manifestRelativePath(p),
         ...(lockfilePath ? { lockfilePath } : {}),
         ...(p.drift
@@ -980,6 +1083,7 @@ function buildProjectRefs(rootDir: string, projects: ProjectScan[]): ProjectRef[
       };
     })
     .sort((a, b) => a.path.localeCompare(b.path));
+  return refs.length > 0 ? refs : undefined;
 }
 
 /**
@@ -1054,7 +1158,7 @@ function scoreForProject(rootDir: string, a: ScanArtifact, proj: ProjectScan): S
     counts: { behind, eol, unmaintained, total },
     rootPath: proj.path === '' ? '.' : proj.path,
     scannedAt: a.timestamp,
-    ...(buildBreakdown(proj.drift, [proj]) ? { breakdown: buildBreakdown(proj.drift, [proj]) } : {}),
+    ...(buildBreakdown(rootDir, [proj]) ? { breakdown: buildBreakdown(rootDir, [proj]) } : {}),
     ...(buildEolHorizon([proj]) ? { eolHorizon: buildEolHorizon([proj]) } : {}),
     ...(buildProjectRefs(rootDir, a.projects ?? [])
       ? { projects: buildProjectRefs(rootDir, a.projects ?? []) }
@@ -1117,19 +1221,68 @@ function bandForScore(n: number): Band {
  * uses (so row numbers match the portfolio score), then ranks worst-first.
  * Current packages stay in the list at drift 0 — Snyk-style inventory, not
  * only the offenders. Excluded placeholder stubs are omitted.
+ *
+ * Collects every project manifest that pins the package (with best-effort
+ * declaration line) so the panel can open each hit — same pattern as vulns.
  */
-function buildBreakdown(_drift: DriftScore, projects: ProjectScan[]): BreakdownItem[] | undefined {
-  const byPkg = new Map<string, { row: DependencyRow; ecosystem: string | null }>();
+function buildBreakdown(rootDir: string, projects: ProjectScan[]): BreakdownItem[] | undefined {
+  type Acc = {
+    row: DependencyRow;
+    ecosystem: string | null;
+    locations: BreakdownLocation[];
+  };
+  const byPkg = new Map<string, Acc>();
+
   for (const p of projects) {
+    const relManifest = manifestRelativePath(p);
+    if (isPrunedWorkspacePath(p.path) || isPrunedWorkspacePath(relManifest)) continue;
     const ecosystem = osvEcosystem(p.type);
+
+    // Read each manifest once; line lookup is best-effort (absent when missing).
+    const absManifest = path.resolve(rootDir, relManifest);
+    let text: string | null = null;
+    try {
+      if (fs.existsSync(absManifest)) text = fs.readFileSync(absManifest, 'utf8');
+    } catch {
+      text = null;
+    }
+    const kind = manifestKind(absManifest);
+
     for (const d of p.dependencies ?? []) {
-      if (!byPkg.has(d.package)) byPkg.set(d.package, { row: d, ecosystem });
+      let line: number | null = null;
+      if (text && kind !== 'unknown') {
+        const l = findPackageLine(text, d.package, kind);
+        if (l >= 0) line = l + 1; // 1-based for the editor
+      }
+      const loc: BreakdownLocation = { file: relManifest, line };
+      const existing = byPkg.get(d.package);
+      if (!existing) {
+        byPkg.set(d.package, { row: d, ecosystem, locations: [loc] });
+        continue;
+      }
+      if (!existing.locations.some((x) => x.file === loc.file && x.line === loc.line)) {
+        existing.locations.push(loc);
+      }
+      // Prefer the worse drift row when the same package appears multiple times
+      // (first-wins was silent; keep the higher-signal version for display).
+      const prev = perDependencyDrift(existing.row, {
+        unsupported: existing.row.unsupported === true,
+        abandoned: existing.row.abandoned === true,
+      });
+      const next = perDependencyDrift(d, {
+        unsupported: d.unsupported === true,
+        abandoned: d.abandoned === true,
+      });
+      if (!next.excluded && (prev.excluded || next.drift > prev.drift)) {
+        existing.row = d;
+        if (ecosystem) existing.ecosystem = ecosystem;
+      }
     }
   }
   if (byPkg.size === 0) return undefined;
 
   const items: BreakdownItem[] = [];
-  for (const [, { row, ecosystem }] of byPkg) {
+  for (const [, { row, ecosystem, locations }] of byPkg) {
     const scored = perDependencyDrift(row, {
       unsupported: row.unsupported === true,
       abandoned: row.abandoned === true,
@@ -1150,6 +1303,7 @@ function buildBreakdown(_drift: DriftScore, projects: ProjectScan[]): BreakdownI
       unsupported: scored.unsupported || row.unsupported === true,
       abandoned: scored.flags.includes('abandoned-floor') || row.abandoned === true,
       flags: scored.flags,
+      locations,
     });
   }
 
@@ -1453,7 +1607,7 @@ function versionJourney(yours: string, latest: string): string | null {
  * the same rule that keeps marketing visuals honest (no invented product
  * output); a hover card is not exempt.
  *
- * Two links, both real, not aspirational: "Route this fix →" opens the
+ * Two links, both real, not aspirational: "Fix →" opens the
  * existing ranked, vendor-neutral remediation menu (`routeFix.ts`) — per the
  * wireframe's own design notes, that is explicitly not a "Fix" button, so it
  * does not conflict with "no fix affordance" (plan §0.1). "Explain this
@@ -1512,7 +1666,7 @@ function hoverMarkdown(dep: DependencyRow, contribution: number | null): string 
       majorsBehind: dep.majorsBehind ?? 0,
     });
     const explainUri = commandUri('vibgrate.explain', { package: dep.package });
-    lines.push(`[Route this fix →](${routeFixUri}) · [Explain this drift](${explainUri})`);
+    lines.push(`[Fix →](${routeFixUri}) · [Explain this drift](${explainUri})`);
   }
 
   lines.push('');

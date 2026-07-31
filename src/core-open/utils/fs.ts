@@ -110,6 +110,8 @@ export const SKIP_DIRS = new Set([
   'Carthage',           // Carthage (iOS/macOS)
 
   // ── Python — virtualenvs & tool caches ──
+  // Exact names only; custom-named envs (`.venv-foo`) and `site-packages`
+  // are handled by {@link isSkippedDirName}.
   '.venv', 'venv', 'virtualenv', '.tox', '.nox',
   '__pycache__', '.mypy_cache', '.pytest_cache', '.ruff_cache',
   '.eggs', '.ipynb_checkpoints',
@@ -138,6 +140,20 @@ export const SKIP_DIRS = new Set([
   // ── Infrastructure-as-code build/state ──
   '.terraform', '.serverless', 'cdk.out', '.aws-sam',
 ]);
+
+/**
+ * True when a directory basename must be pruned from discovery / billing walks.
+ * Covers exact {@link SKIP_DIRS} names plus custom virtualenv names
+ * (`.venv-contextbench`, `venv-tools`, …) and Python install trees
+ * (`site-packages`) that otherwise mint phantom nested projects.
+ */
+export function isSkippedDirName(name: string): boolean {
+  if (!name) return false;
+  if (SKIP_DIRS.has(name)) return true;
+  if (name.startsWith('.venv') || name.startsWith('venv-')) return true;
+  if (name === 'site-packages') return true;
+  return false;
+}
 
 /** File extensions skipped during the walk — binary/font/media that no scanner needs to read */
 const SKIP_EXTENSIONS = new Set([
@@ -445,7 +461,7 @@ export class FileCache {
         if (isExcluded && isExcluded(relPath)) continue;
 
         if (e.isDirectory()) {
-          if (SKIP_DIRS.has(e.name) || extraSkip.has(e.name)) continue;
+          if (isSkippedDirName(e.name) || extraSkip.has(e.name)) continue;
           // Respect .gitignore (root + any nested ones seen so far) so
           // repo-specific, non-canonically-named build/dependency/cache dirs
           // (e.g. a custom-named virtualenv) don't get walked just because
@@ -755,7 +771,7 @@ export async function quickTreeCount(rootDir: string, excludePatterns?: string[]
       if (isExcluded && isExcluded(relPath)) continue;
 
       if (e.isDirectory()) {
-        if (SKIP_DIRS.has(e.name) || extraSkip.has(e.name)) continue;
+        if (isSkippedDirName(e.name) || extraSkip.has(e.name)) continue;
         if (isGitignored(levels, absPath, true)) continue;
         totalDirs++;
         subs.push(count(absPath, levels));
@@ -840,7 +856,7 @@ export async function countFilesInDir(dir: string, recursive = true): Promise<nu
     for (const e of entries) {
       if (e.isDirectory()) {
         if (!recursive) continue;
-        if (SKIP_DIRS.has(e.name) || extraSkip.has(e.name)) continue;
+        if (isSkippedDirName(e.name) || extraSkip.has(e.name)) continue;
         subs.push(walk(path.join(currentDir, e.name)));
       } else if (e.isFile()) {
         const ext = path.extname(e.name).toLowerCase();
@@ -874,7 +890,7 @@ export async function bytesInDir(dir: string, recursive = true): Promise<number>
     for (const e of entries) {
       if (e.isDirectory()) {
         if (!recursive) continue;
-        if (SKIP_DIRS.has(e.name) || extraSkip.has(e.name)) continue;
+        if (isSkippedDirName(e.name) || extraSkip.has(e.name)) continue;
         subs.push(walk(path.join(currentDir, e.name)));
       } else if (e.isFile()) {
         const ext = path.extname(e.name).toLowerCase();
@@ -916,7 +932,7 @@ export async function findFiles(
 
     for (const e of entries) {
       if (e.isDirectory()) {
-        if (SKIP_DIRS.has(e.name)) continue;
+        if (isSkippedDirName(e.name)) continue;
         subDirectoryWalks.push(walk(path.join(dir, e.name)));
       } else if (e.isFile() && predicate(e.name)) {
         const ext = path.extname(e.name).toLowerCase();

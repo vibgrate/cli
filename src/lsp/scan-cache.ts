@@ -17,7 +17,7 @@ import * as path from 'node:path';
 import { hashBytes, hashString, canonicalize } from '../engine/hash.js';
 import { cacheDir } from '../engine/cache.js';
 import { stableStringify } from '../engine/serialize.js';
-import { SKIP_DIRS, SKIP_FILES } from '../engine/discover.js';
+import { isSkippedDirName, SKIP_FILES } from '../engine/discover.js';
 import { isManifest } from './manifest-positions.js';
 import type { ScanArtifact } from '../core-open/index.js';
 
@@ -50,7 +50,7 @@ export function manifestHash(root: string): string {
     for (const entry of entries) {
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
+        if (isSkippedDirName(entry.name)) continue;
         walk(abs);
         continue;
       }
@@ -85,7 +85,7 @@ export function isDependencyFile(root: string, filePath: string): boolean {
   const rel = path.relative(path.resolve(root), path.resolve(filePath));
   if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return false;
   const parts = rel.split(path.sep);
-  if (parts.slice(0, -1).some((dir) => SKIP_DIRS.has(dir))) return false;
+  if (parts.slice(0, -1).some((dir) => isSkippedDirName(dir))) return false;
   const base = parts[parts.length - 1]!.toLowerCase();
   return isManifest(filePath) || SKIP_FILES.has(base);
 }

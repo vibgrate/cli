@@ -229,6 +229,45 @@ export function registerCode(program: Command): void {
         return;
       }
       if (!instruction) throw usageError('say what to change, e.g. `vg code "add a --timeout flag to the scan command"`');
+
+      // Auto-build a missing map (same contract as guided mode / `vg serve`) so
+      // host UIs never fail the first turn with "no map found". Under
+      // --stream-json, progress is NDJSON on stdout for the progress bar.
+      {
+        const { ensureCodeMap } = await import('../code/ensure-map.js');
+        const mapRoot = rootOf(global);
+        try {
+          await ensureCodeMap(mapRoot, global, {
+            onProgress: (p) => {
+              if (opts.streamJson) {
+                process.stdout.write(
+                  JSON.stringify({
+                    event: 'event',
+                    type: 'map_build',
+                    phase: p.phase,
+                    message: p.message,
+                    ...(p.pct != null ? { pct: p.pct } : {}),
+                  }) + '\n',
+                );
+                return;
+              }
+              if (!global.json && !global.quiet && (p.phase === 'start' || p.phase === 'done')) {
+                info(c.dim(`vg code · ${p.message}`));
+              }
+            },
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (opts.streamJson) {
+            process.stdout.write(
+              JSON.stringify({ event: 'error', message: `Could not build the code map: ${msg}` }) + '\n',
+            );
+            return;
+          }
+          throw e;
+        }
+      }
+
       const { root, graph } = requireGraph(global);
 
       let mockReply: string | undefined;

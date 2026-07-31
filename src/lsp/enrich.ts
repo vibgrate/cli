@@ -403,13 +403,20 @@ export async function scanWorkspaceVulns(
         : t.file
           ? [{ file: t.file, line: t.line ?? null }]
           : [];
-      // One row per advisory × package@version — never one row per manifest hit.
-      // Locations ride along so the panel can list every file without duplicating.
+      // One row per distinct advisory × package@version — never one row per
+      // manifest hit, and never two rows for the same CVE under different OSV
+      // ids (GHSA-… + PYSEC-…). Locations ride along so the panel can list
+      // every file without duplicating the advisory.
       const seenIds = new Set<string>();
+      const seenCves = new Set<string>();
       for (const v of r.vulns) {
         if (seenIds.has(v.id)) continue;
+        const cveKeys = (v.cves ?? []).map((c) => c.toUpperCase()).filter(Boolean);
+        // Drop alias records that only restate a CVE we already emitted.
+        if (cveKeys.length && cveKeys.every((c) => seenCves.has(c))) continue;
         seenIds.add(v.id);
-        const kevHit = v.cves.some((c) => kev.cves.has(c.toUpperCase()));
+        for (const c of cveKeys) seenCves.add(c);
+        const kevHit = cveKeys.some((c) => kev.cves.has(c));
         findings.push({
           package: t.package,
           version: t.version,

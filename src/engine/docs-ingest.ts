@@ -23,7 +23,7 @@ import * as path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
 import { redactSecrets } from '../core-open/utils/redact.js';
 import { nodeId } from './ids.js';
-import { SKIP_DIRS, SKIP_FILES } from './discover.js';
+import { isSkippedDirName, SKIP_FILES } from './discover.js';
 import type { GraphNode } from '../schema.js';
 
 /** Soft cap on characters stored/embedded per document (keeps index snappy). */
@@ -416,7 +416,7 @@ export function discoverDocs(options: DiscoverDocsOptions): DiscoveredDoc[] {
       const abs = path.join(dir, entry.name);
       const rel = toPosix(path.relative(root, abs));
       if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
+        if (isSkippedDirName(entry.name)) continue;
         // Workflows / .github must be walked even if other tools ignore them
         if (rel && rootIg.ignores(`${rel}/`) && !rel.startsWith('.github')) continue;
         walk(abs, depth + 1);
