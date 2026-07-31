@@ -979,110 +979,47 @@ function projectByPath(a: ScanArtifact, projectPath: string): ProjectScan | unde
 }
 
 /**
- * True when the project's own directory contains a lockfile or a .NET project
- * file (*.csproj / *.fsproj / *.vbproj). Used by the monorepo scope picker so
- * we only list real package folders — not every discovered subfolder, and not
- * packages that only inherit a workspace-root lockfile.
+ * Compact monorepo project list for the panel scope picker.
+ *
+ * Source of truth: scanned projects that carry a DriftScore (same set as
+ * `.vibgrate/project_scores.json` / Explorer badges). Full workspace-relative
+ * paths are preserved so packages with the same leaf name stay distinct.
+ * Duplicate paths in the artifact are collapsed (prefer the scored entry).
  */
-function projectHasLocalLockOrCsproj(rootDir: string, proj: ProjectScan): boolean {
-  const base = proj.path === '.' || proj.path === '' ? '' : proj.path;
-  const dirAbs = base ? path.join(rootDir, base) : rootDir;
-  // Lockfile names by ecosystem (checked only in the project directory itself).
-  const lockNames: string[] = (() => {
-    switch (proj.type) {
-      case 'node':
-      case 'typescript':
-        return ['pnpm-lock.yaml', 'yarn.lock', 'package-lock.json', 'bun.lockb', 'bun.lock'];
-      case 'python':
-        return ['poetry.lock', 'uv.lock', 'Pipfile.lock'];
-      case 'go':
-        return ['go.sum'];
-      case 'rust':
-        return ['Cargo.lock'];
-      case 'ruby':
-        return ['Gemfile.lock'];
-      case 'php':
-        return ['composer.lock'];
-      case 'dotnet':
-        return ['packages.lock.json'];
-      case 'dart':
-        return ['pubspec.lock'];
-      case 'java':
-      case 'kotlin':
-      case 'scala':
-      case 'groovy':
-        return ['gradle.lockfile'];
-      default:
-        // Unknown type — still accept common lock names so we don't hide real packages.
-        return [
-          'pnpm-lock.yaml',
-          'yarn.lock',
-          'package-lock.json',
-          'bun.lockb',
-          'poetry.lock',
-          'uv.lock',
-          'Cargo.lock',
-          'go.sum',
-          'Gemfile.lock',
-          'composer.lock',
-          'packages.lock.json',
-          'pubspec.lock',
-        ];
-    }
-  })();
-  for (const name of lockNames) {
-    try {
-      if (fs.existsSync(path.join(dirAbs, name))) return true;
-    } catch {
-      /* unreadable — try next */
-    }
-  }
-  // .NET project files live in the project folder (no universal lockfile).
-  try {
-    if (fs.existsSync(dirAbs)) {
-      const entries = fs.readdirSync(dirAbs);
-      if (entries.some((e) => /\.(csproj|fsproj|vbproj)$/i.test(e))) return true;
-    }
-  } catch {
-    /* unreadable */
-  }
-  // Infer from scanned type + name when the manifest path itself is a csproj.
-  const manifest = manifestRelativePath(proj);
-  if (/\.(csproj|fsproj|vbproj)$/i.test(manifest)) {
-    try {
-      if (fs.existsSync(path.join(rootDir, manifest))) return true;
-    } catch {
-      /* ignore */
-    }
-  }
-  return false;
-}
-
-/** Compact monorepo project list for the panel scope picker. */
 function buildProjectRefs(rootDir: string, projects: ProjectScan[]): ProjectRef[] | undefined {
   if (projects.length === 0) return undefined;
-  const refs = projects
-    .filter((p) => projectHasLocalLockOrCsproj(rootDir, p))
-    .map((p): ProjectRef => {
-      const rel = p.path === '' ? '.' : p.path;
-      // Folder name only — the scope picker shows basename, not package path.
-      const base = rel === '.' || rel === '' ? 'root' : path.basename(rel);
-      const lockfilePath = lockfileRelativePath(rootDir, p);
-      return {
-        path: rel,
-        name: base,
-        manifestPath: manifestRelativePath(p),
-        ...(lockfilePath ? { lockfilePath } : {}),
-        ...(p.drift
-          ? {
-              score: p.drift.score,
-              band: (p.drift.riskLevel ?? 'low') as Band,
-              mode: (p.drift.mode ?? 'verified') as 'verified' | 'estimated',
-            }
-          : {}),
-      };
-    })
-    .sort((a, b) => a.path.localeCompare(b.path));
+
+  const byPath = new Map<string, ProjectScan>();
+  for (const p of projects) {
+    const rel = p.path === '' ? '.' : p.path;
+    const prev = byPath.get(rel);
+    if (!prev) {
+      byPath.set(rel, p);
+      continue;
+    }
+    // Prefer the entry that carries a score when the scan lists a path twice.
+    if (!prev.drift && p.drift) byPath.set(rel, p);
+  }
+
+  const refs: ProjectRef[] = [];
+  for (const [rel, p] of byPath) {
+    // Scope picker = monorepo packages the scan scored. Unscored discovery
+    // noise (if any) stays out of the dropdown.
+    if (!p.drift) continue;
+    const lockfilePath = lockfileRelativePath(rootDir, p);
+    refs.push({
+      path: rel,
+      // Full relative path for display/identity; package name alone collides
+      // across nested fixtures (e.g. two "mcp" leaves).
+      name: rel,
+      manifestPath: manifestRelativePath(p),
+      ...(lockfilePath ? { lockfilePath } : {}),
+      score: p.drift.score,
+      band: (p.drift.riskLevel ?? 'low') as Band,
+      mode: (p.drift.mode ?? 'verified') as 'verified' | 'estimated',
+    });
+  }
+  refs.sort((a, b) => a.path.localeCompare(b.path));
   return refs.length > 0 ? refs : undefined;
 }
 

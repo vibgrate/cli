@@ -1,17 +1,21 @@
 /**
  * Constrained-decoding grammars for PatchIR (Fusion Approach B / ADR-005).
  *
- * Spark-tier local models should emit syntactically valid PatchIR JSON so apply
- * never parses free-text tool calls. Providers that support GBNF (llama.cpp via
- * llm-host) receive {@link patchIrGbnf}; others ignore the grammar field.
+ * **Not used on VG Code agent chat turns.** The full coding agent never attaches
+ * turn-level PatchIR GBNF — that made Q&A emit edit JSON. PatchIR remains the
+ * structured payload for `apply_patch` tool arguments when the model elects to
+ * edit. This module is retained for offline remediation packs / future tool-arg
+ * schemas, not for forcing every completion into an edit document.
+ *
+ * Providers that support GBNF (llama.cpp via llm-host) may receive
+ * {@link patchIrGbnf} only on explicit non-agent paths.
  *
  * The grammar is intentionally permissive on string contents (file paths, code)
- * while fixing the structural keys and op enum — highest leverage for zero
- * retry loops without needing a full JSON Schema compiler in-process.
+ * while fixing the structural keys and op enum.
  *
  * **llama.cpp GBNF constraint:** each production must be a single line. Indented
  * continuations are parsed as new (invalid) rules and fail with
- * `failed to parse grammar` — which aborts Spark's requireGrammar path.
+ * `failed to parse grammar`.
  */
 
 /** GBNF that constrains the model to a PatchIR-shaped JSON object (schema patch-ir/0). */

@@ -502,7 +502,8 @@ export function registerCode(program: Command): void {
             capsule,
             files: opts.file.length ? opts.file : undefined,
             worktreeOverlay: true,
-            advancedMode: !capsule,
+            // Full coding agent: free discovery by default. Capsule is context only.
+            advancedMode: true,
             externalTools,
             attribution: {
               client: 'vg-code',

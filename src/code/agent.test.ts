@@ -31,8 +31,43 @@ const tc = (name: string, args: Record<string, unknown>, id = 'c'): ToolCall => 
 describe('runAgent — the agentic loop', () => {
   const baseFile = 'export function scanDir() {\n  const timeout = 0;\n  return timeout;\n}\n';
 
-  it('answers a pure URL locate without calling the model (no PatchIR dump)', async () => {
+  it('default path is full agent: locate questions call the model (no short-circuit)', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-agent-locate-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'src'));
+      fs.writeFileSync(
+        path.join(dir, 'src', 'extension.ts'),
+        `void open('https://dash.vibgrate.com/signup');\n`,
+      );
+      const provider = new ScriptedProvider('m', [
+        {
+          toolCalls: [
+            tc('search_code', { query: 'https://dash.vibgrate.com/signup' }, 's1'),
+          ],
+        },
+        { toolCalls: [tc('finish', { summary: 'Found in src/extension.ts:1' }, 'f1')] },
+      ]);
+      const result = await runAgent({
+        graph: fixtureGraph(),
+        root: dir,
+        instruction: 'where is https://dash.vibgrate.com/signup?',
+        providers: [provider],
+        fsImpl: memFs(),
+        run: () => ({ stdout: '', exitCode: 0 }),
+        approve: async () => true,
+        noAudit: true,
+      });
+      expect(result.stopped).toBe('finished');
+      expect(result.provider.id).not.toBe('deterministic-locate');
+      expect(result.finalText).toMatch(/extension\.ts:1/i);
+      expect(result.steps).toBeGreaterThan(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('opt-in deterministicLocate short-circuits pure URL locate without the model', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-agent-locate-opt-'));
     try {
       fs.mkdirSync(path.join(dir, 'src'));
       fs.writeFileSync(
@@ -53,13 +88,12 @@ describe('runAgent — the agentic loop', () => {
         approve: async () => true,
         onEvent: (e) => events.push(e),
         noAudit: true,
+        deterministicLocate: true,
       });
       expect(result.stopped).toBe('finished');
       expect(result.provider.id).toBe('deterministic-locate');
       expect(result.finalText).toContain('extension.ts:1');
       expect(result.finalText).not.toContain('patch-ir');
-      expect(result.finalText).not.toContain('unknown identifiers');
-      // Model was never consulted.
       expect(events.some((e) => e.type === 'assistant' && e.text.includes('Found'))).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -326,6 +360,7 @@ describe('runAgent — the agentic loop', () => {
     });
     expect(result.finalText).not.toContain('operations');
     expect(result.finalText).not.toContain('patch-ir');
+    expect(result.finalText).toMatch(/edit-shaped payload|tools|Markdown/i);
     expect(result.finalText.length).toBeGreaterThan(20);
   });
 

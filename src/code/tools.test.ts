@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { executeTool, AGENT_TOOLS, type ToolContext } from './tools.js';
+import { executeTool, AGENT_TOOLS, occurrenceSearchQuery, type ToolContext } from './tools.js';
 import { fixtureGraph } from './graph-fixture.js';
 import type { CodeFs } from './session.js';
 import type { ToolCall } from './types.js';
@@ -105,6 +105,32 @@ describe('read-only tools (auto, no approval)', () => {
       );
       expect(r.content).toMatch(/no symbol or text match/i);
       expect(r.content).not.toMatch(/DoesNot|NonExisting|commandExists/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('occurrenceSearchQuery quotes bare identifiers for literal sweeps', () => {
+    expect(occurrenceSearchQuery('stripe')).toBe('"stripe"');
+    expect(occurrenceSearchQuery('"stripe"')).toBe('"stripe"');
+    expect(occurrenceSearchQuery('where is stripe')).toBe('where is stripe');
+    expect(occurrenceSearchQuery('https://x.test/a')).toBe('https://x.test/a');
+  });
+
+  it('search_code finds bare-token occurrences like workspace Find (not false empty)', async () => {
+    const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const root = mkdtempSync(join(tmpdir(), 'vg-search-stripe-'));
+    try {
+      mkdirSync(join(root, 'src'), { recursive: true });
+      mkdirSync(join(root, 'docs'), { recursive: true });
+      writeFileSync(join(root, 'src', 'stripe-config.ts'), 'export const STRIPE_KEY = "sk_test";\n// stripe meters\n');
+      writeFileSync(join(root, 'docs', 'STRIPE-SETUP.md'), '# stripe setup\n');
+      const r = await executeTool(call('search_code', { query: 'stripe' }), ctx({ root }));
+      expect(r.content).toMatch(/stripe/i);
+      expect(r.content).toMatch(/literal match/i);
+      expect(r.content).not.toMatch(/no symbol or text match/i);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

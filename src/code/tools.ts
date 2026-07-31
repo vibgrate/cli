@@ -375,15 +375,31 @@ function arrStr(v: unknown): string[] | undefined {
   return v.map((x) => (typeof x === 'string' ? x : String(x ?? ''))).filter(Boolean);
 }
 
+/**
+ * Normalize a search_code query for occurrence-quality results.
+ * Bare identifiers (e.g. `stripe`) are quoted so the hybrid engine runs a full
+ * literal sweep — same idea as VS Code Find — instead of a symbol-only path that
+ * can skip the tree scan after an exact name hit and report false empty results.
+ */
+export function occurrenceSearchQuery(query: string): string {
+  const q = query.trim();
+  if (!q) return q;
+  if (/^["'`]/.test(q) || /^https?:\/\//i.test(q) || /\s/.test(q)) return q;
+  // Single token / dotted path / kebab: force phrase/literal sweep.
+  if (/^[\w./:@-]+$/.test(q)) return JSON.stringify(q);
+  return q;
+}
+
 async function search(ctx: ToolContext, query: string): Promise<ToolResult> {
   if (!query) return { content: 'search_code needs a query', mutated: false };
 
   // Hybrid path (same engine as MCP `search_symbols`): graph name index +
-  // literal phrase/URL sweep. Without this, a URL occurrence search only ran
-  // lexical symbol ranking and returned confidently wrong hubs (field report).
+  // literal phrase/URL sweep. Bare identifiers are occurrence-quoted so a
+  // "where is stripe" style tool call matches workspace Find, not only defs.
   if (ctx.root) {
     try {
-      const hybrid = await searchSymbols(ctx.graph, ctx.root, query, 20);
+      const hybridQuery = occurrenceSearchQuery(query);
+      const hybrid = await searchSymbols(ctx.graph, ctx.root, hybridQuery, 40);
       if (hybrid.matches.length > 0) {
         const lines = hybrid.matches.map((m) => {
           if ('preview' in m) {
