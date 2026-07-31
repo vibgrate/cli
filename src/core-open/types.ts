@@ -732,6 +732,18 @@ export interface ScanArtifact {
 
 // ── Reachability (vulnerable-symbol usage, local graph query) ──
 
+/**
+ * One code site where a vulnerable package/symbol is evidenced in the local
+ * graph query. File is always present; line is 1-based when a lexical hit
+ * was located. Function is best-effort enclosing symbol from the code map.
+ */
+export interface ReachabilitySite {
+  file: string;
+  line?: number | null;
+  symbol?: string | null;
+  function?: string | null;
+}
+
 /** One vulnerable-symbol reachability verdict from the local graph query. */
 export interface ScanReachabilityFinding {
   advisoryId: string;
@@ -741,8 +753,14 @@ export interface ScanReachabilityFinding {
   /** The vulnerable symbol checked. Absent for module-level verdicts. */
   symbol?: string;
   tier: ReachabilityTier;
-  /** Bounded evidence chain (importing files / symbols). */
+  /**
+   * Bounded evidence chain of importing / referencing files.
+   * When line is known, entries may be `path:line` for human display;
+   * prefer structured `sites` for machine consumers.
+   */
   callPath?: string[];
+  /** Structured evidence sites (file / line / symbol / enclosing function). */
+  sites?: ReachabilitySite[];
   /** One-line human-readable evidence. */
   evidence?: string;
   /** Confidence in the graph verdict (0–1). */
@@ -1183,6 +1201,12 @@ export interface LayerSummary {
   services: ServiceDependencyItem[];
   /** Packages referenced in this layer with their drift status */
   packages: LayerPackageRef[];
+  /**
+   * Sample of files (relative to project root) classified into this layer,
+   * capped at a small count for display — not every classified file, just
+   * enough for a client to link out to representative examples.
+   */
+  files: string[];
 }
 
 /** Package reference within a layer */

@@ -7,11 +7,60 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Dirent } from 'node:fs';
+import ignore, { type Ignore } from 'ignore';
 import { Semaphore } from './semaphore.js';
 import { compileGlobs } from './glob.js';
 
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * One `.gitignore`'s compiled matcher, scoped to the directory it lives in.
+ * `.gitignore` patterns are relative to their own directory (not the walk
+ * root), so each level is tested independently against a path relative to
+ * `dir`, and results are combined root-to-leaf so a deeper `.gitignore` can
+ * re-include (negate) something an ancestor ignored — the same precedence
+ * git itself uses.
+ */
+interface GitignoreLevel {
+  dir: string;
+  ig: Ignore;
+}
+
+/**
+ * Load `dir/.gitignore` if present and return a new level list with it
+ * appended. Returns `levels` unchanged (no allocation) when the directory has
+ * no `.gitignore`, which is the common case.
+ */
+async function extendGitignoreLevels(dir: string, levels: GitignoreLevel[]): Promise<GitignoreLevel[]> {
+  try {
+    const txt = await fs.readFile(path.join(dir, '.gitignore'), 'utf8');
+    return [...levels, { dir, ig: ignore().add(txt) }];
+  } catch {
+    return levels;
+  }
+}
+
+/**
+ * Test whether `absPath` is ignored by any `.gitignore` level collected while
+ * walking down from the repo root. Walks levels in root-to-leaf order so a
+ * later (deeper) match — ignore or negated un-ignore — wins, matching git's
+ * own precedence rules.
+ */
+function isGitignored(levels: GitignoreLevel[], absPath: string, isDir: boolean): boolean {
+  if (levels.length === 0) return false;
+  let ignored = false;
+  for (const { dir, ig } of levels) {
+    const rel = path.relative(dir, absPath);
+    if (!rel || rel.startsWith('..')) continue;
+    const relPosix = rel.split(path.sep).join('/');
+    const testPath = isDir ? `${relPosix}/` : relPosix;
+    const result = ig.test(testPath);
+    if (result.ignored) ignored = true;
+    else if (result.unignored) ignored = false;
+  }
+  return ignored;
+}
 
 /**
  * Directories pruned entirely from the walk — third-party dependency trees,
@@ -346,7 +395,7 @@ export class FileCache {
     const isExcluded = this.excludePredicate;
     const stuckDirs = this._stuckPaths;
 
-    async function walk(dir: string) {
+    async function walk(dir: string, gitignoreLevels: GitignoreLevel[]) {
       const relDir = path.relative(rootDir, dir);
 
       // Report the directory we are ABOUT to read so the UI shows
@@ -354,6 +403,11 @@ export class FileCache {
       if (onProgress) {
         onProgress(foundCount, relDir || '.');
       }
+
+      // Extend the .gitignore chain with this directory's own file (if any)
+      // BEFORE reading entries, so its rules apply to its own children —
+      // matching git's precedence (deepest applicable .gitignore wins).
+      const levels = await extendGitignoreLevels(dir, gitignoreLevels);
 
       // Acquire the semaphore ONLY for the readdir I/O, then release
       // immediately so parent dirs don't hold slots while awaiting children.
@@ -392,14 +446,20 @@ export class FileCache {
 
         if (e.isDirectory()) {
           if (SKIP_DIRS.has(e.name) || extraSkip.has(e.name)) continue;
+          // Respect .gitignore (root + any nested ones seen so far) so
+          // repo-specific, non-canonically-named build/dependency/cache dirs
+          // (e.g. a custom-named virtualenv) don't get walked just because
+          // they aren't on the hardcoded SKIP_DIRS list.
+          if (isGitignored(levels, absPath, true)) continue;
           results.push({ absPath, relPath, name: e.name, isFile: false, isDirectory: true });
           // Launch sub-walk WITHOUT wrapping in sem.run — child walks
           // acquire the semaphore independently for their own readdir.
-          subWalks.push(walk(absPath));
+          subWalks.push(walk(absPath, levels));
         } else if (e.isFile()) {
           // Skip binary/font/media files that no scanner needs
           const ext = path.extname(e.name).toLowerCase();
           if (SKIP_EXTENSIONS.has(ext)) continue;
+          if (isGitignored(levels, absPath, false)) continue;
           results.push({ absPath, relPath, name: e.name, isFile: true, isDirectory: false });
           foundCount++;
           if (onProgress && foundCount - lastReported >= REPORT_INTERVAL) {
@@ -411,7 +471,7 @@ export class FileCache {
       await Promise.all(subWalks);
     }
 
-    await walk(rootDir);
+    await walk(rootDir, []);
 
     let totalDirs = 0;
     const rootNameIndex = new Map<string, string[]>();
@@ -680,31 +740,36 @@ export async function quickTreeCount(rootDir: string, excludePatterns?: string[]
   const extraSkip = EXTRA_SKIP_DIRS;
   const isExcluded = excludePatterns ? compileGlobs(excludePatterns) : null;
 
-  async function count(dir: string) {
+  async function count(dir: string, gitignoreLevels: GitignoreLevel[]) {
     let entries: Dirent[];
     try {
       entries = await sem.run(() => fs.readdir(dir, { withFileTypes: true }));
     } catch {
       return;
     }
+    const levels = await extendGitignoreLevels(dir, gitignoreLevels);
     const subs: Promise<void>[] = [];
     for (const e of entries) {
-      const relPath = path.relative(rootDir, path.join(dir, e.name));
+      const absPath = path.join(dir, e.name);
+      const relPath = path.relative(rootDir, absPath);
       if (isExcluded && isExcluded(relPath)) continue;
 
       if (e.isDirectory()) {
         if (SKIP_DIRS.has(e.name) || extraSkip.has(e.name)) continue;
+        if (isGitignored(levels, absPath, true)) continue;
         totalDirs++;
-        subs.push(count(path.join(dir, e.name)));
+        subs.push(count(absPath, levels));
       } else if (e.isFile()) {
         const ext = path.extname(e.name).toLowerCase();
-        if (!SKIP_EXTENSIONS.has(ext)) totalFiles++;
+        if (SKIP_EXTENSIONS.has(ext)) continue;
+        if (isGitignored(levels, absPath, false)) continue;
+        totalFiles++;
       }
     }
     await Promise.all(subs);
   }
 
-  await count(rootDir);
+  await count(rootDir, []);
   return { totalFiles, totalDirs };
 }
 
@@ -715,7 +780,14 @@ export function normalizeGlobForRipgrep(pattern: string): string {
 }
 
 async function quickTreeCountWithRipgrep(rootDir: string, excludePatterns?: string[]): Promise<TreeCount | null> {
-  const args = ['--files', '--hidden', '--no-ignore', '--null'];
+  // `--hidden` includes dotfiles/dot-dirs (ripgrep skips them by default);
+  // deliberately NOT passing `--no-ignore` here so ripgrep applies its own
+  // (correct, battle-tested) .gitignore handling — root, nested, and global
+  // excludes — the same way `git status` would. This must stay in sync with
+  // the manual .gitignore handling in the JS walk fallback (`_doWalk`,
+  // `quickTreeCount`'s `count()`) below, which exists only for machines
+  // without `rg` on PATH.
+  const args = ['--files', '--hidden', '--null'];
 
   for (const dir of SKIP_DIRS) {
     args.push('-g', `!**/${dir}/**`);

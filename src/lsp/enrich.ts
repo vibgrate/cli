@@ -41,14 +41,24 @@ export interface EnrichResult {
 /**
  * Confidence that app code reaches this dependency — graph-derived, never proof.
  * `unknown` when no code map is available.
+ * `potentially_reachable` = package imported but no vulnerable-symbol hit yet.
  */
-export type Reachability = 'reached' | 'not-observed' | 'unknown';
+export type Reachability = 'reached' | 'potentially_reachable' | 'not-observed' | 'unknown';
 
 /** Manifest hit for a resolved package (workspace-relative path + optional line). */
 export interface VulnLocation {
   file: string;
   /** 1-based line of the package in the manifest, when known. */
   line: number | null;
+}
+
+/** One code site where the vulnerable package is evidenced (import / use). */
+export interface VulnReachSite {
+  file: string;
+  /** 1-based line when known (lexical symbol hit); omit for import-only evidence. */
+  line?: number | null;
+  symbol?: string | null;
+  function?: string | null;
 }
 
 /** One advisory × package row for the Vulnerabilities panel (flat, severity-ranked). */
@@ -69,6 +79,10 @@ export interface VulnFinding {
    * Drift-aware exposure signal from the local code map. Honest about unknowns.
    */
   reachability: Reachability;
+  /** Structured import / use sites (app source, not manifests). */
+  reachSites?: VulnReachSite[];
+  /** One-line human evidence from the code map when available. */
+  reachEvidence?: string | null;
   /**
    * Workspace-relative manifest path when known (first of `locations` for
    * backward compatibility with older panel code).
@@ -113,6 +127,42 @@ export interface VulnTarget {
   latestStable?: string | null;
   /** Precomputed package-level reachability (from the code map). */
   reachability?: Reachability;
+  /** App source sites that import / reference this package. */
+  reachSites?: VulnReachSite[];
+  reachEvidence?: string | null;
+}
+
+const REACH_RANK: Record<Reachability, number> = {
+  reached: 3,
+  potentially_reachable: 2,
+  unknown: 1,
+  'not-observed': 0,
+};
+
+export function mergeReachability(
+  a: Reachability | undefined,
+  b: Reachability | undefined,
+): Reachability {
+  const left = a ?? 'unknown';
+  const right = b ?? 'unknown';
+  return REACH_RANK[right] > REACH_RANK[left] ? right : left;
+}
+
+export function mergeReachSites(
+  a: VulnReachSite[] | undefined,
+  b: VulnReachSite[] | undefined,
+): VulnReachSite[] {
+  const out: VulnReachSite[] = [];
+  const seen = new Set<string>();
+  for (const site of [...(a ?? []), ...(b ?? [])]) {
+    if (!site?.file) continue;
+    const k = `${site.file}::${site.line ?? ''}::${site.symbol ?? ''}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(site);
+    if (out.length >= 10) break;
+  }
+  return out;
 }
 
 const OSV_QUERY_URL = 'https://api.osv.dev/v1/query';
@@ -321,11 +371,12 @@ export async function scanWorkspaceVulns(
         existing.locations.push(loc);
       }
     }
-    // Prefer "reached" over weaker signals when merging monorepo hits.
-    if (t.reachability === 'reached') existing.reachability = 'reached';
-    else if (t.reachability === 'not-observed' && existing.reachability === 'unknown') {
-      existing.reachability = 'not-observed';
+    // Prefer stronger reachability when merging monorepo hits.
+    existing.reachability = mergeReachability(existing.reachability, t.reachability);
+    if (t.reachSites?.length) {
+      existing.reachSites = mergeReachSites(existing.reachSites, t.reachSites);
     }
+    if (!existing.reachEvidence && t.reachEvidence) existing.reachEvidence = t.reachEvidence;
     if (!existing.latestStable && t.latestStable) existing.latestStable = t.latestStable;
     if (!existing.section && t.section) existing.section = t.section;
   }
@@ -371,6 +422,8 @@ export async function scanWorkspaceVulns(
           published: v.published,
           kev: kevHit,
           reachability: t.reachability ?? 'unknown',
+          reachSites: t.reachSites ?? [],
+          reachEvidence: t.reachEvidence ?? null,
           file: locations[0]?.file ?? t.file ?? null,
           line: locations[0]?.line ?? t.line ?? null,
           locations,

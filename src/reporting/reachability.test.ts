@@ -100,7 +100,11 @@ describe('analyzeReachability', () => {
     const reachable = result.findings.find((f) => f.tier === 'reachable');
     expect(reachable).toBeDefined();
     expect(reachable?.symbol).toBe('lodash.template');
-    expect(reachable?.callPath).toEqual(['src/render.ts']);
+    // Line 2 is where `template` is referenced in the fixture source.
+    expect(reachable?.callPath).toEqual(['src/render.ts:2']);
+    expect(reachable?.sites).toEqual([
+      { file: 'src/render.ts', line: 2, symbol: 'lodash.template', function: null },
+    ]);
     expect(reachable?.graphConfidence).toBeGreaterThan(0);
   });
 
