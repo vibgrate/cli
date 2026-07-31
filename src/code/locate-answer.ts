@@ -1,10 +1,10 @@
 /**
- * Deterministic string/URL locate answers for VG Code.
+ * Optional deterministic string/URL locate answers (opt-in via
+ * `deterministicLocate: true` on the agent).
  *
- * Local constrained models are forced onto PatchIR grammar for edits. That is
- * the wrong contract for "where is https://…?" — the model then dumps invalid
- * JSON into the panel. For pure locate asks we answer from the hybrid literal
- * sweep and never surface PatchIR or identifier-annotation noise.
+ * The default VG Code path is a full coding agent: Task Capsule → model → tools.
+ * This module remains for offline/CI shortcuts and for sanitizing accidental
+ * PatchIR dumps out of the panel when a model ignores the tool contract.
  */
 
 import { extractLiteralNeedles, isLocateOnlyInstruction } from '../engine/query.js';
@@ -51,7 +51,12 @@ export function formatLocateAnswer(
 
 /**
  * Run the hybrid literal sweep and build a panel-ready locate answer.
- * Call only when {@link isLocateOnlyInstruction} is true.
+ * Call only when {@link isLocateOnlyInstruction} is true and the agent opted into
+ * `deterministicLocate`.
+ *
+ * Always forces an occurrence-quality search (quoted needle) so a single token
+ * like `stripe` runs the full literal sweep — same corpus idea as workspace Find —
+ * instead of symbol-only / skip-scan paths that report false "0 matches".
  */
 export async function answerLocateInstruction(
   graph: VgGraph,
@@ -60,10 +65,23 @@ export async function answerLocateInstruction(
   limit = 30,
 ): Promise<LocateAnswer> {
   const needle = primaryLocateNeedle(instruction);
-  const result = await searchSymbols(graph, root, needle, limit);
-  const hits = result.matches
+  // Quote so searchSymbols treats this as an occurrence sweep (isPhrase), not a
+  // single-name symbol lookup that can skip the tree scan after an exact hit.
+  const occurrenceQuery = /^https?:\/\//i.test(needle) ? needle : JSON.stringify(needle);
+  const result = await searchSymbols(graph, root, occurrenceQuery, limit);
+  const textHits = result.matches
     .filter((m): m is TextHit => m.kind === 'text')
     .map((m) => ({ file: m.file, line: m.line, preview: m.preview }));
+  // Include symbol hits as file:line when the literal pass is empty but the graph
+  // knows the name — better than a false "0 matches" against workspace Find.
+  const symbolHits = result.matches
+    .filter((m) => m.kind !== 'text')
+    .map((m) => ({
+      file: m.file,
+      line: m.line,
+      preview: 'name' in m ? `${m.name} (${m.kind})` : m.kind,
+    }));
+  const hits = textHits.length > 0 ? textHits : symbolHits;
   const total = result.totalTextMatches ?? hits.length;
   return {
     needle,
@@ -80,14 +98,15 @@ export async function answerLocateInstruction(
 export function sanitizeAgentDisplayText(text: string): string {
   if (!text) return text;
   let t = text.replace(/\n*\/\*\s*vg:\s*unknown identifiers[\s\S]*?\*\//gi, '').trim();
-  // No-op / garbage PatchIR is not a user answer.
+  // PatchIR is a tool payload, not a chat answer — drop it so the loop can continue
+  // or finish cleanly. Do not re-route the user into a locate short-circuit.
   if (
     /"schemaVersion"\s*:\s*"patch-ir\/0"/i.test(t) ||
     (/"op"\s*:\s*"replace-text"/i.test(t) && /"operations"\s*:/i.test(t))
   ) {
     return (
-      'This looked like a locate/search question, but the model returned an edit payload instead of an answer. ' +
-      'Ask again as “where is <url or string>?” — VG Code will use the literal search path.'
+      'The model returned an edit-shaped payload instead of a chat answer. ' +
+      'Use tools (search_code, read_file, edit_file, apply_patch) or finish with Markdown.'
     );
   }
   return t;

@@ -46,7 +46,8 @@ describe('sanitizeAgentDisplayText', () => {
       operations: [{ op: 'replace-text', file: 'x.ts', search: 'a', replace: 'a' }],
     });
     expect(sanitizeAgentDisplayText(dump)).not.toContain('patch-ir');
-    expect(sanitizeAgentDisplayText(dump)).toMatch(/locate/i);
+    expect(sanitizeAgentDisplayText(dump)).toMatch(/edit-shaped|tools|Markdown/i);
+    expect(sanitizeAgentDisplayText(dump)).not.toMatch(/Ask again as/i);
   });
 
   it('strips identifier annotation comments', () => {
@@ -81,6 +82,22 @@ describe('answerLocateInstruction', () => {
     expect(a.summary).toContain('src/extension.ts:1');
     expect(a.summary).not.toContain('patch-ir');
     expect(a.summary).not.toContain('unknown identifiers');
+  });
+
+  it('finds bare-identifier occurrences via forced literal sweep (workspace-Find quality)', async () => {
+    // Fresh tree — walk listing is cached per root; do not append to `root` after a prior scan.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-locate-stripe-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'src'));
+      fs.writeFileSync(path.join(dir, 'src', 'billing.ts'), `import { stripe } from './pay';\n// stripe webhook\n`);
+      const a = await answerLocateInstruction(emptyGraph as never, dir, "where is 'stripe'?", 30);
+      expect(a.needle).toBe('stripe');
+      expect(a.totalTextMatches).toBeGreaterThan(0);
+      expect(a.summary).toMatch(/billing\.ts/i);
+      expect(a.summary).not.toMatch(/No occurrences/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('formats zero hits honestly', () => {

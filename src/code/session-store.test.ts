@@ -2,7 +2,16 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { newSession, recordTask, saveSession, loadLatestSession, summarizeSession } from './session-store.js';
+import {
+  newSession,
+  recordTask,
+  saveSession,
+  loadLatestSession,
+  loadSession,
+  listSessions,
+  setLatestSession,
+  summarizeSession,
+} from './session-store.js';
 import type { FileChange } from './types.js';
 
 function tmp(): string {
@@ -42,6 +51,31 @@ describe('session-store', () => {
     const root = tmp();
     try {
       expect(loadLatestSession(root)).toBeUndefined();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('lists sessions newest-first and can switch latest for multi-chat resume', () => {
+    const root = tmp();
+    try {
+      let a = newSession('a1', 'ollama', 'qwen', 1000);
+      a = recordTask(a, { instruction: 'find stripe', summary: 'found it', changes: [], stopped: 'finished' }, 1001);
+      saveSession(root, a);
+      let b = newSession('b2', 'openrouter', 'claude', 2000);
+      b = recordTask(b, { instruction: 'fix timeout', summary: 'fixed', changes: [change('x.ts')], stopped: 'finished' }, 2001);
+      saveSession(root, b);
+
+      const list = listSessions(root);
+      expect(list.map((e) => e.id)).toEqual(['b2', 'a1']);
+      expect(list[0]!.title).toContain('fix timeout');
+      expect(list[1]!.taskCount).toBe(1);
+
+      expect(loadLatestSession(root)?.id).toBe('b2');
+      expect(setLatestSession(root, 'a1')).toBe(true);
+      expect(loadLatestSession(root)?.id).toBe('a1');
+      expect(loadSession(root, 'b2')?.model).toBe('claude');
+      expect(setLatestSession(root, '../evil')).toBe(false);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

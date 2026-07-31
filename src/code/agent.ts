@@ -70,7 +70,6 @@ import type { CodeFs } from './session.js';
 import type { ChatMessage, CodeContext, FileChange, Provider, ProviderResult, ToolCall, ToolSpec } from './types.js';
 import type { VgGraph } from '../schema.js';
 import { redactSecrets } from './providers.js';
-import { patchIrGbnf, shouldUsePatchIrGrammar } from './patch-ir-grammar.js';
 import {
   answerLocateInstruction,
   isLocateOnlyInstruction,
@@ -221,9 +220,11 @@ export interface AgentOptions {
    */
   verifyLadder?: boolean;
   /**
-   * Free use of low-level discovery tools. Default true. When false (typical
-   * with capsule mode), early discovery is soft-nudged then hard-capped until
-   * a mutation or inspect_change (Fusion Phase 4 ZNS@1 path).
+   * Free use of low-level discovery tools. Default **true** (full coding agent).
+   * When false, early discovery is soft-nudged then hard-capped until a mutation
+   * or inspect_change (legacy capsule-first ZNS@1 path for tiny local models).
+   * Task Capsules still ground the first turn either way — they are context, not
+   * a substitute for tools.
    */
   advancedMode?: boolean;
   /**
@@ -233,8 +234,10 @@ export interface AgentOptions {
    */
   worktreeOverlay?: boolean;
   /**
-   * When true (default), pure locate/URL-occurrence asks answer from the hybrid
-   * literal sweep without calling the model — avoids PatchIR dumps in the panel.
+   * When true, pure locate/URL-occurrence asks answer from the hybrid literal
+   * sweep without calling the model. Default **false**: VG Code is a full coding
+   * agent — build the capsule, send the task to the model, and let it choose
+   * tools (search_code, finish, edits). Opt-in only for offline/CI shortcuts.
    */
   deterministicLocate?: boolean;
 }
@@ -328,8 +331,9 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     overlay?.flush();
   };
 
-  // Capsule-first runs default to non-advanced discovery (ZNS@1 path).
-  const advancedMode = options.advancedMode ?? !options.capsule;
+  // Full coding agent: free discovery by default. Capsule is first-turn evidence,
+  // not a lock on tools. Opt into advancedMode:false only for tiny local packs.
+  const advancedMode = options.advancedMode ?? true;
   const discoveryGate = createDiscoveryGateState();
 
   const allTools = [...AGENT_TOOLS, ...(options.externalTools?.specs ?? [])];
@@ -349,9 +353,6 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   if (options.testCommand) {
     messages.push({ role: 'user', content: `When you want to verify a change, the project's test command is: \`${options.testCommand}\`` });
   }
-  // Locate-only (URL / "where is …?"): never force PatchIR grammar — the model
-  // would dump JSON edits into the panel. Prefer a deterministic literal answer.
-  const locateOnly = isLocateOnlyInstruction(instruction);
   const spans = buildSpanIndex(graph);
 
   const changes: FileChange[] = [];
@@ -375,9 +376,9 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const capsuleSummary = capsule ? summarizeCapsule(capsule) : null;
   if (capsuleSummary) onEvent({ type: 'capsule', summary: capsuleSummary });
 
-  // Deterministic locate short-circuit: correct file:line without model noise
-  // (and without PatchIR / identifier-annotation dumps in the VG Code panel).
-  if (locateOnly && options.deterministicLocate !== false) {
+  // Opt-in only: short-circuit pure locate asks without a model. Default is off —
+  // we never second-guess chat intent; the model + search_code own occurrence Q&A.
+  if (options.deterministicLocate === true && isLocateOnlyInstruction(instruction)) {
     try {
       const locate = await answerLocateInstruction(graph, root, instruction, 30);
       providerInfo = { id: 'deterministic-locate', model: 'literal-sweep', fellBack: false };
@@ -717,6 +718,8 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         kind: m.role === 'system' ? 'system' : i < 3 ? 'context' : m.role === 'user' ? 'user' : 'assistant',
         text: typeof m.content === 'string' ? m.content : '',
       }));
+      // Full agent path: never attach turn-level PatchIR GBNF. Edits go through
+      // tools (edit_file / apply_patch); the model chooses answer vs mutate.
       const c = await complete(
         providers,
         messages,
@@ -727,7 +730,6 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         identifierTrie,
         draftCandidates,
         promptSegments,
-        /* skipPatchIrGrammar */ locateOnly,
       );
       result = c.result;
       providerInfo = { id: c.provider.id, model: c.provider.model, fellBack: c.fellBack };
@@ -834,7 +836,11 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   return finish('max-steps', 'reached the step limit before finishing', maxSteps);
 }
 
-/** Try providers in order, falling back on transport failure. Throws the last actionable error. */
+/**
+ * Try providers in order, falling back on transport failure.
+ * Never attaches turn-level PatchIR GBNF — that belongs to tool arguments when
+ * the model elects to edit, not to every chat completion (full agent contract).
+ */
 async function complete(
   providers: Provider[],
   messages: ChatMessage[],
@@ -845,19 +851,12 @@ async function complete(
   identifierTrie?: TrieNode,
   draftCandidates?: string[],
   promptSegments?: Array<{ kind: string; text: string }>,
-  skipPatchIrGrammar = false,
 ): Promise<{ result: ProviderResult; provider: Provider; fellBack: boolean }> {
   if (providers.length === 0) throw new Error('no model provider available');
   const onToken = stream ? (t: string): void => onEvent({ type: 'token', text: t }) : undefined;
-  // Locate/Q&A must not use PatchIR GBNF — that forces edit JSON into the panel.
-  const grammar =
-    !skipPatchIrGrammar && shouldUsePatchIrGrammar(modelProfile) ? patchIrGbnf() : undefined;
-  // Fail-closed on embedded path when pack requires constrained decoding.
-  const requireGrammar = !!(
-    grammar &&
-    modelProfile?.constrainedDecoding &&
-    providers.some((p) => p.id === 'llama-cpp')
-  );
+  // modelProfile remains available for future temperature / budget knobs; turn-level
+  // PatchIR GBNF is never attached (full agent: tools own edit structure).
+  void modelProfile;
   let lastErr: unknown;
   for (let i = 0; i < providers.length; i++) {
     try {
@@ -866,9 +865,6 @@ async function complete(
         tools,
         stream,
         onToken,
-        grammar,
-        // Only require grammar on the llama-cpp provider; HTTP providers ignore it.
-        requireGrammar: requireGrammar && providers[i].id === 'llama-cpp',
         identifierTrie,
         draftCandidates,
         promptSegments,

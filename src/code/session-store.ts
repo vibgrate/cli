@@ -58,12 +58,80 @@ export function saveSession(root: string, session: StoredSession): void {
 export function loadLatestSession(root: string): StoredSession | undefined {
   try {
     const { id } = JSON.parse(fs.readFileSync(latestPointer(root), 'utf8')) as { id: string };
-    const raw = JSON.parse(fs.readFileSync(path.join(sessionsDir(root), `${id}.json`), 'utf8')) as StoredSession;
-    if (Array.isArray(raw.tasks)) return raw;
+    return loadSession(root, id);
   } catch {
     /* no session */
   }
   return undefined;
+}
+
+/** Load one session by id, or undefined if missing/invalid. */
+export function loadSession(root: string, id: string): StoredSession | undefined {
+  try {
+    const safe = id.replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!safe || safe !== id) return undefined;
+    const raw = JSON.parse(fs.readFileSync(path.join(sessionsDir(root), `${safe}.json`), 'utf8')) as StoredSession;
+    if (Array.isArray(raw.tasks) && raw.id) return raw;
+  } catch {
+    /* missing */
+  }
+  return undefined;
+}
+
+export interface SessionListEntry {
+  id: string;
+  provider: string;
+  model: string;
+  startedAt: number;
+  updatedAt: number;
+  taskCount: number;
+  /** First task instruction (truncated) for history UI. */
+  title: string;
+}
+
+/** List stored sessions newest-first (multi-chat history). Best-effort. */
+export function listSessions(root: string, limit = 50): SessionListEntry[] {
+  try {
+    const dir = sessionsDir(root);
+    if (!fs.existsSync(dir)) return [];
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json') && f !== 'latest.json');
+    const out: SessionListEntry[] = [];
+    for (const f of files) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as StoredSession;
+        if (!raw?.id || !Array.isArray(raw.tasks)) continue;
+        const first = raw.tasks[0]?.instruction?.trim() || 'New chat';
+        out.push({
+          id: raw.id,
+          provider: raw.provider ?? '',
+          model: raw.model ?? '',
+          startedAt: raw.startedAt ?? 0,
+          updatedAt: raw.updatedAt ?? raw.startedAt ?? 0,
+          taskCount: raw.tasks.length,
+          title: first.slice(0, 80),
+        });
+      } catch {
+        /* skip bad file */
+      }
+    }
+    out.sort((a, b) => b.updatedAt - a.updatedAt);
+    return out.slice(0, Math.max(1, limit));
+  } catch {
+    return [];
+  }
+}
+
+/** Point `latest` at an existing session (resume a prior chat). */
+export function setLatestSession(root: string, id: string): boolean {
+  const s = loadSession(root, id);
+  if (!s) return false;
+  try {
+    fs.mkdirSync(sessionsDir(root), { recursive: true });
+    fs.writeFileSync(latestPointer(root), JSON.stringify({ id: s.id }));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** A short natural-language recap of a session to seed a continued run's context. */
