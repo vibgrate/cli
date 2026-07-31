@@ -673,7 +673,7 @@ export function aggregateSolutionArchitecture(
     for (const ls of r.layers) {
       const existing = layerMap.get(ls.layer);
       if (!existing) {
-        layerMap.set(ls.layer, { ...ls, packages: [...ls.packages], techStack: [...ls.techStack], services: [...ls.services] });
+        layerMap.set(ls.layer, { ...ls, packages: [...ls.packages], techStack: [...ls.techStack], services: [...ls.services], files: [...ls.files] });
       } else {
         existing.fileCount += ls.fileCount;
         // Merge packages (dedup by name)
@@ -698,6 +698,15 @@ export function aggregateSolutionArchitecture(
           if (!svcPkgs.has(s.package)) {
             existing.services.push(s);
             svcPkgs.add(s.package);
+          }
+        }
+        // Merge files (dedup, capped — cross-project paths so no collision risk)
+        const seenFiles = new Set(existing.files);
+        for (const f of ls.files) {
+          if (existing.files.length >= 40) break;
+          if (!seenFiles.has(f)) {
+            existing.files.push(f);
+            seenFiles.add(f);
           }
         }
         // Recompute drift for merged packages
@@ -779,9 +788,17 @@ export async function scanArchitecture(
     'config', 'testing', 'shared',
   ];
 
+  const LAYER_FILES_CAP = 40;
   const layerFileCounts = new Map<ArchitectureLayer, number>();
+  const layerFiles = new Map<ArchitectureLayer, string[]>();
   for (const c of classifications) {
     layerFileCounts.set(c.layer, (layerFileCounts.get(c.layer) ?? 0) + 1);
+    const existing = layerFiles.get(c.layer);
+    if (existing) {
+      if (existing.length < LAYER_FILES_CAP) existing.push(c.filePath);
+    } else {
+      layerFiles.set(c.layer, [c.filePath]);
+    }
   }
 
   const layers: LayerSummary[] = [];
@@ -823,6 +840,7 @@ export async function scanArchitecture(
       techStack: tech,
       services: svc,
       packages,
+      files: layerFiles.get(layer) ?? [],
     });
   }
 

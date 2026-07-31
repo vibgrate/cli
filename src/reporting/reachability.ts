@@ -27,6 +27,7 @@ import * as fs from 'node:fs/promises';
 import type {
   ScanReachabilityResult,
   ScanReachabilityFinding,
+  ReachabilitySite,
   ReachabilityTier,
   RiskySymbolManifestEntry,
   SymbolsPreflightDependency,
@@ -131,16 +132,66 @@ function collectPackageImports(
   };
 }
 
-async function fileReferencesIdentifier(
+/**
+ * First 1-based line where `identifier` appears as a word boundary match, or
+ * null when the file is unreadable / has no hit.
+ */
+async function firstReferenceLine(
   rootDir: string,
   relFile: string,
   identifier: string,
   readFile: (absPath: string) => Promise<string | null>,
-): Promise<boolean> {
+): Promise<number | null> {
   const content = await readFile(path.join(rootDir, relFile));
-  if (!content) return false;
+  if (!content) return null;
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`\\b${escaped}\\b`).test(content);
+  const re = new RegExp(`\\b${escaped}\\b`);
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (re.test(lines[i]!)) return i + 1;
+  }
+  return null;
+}
+
+/** Format a site for human callPath display: `path` or `path:line`. */
+export function formatSitePath(site: ReachabilitySite): string {
+  return site.line != null && site.line > 0 ? `${site.file}:${site.line}` : site.file;
+}
+
+/**
+ * Best-effort enclosing function/method name for a line in a file, from the
+ * code map. Returns null when the graph has no spanning function node.
+ */
+function enclosingFunctionName(
+  graph: VgGraph,
+  relFile: string,
+  line: number | null | undefined,
+): string | null {
+  if (line == null || line < 1) return null;
+  let best: GraphNode | null = null;
+  let bestSpan = Number.POSITIVE_INFINITY;
+  for (const node of graph.nodes) {
+    if (node.file !== relFile) continue;
+    if (node.kind !== 'function' && node.kind !== 'method') continue;
+    const start = node.span?.start;
+    const end = node.span?.end;
+    if (start == null || end == null) continue;
+    if (line < start || line > end) continue;
+    const span = end - start;
+    if (span < bestSpan) {
+      bestSpan = span;
+      best = node;
+    }
+  }
+  return best?.name ?? null;
+}
+
+function sitesFromImportFiles(
+  files: string[],
+  limit = 10,
+): { callPath: string[]; sites: ReachabilitySite[] } {
+  const sites: ReachabilitySite[] = files.slice(0, limit).map((file) => ({ file }));
+  return { callPath: sites.map(formatSitePath), sites };
 }
 
 async function defaultReadFile(absPath: string): Promise<string | null> {
@@ -259,6 +310,7 @@ export async function analyzeReachability(
     if (entry.symbolCoverage !== 'function' || matchableSymbols.length === 0) {
       // Module imported, but no usable symbol data (pending extraction, module
       // coverage, or names too generic to match safely) → potentially reachable.
+      const { callPath, sites } = sitesFromImportFiles(evidence.importingFiles, 10);
       findings.push({
         advisoryId: entry.advisoryId,
         ecosystem: entry.ecosystem,
@@ -266,7 +318,8 @@ export async function analyzeReachability(
         version: entry.version,
         tier: 'potentially_reachable',
         evidence: `${entry.package} is imported by ${evidence.importingFiles.length} file${evidence.importingFiles.length === 1 ? '' : 's'}; vulnerable symbols unresolved (coverage: ${entry.symbolCoverage})`,
-        callPath: evidence.importingFiles.slice(0, 10),
+        callPath,
+        sites,
         graphConfidence: Math.min(baseConfidence, 0.6),
       });
       continue;
@@ -277,14 +330,19 @@ export async function analyzeReachability(
     const filesToCheck = evidence.importingFiles.slice(0, MAX_FILES_PER_PACKAGE);
     let anySymbolFound = false;
     for (const { symbol, identifier } of matchableSymbols) {
-      const referencingFiles: string[] = [];
+      const sites: ReachabilitySite[] = [];
       for (const relFile of filesToCheck) {
-        if (await fileReferencesIdentifier(input.rootDir, relFile, identifier, readFile)) {
-          referencingFiles.push(relFile);
-          if (referencingFiles.length >= 5) break;
-        }
+        const line = await firstReferenceLine(input.rootDir, relFile, identifier, readFile);
+        if (line == null) continue;
+        sites.push({
+          file: relFile,
+          line,
+          symbol,
+          function: enclosingFunctionName(input.graph, relFile, line),
+        });
+        if (sites.length >= 5) break;
       }
-      if (referencingFiles.length > 0) {
+      if (sites.length > 0) {
         anySymbolFound = true;
         findings.push({
           advisoryId: entry.advisoryId,
@@ -293,14 +351,16 @@ export async function analyzeReachability(
           version: entry.version,
           symbol,
           tier: 'reachable',
-          evidence: `vulnerable symbol \`${identifier}\` is referenced in ${referencingFiles.length} importing file${referencingFiles.length === 1 ? '' : 's'}`,
-          callPath: referencingFiles,
+          evidence: `vulnerable symbol \`${identifier}\` is referenced in ${sites.length} importing file${sites.length === 1 ? '' : 's'}`,
+          callPath: sites.map(formatSitePath),
+          sites,
           graphConfidence: Math.min(baseConfidence, 0.75),
         });
       }
     }
 
     if (!anySymbolFound) {
+      const { callPath, sites } = sitesFromImportFiles(evidence.importingFiles, 10);
       findings.push({
         advisoryId: entry.advisoryId,
         ecosystem: entry.ecosystem,
@@ -308,7 +368,8 @@ export async function analyzeReachability(
         version: entry.version,
         tier: 'not_reached',
         evidence: `${entry.package} is imported, but none of its ${matchableSymbols.length} vulnerable symbol${matchableSymbols.length === 1 ? '' : 's'} is referenced in the ${filesToCheck.length} importing file${filesToCheck.length === 1 ? '' : 's'} checked`,
-        callPath: evidence.importingFiles.slice(0, 10),
+        callPath,
+        sites,
         graphConfidence: Math.min(baseConfidence, 0.55),
       });
     }

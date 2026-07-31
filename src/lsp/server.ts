@@ -52,6 +52,7 @@ import {
   type Reachability,
   type VulnTarget,
   type VulnsWorkspaceResult,
+  type VulnReachSite,
 } from './enrich.js';
 import type { VgGraph } from '../schema.js';
 
@@ -116,6 +117,48 @@ export interface ProjectRef {
   band?: Band;
   /** `estimated` → badge/tooltip use a leading `~` (same as the status bar). */
   mode?: 'verified' | 'estimated';
+  /** Workspace-relative path to this project's manifest (package.json, .csproj, …). */
+  manifestPath?: string;
+  /** Workspace-relative path to this project's lockfile, when one was resolved. */
+  lockfilePath?: string;
+}
+
+/**
+ * `vibgrate/architecture` — pulled by the Architecture panel on scope change.
+ * `undefined path` (or `'__repo__'`) returns the whole-workspace aggregate;
+ * a project path returns that project's own architecture detection.
+ */
+export interface ArchitectureResponse {
+  archetype: ProjectArchetypeWire;
+  archetypeConfidence: number;
+  layers: LayerSummaryWire[];
+  totalClassified: number;
+  unclassified: number;
+  /** Workspace-relative manifest path — absent at whole-workspace scope. */
+  manifestPath?: string;
+  /** Workspace-relative lockfile path — absent at whole-workspace scope or when none was resolved. */
+  lockfilePath?: string;
+}
+
+type ProjectArchetypeWire = string;
+
+/** Per-layer summary, wire shape mirrors `LayerSummary` in core-open/types.ts. */
+export interface LayerSummaryWire {
+  layer: string;
+  fileCount: number;
+  driftScore: number;
+  riskLevel: 'none' | Band;
+  techStack: Array<{ name: string; package: string; version: string | null }>;
+  services: Array<{ name: string; package: string; version: string | null }>;
+  packages: Array<{
+    name: string;
+    version: string | null;
+    latestStable: string | null;
+    majorsBehind: number | null;
+    drift: 'current' | 'minor-behind' | 'major-behind' | 'unknown';
+  }>;
+  /** Workspace- or project-relative sample file paths classified into this layer. */
+  files: string[];
 }
 
 /** One runtime's real EOL date and distance from today, for the panel's horizon. */
@@ -353,6 +396,7 @@ export class VibgrateLanguageServer {
     this.conn.onRequest('vibgrate/graph/query', (_m, params) => this.onGraphQuery(params));
     this.conn.onRequest('vibgrate/score/forFile', (_m, params) => this.onScoreForFile(params));
     this.conn.onRequest('vibgrate/score/forProject', (_m, params) => this.onScoreForProject(params));
+    this.conn.onRequest('vibgrate/architecture', (_m, params) => this.onArchitecture(params));
     // Trend data for the panel sparkline (plan §5.6). Entries carry their
     // methodology so the client can break the line across a change — the one
     // trend rule v3 imposes. Empty history is an empty array, not an error.
@@ -514,7 +558,9 @@ export class VibgrateLanguageServer {
       ...(delta !== undefined ? { delta } : {}),
       ...(buildBreakdown(a.drift, a.projects ?? []) ? { breakdown: buildBreakdown(a.drift, a.projects ?? []) } : {}),
       ...(buildEolHorizon(a.projects ?? []) ? { eolHorizon: buildEolHorizon(a.projects ?? []) } : {}),
-      ...(buildProjectRefs(a.projects ?? []) ? { projects: buildProjectRefs(a.projects ?? []) } : {}),
+      ...(buildProjectRefs(this.opts.root, a.projects ?? [])
+        ? { projects: buildProjectRefs(this.opts.root, a.projects ?? []) }
+        : {}),
     };
 
     this.conn.notify('vibgrate/score', payload);
@@ -739,8 +785,8 @@ export class VibgrateLanguageServer {
       };
     }
 
-    // Best-effort code-map import set (do not block on a cold build).
-    const reachedPkgs = packageReachSet(this.graph);
+    // Best-effort code-map import evidence (do not block on a cold build).
+    const importMap = packageImportMap(this.graph);
 
     const targets: VulnTarget[] = [];
     for (const proj of a.projects ?? []) {
@@ -768,8 +814,24 @@ export class VibgrateLanguageServer {
           if (l >= 0) line = l + 1; // 1-based for the editor
         }
         let reachability: Reachability = 'unknown';
-        if (reachedPkgs) {
-          reachability = packageReached(reachedPkgs, dep.package) ? 'reached' : 'not-observed';
+        let reachSites: VulnReachSite[] = [];
+        let reachEvidence: string | null = null;
+        if (importMap) {
+          const files = lookupImportFiles(importMap, dep.package);
+          if (files.length > 0) {
+            // Package-level import evidence is "reached" for the IDE chip
+            // (honest: import seen, not necessarily a vulnerable symbol).
+            reachability = 'reached';
+            reachSites = files.slice(0, 10).map((file) => ({
+              file,
+              // Best-effort first line that mentions the package name (import site).
+              line: firstPackageMentionLine(this.opts.root, file, dep.package),
+            }));
+            reachEvidence = `${dep.package} is imported by ${files.length} file${files.length === 1 ? '' : 's'} in the code map`;
+          } else {
+            reachability = 'not-observed';
+            reachEvidence = `no import of ${dep.package} was found in the code map`;
+          }
         }
         targets.push({
           ecosystem,
@@ -780,6 +842,8 @@ export class VibgrateLanguageServer {
           section: dep.section ?? null,
           latestStable: dep.latestStable ?? null,
           reachability,
+          reachSites,
+          reachEvidence,
         });
       }
     }
@@ -791,7 +855,7 @@ export class VibgrateLanguageServer {
     const a = this.artifact;
     if (!a || !p.uri) return null;
     const project = projectForFile(this.opts.root, a, uriToPath(p.uri));
-    return project ? scoreForProject(a, project) : null;
+    return project ? scoreForProject(this.opts.root, a, project) : null;
   }
 
   /**
@@ -803,7 +867,43 @@ export class VibgrateLanguageServer {
     const a = this.artifact;
     if (!a || typeof p.path !== 'string') return null;
     const project = projectByPath(a, p.path);
-    return project ? scoreForProject(a, project) : null;
+    return project ? scoreForProject(this.opts.root, a, project) : null;
+  }
+
+  /**
+   * `vibgrate/architecture` — the Architecture panel. `path` absent or
+   * `'__repo__'` returns the whole-workspace aggregate (`extended.architecture`);
+   * a project path returns that project's own detection (`ProjectScan.architecture`).
+   * Returns `null` when the scanner hasn't produced architecture data yet (still
+   * scanning, or the archetype/layer scanner is disabled) rather than an empty
+   * shape a client might mistake for "no layers detected".
+   */
+  private onArchitecture(params: unknown): ArchitectureResponse | null {
+    const p = params as { path?: string } | undefined;
+    const a = this.artifact;
+    if (!a) return null;
+    if (!p?.path || p.path === '__repo__') {
+      const arch = a.extended?.architecture;
+      if (!arch) return null;
+      return {
+        archetype: arch.archetype,
+        archetypeConfidence: arch.archetypeConfidence,
+        layers: arch.layers,
+        totalClassified: arch.totalClassified,
+        unclassified: arch.unclassified,
+      };
+    }
+    const project = projectByPath(a, p.path);
+    if (!project?.architecture) return null;
+    return {
+      archetype: project.architecture.archetype,
+      archetypeConfidence: project.architecture.archetypeConfidence,
+      layers: project.architecture.layers,
+      totalClassified: project.architecture.totalClassified,
+      unclassified: project.architecture.unclassified,
+      manifestPath: manifestRelativePath(project),
+      lockfilePath: lockfileRelativePath(this.opts.root, project),
+    };
   }
 }
 
@@ -858,15 +958,18 @@ function projectByPath(a: ScanArtifact, projectPath: string): ProjectScan | unde
 }
 
 /** Compact monorepo project list for the panel scope picker. */
-function buildProjectRefs(projects: ProjectScan[]): ProjectRef[] | undefined {
+function buildProjectRefs(rootDir: string, projects: ProjectScan[]): ProjectRef[] | undefined {
   if (projects.length === 0) return undefined;
   return projects
     .map((p): ProjectRef => {
       const rel = p.path === '' ? '.' : p.path;
       const base = rel === '.' ? '.' : path.basename(rel);
+      const lockfilePath = lockfileRelativePath(rootDir, p);
       return {
         path: rel,
         name: p.name || base,
+        manifestPath: manifestRelativePath(p),
+        ...(lockfilePath ? { lockfilePath } : {}),
         ...(p.drift
           ? {
               score: p.drift.score,
@@ -926,7 +1029,7 @@ function hasReleaseDates(a: ScanArtifact): boolean {
  * than re-deriving a score client-side, for the same "one engine" reason the
  * whole-repo score is never recomputed in a client.
  */
-function scoreForProject(a: ScanArtifact, proj: ProjectScan): ScoreNotification | null {
+function scoreForProject(rootDir: string, a: ScanArtifact, proj: ProjectScan): ScoreNotification | null {
   if (!proj.drift) return null;
 
   let behind = 0;
@@ -953,7 +1056,9 @@ function scoreForProject(a: ScanArtifact, proj: ProjectScan): ScoreNotification 
     scannedAt: a.timestamp,
     ...(buildBreakdown(proj.drift, [proj]) ? { breakdown: buildBreakdown(proj.drift, [proj]) } : {}),
     ...(buildEolHorizon([proj]) ? { eolHorizon: buildEolHorizon([proj]) } : {}),
-    ...(buildProjectRefs(a.projects ?? []) ? { projects: buildProjectRefs(a.projects ?? []) } : {}),
+    ...(buildProjectRefs(rootDir, a.projects ?? [])
+      ? { projects: buildProjectRefs(rootDir, a.projects ?? []) }
+      : {}),
   };
 }
 
@@ -1087,36 +1192,156 @@ function manifestRelativePath(proj: ProjectScan): string {
 }
 
 /**
- * Build a set of dependency names observed as imports/externals in the code map.
- * Returns null when no graph is loaded — callers then report reachability unknown.
+ * Workspace-relative lockfile path for a scanned project, when one is present
+ * on disk. Checked against the real filesystem (not just inferred from
+ * ecosystem) since the lockfile may live at the project's own directory or,
+ * for a JS/TS package inside a monorepo, at the workspace root instead.
+ * Returns `undefined` when no known lockfile name exists for the project.
  */
-function packageReachSet(graph: VgGraph | null | undefined): Set<string> | null {
-  if (!graph?.nodes?.length) return null;
-  const set = new Set<string>();
-  for (const n of graph.nodes) {
-    if (n.kind !== 'external' && n.kind !== 'package' && n.kind !== 'module') continue;
-    const names = [n.name, n.qualifiedName].filter(Boolean) as string[];
-    for (const raw of names) {
-      // npm-style: strip path after package root (`lodash/fp` → `lodash`, `@scope/pkg/x` → `@scope/pkg`).
-      const cleaned = raw.replace(/^node_modules\//, '').replace(/\\/g, '/');
-      if (cleaned.startsWith('@')) {
-        const parts = cleaned.split('/');
-        if (parts.length >= 2) set.add(`${parts[0]}/${parts[1]}`.toLowerCase());
-      } else {
-        set.add(cleaned.split('/')[0]!.toLowerCase());
+function lockfileRelativePath(rootDir: string, proj: ProjectScan): string | undefined {
+  const base = proj.path === '.' || proj.path === '' ? '' : proj.path;
+  const candidateNames: string[] = (() => {
+    switch (proj.type) {
+      case 'node':
+      case 'typescript':
+        return ['pnpm-lock.yaml', 'yarn.lock', 'package-lock.json', 'bun.lockb'];
+      case 'python':
+        return ['poetry.lock', 'uv.lock', 'Pipfile.lock'];
+      case 'go':
+        return ['go.sum'];
+      case 'rust':
+        return ['Cargo.lock'];
+      case 'ruby':
+        return ['Gemfile.lock'];
+      case 'php':
+        return ['composer.lock'];
+      case 'dotnet':
+        return ['packages.lock.json'];
+      case 'dart':
+        return ['pubspec.lock'];
+      default:
+        return [];
+    }
+  })();
+  const dirsToTry = base ? [base, ''] : [''];
+  for (const dir of dirsToTry) {
+    for (const name of candidateNames) {
+      const rel = dir ? path.join(dir, name) : name;
+      try {
+        if (fs.existsSync(path.join(rootDir, rel))) return rel;
+      } catch {
+        // Unreadable path — try the next candidate.
       }
-      set.add(cleaned.toLowerCase());
     }
   }
-  return set;
+  return undefined;
 }
 
-function packageReached(set: Set<string>, pkg: string): boolean {
+/**
+ * Map package name (lowered) → repo-relative files that import it.
+ * Returns null when no graph is loaded — callers then report reachability unknown.
+ */
+function packageImportMap(graph: VgGraph | null | undefined): Map<string, string[]> | null {
+  if (!graph?.nodes?.length) return null;
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const map = new Map<string, Set<string>>();
+
+  const addPkg = (raw: string, file: string) => {
+    if (!file) return;
+    const cleaned = raw.replace(/^node_modules\//, '').replace(/\\/g, '/');
+    const keys = new Set<string>();
+    keys.add(cleaned.toLowerCase());
+    if (cleaned.startsWith('@')) {
+      const parts = cleaned.split('/');
+      if (parts.length >= 2) keys.add(`${parts[0]}/${parts[1]}`.toLowerCase());
+    } else {
+      keys.add(cleaned.split('/')[0]!.toLowerCase());
+    }
+    for (const k of keys) {
+      let set = map.get(k);
+      if (!set) {
+        set = new Set();
+        map.set(k, set);
+      }
+      set.add(file);
+    }
+  };
+
+  // Prefer import edges (source file → external package).
+  for (const e of graph.edges ?? []) {
+    if (e.kind !== 'import') continue;
+    const src = byId.get(e.src);
+    const dst = byId.get(e.dst);
+    if (!src?.file || !dst) continue;
+    if (dst.kind !== 'external' && dst.kind !== 'package' && dst.kind !== 'module') continue;
+    for (const raw of [dst.name, dst.qualifiedName].filter(Boolean) as string[]) {
+      addPkg(raw, src.file);
+    }
+  }
+
+  // Also index external nodes that somehow lack edges (defensive).
+  for (const n of graph.nodes) {
+    if (n.kind !== 'external' && n.kind !== 'package' && n.kind !== 'module') continue;
+    // No file list without import edges — keys only for membership.
+    for (const raw of [n.name, n.qualifiedName].filter(Boolean) as string[]) {
+      const cleaned = raw.replace(/^node_modules\//, '').replace(/\\/g, '/').toLowerCase();
+      if (!map.has(cleaned)) map.set(cleaned, new Set());
+      if (cleaned.startsWith('@')) {
+        const parts = cleaned.split('/');
+        if (parts.length >= 2 && !map.has(`${parts[0]}/${parts[1]}`)) {
+          map.set(`${parts[0]}/${parts[1]}`, new Set());
+        }
+      }
+    }
+  }
+
+  const out = new Map<string, string[]>();
+  for (const [k, files] of map) {
+    out.set(k, [...files].sort());
+  }
+  return out;
+}
+
+function lookupImportFiles(map: Map<string, string[]>, pkg: string): string[] {
   const p = pkg.toLowerCase();
-  if (set.has(p)) return true;
-  // Scoped packages already full; also try unscoped root.
-  if (!p.startsWith('@') && set.has(p.split('/')[0]!)) return true;
-  return false;
+  if (map.has(p)) return map.get(p)!;
+  if (!p.startsWith('@')) {
+    const root = p.split('/')[0]!;
+    if (map.has(root)) return map.get(root)!;
+  }
+  return [];
+}
+
+/**
+ * First 1-based line in `relFile` that mentions the package (import site).
+ * Best-effort and bounded; returns null when unreadable or no hit.
+ */
+function firstPackageMentionLine(root: string, relFile: string, pkg: string): number | null {
+  try {
+    const abs = path.resolve(root, relFile);
+    const stat = fs.statSync(abs);
+    if (!stat.isFile() || stat.size > 256 * 1024) return null;
+    const text = fs.readFileSync(abs, 'utf8');
+    // Prefer a token that appears in import lines: package name or last segment.
+    const tokens = [pkg];
+    if (pkg.startsWith('@')) {
+      const parts = pkg.split('/');
+      if (parts[1]) tokens.push(parts[1]);
+    } else if (pkg.includes('/')) {
+      tokens.push(pkg.split('/')[0]!);
+    }
+    const lines = text.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      if (!/import|require|from|use |include/.test(line) && !line.includes(pkg)) continue;
+      for (const t of tokens) {
+        if (t && line.includes(t)) return i + 1;
+      }
+    }
+  } catch {
+    /* unreadable */
+  }
+  return null;
 }
 
 /** Map a scanned project type to its OSV.dev ecosystem slug (null = no OSV

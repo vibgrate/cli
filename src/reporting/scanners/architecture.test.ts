@@ -141,6 +141,21 @@ describe('scanArchitecture', () => {
     await cleanupDir(tmpDir);
   });
 
+  it('carries the classified file paths for each layer, not just the count', async () => {
+    await createFiles(tmpDir, [
+      'src/routes/users.ts',
+      'src/controllers/auth.ts',
+      'src/api/health.ts',
+    ]);
+    const result = await scanArchitecture(tmpDir, [makeProject([])]);
+    const routingLayer = result.layers.find((l) => l.layer === 'routing');
+    expect(routingLayer).toBeDefined();
+    expect(routingLayer!.files.sort()).toEqual(
+      ['src/routes/users.ts', 'src/controllers/auth.ts', 'src/api/health.ts'].sort(),
+    );
+    await cleanupDir(tmpDir);
+  });
+
   it('classifies middleware files into middleware layer', async () => {
     await createFiles(tmpDir, [
       'src/middleware/auth.ts',
