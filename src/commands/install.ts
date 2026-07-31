@@ -1,6 +1,16 @@
 import { Command } from 'commander';
 import { loadGraph } from '../engine/load.js';
-import { ASSISTANTS, SMALL_REPO_FILES, assistantById, detectAssistants, detectServeLaunch, installAssistant, uninstallAssistant, writeNavigationConfig } from '../install/registry.js';
+import {
+  ASSISTANTS,
+  SMALL_REPO_FILES,
+  assistantById,
+  detectAssistants,
+  detectServeLaunch,
+  installAssistant,
+  isAssistantInstalled,
+  uninstallAssistant,
+  writeNavigationConfig,
+} from '../install/registry.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
@@ -45,12 +55,24 @@ export function registerInstall(program: Command): void {
           return;
         }
         if (global.json) {
-          json(ASSISTANTS.map((a) => ({ id: a.id, label: a.label, mcp: !!a.mcp, skill: !!a.skill, nudge: !!a.nudge })));
+          json(
+            ASSISTANTS.map((a) => ({
+              id: a.id,
+              label: a.label,
+              mcp: !!a.mcp,
+              skill: !!a.skill,
+              nudge: !!a.nudge,
+              installed: isAssistantInstalled(a, root),
+            })),
+          );
         } else {
           info(`${c.cyan('vg install')} · supported assistants`);
           const pad = Math.max(...ASSISTANTS.map((a) => a.id.length)) + 2;
           for (const a of ASSISTANTS) {
-            info(`  ${c.bold(a.id.padEnd(pad))} ${a.label}  ${c.dim(`mcp:${a.mcp ? '✓' : '—'} skill:${a.skill ? '✓' : '—'} nudge:${a.nudge ? '✓' : '—'}`)}`);
+            const on = isAssistantInstalled(a, root) ? c.green('on') : c.dim('off');
+            info(
+              `  ${c.bold(a.id.padEnd(pad))} ${a.label}  ${on}  ${c.dim(`mcp:${a.mcp ? '✓' : '—'} skill:${a.skill ? '✓' : '—'} nudge:${a.nudge ? '✓' : '—'}`)}`,
+            );
           }
         }
         return;

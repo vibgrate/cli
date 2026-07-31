@@ -75,10 +75,16 @@ export function registerBuild(program: Command): void {
   applyGlobalOptions(cmd);
 }
 
+export interface RunBuildHooks {
+  /** Invoked during the parse phase (even under --quiet / non-TTY hosts). */
+  onParseProgress?: (done: number, total: number) => void;
+}
+
 export async function runBuild(
   paths: string[],
   opts: BuildCmdOpts,
   global: GlobalOpts,
+  hooks?: RunBuildHooks,
 ): Promise<void> {
   const root = path.resolve(global.cwd ?? '.');
 
@@ -91,7 +97,7 @@ export async function runBuild(
 
   // Brand banner + live parse progress for an interactive human while the index
   // builds (TTY only; both are no-ops under --json/--quiet/pipe so machine output
-  // stays clean).
+  // stays clean). Hosts can still receive progress via hooks.onParseProgress.
   const interactive = !global.json && !global.quiet;
   if (interactive) printLogo(path.basename(root) || root);
   const bar = interactive ? new ProgressBar(c.dim('parsing')) : undefined;
@@ -125,7 +131,10 @@ export async function runBuild(
       noIndex: opts.index === false,
       analysisTier,
       generatedAt: global.generatedAt,
-      onParseProgress: bar ? (done, total) => bar.update(done, total) : undefined,
+      onParseProgress: (done, total) => {
+        bar?.update(done, total);
+        hooks?.onParseProgress?.(done, total);
+      },
       grammarsDir: opts.grammars,
     });
   } catch (err) {

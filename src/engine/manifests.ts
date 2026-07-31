@@ -11,7 +11,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
 import { nodeId, edgeId } from './ids.js';
-import { SKIP_DIRS } from './discover.js';
+import { isSkippedDirName } from './discover.js';
 import type { GraphEdge, GraphNode } from '../schema.js';
 
 export interface ManifestExtract {
@@ -273,7 +273,7 @@ function walkManifests(
     const abs = path.join(dir, entry.name);
     const rel = path.relative(root, abs).split(path.sep).join('/');
     if (entry.isDirectory()) {
-      if (SKIP_DIRS.has(entry.name)) continue;
+      if (isSkippedDirName(entry.name)) continue;
       if (rel && ig.ignores(`${rel}/`)) continue;
       walkManifests(root, abs, ig, found);
     } else if (entry.isFile()) {

@@ -18,6 +18,9 @@ import { langForExtension, langById, type LanguageDef } from './languages.js';
 // import), and `test/discover-skips.test.ts` asserts this set covers the
 // scanner's, so the graph can never index a package folder the scanner
 // already decided is third-party.
+//
+// Exact names only. For prefix patterns (`.venv-*`, `venv-*`) and install
+// trees (`site-packages`), use {@link isSkippedDirName}.
 export const SKIP_DIRS = new Set<string>([
   // Version control, IDE & tool metadata
   '.git', '.svn', '.hg',
@@ -62,6 +65,22 @@ export const SKIP_DIRS = new Set<string>([
   // Infrastructure-as-code build/state
   '.terraform', '.serverless', 'cdk.out', '.aws-sam',
 ]);
+
+/**
+ * True when a directory basename must be pruned from discovery / scoring walks.
+ * Covers exact {@link SKIP_DIRS} names plus common virtualenv naming variants
+ * (`.venv-contextbench`, `venv-tools`, …) and Python install trees
+ * (`site-packages`) that mint hundreds of phantom nested "projects".
+ */
+export function isSkippedDirName(name: string): boolean {
+  if (!name) return false;
+  if (SKIP_DIRS.has(name)) return true;
+  // Custom-named virtualenvs (uv/poetry/team convention: `.venv-<purpose>`).
+  if (name.startsWith('.venv') || name.startsWith('venv-')) return true;
+  // Python install tree — never source we own.
+  if (name === 'site-packages') return true;
+  return false;
+}
 
 // Lockfiles and generated dependency manifests — never hand-written source,
 // and single files can run to many MB (a pnpm-lock.yaml, a Yarn PnP .pnp.cjs).
@@ -196,7 +215,7 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
       const abs = path.join(dir, entry.name);
       const rel = toPosix(path.relative(root, abs));
       if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
+        if (isSkippedDirName(entry.name)) continue;
         if (rel && rootIg.ignores(`${rel}/`)) continue;
         walk(abs);
       } else if (entry.isFile()) {

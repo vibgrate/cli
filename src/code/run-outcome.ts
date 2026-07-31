@@ -95,7 +95,7 @@ function hash(saltValue: string, value: string): string {
  * Best-effort, best-guess classification of an instruction's purpose. A
  * heuristic, not a model call — good enough for routing-signal aggregation,
  * not claimed as precise. `fromFinding` is set when the instruction was
- * composed by "Route this fix →" (routeFix.ts), which already know their own
+ * composed by "Fix →" (routeFix.ts), which already know their own
  * kind and skip guessing.
  */
 export function classifyInstructionKind(
