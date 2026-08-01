@@ -1,5 +1,6 @@
 import { indexFor, type GraphIndex } from './relations.js';
 import { cosine, type Embedder } from './embeddings.js';
+import { WEAK_TERMS, expandConcepts } from './concepts.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
 /**
@@ -7,8 +8,12 @@ import type { GraphNode, VgGraph } from '../schema.js';
  *
  * Builds a structured, fact-annotated, budget-bounded context block for a
  * question — designed to drop straight into an assistant's context. The default
- * is deterministic lexical+structural retrieval (identifier/term matching with
- * morphological prefix-fuzzing, ranked by importance). `--semantic`/`--deep` adds
+ * is deterministic lexical+structural retrieval: identifier/term matching with
+ * morphological prefix-fuzzing, term-role weighting (process verbs like "add"
+ * only corroborate, never seed — see engine/concepts.ts), static concept
+ * expansion ("payments" → stripe/billing/…, "direct debit" → sepa/bacs/mandate),
+ * and a multi-term coverage bonus, ranked with importance as a mild tiebreaker.
+ * `--semantic`/`--deep` adds
  * a hybrid local-embedding pass (`queryGraphSemantic`) that surfaces conceptually
  * related code even when no word is shared — still no API key.
  */
@@ -156,17 +161,19 @@ export function queryGraph(graph: VgGraph, question: string, options: QueryOptio
   // than path-token false positives that poison Task Capsules.
   const literals = extractLiteralNeedles(question);
   const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
-  const terms = tokenize(forTokens);
-  const weightOf = termWeights(graph, terms);
+  const prep = prepareTerms(forTokens);
+  const weightOf = termWeights(graph, prep.terms.map((t) => t.term));
   const index = indexFor(graph);
 
   const scored: QueryMatch[] = [];
-  // Literal-only locate: no identifier terms left after stripping needles → do
-  // not invent symbol seeds from empty/weak residual framing.
-  if (terms.length > 0) {
+  // Two honest-miss paths: literal-only locate (no identifier terms after
+  // stripping needles) and weak-only asks ("add a new feature") whose every
+  // term is a process verb — seeding those from `add*`/`create*` surface
+  // matches is exactly the capsule-poisoning failure (field report 2026-07).
+  if (prep.hasContent) {
     for (const node of graph.nodes) {
       if (node.kind === 'file' || node.kind === 'external') continue;
-      const { score, why } = scoreNode(node, terms, weightOf);
+      const { score, why } = scoreNode(node, prep.terms, weightOf);
       if (score > 0) scored.push({ node, score: round(score * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
     }
     scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
@@ -200,21 +207,24 @@ export async function queryGraphSemantic(
   const limit = options.limit ?? 12;
   const literals = extractLiteralNeedles(question);
   const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
-  const terms = tokenize(forTokens);
+  const prep = prepareTerms(forTokens);
+  const terms = prep.terms.map((t) => t.term);
   const weightOf = termWeights(graph, terms);
   const index = indexFor(graph);
   // Embed the residual ask (without URL/quote noise) so semantic neighbours
   // aren't dragged toward package names that share host path segments.
   const queryVec = await options.embedder.embedQuery(forTokens || question);
 
-  // Raw lexical scores (pre-importance) for normalization.
+  // Raw lexical scores (pre-importance) for normalization. Weak-only asks get
+  // no lexical evidence (same suppression as queryGraph); the semantic cosine
+  // below may still surface conceptual neighbours for them.
   const lexRaw = new Map<string, number>();
   let lexMax = 0;
   const whyById = new Map<string, string>();
-  if (terms.length > 0) {
+  if (prep.hasContent) {
     for (const node of graph.nodes) {
       if (node.kind === 'file' || node.kind === 'external') continue;
-      const { score, why } = scoreNode(node, terms, weightOf);
+      const { score, why } = scoreNode(node, prep.terms, weightOf);
       lexRaw.set(node.id, score);
       whyById.set(node.id, why);
       if (score > lexMax) lexMax = score;
@@ -266,46 +276,124 @@ function tokenize(q: string): string[] {
   ];
 }
 
-function scoreNode(node: GraphNode, terms: string[], weightOf: (t: string) => number = () => 1): { score: number; why: string } {
+/** Ordered, lowercased token stream WITH stopwords — bigram concepts ("sign in",
+ *  "direct debit") need adjacency over the raw word order. */
+function tokenizeOrdered(q: string): string[] {
+  return q
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((t) => t.length >= 1);
+}
+
+/**
+ * A query term with its role resolved. Roles decide how much evidence a match
+ * carries (see scoreNode):
+ *  - content  — names the topic; full weight, counts toward coverage
+ *  - weak     — process verb ("add", "create", "via"); down-weighted, can only
+ *               corroborate a content match, never carry a seed alone
+ *  - expansion — concept vocabulary from the lexicon ("payments"→"stripe");
+ *               reduced weight, counts as content evidence, provenance in `why`
+ */
+interface QueryTerm {
+  term: string;
+  weak: boolean;
+  /** Source token/bigram when this term came from concept expansion. */
+  from?: string;
+}
+
+interface PreparedTerms {
+  terms: QueryTerm[];
+  /** True when at least one content or expansion term exists — the bar a
+   *  question must clear before ANY node may seed. */
+  hasContent: boolean;
+}
+
+/** Weak process verbs corroborate at a fraction of a content term's weight. */
+const WEAK_TERM_WEIGHT = 0.25;
+/** Concept expansions score below a literal question term of the same rarity. */
+const EXPANSION_WEIGHT = 0.7;
+/** Per extra distinct content term matched, the multiplicative coverage bonus.
+ *  Multi-topic evidence ("direct" + "debit" + "payments") must beat any
+ *  single-term surface hit ("add") by construction, not by luck. */
+const COVERAGE_BONUS = 0.35;
+
+/** Resolve term roles + concept expansions for the residual ask text. */
+function prepareTerms(forTokens: string): PreparedTerms {
+  const base = tokenize(forTokens);
+  const ordered = tokenizeOrdered(forTokens);
+  const baseSet = new Set(base);
+  const terms: QueryTerm[] = base.map((t) => ({ term: t, weak: WEAK_TERMS.has(t) }));
+  for (const e of expandConcepts(ordered)) {
+    if (baseSet.has(e.term)) continue;
+    terms.push({ term: e.term, weak: false, from: e.from });
+  }
+  const hasContent = terms.some((t) => !t.weak);
+  return { terms, hasContent };
+}
+
+function scoreNode(node: GraphNode, terms: QueryTerm[], weightOf: (t: string) => number = () => 1): { score: number; why: string } {
   let score = 0;
+  let contentHits = 0;
   const hits: string[] = [];
   const name = node.name.toLowerCase();
   const qn = node.qualifiedName.toLowerCase();
   const file = node.file.toLowerCase();
+  // Directory segments of the file path: a term naming a whole directory
+  // ("payments" → src/payments/…) is domain evidence, stronger than an
+  // incidental substring somewhere in the path.
+  const dirSegments = new Set(file.split('/').slice(0, -1));
   // Split the ORIGINAL name on camelCase / snake_case, then lowercase the parts
   // (splitting must see the capitals, so it happens before lowercasing).
   const nameParts = identifierParts(node.name);
-  for (const t of terms) {
+  for (const { term: t, weak, from } of terms) {
     // Each term's contribution is weighted by its specificity (IDF over symbol
     // names): a match on a distinctive term ("toComparable", "layoutFor") counts
     // for more than a match on a term shared by hundreds of symbols ("code",
     // "get", "run"). Without this, an incidental exact-name hit on a common word
     // in a natural-language question outranked the conceptually-correct symbol,
     // and importance weighting amplified the wrong hit (VG-NAVIGATION trace).
-    const w = weightOf(t);
+    // Role multipliers stack on top: process verbs corroborate at a fraction,
+    // concept expansions score below a literal term of the same rarity.
+    const w = weightOf(t) * (weak ? WEAK_TERM_WEIGHT : 1) * (from ? EXPANSION_WEIGHT : 1);
+    const label = from ? `${from}→${t}` : t;
+    let contribution = 0;
     if (name === t) {
-      score += 10 * w;
-      hits.push(t);
+      contribution = 10 * w;
+      hits.push(label);
     } else if (nameParts.has(t)) {
-      score += 6 * w;
-      hits.push(t);
+      contribution = 6 * w;
+      hits.push(label);
     } else if (name.includes(t)) {
-      score += 4 * w;
-      hits.push(t);
+      contribution = 4 * w;
+      hits.push(label);
     } else if (qn.includes(t)) {
-      score += 3 * w;
-      hits.push(t);
+      contribution = 3 * w;
+      hits.push(label);
     } else if (fuzzyPartMatch(t, nameParts)) {
       // Morphological / subword match: "authentication" ↔ "authenticate"
       // (shared prefix), so lexical ask survives word-form differences without
       // a model. The semantic path handles non-shared-root synonyms.
-      score += 2 * w;
-      hits.push(`~${t}`);
+      contribution = 2 * w;
+      hits.push(from ? `~${from}→${t}` : `~${t}`);
+    } else if (dirSegments.has(t)) {
+      contribution = 2 * w;
+      hits.push(label);
     } else if (file.includes(t)) {
-      score += 1 * w;
-      hits.push(t);
+      contribution = 1 * w;
+      hits.push(label);
+    }
+    if (contribution > 0) {
+      score += contribution;
+      if (!weak) contentHits += 1;
     }
   }
+  // A node whose only evidence is weak process verbs is noise by definition —
+  // the `add`-grab-bag capsule failure. Suppress it outright: weak terms
+  // corroborate content matches, they never carry a seed.
+  if (contentHits === 0) return { score: 0, why: '' };
+  // Reward multi-term topic coverage multiplicatively so converging evidence
+  // ("direct" + "debit" + payments-expansion) dominates single-term hits.
+  score *= 1 + COVERAGE_BONUS * Math.min(contentHits - 1, 4);
   return { score, why: hits.length ? `matched: ${hits.join(', ')}` : '' };
 }
 

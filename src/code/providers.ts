@@ -443,13 +443,18 @@ export class LocalLlamaProvider implements Provider {
       // Prefer direct session API for metrics-rich generate.
       const session = await acquireHostSession(LocalLlamaProvider.warmBinding, this.modelPath);
       const report = await generateOnSession(session, chatMessages, genOpts);
+      // Real-ish usage for the panel meter. Never report draftAcceptedChars as
+      // tokens — that is a char count of a speculative draft, not model usage
+      // (it produced footers like "56 tokens" for multi-paragraph answers).
+      const promptTokens = report.kvPlan?.totalTokens;
+      const completionTokens = report.text ? Math.max(1, Math.ceil(report.text.length / 4)) : undefined;
       return {
         text: report.text,
         model: this.model,
         provider: this.id,
         usage: {
-          // Surface host metrics in usage extension fields via completionTokens when useful.
-          completionTokens: report.draftAcceptedChars || undefined,
+          ...(typeof promptTokens === 'number' && promptTokens > 0 ? { promptTokens } : {}),
+          ...(completionTokens != null ? { completionTokens } : {}),
         },
       };
     } catch (e) {

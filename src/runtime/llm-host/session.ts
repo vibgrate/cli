@@ -417,25 +417,33 @@ function resolveLogitMask(
 }
 
 async function sessionPrompt(session: WarmSession, messages: LlmChatMessage[], promptOpts: Record<string, unknown>): Promise<string> {
+  // Each generateOnSession call already passes the *full* message list for that
+  // turn. LlamaChatSession.prompt() is stateful and would otherwise accumulate
+  // every prior turn (and its answer) into the next one — so turn 2 of a
+  // session silently continues turn 1's reply. Recreate the chat wrapper on
+  // the warm sequence so only the model/KV stay warm, not chat history.
+  const { LlamaChatSession } = session.lib as { LlamaChatSession?: new (opts: { contextSequence: unknown }) => { prompt: (p: string, o?: unknown) => Promise<string> } };
+  if (typeof LlamaChatSession === 'function') {
+    try {
+      session.chat = new LlamaChatSession({ contextSequence: session.sequence });
+    } catch {
+      /* keep existing chat if reconstruction fails */
+    }
+  }
   const prompt = messages.map((m) => `${m.role}: ${m.content}`).join('\n\n');
   const text: string = await session.chat.prompt(prompt, promptOpts);
   return typeof text === 'string' ? text : String(text ?? '');
 }
 
-async function tryAcceptDraft(session: WarmSession, draft: string, caps: BindingCapabilities): Promise<boolean> {
-  try {
-    const seq = session.sequence;
-    if (caps.evaluateWithoutGenerate && caps.tokenize && seq && typeof seq.evaluateWithoutGeneratingNewTokens === 'function') {
-      const model = session.model;
-      if (model && typeof model.tokenize === 'function') {
-        const tokens = model.tokenize(draft);
-        await seq.evaluateWithoutGeneratingNewTokens(tokens);
-        return true;
-      }
-    }
-  } catch {
-    /* fall through */
-  }
+/**
+ * Speculative draft accept. evaluateWithoutGeneratingNewTokens only preloads
+ * tokens into KV — it does **not** mean the model would have emitted them.
+ * Returning true from that path prepended random graph signatures (e.g.
+ * `fmtLong = (d) => …`) onto every answer. Until we have a real draft-verify
+ * (next-token agreement), only accept a draft that is already a warm KV block.
+ */
+async function tryAcceptDraft(session: WarmSession, draft: string, _caps: BindingCapabilities): Promise<boolean> {
+  void _caps;
   return session.kv.isWarm(contentHash(draft));
 }
 

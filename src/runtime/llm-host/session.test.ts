@@ -176,18 +176,63 @@ describe('host session pool', () => {
     expect(typeof res2.kvDeltaTokens).toBe('number');
   });
 
-  it('accepts a graph draft when the user asks about a signature', async () => {
-    const lib = fakeLib(' rest of answer');
+  it('does not accept a random graph draft just because evaluate exists', async () => {
+    // evaluateWithoutGeneratingNewTokens is not draft verification — prepending
+    // a signature that merely tokenizes poisoned every answer (fmtLong, …).
+    const lib = {
+      getLlama: async () => ({
+        loadModel: async () => ({
+          createContext: async () => ({
+            getSequence: () => ({
+              evaluateWithoutGeneratingNewTokens: async () => {},
+            }),
+          }),
+          tokenize: (s: string) => s.split(''),
+        }),
+      }),
+      LlamaChatSession: class {
+        async prompt() {
+          return 'real answer about dependencies';
+        }
+      },
+    };
     const session = await acquireHostSession(lib, '/m2.gguf');
-    const draft = 'export function readConfig(): Config {';
+    const draft = 'fmtLong = (d) => new Date(d).toLocaleDateString';
     const res = await generateOnSession(
       session,
-      [{ role: 'user', content: 'reproduce the signature for readConfig please' }],
+      [{ role: 'user', content: 'check for high risk dependencies' }],
       { draftCandidates: [draft] },
     );
-    // Soft accept may fail without evaluate API; still returns text.
-    expect(res.text.length).toBeGreaterThan(0);
-    expect(typeof res.draftAcceptedChars).toBe('number');
+    expect(res.text).toBe('real answer about dependencies');
+    expect(res.draftAcceptedChars).toBe(0);
+    expect(res.text).not.toContain('fmtLong');
+  });
+
+  it('resets LlamaChatSession so turn 2 does not inherit turn 1 chat history', async () => {
+    let chatInstances = 0;
+    const lib = {
+      getLlama: async () => ({
+        loadModel: async () => ({
+          createContext: async () => ({ getSequence: () => ({}) }),
+        }),
+      }),
+      LlamaChatSession: class {
+        constructor() {
+          chatInstances++;
+        }
+        async prompt() {
+          return `reply-${chatInstances}`;
+        }
+      },
+    };
+    const session = await acquireHostSession(lib, '/hist.gguf');
+    const r1 = await generateOnSession(session, [{ role: 'user', content: 'where is stripe' }]);
+    const r2 = await generateOnSession(session, [{ role: 'user', content: 'high risk deps' }]);
+    // One session construct at acquire + one per generate (fresh history each turn).
+    expect(chatInstances).toBeGreaterThanOrEqual(3);
+    expect(r1.text).toMatch(/reply-/);
+    expect(r2.text).toMatch(/reply-/);
+    expect(r2.text).not.toBe(r1.text);
   });
 
   it('evicts idle sessions under pressure', async () => {
