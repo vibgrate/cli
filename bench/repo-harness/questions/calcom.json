@@ -1,0 +1,34 @@
+[
+  { "category": "name-usage", "q": "explain where useBooking is used", "k": 5,
+    "expectAnyFiles": [
+      "apps/admin/src/hooks/useBooking.ts",
+      "apps/platform/src/hooks/useBooking.ts",
+      "apps/web/src/hooks/useBooking.ts",
+      "apps/booking/src/hooks/useBooking.ts",
+      "apps/api/src/hooks/useBooking.ts"
+    ] },
+  { "category": "name-usage", "q": "explain where useTeam is used", "k": 5,
+    "expectAnyFiles": [
+      "apps/admin/src/hooks/useTeam.ts",
+      "apps/booking/src/hooks/useTeam.ts",
+      "apps/web/src/hooks/useTeam.ts"
+    ] },
+
+  { "category": "intent-booking", "q": "where do we fetch booking data for the booking flow?", "k": 8,
+    "expectAnyFiles": [
+      "apps/booking/src/hooks/useBooking.ts",
+      "apps/booking/src/api/booking.ts",
+      "apps/web/src/hooks/useBooking.ts",
+      "apps/admin/src/hooks/useBooking.ts"
+    ] },
+  { "category": "intent-teams", "q": "how are teams loaded and shown on the teams page?", "k": 8,
+    "expectAnyFiles": [
+      "apps/booking/src/hooks/useTeam.ts",
+      "apps/booking/src/pages/teams.tsx",
+      "apps/admin/src/hooks/useTeam.ts",
+      "apps/web/src/hooks/useTeam.ts"
+    ] },
+
+  { "category": "off-topic-must-miss", "q": "where do we reconcile the settlement ledger for the mainframe?", "mustMiss": true },
+  { "category": "weak-only-must-miss", "q": "can you make changes", "mustMiss": true }
+]
