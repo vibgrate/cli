@@ -151,6 +151,7 @@ describe('parseHostMessage', () => {
     expect(parseHostMessage('{"approveId":3}')).toEqual({ kind: 'approve', id: 3, approve: false });
     expect(parseHostMessage('{"answerId":1,"answer":"yes"}')).toEqual({ kind: 'answer', id: 1, answer: 'yes' });
     expect(parseHostMessage('{"submit":"  add a test  "}')).toEqual({ kind: 'submit', instruction: 'add a test' });
+    expect(parseHostMessage('{"compactSession":true}')).toEqual({ kind: 'compact' });
     expect(parseHostMessage('{"cancel":true}')).toEqual({ kind: 'cancel' });
     expect(parseHostMessage('{"end":true}')).toEqual({ kind: 'end' });
   });
@@ -175,7 +176,10 @@ describe('runCodeStreamJsonSession', () => {
     }) as never;
 
   /** Feeds instructions in order, then ends the session. */
-  const scriptTurns = (queue: string[]) => () => Promise.resolve(queue.shift() ?? null);
+  const scriptTurns = (queue: string[]) => () => {
+    const next = queue.shift();
+    return Promise.resolve(next != null ? { instruction: next } : null);
+  };
 
   it('runs turn after turn against warm state and announces idle between them', async () => {
     const out: StreamJsonOut[] = [];

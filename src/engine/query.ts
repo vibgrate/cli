@@ -1,6 +1,7 @@
 import { indexFor, type GraphIndex } from './relations.js';
 import { cosine, type Embedder } from './embeddings.js';
 import { WEAK_TERMS, expandConcepts } from './concepts.js';
+import type { RelevanceAnalysis } from './relevance-provider.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
 /**
@@ -21,6 +22,15 @@ import type { GraphNode, VgGraph } from '../schema.js';
 export interface QueryOptions {
   budget?: number; // approx token budget for the context block (default 2000)
   limit?: number; // max seed matches to expand (default 12)
+  /** Optional pre-computed relevance analysis (engine/relevance-provider.ts).
+   *  Injected by async callers so this module stays pure and sync; when
+   *  absent, ranking is exactly the built-in lexicon path. */
+  relevance?: RelevanceAnalysis | null;
+  /** Optional per-node topic tags (engine/relevance-enrich.ts). Combined with
+   *  `relevance.topics` into a bounded affinity bonus: a node structurally
+   *  tagged with a topic the question is about ranks above an equal textual
+   *  match outside it. Never seeds alone — it multiplies existing evidence. */
+  topicTags?: Map<string, readonly string[]> | null;
 }
 
 export interface QueryMatch {
@@ -161,7 +171,7 @@ export function queryGraph(graph: VgGraph, question: string, options: QueryOptio
   // than path-token false positives that poison Task Capsules.
   const literals = extractLiteralNeedles(question);
   const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
-  const prep = prepareTerms(forTokens);
+  const prep = prepareTerms(forTokens, options.relevance);
   const weightOf = termWeights(graph, prep.terms.map((t) => t.term));
   const index = indexFor(graph);
 
@@ -174,7 +184,14 @@ export function queryGraph(graph: VgGraph, question: string, options: QueryOptio
     for (const node of graph.nodes) {
       if (node.kind === 'file' || node.kind === 'external') continue;
       const { score, why } = scoreNode(node, prep.terms, weightOf);
-      if (score > 0) scored.push({ node, score: round(score * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
+      if (score > 0) {
+        const affinity = topicAffinity(node.id, options.relevance, options.topicTags);
+        scored.push({
+          node,
+          score: round(score * affinity.boost * (1 + IMPORTANCE_WEIGHT * node.importance)),
+          why: why + affinity.label,
+        });
+      }
     }
     scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
   }
@@ -192,11 +209,30 @@ export interface SemanticQueryOptions extends QueryOptions {
 }
 
 /**
- * Hybrid lexical + local-embedding retrieval. Blends the normalized lexical score
- * with cosine similarity to the query embedding (50/50), so a question like
- * "where do we handle auth failures?" can surface `verify_token` even with no
- * shared identifier. Deterministic given the same model + cached vectors;
- * embeddings live only in the cache, never in `graph.json`.
+ * Reciprocal Rank Fusion constant (the standard k=60). Fusing RANKINGS
+ * instead of blending raw scores removes the need to calibrate two
+ * incomparable scales (tiered lexical evidence vs cosine similarity): a node's
+ * fused score is Σ 1/(k + rankᵢ) over the lists it appears in, so agreement
+ * between signals dominates and a single signal's outlier magnitude cannot.
+ */
+const RRF_K = 60;
+
+/** 1-based ranks for a scored id list (desc score, qualifiedName tiebreak). */
+function ranksOf(scores: Map<string, number>, nameOf: (id: string) => string): Map<string, number> {
+  const ids = [...scores.entries()]
+    .filter(([, s]) => s > 0)
+    .sort((a, b) => b[1] - a[1] || nameOf(a[0]).localeCompare(nameOf(b[0])))
+    .map(([id]) => id);
+  return new Map(ids.map((id, i) => [id, i + 1]));
+}
+
+/**
+ * Hybrid lexical + local-embedding retrieval, combined with Reciprocal Rank
+ * Fusion (Phase 3.2 — replaces the former 50/50 score blend), so a question
+ * like "where do we handle auth failures?" can surface `verify_token` even
+ * with no shared identifier. Topic affinity and importance stay multiplicative
+ * tiebreakers on the fused score. Deterministic given the same model + cached
+ * vectors; embeddings live only in the cache, never in `graph.json`.
  */
 export async function queryGraphSemantic(
   graph: VgGraph,
@@ -207,7 +243,7 @@ export async function queryGraphSemantic(
   const limit = options.limit ?? 12;
   const literals = extractLiteralNeedles(question);
   const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
-  const prep = prepareTerms(forTokens);
+  const prep = prepareTerms(forTokens, options.relevance);
   const terms = prep.terms.map((t) => t.term);
   const weightOf = termWeights(graph, terms);
   const index = indexFor(graph);
@@ -215,11 +251,10 @@ export async function queryGraphSemantic(
   // aren't dragged toward package names that share host path segments.
   const queryVec = await options.embedder.embedQuery(forTokens || question);
 
-  // Raw lexical scores (pre-importance) for normalization. Weak-only asks get
-  // no lexical evidence (same suppression as queryGraph); the semantic cosine
-  // below may still surface conceptual neighbours for them.
+  // Raw lexical scores (pre-importance) — RRF consumes only their ORDER.
+  // Weak-only asks get no lexical evidence (same suppression as queryGraph);
+  // the semantic cosine below may still surface conceptual neighbours for them.
   const lexRaw = new Map<string, number>();
-  let lexMax = 0;
   const whyById = new Map<string, string>();
   if (prep.hasContent) {
     for (const node of graph.nodes) {
@@ -227,7 +262,6 @@ export async function queryGraphSemantic(
       const { score, why } = scoreNode(node, prep.terms, weightOf);
       lexRaw.set(node.id, score);
       whyById.set(node.id, why);
-      if (score > lexMax) lexMax = score;
     }
   }
 
@@ -235,16 +269,29 @@ export async function queryGraphSemantic(
   // Literal-only asks: skip the semantic loop entirely — embeddings over
   // "does not exist find occurrences" still surface unrelated hubs.
   if (terms.length > 0 || literals.length === 0) {
+    // Independent per-signal rankings, then RRF.
+    const semRaw = new Map<string, number>();
+    const nodeById = new Map<string, GraphNode>();
     for (const node of graph.nodes) {
       if (node.kind === 'file' || node.kind === 'external') continue;
-      const lexNorm = lexMax > 0 ? (lexRaw.get(node.id) ?? 0) / lexMax : 0;
+      nodeById.set(node.id, node);
       const vec = options.nodeVectors.get(node.id);
       const sem = vec && terms.length > 0 ? Math.max(0, cosine(queryVec, vec)) : 0;
-      const hybrid = 0.5 * lexNorm + 0.5 * sem;
-      if (hybrid <= 0) continue;
-      const lexWhy = whyById.get(node.id);
-      const why = lexWhy || (sem > 0.3 ? `semantic match (${sem.toFixed(2)})` : 'weak match');
-      scored.push({ node, score: round(hybrid * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
+      if (sem > 0) semRaw.set(node.id, sem);
+    }
+    const nameOf = (id: string) => nodeById.get(id)?.qualifiedName ?? id;
+    const lexRanks = ranksOf(lexRaw, nameOf);
+    const semRanks = ranksOf(semRaw, nameOf);
+    for (const [id, node] of nodeById) {
+      const lr = lexRanks.get(id);
+      const sr = semRanks.get(id);
+      if (lr === undefined && sr === undefined) continue;
+      const fused = (lr !== undefined ? 1 / (RRF_K + lr) : 0) + (sr !== undefined ? 1 / (RRF_K + sr) : 0);
+      const sem = semRaw.get(id) ?? 0;
+      const lexWhy = whyById.get(id);
+      const affinity = topicAffinity(id, options.relevance, options.topicTags);
+      const why = (lexWhy || (sem > 0.3 ? `semantic match (${sem.toFixed(2)})` : 'weak match')) + affinity.label;
+      scored.push({ node, score: round(fused * affinity.boost * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
     }
     scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
   }
@@ -299,6 +346,9 @@ interface QueryTerm {
   weak: boolean;
   /** Source token/bigram when this term came from concept expansion. */
   from?: string;
+  /** Provider-supplied confidence (0..1) when this term came from the optional
+   *  relevance provider; replaces the flat EXPANSION_WEIGHT for that term. */
+  providerWeight?: number;
 }
 
 interface PreparedTerms {
@@ -318,14 +368,25 @@ const EXPANSION_WEIGHT = 0.7;
 const COVERAGE_BONUS = 0.35;
 
 /** Resolve term roles + concept expansions for the residual ask text. */
-function prepareTerms(forTokens: string): PreparedTerms {
+function prepareTerms(forTokens: string, relevance?: RelevanceAnalysis | null): PreparedTerms {
   const base = tokenize(forTokens);
   const ordered = tokenizeOrdered(forTokens);
   const baseSet = new Set(base);
   const terms: QueryTerm[] = base.map((t) => ({ term: t, weak: WEAK_TERMS.has(t) }));
+  const have = new Set(base);
   for (const e of expandConcepts(ordered)) {
     if (baseSet.has(e.term)) continue;
     terms.push({ term: e.term, weak: false, from: e.from });
+    have.add(e.term);
+  }
+  // Provider expansions (already sanitized by engine/relevance-provider.ts)
+  // join as expansion-role terms with their own confidence weight. The
+  // built-in lexicon wins ties: a term it already produced is not re-added,
+  // so provider presence never changes the score of a lexicon-covered term.
+  for (const e of relevance?.expansions ?? []) {
+    if (have.has(e.term)) continue;
+    terms.push({ term: e.term, weak: false, from: e.from, providerWeight: e.weight });
+    have.add(e.term);
   }
   const hasContent = terms.some((t) => !t.weak);
   return { terms, hasContent };
@@ -345,7 +406,7 @@ function scoreNode(node: GraphNode, terms: QueryTerm[], weightOf: (t: string) =>
   // Split the ORIGINAL name on camelCase / snake_case, then lowercase the parts
   // (splitting must see the capitals, so it happens before lowercasing).
   const nameParts = identifierParts(node.name);
-  for (const { term: t, weak, from } of terms) {
+  for (const { term: t, weak, from, providerWeight } of terms) {
     // Each term's contribution is weighted by its specificity (IDF over symbol
     // names): a match on a distinctive term ("toComparable", "layoutFor") counts
     // for more than a match on a term shared by hundreds of symbols ("code",
@@ -354,7 +415,12 @@ function scoreNode(node: GraphNode, terms: QueryTerm[], weightOf: (t: string) =>
     // and importance weighting amplified the wrong hit (VG-NAVIGATION trace).
     // Role multipliers stack on top: process verbs corroborate at a fraction,
     // concept expansions score below a literal term of the same rarity.
-    const w = weightOf(t) * (weak ? WEAK_TERM_WEIGHT : 1) * (from ? EXPANSION_WEIGHT : 1);
+    // Expansion role multiplier: provider expansions carry their own 0..1
+    // confidence (capped at the lexicon's EXPANSION_WEIGHT so an installed
+    // provider can widen vocabulary but never outrank the reviewed lexicon's
+    // evidence class); lexicon expansions keep the flat EXPANSION_WEIGHT.
+    const expansionW = providerWeight !== undefined ? Math.min(providerWeight, EXPANSION_WEIGHT) : from ? EXPANSION_WEIGHT : 1;
+    const w = weightOf(t) * (weak ? WEAK_TERM_WEIGHT : 1) * expansionW;
     const label = from ? `${from}→${t}` : t;
     let contribution = 0;
     if (name === t) {
@@ -404,6 +470,38 @@ function scoreNode(node: GraphNode, terms: QueryTerm[], weightOf: (t: string) =>
  * break genuine ties without overriding term evidence.
  */
 const IMPORTANCE_WEIGHT = 0.4;
+
+/**
+ * Topic-affinity bonus cap: a node whose enrichment tags intersect the
+ * question's inferred topics gains at most this fraction on top of its
+ * textual evidence. Sized between IMPORTANCE_WEIGHT (0.4) and nothing:
+ * strong enough to break domain ties ("direct debits" → the payments file
+ * over an equal-scoring name hit elsewhere), never strong enough to outrank
+ * a clearly better textual match — and it multiplies an existing non-zero
+ * score, so it can never conjure a seed by itself.
+ */
+const TOPIC_AFFINITY_WEIGHT = 0.3;
+
+/** Affinity multiplier + provenance for one node under the current analysis. */
+function topicAffinity(
+  nodeId: string,
+  relevance: RelevanceAnalysis | null | undefined,
+  topicTags: Map<string, readonly string[]> | null | undefined,
+): { boost: number; label: string } {
+  if (!relevance?.topics?.length || !topicTags) return { boost: 1, label: '' };
+  const tags = topicTags.get(nodeId);
+  if (!tags?.length) return { boost: 1, label: '' };
+  let affinity = 0;
+  const matched: string[] = [];
+  for (const t of relevance.topics) {
+    if (tags.includes(t.id)) {
+      affinity += t.score;
+      matched.push(t.id);
+    }
+  }
+  if (affinity <= 0) return { boost: 1, label: '' };
+  return { boost: 1 + TOPIC_AFFINITY_WEIGHT * Math.min(affinity, 1), label: `, topic:${matched.sort().join('+')}` };
+}
 
 /**
  * Per-term specificity weights (IDF) for one question, computed over the graph's

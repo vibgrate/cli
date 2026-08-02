@@ -35,7 +35,31 @@ function openAiMessages(messages: ChatMessage[]): unknown[] {
         tool_calls: m.toolCalls.map((t) => ({ id: t.id, type: 'function', function: { name: t.name, arguments: JSON.stringify(t.arguments) } })),
       };
     }
+    // Multimodal user turn → OpenAI content-part array (text + data-URI images).
+    if (m.role === 'user' && m.images?.length) {
+      return {
+        role: 'user',
+        content: [
+          { type: 'text', text: m.content },
+          ...m.images.map((img) => ({
+            type: 'image_url',
+            image_url: { url: `data:${img.mediaType};base64,${img.dataBase64}` },
+          })),
+        ],
+      };
+    }
     return { role: m.role, content: m.content };
+  });
+}
+
+/** Ollama's chat shape: images ride as a base64 array on the message itself. */
+function ollamaMessages(messages: ChatMessage[]): unknown[] {
+  return openAiMessages(messages).map((wire, i) => {
+    const m = messages[i];
+    if (m.role === 'user' && m.images?.length) {
+      return { role: 'user', content: m.content, images: m.images.map((img) => img.dataBase64) };
+    }
+    return wire;
   });
 }
 
@@ -184,7 +208,7 @@ export class OllamaProvider implements Provider {
     try {
       res = await postJson(
         `${this.host.replace(/\/$/, '')}/api/chat`,
-        { model: this.model, messages: openAiMessages(messages), stream: streaming, tools: openAiTools(opts.tools), options: { temperature: opts.temperature ?? 0 } },
+        { model: this.model, messages: ollamaMessages(messages), stream: streaming, tools: openAiTools(opts.tools), options: { temperature: opts.temperature ?? 0 } },
         {},
         opts.timeoutMs ?? 120_000,
       );
@@ -383,6 +407,12 @@ export class LocalLlamaProvider implements Provider {
   /** Surfaced as the Vibgrate model manager (embedded llama.cpp). */
   readonly label = 'Vibgrate (local)';
   readonly local = true;
+  /**
+   * The embedded host has no native function-calling API — the router wraps
+   * this provider in the text tool protocol (text-tool-protocol.ts) so the
+   * agent loop still gets structured tool calls.
+   */
+  readonly supportsTools = false;
   /** Process-wide warm binding + path (best-in-breed: no reload per turn). */
   private static warmBinding: unknown | null = null;
   private static warmHost: import('../runtime/llm-host/embedded.js').EmbeddedLlmHost | null = null;

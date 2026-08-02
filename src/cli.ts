@@ -19,6 +19,8 @@ import { registerUnknowns } from './commands/unknowns.js';
 import { registerServe } from './commands/serve.js';
 import { registerLsp } from './commands/lsp.js';
 import { registerInstall } from './commands/install.js';
+import { registerModule } from './commands/module.js';
+import { registerHook } from './commands/hook.js';
 import { registerShare } from './commands/share.js';
 import { registerWatch } from './commands/watch.js';
 import { registerTests } from './commands/tests.js';
@@ -86,6 +88,7 @@ export const KNOWN_COMMANDS = new Set([
   'serve',
   'lsp',
   'doctor',
+  'module',
   'daemon',
   'policy',
   'llm-host',
@@ -93,6 +96,7 @@ export const KNOWN_COMMANDS = new Set([
   'uninstall',
   'share',
   'watch',
+  'hook',
   'help',
   // Drift-reporting verbs (merged from the Vibgrate CLI).
   'init',
@@ -151,6 +155,8 @@ export function buildProgram(): Command {
   registerServe(program);
   registerLsp(program);
   registerInstall(program);
+  registerModule(program);
+  registerHook(program);
   registerShare(program);
   registerWatch(program);
   registerTests(program);

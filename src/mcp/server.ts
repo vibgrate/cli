@@ -8,7 +8,8 @@ import { parseGraph } from '../engine/serialize.js';
 import { mapFileStat } from '../engine/snapshot.js';
 import { loadGraphPreferIndex } from '../engine/index-db.js';
 import { refreshIfStale } from '../engine/refresh.js';
-import { TOOLS, warmEmbedderInBackground } from './tools.js';
+import { TOOLS, budgetSuffix, listedToolNames, warmEmbedderInBackground, type ToolSurface } from './tools.js';
+import { isRelevantChange } from '../engine/watch-filter.js';
 import { renderToolResult } from './response.js';
 import { recordSaving, sanitizeClient, PER_FILE_TOKENS, SAVINGS_TOOLS, type Outcome } from '../engine/savings.js';
 import type { SessionStats } from './serve-stats.js';
@@ -53,6 +54,8 @@ const PROBE_DUTY_FACTOR = 20;
 export const REFRESH_BUDGET_MS = 100;
 /** After a refresh failure (e.g. read-only checkout), don't retry for this long. */
 const FAILURE_COOLDOWN_MS = 60_000;
+/** Settle time between a watcher event and the background refresh it triggers. */
+const WATCH_DEBOUNCE_MS = 400;
 
 export type RefreshImpl = typeof refreshIfStale;
 
@@ -86,6 +89,13 @@ export interface ServeOptions {
   /** Auto-refresh the map when the working tree drifts (default true). */
   refresh?: boolean;
   /**
+   * Event-driven refresh: recursive fs.watch on the workspace so a save
+   * rebuilds in ~400 ms instead of waiting out the freshness poll (default
+   * true when refresh is on; `--no-watch` opts out). Where recursive watch is
+   * unavailable the poll silently remains the only mechanism.
+   */
+  watch?: boolean;
+  /**
    * Workspace root (project directory). When set, freshness probes and tools
    * use this instead of inferring root from the graph path.
    */
@@ -96,6 +106,12 @@ export interface ServeOptions {
    * the process (the opt-in ledger above is a separate concern).
    */
   stats?: SessionStats;
+  /**
+   * Listing surface (`--surface hot` / `--tools a,b`). Filters ONLY what
+   * `tools/list` advertises; every tool stays callable so behaviour is
+   * byte-identical across surfaces. See `listedToolNames` in ./tools.ts.
+   */
+  toolSurface?: ToolSurface;
 }
 
 export class GraphSource {
@@ -109,6 +125,16 @@ export class GraphSource {
   /** Self-tuned: grows with measured probe/rebuild cost so huge repos aren't penalized. */
   private probeIntervalMs = PROBE_INTERVAL_MS;
   private readonly refreshImpl: RefreshImpl;
+  /**
+   * Files seen changing since the last COMMITTED refresh (watcher events,
+   * filename → last-seen ms). Entries are cleared only after a refresh that
+   * started at-or-after their last event completes with 'fresh'/'refreshed' —
+   * a change landing mid-refresh stays pending, so the staleness signal can
+   * be a false positive but never a false negative.
+   */
+  private readonly pendingChanges = new Map<string, number>();
+  private watcher: fs.FSWatcher | null = null;
+  private watchTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     readonly graphPath: string,
@@ -149,9 +175,19 @@ export class GraphSource {
       const interval = this.tuning.probeIntervalMs ?? this.probeIntervalMs;
       if (now < this.failedUntil || now - this.lastProbeAt < interval) return;
       this.lastProbeAt = now;
+      const startedAt = now;
       this.inflight = this.refreshImpl(this.root, { graphPath: this.graphPath })
         .then((r) => {
           if (r.status === 'error') this.failedUntil = Date.now() + FAILURE_COOLDOWN_MS;
+          // A COMMITTED outcome (map verified fresh, or rebuilt) clears the
+          // pending set — but only entries whose last event predates the
+          // refresh start. 'locked'/'error'/'no-snapshot' clear nothing:
+          // the map may still be behind those changes.
+          if (r.status === 'fresh' || r.status === 'refreshed') {
+            for (const [file, seenAt] of this.pendingChanges) {
+              if (seenAt <= startedAt) this.pendingChanges.delete(file);
+            }
+          }
           // Self-tune off the full wall cost of *every* outcome — including a
           // multi-second incremental rebuild. Previously only probe-only
           // outcomes (fresh/no-snapshot/locked) backed off, so a 20s rebuild
@@ -172,6 +208,68 @@ export class GraphSource {
         });
     }
     await Promise.race([this.inflight, sleep(this.tuning.refreshBudgetMs ?? REFRESH_BUDGET_MS)]);
+  }
+
+  /**
+   * Record a source change (watcher event, or a test). Arms the next probe to
+   * run immediately (bypassing the self-tuned interval — a real event is not a
+   * poll) and schedules a debounced background refresh so the rebuild happens
+   * BETWEEN tool calls instead of on the next call's 100 ms budget.
+   */
+  notePendingChange(filename: string): void {
+    this.pendingChanges.set(filename, Date.now());
+    this.lastProbeAt = 0;
+    this.failedUntil = 0;
+    if (!this.refresh) return;
+    if (this.watchTimer) clearTimeout(this.watchTimer);
+    this.watchTimer = setTimeout(() => {
+      this.watchTimer = null;
+      void this.maybeRefresh();
+    }, WATCH_DEBOUNCE_MS);
+    this.watchTimer.unref?.();
+  }
+
+  /**
+   * Event-driven freshness (the serve-loop watcher): a recursive `fs.watch`
+   * on the workspace feeds `notePendingChange`, so a save triggers a rebuild
+   * in ~WATCH_DEBOUNCE_MS instead of waiting out the 2–30 s poll. The poll
+   * stays armed as the fallback — on filesystems where recursive watch fails
+   * (some containers/NFS) this returns false and behaviour is unchanged.
+   */
+  startWatching(): boolean {
+    if (this.watcher) return true;
+    try {
+      this.watcher = fs.watch(this.root, { recursive: true }, (_event, filename) => {
+        if (!filename) return;
+        if (!isRelevantChange(filename)) return;
+        this.notePendingChange(filename);
+      });
+      this.watcher.unref?.();
+      return true;
+    } catch {
+      this.watcher = null;
+      return false;
+    }
+  }
+
+  stopWatching(): void {
+    this.watcher?.close();
+    this.watcher = null;
+    if (this.watchTimer) clearTimeout(this.watchTimer);
+    this.watchTimer = null;
+  }
+
+  /**
+   * In-band staleness signal for tool responses: what has changed since the
+   * last committed refresh. Null when the map is current (the common case —
+   * responses carry zero overhead then).
+   */
+  stalenessNote(): string | null {
+    const n = this.pendingChanges.size;
+    if (n === 0) return null;
+    const names = [...this.pendingChanges.keys()].sort().slice(0, 3);
+    const more = n > names.length ? `, +${n - names.length} more` : '';
+    return `map freshness: ${n} file(s) changed since the last rebuild (${names.join(', ')}${more}) — auto-refresh pending; symbol locations may have shifted`;
   }
 }
 
@@ -219,14 +317,27 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
     },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOLS.map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    })),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const listed = new Set(listedToolNames(opts.toolSurface));
+    // Repo-size call budget on orient's listed description: the stop-discipline
+    // where the model decides, priced once per list, not per step. Best-effort —
+    // when no map is loadable yet the description ships without the line.
+    let budget = '';
+    try {
+      const graph = await source.get();
+      budget = budgetSuffix(new Set(graph.nodes.map((n) => n.file)).size);
+    } catch {
+      /* no map yet — plain description */
+    }
+    return {
+      tools: TOOLS.filter((t) => listed.has(t.name)).map((t) => ({
+        name: t.name,
+        description: t.name === 'orient' && budget ? `${t.description}${budget}` : t.description,
+        inputSchema: t.inputSchema,
+        annotations: { readOnlyHint: true, openWorldHint: false },
+      })),
+    };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const tool = TOOLS.find((t) => t.name === request.params.name);
@@ -244,7 +355,7 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
     const startedAt = Date.now();
     try {
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-      const result = await tool.handler(graph, args, { root, local, dedup, seen });
+      const result = await tool.handler(graph, args, { root, local, dedup, seen, graphPath: source.graphPath });
       const ms = Date.now() - startedAt;
       // Live, in-memory session stats for the serve status display — always on
       // when a serve process passed them (nothing leaves the process).
@@ -255,7 +366,14 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
       // the client detected from the initialize handshake.
       if (record) recordUsage(root, tool.name, result, detectClient(server), ms);
       // Compact → clamp to the token ceiling → compact-serialise. See ./response.ts.
-      return renderToolResult(result);
+      const rendered = renderToolResult(result);
+      // In-band staleness (serve-loop watcher): when the working tree has
+      // drifted past the served map, say so ON the response — the agent is the
+      // one acting on possibly-moved symbols, and stderr never reaches it.
+      // Zero overhead when the map is current (the overwhelmingly common case).
+      const staleness = source.stalenessNote();
+      if (staleness) rendered.content = [...(rendered.content ?? []), { type: 'text', text: `[${staleness}]` }];
+      return rendered;
     } catch (err) {
       // A failed call still counts in the live display — as a miss, so the
       // operator sees trouble instead of a silently frozen dashboard.
@@ -276,6 +394,7 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
 
 export async function serveStdio(graphPath: string, opts: ServeOptions = {}): Promise<void> {
   const source = new GraphSource(graphPath, opts.refresh !== false, { root: opts.root });
+  if (opts.refresh !== false && opts.watch !== false) source.startWatching();
   const server = createServer(source, opts);
   // Start the semantic-model warm-up as soon as the server boots, so the first
   // orient/query_graph doesn't pay a cold download. Non-blocking: navigation

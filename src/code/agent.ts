@@ -21,6 +21,8 @@
  */
 
 import { buildCodeContext } from './context.js';
+import { analyzeQuestion, type RelevanceAnalysis } from '../engine/relevance-provider.js';
+import { loadTopicTags } from '../engine/relevance-enrich.js';
 import {
   buildTaskCapsule,
   capsuleToCodeContext,
@@ -67,7 +69,7 @@ import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { repositoryIdFromRoot } from '../runtime/paths.js';
 import type { SymbolSpan } from './apply.js';
 import type { CodeFs } from './session.js';
-import type { ChatMessage, CodeContext, FileChange, Provider, ProviderResult, ToolCall, ToolSpec } from './types.js';
+import type { ChatMessage, CodeContext, FileChange, ImageAttachment, Provider, ProviderResult, ToolCall, ToolSpec } from './types.js';
 import type { VgGraph } from '../schema.js';
 import { redactSecrets } from './providers.js';
 import {
@@ -78,6 +80,7 @@ import {
 import { buildIdentifierTrieFromGraph } from '../runtime/identifier-trie.js';
 import type { TrieNode } from '../runtime/identifier-trie.js';
 import { graphDraftCandidates, KvBlockRegistry } from '../runtime/kv-cache.js';
+import { lookupModelCapabilities } from './model-capabilities.js';
 
 export type { CapsuleSummary, RunProvenance };
 export { CONTEXT_POLICY_VERSION };
@@ -105,6 +108,8 @@ export type AgentEvent =
   | { type: 'session-graph'; reparsed: number; dirty: number }
   | { type: 'step'; n: number }
   | { type: 'capsule'; summary: CapsuleSummary }
+  /** Advisory line for the host transcript (e.g. vision downgrade, rules loaded). */
+  | { type: 'notice'; text: string }
   | { type: 'capsule-delta'; delta: CapsuleDelta }
   | { type: 'failure-capsule'; capsule: FailureCapsule }
   | { type: 'checkpoint'; ref: string; commit: string; seq: number; files: string[] }
@@ -148,6 +153,15 @@ export interface AgentOptions {
   contextBudget?: number;
   /** Autonomous mode — enforce the command denylist (no human reviews each call). */
   auto?: boolean;
+  /**
+   * Plan mode: the run is read-only. Every mutating action is denied engine-side
+   * (no approval round-trip), with a tool result telling the model to present a
+   * plan instead. Host UIs may additionally prefix the instruction; this flag is
+   * the enforcement, the prefix is the styling.
+   */
+  plan?: boolean;
+  /** Images attached to this task (rides on the task turn; multimodal providers encode them). */
+  images?: ImageAttachment[];
   /** Project-configured extra denylist rules for autonomous commands. */
   denyCommands?: string[];
   /** The project's test/verify command, surfaced to the model. */
@@ -158,6 +172,14 @@ export interface AgentOptions {
   stream?: boolean;
   /** A recap of earlier tasks (from `--continue`) to seed continuity. */
   priorSummary?: string;
+  /**
+   * When the transcript exceeds the context budget, ask the model to write a
+   * structured checkpoint summary of the dropped rounds (Cline/OpenCode-style
+   * compaction) instead of the static note. One bounded extra completion per
+   * compaction; any failure falls back to the deterministic note. Default off
+   * so scripted/offline runs stay deterministic — real-model hosts enable it.
+   */
+  llmCompaction?: boolean;
   /**
    * Rendered project instructions (AGENTS.md / CLAUDE.md / .vibgrate/rules).
    * Advisory only — see {@link loadProjectRules}; they never widen permissions.
@@ -274,6 +296,8 @@ const KEEP_ROUNDS = 8;
 const NUDGE_AT = 3;
 /** After this many, stop the run as no-progress. */
 const STOP_AT = 5;
+/** Empty / non-prose no-tool replies tolerated (nudge + retry) before stopping. */
+const EMPTY_REPLY_RETRIES = 2;
 
 export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const { root, instruction, providers } = options;
@@ -337,11 +361,36 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const discoveryGate = createDiscoveryGateState();
 
   const allTools = [...AGENT_TOOLS, ...(options.externalTools?.specs ?? [])];
-  const built = buildAgentContext(graph, instruction, { ...options, fsImpl, budget });
+  // Optional relevance provider: widens capsule seed vocabulary when
+  // installed; null (the default) changes nothing. Loaded once per run and
+  // reused by the capsule-delta recompile below.
+  const relevance = await analyzeQuestion(instruction);
+  const topicTags = relevance ? await loadTopicTags(graph, options.root) : null;
+  const built = buildAgentContext(graph, instruction, { ...options, fsImpl, budget, relevance, topicTags });
   const context = built.context;
   let capsule = built.capsule;
   const useLadder = options.verifyLadder ?? !!capsule;
   const messages: ChatMessage[] = buildAgentMessages(context);
+  // Attach any user-uploaded images to the task turn; multimodal providers
+  // encode them on the wire, text-only backends see the naming text instead.
+  // Vision negotiation: when the routed model is *known* to be blind, drop the
+  // pixels (some backends reject image parts outright) and say so — the
+  // prompt's on-disk reference block still names each attachment. Unknown
+  // models get the images; the encoders degrade harmlessly.
+  if (options.images?.length) {
+    const caps = lookupModelCapabilities(providers[0]?.model);
+    if (caps.vision === false) {
+      onEvent({
+        type: 'notice',
+        text: `${providers[0]?.model ?? 'the selected model'} cannot view images — attached image(s) are referenced by name/path only. Pick a vision-capable model to have it read the pixels.`,
+      });
+    } else {
+      const last = messages[messages.length - 1];
+      if (last?.role === 'user') {
+        messages[messages.length - 1] = { ...last, images: options.images };
+      }
+    }
+  }
   // Project instructions sit after the repo context and before the recap: the
   // model should read house style before it reads what it already did.
   if (options.projectRules) {
@@ -357,6 +406,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 
   const changes: FileChange[] = [];
   const repeats = new Map<string, number>();
+  let emptyReplies = 0;
   let recordedSearch = false;
   let commandCount = 0;
   let verifyRounds = verifyConfig?.maxRounds ?? 2;
@@ -450,6 +500,8 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
    * a command approval has nothing to restore.
    */
   const approveAndCheckpoint = async (action: MutatingAction): Promise<boolean> => {
+    // Plan mode is read-only, enforced here — no approval round-trip, no write.
+    if (options.plan) return false;
     const approved = await options.approve(action);
     if (!approved || !options.checkpoint) return approved;
     const files = actionFiles(action);
@@ -505,6 +557,8 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
           const nextCapsule = buildTaskCapsule(session.graph, instruction, {
             budget,
             files: options.files,
+            relevance,
+            topicTags,
             readFile: (rel) => fsImpl.read(rel),
             repositoryId: repositoryIdFromRoot(root),
             provenance: {
@@ -696,7 +750,11 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 
     // Keep the transcript under the budget: preserve the cache-stable prefix
     // (system + graph context + task) and the recent rounds, summarize the rest.
-    const compacted = compact(messages, contextBudget, changes);
+    const compacted = options.llmCompaction
+      ? await compactWithModel(messages, contextBudget, changes, (transcript) =>
+          summarizeForCompaction(providers, transcript),
+        )
+      : compact(messages, contextBudget, changes);
     if (compacted.droppedRounds > 0) {
       messages.length = 0;
       messages.push(...compacted.messages);
@@ -758,8 +816,27 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       if (isUserFacingProse(displayText)) {
         return finish('finished', displayText, step);
       }
-      return finish('no-tools', displayText || 'done', step);
+      // An empty or non-prose reply (weak/local models do this) is not an
+      // answer — the user would see nothing. Nudge and retry before giving up.
+      emptyReplies++;
+      if (emptyReplies <= EMPTY_REPLY_RETRIES && step < maxSteps) {
+        messages.push({
+          role: 'user',
+          content:
+            displayText.trim().length === 0
+              ? 'Your last reply was empty. Either call a tool to keep working, or answer the task in plain Markdown now.'
+              : 'Your last reply was neither a tool call nor a readable answer. Do not emit raw JSON or templates — call a tool, or answer the task in plain Markdown.',
+        });
+        continue;
+      }
+      return finish(
+        'no-tools',
+        displayText ||
+          `The model (${providerInfo.model}) returned no usable output after ${emptyReplies} attempt(s). Try a stronger model, or re-ask with a more specific instruction.`,
+        step,
+      );
     }
+    emptyReplies = 0;
 
     messages.push({ role: 'assistant', content: result.text, toolCalls });
 
@@ -905,6 +982,92 @@ export function compact(messages: ChatMessage[], budget: number, changes: FileCh
   return { messages: [...head, note, ...kept], droppedRounds: dropped.length };
 }
 
+/** The fixed contract for a compaction summary (structured checkpoint). */
+const COMPACTION_PROMPT = [
+  'Summarize the following coding-agent transcript into a compact checkpoint the agent can resume from.',
+  'Cover, as short labelled lines: Objective; Key findings/decisions; Files read or changed (with paths);',
+  'Current state; Next steps. Under 250 words. Plain text only — no code blocks, no tool syntax.',
+].join(' ');
+
+/** Render dropped rounds compactly for the summarizer (bounded input). */
+function renderDroppedRounds(rounds: ChatMessage[][]): string {
+  const lines: string[] = [];
+  for (const round of rounds) {
+    for (const m of round) {
+      if (m.role === 'assistant') {
+        if (m.content?.trim()) lines.push(`assistant: ${m.content.trim().slice(0, 400)}`);
+        for (const t of m.toolCalls ?? []) {
+          lines.push(`tool-call: ${t.name}(${JSON.stringify(t.arguments).slice(0, 200)})`);
+        }
+      } else if (m.role === 'tool') {
+        lines.push(`tool-result[${m.name}]: ${m.content.split('\n')[0].slice(0, 300)}`);
+      } else if (m.role === 'user') {
+        lines.push(`user: ${m.content.trim().slice(0, 300)}`);
+      }
+    }
+  }
+  return lines.join('\n').slice(0, 24_000);
+}
+
+/** One bounded summarization completion against the primary provider. */
+async function summarizeForCompaction(providers: Provider[], transcript: string): Promise<string | null> {
+  const provider = providers[0];
+  if (!provider) return null;
+  const r = await provider.chat(
+    [
+      { role: 'system', content: COMPACTION_PROMPT },
+      { role: 'user', content: transcript },
+    ],
+    { temperature: 0, maxTokens: 512, timeoutMs: 60_000 },
+  );
+  return (r.text ?? '').trim() || null;
+}
+
+/** True when a summary is usable prose — not tool markup or a JSON dump. */
+function isUsableSummary(text: string | null): text is string {
+  const t = (text ?? '').trim();
+  return !!t && !t.startsWith('{') && !t.includes('<tool_call>');
+}
+
+/**
+ * LLM-backed variant of {@link compact}: same prefix/recent-rounds shape, but
+ * the middle is replaced by a model-written structured checkpoint (objective,
+ * decisions, files, next steps). Any summarizer failure falls back to the
+ * deterministic note — compaction never becomes a reason a run fails.
+ */
+export async function compactWithModel(
+  messages: ChatMessage[],
+  budget: number,
+  changes: FileChange[],
+  summarize: (transcript: string) => Promise<string | null>,
+): Promise<{ messages: ChatMessage[]; droppedRounds: number }> {
+  const deterministic = compact(messages, budget, changes);
+  if (deterministic.droppedRounds === 0) return deterministic;
+  const head = messages.slice(0, 3);
+  const body = messages.slice(3);
+  const rounds: ChatMessage[][] = [];
+  for (const m of body) {
+    if (m.role === 'assistant' || rounds.length === 0) rounds.push([m]);
+    else rounds[rounds.length - 1].push(m);
+  }
+  const dropped = rounds.slice(0, rounds.length - KEEP_ROUNDS);
+  const kept = rounds.slice(-KEEP_ROUNDS).flat();
+  let summary: string | null = null;
+  try {
+    summary = await summarize(renderDroppedRounds(dropped));
+  } catch {
+    summary = null;
+  }
+  // A summary that itself looks like tool markup or JSON is worse than the note.
+  if (!isUsableSummary(summary)) return deterministic;
+  const filesChanged = [...new Set(changes.map((c) => c.file))];
+  const note: ChatMessage = {
+    role: 'user',
+    content: `[Earlier steps were compacted to save context. Checkpoint summary:\n${summary.trim().slice(0, 4000)}\n${filesChanged.length ? `Files changed so far: ${filesChanged.join(', ')}. ` : ''}Continue the task.]`,
+  };
+  return { messages: [...head, note, ...kept], droppedRounds: dropped.length };
+}
+
 /**
  * Assemble the first-turn context. Capsule mode injects exact source ranges
  * from graph spans (Fusion Runtime); legacy mode is metadata-only.
@@ -913,16 +1076,20 @@ export function compact(messages: ChatMessage[], budget: number, changes: FileCh
 function buildAgentContext(
   graph: VgGraph,
   instruction: string,
-  options: AgentOptions,
+  options: AgentOptions & { relevance?: RelevanceAnalysis | null; topicTags?: Map<string, readonly string[]> | null },
 ): { context: CodeContext; capsule: TaskCapsule | null } {
   const budget = options.budget ?? 3000;
   const files = options.files;
+  const relevance = options.relevance;
+  const topicTags = options.topicTags;
   if (!options.capsule) {
-    return { context: buildCodeContext(graph, instruction, { budget, files }), capsule: null };
+    return { context: buildCodeContext(graph, instruction, { budget, files, relevance, topicTags }), capsule: null };
   }
   const capsule = buildTaskCapsule(graph, instruction, {
     budget,
     files,
+    relevance,
+    topicTags,
     readFile: (rel) => options.fsImpl.read(rel),
     repositoryId: repositoryIdFromRoot(options.root),
     extraPinnedFacts: options.extraPinnedFacts,

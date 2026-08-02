@@ -34,9 +34,27 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
 }
 
-/** A chat turn sent to a model. Ordering is cache-stable (see router.ts). */
+/** An image attached to a user turn (multimodal input, provider-encoded). */
+export interface ImageAttachment {
+  /** Display name, e.g. `screenshot.png`. */
+  name: string;
+  /** MIME type, e.g. `image/png`. */
+  mediaType: string;
+  /** Raw image bytes, base64 (no data: prefix). */
+  dataBase64: string;
+}
+
+/**
+ * A chat turn sent to a model. Ordering is cache-stable (see router.ts).
+ * `content` stays a string on every role so transcript compaction, token
+ * estimation, and KV planning remain simple; images ride as a sibling field on
+ * user turns and are encoded per wire format by each provider (OpenAI
+ * `image_url` parts, Ollama `images`). Backends without vision ignore them —
+ * the accompanying text names the attachment so the model still knows it exists.
+ */
 export type ChatMessage =
-  | { role: 'system' | 'user'; content: string }
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string; images?: ImageAttachment[] }
   | { role: 'assistant'; content: string; toolCalls?: ToolCall[] }
   | { role: 'tool'; content: string; toolCallId: string; name: string };
 
@@ -99,6 +117,12 @@ export interface Provider {
   readonly local: boolean;
   /** The concrete model id this instance will call. */
   readonly model: string;
+  /**
+   * Whether the backend accepts native (OpenAI-shaped) function calling.
+   * `false` opts the provider into the text tool protocol fallback
+   * (see text-tool-protocol.ts). Absent means true.
+   */
+  readonly supportsTools?: boolean;
   /** Run a completion. Rejects with an actionable, internals-free Error. */
   chat(messages: ChatMessage[], opts?: ChatOptions): Promise<ProviderResult>;
 }

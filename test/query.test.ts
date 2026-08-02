@@ -39,6 +39,68 @@ describe('queryGraph (ask)', () => {
   });
 });
 
+describe('queryGraph with a relevance analysis (provider seam)', () => {
+  const relevance = (expansions: Array<{ term: string; from: string; weight: number }>) => ({
+    version: 'stub-relevance@1',
+    topics: [],
+    expansions,
+  });
+
+  it('provider expansions surface conceptually-related symbols the ask never names', () => {
+    // "purchase flow" shares no token with OrderService; the expansion
+    // purchase→order bridges it, with provenance in the why string.
+    const without = queryGraph(graph, 'purchase flow');
+    const withRel = queryGraph(graph, 'purchase flow', {
+      relevance: relevance([{ term: 'order', from: 'purchase', weight: 0.6 }]),
+    });
+    expect(without.matches.some((m) => m.node.qualifiedName.includes('OrderService'))).toBe(false);
+    const hit = withRel.matches.find((m) => m.node.qualifiedName.includes('OrderService'));
+    expect(hit).toBeTruthy();
+    expect(hit!.why).toContain('purchase→order');
+  });
+
+  it('junk expansions cannot make a weak-only ask seed (grab-bag guard holds)', () => {
+    const r = queryGraph(graph, 'add a new feature', {
+      relevance: relevance([{ term: 'zzznotathing', from: 'sometopic', weight: 0.9 }]),
+    });
+    expect(r.matches.length).toBe(0);
+  });
+
+  it('a provider term the lexicon already produced is not double-counted', () => {
+    // Both the analysis and the ask name "order": scores must equal the
+    // no-provider run because base tokens win over provider duplicates.
+    const a = queryGraph(graph, 'order service');
+    const b = queryGraph(graph, 'order service', {
+      relevance: relevance([{ term: 'order', from: 'purchase', weight: 0.9 }]),
+    });
+    expect(b.matches.map((m) => [m.node.id, m.score])).toEqual(a.matches.map((m) => [m.node.id, m.score]));
+  });
+
+  it('is deterministic with a relevance analysis', () => {
+    const opts = { relevance: relevance([{ term: 'order', from: 'purchase', weight: 0.6 }]) };
+    expect(queryGraph(graph, 'purchase flow', opts).context).toBe(queryGraph(graph, 'purchase flow', opts).context);
+  });
+
+  it('topic-affinity: enrichment tags lift in-topic nodes and annotate why, but never seed alone', () => {
+    // Tag every OrderService-family node with a topic the question is about.
+    const tagged = new Map<string, readonly string[]>();
+    for (const n of graph.nodes) if (n.qualifiedName.includes('OrderService')) tagged.set(n.id, ['commerce']);
+    const withAffinity = {
+      relevance: { version: 'stub-relevance@1', topics: [{ id: 'commerce', score: 1 }], expansions: [] },
+      topicTags: tagged,
+    };
+    const plain = queryGraph(graph, 'order');
+    const boosted = queryGraph(graph, 'order', withAffinity);
+    const score = (r: typeof plain, name: string) => r.matches.find((m) => m.node.qualifiedName.includes(name))?.score ?? 0;
+    expect(score(boosted, 'OrderService')).toBeGreaterThan(score(plain, 'OrderService'));
+    const hit = boosted.matches.find((m) => m.node.qualifiedName.includes('OrderService'))!;
+    expect(hit.why).toContain('topic:commerce');
+    // A tagged node with zero textual evidence still never seeds.
+    const noText = queryGraph(graph, 'zzzznotathing', withAffinity);
+    expect(noText.matches.length).toBe(0);
+  });
+});
+
 describe('queryGraph term specificity (IDF)', () => {
   // A distinctive term must outweigh a common-word exact-name hit: the pathology
   // where "run"/"copy"/"code" in a natural-language question hijacked the ranking.

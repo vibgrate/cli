@@ -299,3 +299,35 @@ describe('list_areas token economy', () => {
     expect(r[0].members).toBeUndefined();
   });
 });
+
+describe('tool listing surface (server-side)', () => {
+  it('full surface lists every tool, in TOOLS order', async () => {
+    const { listedToolNames } = await import('./tools.js');
+    expect(listedToolNames()).toEqual(TOOLS.map((t) => t.name));
+    expect(listedToolNames({ surface: 'full' })).toEqual(TOOLS.map((t) => t.name));
+  });
+
+  it('hot surface lists exactly the navigation core', async () => {
+    const { listedToolNames, HOT_TOOLS } = await import('./tools.js');
+    expect(listedToolNames({ surface: 'hot' })).toEqual([...HOT_TOOLS]);
+  });
+
+  it('an explicit tools list wins over surface, drops unknown names, and keeps TOOLS order', async () => {
+    const { listedToolNames } = await import('./tools.js');
+    expect(listedToolNames({ surface: 'hot', tools: ['impact_of', 'orient', 'not_a_tool'] })).toEqual(['orient', 'impact_of']);
+  });
+
+  it('an all-unknown tools list fails open to the full surface', async () => {
+    const { listedToolNames } = await import('./tools.js');
+    expect(listedToolNames({ tools: ['nope', 'also_nope'] })).toEqual(TOOLS.map((t) => t.name));
+  });
+
+  it('the budget suffix is deterministic and tiered by repo size', async () => {
+    const { budgetSuffix, graphCallBudget } = await import('./tools.js');
+    expect(graphCallBudget(20)).toBe(3);
+    expect(graphCallBudget(500)).toBe(4);
+    expect(graphCallBudget(5000)).toBe(5);
+    expect(budgetSuffix(500)).toContain('~500 file(s) indexed');
+    expect(budgetSuffix(500)).toContain('at most 4 graph calls');
+  });
+});
