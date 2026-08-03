@@ -115,6 +115,44 @@ function httpError(label: string, status: number, hint: string): Error {
  * Total and defensive: any parse failure just yields null and the caller
  * falls back to its hint.
  */
+/**
+ * A `detail` is the upstream's verbatim reason, and upstream reasons are JSON
+ * envelopes more often than sentences. Rendered as-is one fills the panel with
+ * braces and then gets cut mid-token by the 400-char cap
+ * (`"requested_providers":["goo`), burying the sentence that explains the
+ * failure. Lift that sentence out, and spell out the provider lists a routing
+ * refusal carries. Total — a non-envelope string comes back untouched, so a
+ * plain-prose detail is never mangled.
+ */
+export function unwrapNestedErrorJson(text: string): string {
+  const trimmed = (text ?? '').trim();
+  if (!trimmed.startsWith('{')) return trimmed;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+  const obj = (parsed ?? {}) as { error?: unknown; message?: unknown };
+  const err = obj.error;
+  const errObj = (typeof err === 'object' && err ? err : {}) as { message?: unknown; metadata?: unknown };
+  const message =
+    typeof err === 'string' ? err : typeof errObj.message === 'string' ? errObj.message : typeof obj.message === 'string' ? obj.message : null;
+  if (!message?.trim()) return trimmed;
+  const metadata = (typeof errObj.metadata === 'object' && errObj.metadata ? errObj.metadata : {}) as {
+    requested_providers?: unknown;
+    available_providers?: unknown;
+  };
+  const names = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string' && !!v.trim()) : [];
+  const requested = names(metadata.requested_providers);
+  const available = names(metadata.available_providers);
+  const parts = [message.trim()];
+  if (requested.length) parts.push(`requested provider(s): ${requested.join(', ')}`);
+  if (available.length) parts.push(`permitted provider(s): ${available.join(', ')}`);
+  return parts.join(' — ');
+}
+
 export function relayErrorDetail(body: string): string | null {
   if (!body) return null;
   let parsed: unknown;
@@ -135,7 +173,7 @@ export function relayErrorDetail(body: string): string | null {
           ? obj.message
           : null;
   const detailValue = typeof obj?.detail === 'string' ? obj.detail : typeof errObj.detail === 'string' ? errObj.detail : null;
-  const detail = detailValue && detailValue.trim() ? detailValue.trim() : null;
+  const detail = detailValue && detailValue.trim() ? unwrapNestedErrorJson(detailValue) : null;
   const parts = [message, detail].filter((p): p is string => !!p && p.trim().length > 0);
   if (!parts.length) return null;
   const correlationId = typeof obj?.correlation_id === 'string' && obj.correlation_id
