@@ -34,7 +34,7 @@ import { runAgent, type AgentEvent, type AgentOptions, type AgentResult } from '
 import { readModelSavings } from '../engine/savings.js';
 import { SessionMeter } from './cost.js';
 import { McpToolset, defaultMcpConnect, type McpConnect } from './mcp-tools.js';
-import { loadLatestSession, saveSession, summarizeSession, newSession, recordTask, type StoredSession } from './session-store.js';
+import { condenseSession, loadLatestSession, saveSession, summarizeSession, newSession, recordTask, type StoredSession } from './session-store.js';
 import type { McpServerConfig } from './config.js';
 import type { MutatingAction, ShellResult } from './tools.js';
 import type { FileChange, Provider } from './types.js';
@@ -337,7 +337,7 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
       if (line.startsWith('/')) {
         const [cmd] = line.slice(1).split(/\s+/);
         if (cmd === 'help') {
-          prompter.note('commands: /undo /diff /model /cost /clear /exit');
+          prompter.note('commands: /undo /diff /model /cost /compact /clear /exit');
         } else if (cmd === 'undo') {
           if (lastChanges.length === 0) prompter.note(c.dim('nothing to undo'));
           else {
@@ -365,6 +365,15 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
         } else if (cmd === 'cost') {
           prompter.note(`this session: ${meter.summary()}`);
           printCost(root);
+        } else if (cmd === 'compact') {
+          if (store.tasks.length <= 1) prompter.note(c.dim('nothing to compact yet'));
+          else {
+            const before = store.tasks.length;
+            store = condenseSession(store, Date.now());
+            saveSession(root, store);
+            priorSummary = summarizeSession(store) || undefined;
+            prompter.note(c.green(`compacted ${before} task(s) into one checkpoint — future turns carry the short recap`));
+          }
         } else if (cmd === 'clear') {
           prompter.note(c.dim('each task already starts fresh — nothing to clear'));
         } else {
@@ -445,6 +454,7 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
         graphBackend,
         modelProfile,
         extraPinnedFacts,
+        llmCompaction: true,
       });
       priorSummary = undefined; // recap only seeds the first task after --continue
       if (result.changes.length) {
@@ -559,6 +569,8 @@ export async function agentTask(params: {
   advancedMode?: boolean;
   worktreeOverlay?: boolean;
   extraPinnedFacts?: string[];
+  /** Model-written checkpoint summaries on compaction (real-model hosts). */
+  llmCompaction?: boolean;
 }): Promise<AgentResult> {
   const { prompter } = params;
   const approve = async (action: MutatingAction): Promise<boolean> => {
@@ -623,6 +635,8 @@ export async function agentTask(params: {
       if (!e.ok && e.summary.trim()) {
         for (const line of e.summary.split('\n').slice(0, 6)) info(c.dim(`    ${line}`));
       }
+    } else if (e.type === 'notice') {
+      info(c.dim(`  · ${e.text}`));
     } else if (e.type === 'session-graph') {
       info(c.dim(`  · session graph updated (${e.reparsed} reparsed, ${e.dirty} dirty)`));
     } else if (e.type === 'capsule') {
@@ -664,6 +678,7 @@ export async function agentTask(params: {
     externalTools: params.externalTools,
     capsule: params.capsule,
     files: params.files,
+    llmCompaction: params.llmCompaction,
     now: () => Date.now(),
   });
   closeStream();

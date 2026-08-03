@@ -123,6 +123,56 @@ export function buildAskCorpus(catalog) {
 }
 
 /**
+ * Relationship-coverage corpus: term→domain questions generated from
+ * bench/relationship-pairs.json (public vendor/term relationships derived
+ * from public content — gocardless→payments, i18next→i18n, …). These asks
+ * name ONLY the term, never the domain, so the deterministic lexicon alone
+ * cannot resolve them: they are `kernelOnly` and are scored when a relevance
+ * provider is active (the CI gate's provider mode, the release benchmark's
+ * kernel arm). Baseline mode reporting them as misses is the measurement,
+ * not a failure. Pairs whose expansion vocabulary doesn't intersect the
+ * fixture domain's files are skipped — every emitted question is winnable
+ * by expansion, so a provider-mode miss is always a real ranking defect.
+ */
+export function buildRelationshipCorpus(catalog, pairsData) {
+  const c = [];
+  for (const pair of pairsData.pairs ?? []) {
+    const dom = catalog.domains[pair.domain];
+    if (!dom) continue;
+    // Winnable = at least TWO expansion words land in the domain's own
+    // files/symbols; the coverage bonus then makes converging in-domain
+    // evidence dominate any single stray hit elsewhere. Question phrasings
+    // deliberately carry no content words of their own — the vendor term is
+    // the only bridge, which is exactly what these entries measure.
+    const haystack = [...dom.files, ...dom.symbols.map((s) => s.name)].join(' ').toLowerCase();
+    const hits = pair.expansions.filter((w) => haystack.includes(w.toLowerCase()));
+    if (hits.length < 2) continue;
+    // A pair whose expansion vocabulary also lands in the surface-form trap
+    // family isn't a clean measurement of term→domain bridging — the ask
+    // would partly test trap resistance instead. Skip it ("format" from
+    // formatjs hits the Formatting* distractors, for example).
+    const trapHaystack = [
+      ...catalog.distractors.files,
+      ...catalog.distractors.symbols.map((s) => s.name),
+    ].join(' ').toLowerCase();
+    if (pair.expansions.some((w) => trapHaystack.includes(w.toLowerCase()))) continue;
+    for (const q of [`integrate ${pair.term}`, `wire ${pair.term} in`, `adopt ${pair.term} here`]) {
+      c.push({
+        category: `intent-rel-${pair.domain}`,
+        q,
+        k: 8,
+        kernelOnly: true,
+        domainDirs: dom.dirs,
+        minShare: 0.5,
+        forbidFiles: catalog.distractors.files,
+        maxForbidden: 1,
+      });
+    }
+  }
+  return c;
+}
+
+/**
  * Evaluate one seed list against its corpus entry.
  * `seeds` is an ordered array of `{ file }` (extra fields ignored).
  * Returns { pass, reason } — reason set on failure for actionable reporting.

@@ -26,7 +26,11 @@ export const TASK_CAPSULE_SCHEMA_VERSION = 'task-capsule/0' as const;
 /** Bumped 2026.08.1: term roles (weak process verbs never seed alone), concept/bigram
  *  expansion (payments→stripe, "direct debit"→sepa/bacs/mandate), multi-term coverage
  *  bonus, directory-segment evidence — gated by the ask-quality corpus (bench/ask-corpus.mjs). */
-export const CAPSULE_RANKING_VERSION = 'capsule-rank@2026.08.1' as const;
+/** Bumped 2026.08.2: optional relevance-provider seam — sanitized provider expansions
+ *  join term preparation (own 0..1 weight capped at EXPANSION_WEIGHT; weak-provenance
+ *  dropped); provider version recorded as `relevanceVersion` provenance. Absent
+ *  provider = 2026.08.1 behaviour exactly — gated by the same corpus, dual-mode. */
+export const CAPSULE_RANKING_VERSION = 'capsule-rank@2026.08.2' as const;
 export const CAPSULE_COMPILER_ID = 'vg-task-capsule/0' as const;
 
 export interface BuildCapsuleOptions extends BuildContextOptions {
@@ -105,6 +109,9 @@ export interface TaskCapsule {
     securityTier?: string | null;
     /** Frozen policy / ranking patch id if any. */
     policyVersion?: string | null;
+    /** Version of the optional relevance provider that widened seed
+     *  vocabulary for this capsule, or null when none was active. */
+    relevanceVersion?: string | null;
   };
 }
 
@@ -201,6 +208,7 @@ export function buildTaskCapsule(graph: VgGraph, instruction: string, options: B
       modelProfileId: options.provenance?.modelProfileId ?? null,
       securityTier: options.provenance?.securityTier ?? null,
       policyVersion: options.provenance?.policyVersion ?? null,
+      relevanceVersion: options.relevance?.version ?? null,
     },
   };
 }

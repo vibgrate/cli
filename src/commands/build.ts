@@ -11,6 +11,7 @@ import type { VgGraph } from '../schema.js';
 import { writeArtifacts } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
 import { refreshInstalledInstructions, SMALL_REPO_FILES } from '../install/registry.js';
+import { writeAreaSkills } from '../install/area-skills.js';
 import { serializeGraph } from '../engine/serialize.js';
 import { renderReport } from '../engine/report.js';
 import { renderHtml } from '../engine/html.js';
@@ -186,6 +187,17 @@ export async function runBuild(
       for (const r of refreshed) {
         info(c.dim(`vg · refreshed assistant instructions ${r.file} (v${r.from} → v${r.to})`));
       }
+    }
+    // Per-area skills, regenerated from the fresh graph on every build.
+    // Deterministic content → zero churn when the graph didn't change; only
+    // repos that ran `vg install` (skill root present) receive anything.
+    const areaChanges = writeAreaSkills(root, result.graph);
+    if (interactive && (areaChanges.written.length || areaChanges.removed.length)) {
+      const parts = [
+        areaChanges.written.length ? `${areaChanges.written.length} area skill(s) updated` : '',
+        areaChanges.removed.length ? `${areaChanges.removed.length} stale removed` : '',
+      ].filter(Boolean);
+      info(c.dim(`vg · ${parts.join(', ')}`));
     }
   }
 

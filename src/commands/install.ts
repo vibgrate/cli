@@ -12,6 +12,7 @@ import {
   writeNavigationConfig,
 } from '../install/registry.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
+import { installClaudeHooks, uninstallClaudeHooks } from '../install/hooks.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { c, info, json } from '../util/output.js';
@@ -31,7 +32,8 @@ export function registerInstall(program: Command): void {
     .option('--detect', 'detect assistants in use (repo footprint, home config, PATH) and install for those; with --list, only report what was detected')
     .option('--list', 'show the support matrix and exit')
     .option('--no-hook', 'skip the advisory nudge')
-    .action(function (this: Command, tools: string[], opts: { all?: boolean; detect?: boolean; list?: boolean; hook?: boolean }) {
+    .option('--hooks', 'also wire the PreToolUse enrichment hook (Claude Code): Grep/Glob calls get graph context via `vg hook pre-tool-use` (project .claude/settings.json; opt-in)')
+    .action(function (this: Command, tools: string[], opts: { all?: boolean; detect?: boolean; list?: boolean; hook?: boolean; hooks?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
 
@@ -108,6 +110,16 @@ export function registerInstall(program: Command): void {
       for (const r of results) {
         info(`${c.green('✔')} ${c.bold(r.id)} — wrote ${r.wrote.join(', ')}${r.skipped.length ? c.dim(` (skipped ${r.skipped.join(', ')})`) : ''}`);
       }
+      // Opt-in PreToolUse enrichment (Claude Code settings format only): the
+      // host's own Grep/Glob results arrive annotated with graph context.
+      if (opts.hooks && targets.some((a) => a.id === 'claude')) {
+        const vgBin = launch.command === 'npx' ? null : launch.command;
+        const hooksResult = vgBin
+          ? installClaudeHooks(root, vgBin)
+          : ({ file: '.claude/settings.json', status: 'skipped', note: 'vg is not installed on PATH — hooks need a fast binary (npm i -g @vibgrate/cli), rerun with --hooks after' } as const);
+        if (hooksResult.status === 'written') info(`${c.green('✔')} ${c.bold('hooks')} — wrote PreToolUse enrichment into ${hooksResult.file}`);
+        else if (hooksResult.note) info(`${c.yellow('!')} hooks — ${hooksResult.note}`);
+      }
       if (launch.note && results.some((r) => r.note)) info(`${c.yellow('!')} ${launch.note}`);
       if (smallRepo) info(c.dim(`  note: small repo (${fileCount} files) — nudge says searching is fine; vg is still used for impact/tests`));
       info(c.dim(`  wrote ${navConfig} — deferred-loading config for Claude-API agents (lower per-step token cost)`));
@@ -124,6 +136,12 @@ export function registerInstall(program: Command): void {
       const global = readGlobal(this);
       const root = rootOf(global);
       const results = tools.map(resolve).map((a) => ({ id: a.id, removed: uninstallAssistant(a, root, !!opts.purge) }));
+      // Uninstalling claude also removes the vg PreToolUse hook entries (ours
+      // only — everything else in settings.json is preserved verbatim).
+      if (tools.map(resolve).some((a) => a.id === 'claude')) {
+        const hooksResult = uninstallClaudeHooks(root);
+        if (hooksResult.status === 'written') results.find((r) => r.id === 'claude')?.removed.push(`${hooksResult.file} (vg hook entries)`);
+      }
       if (global.json) {
         json({ root, results });
         return;

@@ -14,6 +14,23 @@ backward compatible.
 
 ### Added
 
+- **Change-scoped precise resolution (incremental tsc)** — the TypeScript
+  checker rung now caches per-file results under a key covering the file's
+  content, its transitive import closure, and the shard's ambient surface
+  (`.d.ts` / `declare global` / tsconfig). A warm refresh re-runs the checker
+  only for changed files and their reverse-dependency closure instead of the
+  whole corpus: on a ~600-file repo, a single-file warm rebuild drops from
+  ~6.0s to ~2.1s and a no-change rebuild to ~1.1s, with output byte-identical
+  to a cold full rebuild (enforced by the mutation-corpus identity gate, which
+  now also covers ambient-declaration edits). Disable with `--no-cache`.
+- **ESM emitted-extension import resolution** — relative imports written
+  against emitted files (`./x.js` for `x.ts`, `.mjs`→`.mts`, `.jsx`/`.cjs`
+  likewise, the standard ESM-in-TypeScript style) now resolve to their source
+  files in the heuristic rung. On ESM-style codebases this turns thousands of
+  imports previously recorded as external into real file→file edges —
+  sharper import graphs, and the dependency closures the incremental tsc
+  cache keys on.
+
 - **Global-store maps are now snapshot-only** — builds that write to the
   global application store (the default layout) skip the large pretty-JSON
   serialize entirely and write just the binary snapshot: ~1s faster XL builds

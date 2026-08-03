@@ -278,11 +278,25 @@ export function relativeResolver(relSet: Set<string>): ModuleResolver {
 
 // --- probing ---
 
+/** ESM-in-TS specifiers name the EMITTED file (`./x.js` for `x.ts`); map the
+ * JS extension back to the source extensions TS itself would try. */
+const ESM_EMITTED: Record<string, string[]> = {
+  '.js': ['.ts', '.tsx'],
+  '.jsx': ['.tsx'],
+  '.mjs': ['.mts'],
+  '.cjs': ['.cts'],
+};
+
 function makeProbe(relSet: Set<string>): (base: string) => string | null {
   return (base: string) => {
     const norm = normalizeRel(base);
     if (!norm) return null;
     if (relSet.has(norm)) return norm;
+    const emittedExt = Object.keys(ESM_EMITTED).find((e) => norm.endsWith(e));
+    if (emittedExt) {
+      const stem = norm.slice(0, -emittedExt.length);
+      for (const ext of ESM_EMITTED[emittedExt]) if (relSet.has(stem + ext)) return stem + ext;
+    }
     for (const ext of JS_TS_EXT) if (relSet.has(norm + ext)) return norm + ext;
     for (const ext of JS_TS_EXT) if (relSet.has(`${norm}/index${ext}`)) return `${norm}/index${ext}`;
     for (const ext of OTHER_EXT) if (relSet.has(norm + ext)) return norm + ext;

@@ -5,6 +5,7 @@ import { mapFileExists, snapshotPathFor, writeGraphSnapshot } from './snapshot.j
 import { renderReport } from './report.js';
 import { renderHtml } from './html.js';
 import { globalGraphPath, globalGraphPathForRef, repositoryStoreDir } from '../runtime/paths.js';
+import { deleteTagsSidecarFor } from './relevance-enrich.js';
 import { detectGitRef } from '../runtime/git-ref.js';
 import type { VgGraph } from '../schema.js';
 
@@ -124,6 +125,7 @@ const DEFAULT_GITIGNORE = [
   'cache/',
   'graph.json',
   'graph.snap',
+  'graph.tags.snap',
   'graph.html',
   'GRAPH_REPORT.md',
   'facts.jsonl',
@@ -180,6 +182,12 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
   // path — the canonical graph.json is still written, with the snapshot as a
   // sidecar cache.
   const storeMode = isPathInside(graphPath, repositoryStoreDir(options.root));
+
+  // A (re)written graph at this path is a NEW graph: drop the relevance-tags
+  // sidecar bound to the previous content so nothing stale can outlive its
+  // graph (the sidecar would also self-invalidate via corpusHash, but a
+  // removed/replaced graph must take its derived artifacts with it).
+  deleteTagsSidecarFor(graphPath);
 
   if (storeMode) {
     if (!writeGraphSnapshot(graphPath, graph, { standalone: true })) {

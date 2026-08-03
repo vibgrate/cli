@@ -1,5 +1,7 @@
 import { Command } from 'commander';
 import { queryGraph, queryGraphSemantic, type QueryResult } from '../engine/query.js';
+import { analyzeQuestion } from '../engine/relevance-provider.js';
+import { loadTopicTags } from '../engine/relevance-enrich.js';
 import {
   loadEmbedder,
   getNodeEmbeddings,
@@ -66,6 +68,10 @@ export function registerAsk(program: Command): void {
       let result: QueryResult;
       let mode = 'lexical';
       let note = '';
+      // Optional relevance provider (engine/relevance-provider.ts): widens
+      // seed vocabulary when installed; null (the default) changes nothing.
+      const relevance = await analyzeQuestion(q);
+      const topicTags = relevance ? await loadTopicTags(graph, root, resolveGraphPath(root, global.graph)) : null;
 
       if (wantSemantic) {
         // A genuine first run for this repo (no cached vectors yet) → show a
@@ -80,14 +86,14 @@ export function registerAsk(program: Command): void {
           const bar = !global.json && firstRun ? new ProgressBar(c.dim('embedding')) : undefined;
           const vectors = await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
           bar?.done();
-          result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors });
+          result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors, relevance, topicTags });
           mode = `semantic (${embedder.id})`;
         } else {
-          result = queryGraph(graph, q, { budget });
+          result = queryGraph(graph, q, { budget, relevance, topicTags });
           note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
         }
       } else {
-        result = queryGraph(graph, q, { budget });
+        result = queryGraph(graph, q, { budget, relevance, topicTags });
         if (global.local) note = 'semantic skipped under --local; used lexical';
       }
 

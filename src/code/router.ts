@@ -36,6 +36,8 @@ import {
   OPENAI_COMPATIBLE,
   type OpenAiCompatibleConfig,
 } from './providers.js';
+import { withToolCallFallback } from './text-tool-protocol.js';
+import { lookupModelCapabilities } from './model-capabilities.js';
 import type { Provider } from './types.js';
 
 export interface RouteOptions {
@@ -180,7 +182,13 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
   );
 }
 
-function finish(providers: Provider[], reason: string): RouteResult {
+function finish(rawProviders: Provider[], reason: string): RouteResult {
+  // Every backend gets the tool-call fallback: native providers are passed
+  // through (with a text-markup rescue), backends without native function
+  // calling (embedded llama.cpp) — and models the capability registry knows
+  // cannot tool-call natively — get the prompt-described text protocol. This
+  // is what makes the agent work with whatever model is picked underneath.
+  const providers = rawProviders.map((p) => withToolCallFallback(p, lookupModelCapabilities(p.model)));
   const primary = providers[0];
   const manager = managerFromProviderId(primary?.id);
   return {

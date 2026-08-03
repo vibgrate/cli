@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { runAgent, compact, type AgentEvent } from './agent.js';
+import { runAgent, compact, compactWithModel, type AgentEvent } from './agent.js';
 import { ScriptedProvider } from './providers.js';
 import { fixtureGraph } from './graph-fixture.js';
 import { readModelSavings } from '../engine/savings.js';
@@ -344,6 +344,132 @@ describe('runAgent — the agentic loop', () => {
     expect(result.finalText).toContain('more detail');
   });
 
+  it('retries an empty reply with a nudge instead of ending with nothing', async () => {
+    // Weak local models sometimes return an empty completion; the user must
+    // never see a silent "done". One empty turn, then a real answer.
+    const provider = new ScriptedProvider('m', [
+      { text: '' },
+      { text: 'The scan timeout lives in src/scan.ts and defaults to zero.' },
+    ]);
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'x',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    expect(result.finalText).toContain('scan timeout');
+  });
+
+  it('gives an actionable message when the model stays empty after retries', async () => {
+    const provider = new ScriptedProvider('m', [{ text: '' }]); // empty forever
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'x',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('no-tools');
+    expect(result.finalText).toMatch(/no usable output|stronger model/i);
+    expect(result.finalText).not.toBe('done');
+  });
+
+  it('plan mode denies every mutation engine-side without calling the approval gate', async () => {
+    const approvals: string[] = [];
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('edit_file', { path: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 5;' }, 't1')] },
+      { toolCalls: [tc('run_command', { command: 'echo hi' }, 't2')] },
+      { toolCalls: [tc('finish', { summary: 'Plan: raise the timeout in src/scan.ts.' }, 't3')] },
+    ]);
+    const fsImpl = memFs({ 'src/scan.ts': baseFile });
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'raise the timeout',
+      providers: [provider],
+      fsImpl,
+      run: () => ({ stdout: 'ran', exitCode: 0 }),
+      approve: async (a) => {
+        approvals.push(a.kind);
+        return true;
+      },
+      plan: true,
+      noAudit: true,
+    });
+    expect(approvals).toHaveLength(0); // gate never consulted — denied engine-side
+    expect(fsImpl.files['src/scan.ts']).toBe(baseFile); // nothing written
+    expect(result.changes).toHaveLength(0);
+    expect(result.stopped).toBe('finished');
+  });
+
+  it('attaches user images to the task turn for the provider to encode', async () => {
+    const seenMessages: ChatMessage[][] = [];
+    const provider: Provider = {
+      id: 'spy',
+      label: 'Spy',
+      local: true,
+      model: 'spy-1',
+      async chat(messages) {
+        seenMessages.push(messages);
+        return { text: 'I looked at the screenshot; the button overlaps the sidebar.', model: 'spy-1', provider: 'spy' };
+      },
+    };
+    const image = { name: 'shot.png', mediaType: 'image/png', dataBase64: 'aGk=' };
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'fix the layout in this screenshot',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      images: [image],
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    const task = seenMessages[0].find((m) => m.role === 'user' && 'images' in m && m.images?.length);
+    expect(task).toBeTruthy();
+    expect((task as { images?: unknown[] }).images).toEqual([image]);
+  });
+
+  it('drops images and notices when the routed model is known to be blind', async () => {
+    const seenMessages: ChatMessage[][] = [];
+    const events: AgentEvent[] = [];
+    const provider: Provider = {
+      id: 'ollama',
+      label: 'Ollama',
+      local: true,
+      model: 'qwen2.5-coder:7b', // registry: vision false
+      async chat(messages) {
+        seenMessages.push(messages);
+        return { text: 'I used the on-disk reference; the layout bug is in panel.css.', model: 'qwen2.5-coder:7b', provider: 'ollama' };
+      },
+    };
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'fix the layout in this screenshot',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      images: [{ name: 'shot.png', mediaType: 'image/png', dataBase64: 'aGk=' }],
+      onEvent: (e) => events.push(e),
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    expect(seenMessages[0].some((m) => m.role === 'user' && 'images' in m && m.images?.length)).toBe(false);
+    expect(events.some((e) => e.type === 'notice' && /cannot view images/i.test(e.text))).toBe(true);
+  });
+
   it('sanitizes raw PatchIR dumps into a clean task-space message (no JSON in the panel)', async () => {
     const provider = new ScriptedProvider('m', [
       { text: '{"schemaVersion":"patch-ir/0","operations":[{"op":"replace-text","file":"a.ts","search":"x","replace":"y"}]}' },
@@ -616,5 +742,44 @@ describe('compact', () => {
     expect(r.messages.length).toBe(3 + 1 + 8 * 2);
     // never split an assistant/tool pair — the first kept round starts with an assistant
     expect(r.messages[4].role).toBe('assistant');
+  });
+
+  it('compactWithModel replaces the note with the model-written checkpoint', async () => {
+    const rounds = Array.from({ length: 14 }, (_, i) => round(i)).flat();
+    const msgs = [...head, ...rounds];
+    const transcripts: string[] = [];
+    const r = await compactWithModel(msgs, 500, [], async (t) => {
+      transcripts.push(t);
+      return 'Objective: fix timeout. Findings: default is 0. Next steps: edit scan.ts.';
+    });
+    expect(r.droppedRounds).toBe(14 - 8);
+    expect(r.messages[3].content).toContain('Checkpoint summary');
+    expect(r.messages[3].content).toContain('fix timeout');
+    // The summarizer saw the dropped rounds, not the kept tail.
+    expect(transcripts[0]).toContain('read_file');
+    expect(r.messages.length).toBe(3 + 1 + 8 * 2);
+  });
+
+  it('compactWithModel falls back to the deterministic note when the summarizer fails or returns junk', async () => {
+    const rounds = Array.from({ length: 14 }, (_, i) => round(i)).flat();
+    const msgs = [...head, ...rounds];
+    const failed = await compactWithModel(msgs, 500, [], async () => {
+      throw new Error('model unavailable');
+    });
+    expect(failed.droppedRounds).toBe(14 - 8);
+    expect(failed.messages[3].content).toContain('summarized');
+    const junk = await compactWithModel(msgs, 500, [], async () => '{"schemaVersion":"patch-ir/0"}');
+    expect(junk.messages[3].content).toContain('summarized');
+  });
+
+  it('compactWithModel never calls the summarizer when nothing needs compacting', async () => {
+    const msgs = [...head, ...round(1)];
+    let called = 0;
+    const r = await compactWithModel(msgs, 100_000, [], async () => {
+      called++;
+      return 'x';
+    });
+    expect(r.droppedRounds).toBe(0);
+    expect(called).toBe(0);
   });
 });

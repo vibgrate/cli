@@ -24,25 +24,53 @@ export interface TsResolveResult {
   stats: { files: number; calls: number; jsx: number; heritage: number; resolved: number };
 }
 
+/** One walked file's raw checker output, before the cross-file interface
+ * bridge. Every edge's `src` node lives in this file, so results partition
+ * cleanly by file — the unit the incremental tsc cache stores and reuses. */
+export interface TsFilePartial {
+  /** The program produced a SourceFile for this file (tsc is authoritative). */
+  covered: boolean;
+  edges: GraphEdge[];
+  interfaceCalls: Array<{ srcId: string; interfaceId: string; method: string }>;
+  stats: { calls: number; jsx: number; heritage: number; resolved: number };
+}
+
 export function tsResolveEdges(
   root: string,
   tsFiles: { rel: string; abs: string }[],
   nodes: GraphNode[],
 ): TsResolveResult {
-  const empty: TsResolveResult = {
-    edges: [],
-    coveredFiles: new Set(),
-    stats: { files: 0, calls: 0, jsx: 0, heritage: 0, resolved: 0 },
-  };
-  if (tsFiles.length === 0) return empty;
+  const partials = tsWalkFiles(root, tsFiles, tsFiles, [], nodes);
+  return assembleTsResult(tsFiles.map((f) => f.rel), partials, nodes);
+}
 
-  const absToRel = new Map(tsFiles.map((f) => [normalize(f.abs), f.rel]));
+/**
+ * Walk `walkFiles` with the type checker and return per-file partial results.
+ * `mapFiles` is the full file set edge targets may map into (superset of
+ * walkFiles — a scoped walk still resolves calls INTO unchanged files).
+ * `extraRootFiles` are added as program roots without being walked: ambient
+ * declaration files (`.d.ts`, `declare global`/`declare module`) that shape
+ * checker answers for every file without being imported by any of them.
+ */
+export function tsWalkFiles(
+  root: string,
+  walkFiles: { rel: string; abs: string }[],
+  mapFiles: { rel: string; abs: string }[],
+  extraRootFiles: { rel: string; abs: string }[],
+  nodes: GraphNode[],
+): Map<string, TsFilePartial> {
+  const partials = new Map<string, TsFilePartial>();
+  if (walkFiles.length === 0) return partials;
+
+  const absToRel = new Map(mapFiles.map((f) => [normalize(f.abs), f.rel]));
   const options = compilerOptions(root);
+  const rootAbs = new Set(walkFiles.map((f) => f.abs));
+  for (const f of extraRootFiles) rootAbs.add(f.abs);
   let program: ts.Program;
   try {
-    program = ts.createProgram(tsFiles.map((f) => f.abs), options);
+    program = ts.createProgram([...rootAbs], options);
   } catch {
-    return empty; // never let resolution break the build
+    return partials; // never let resolution break the build
   }
   const checker = program.getTypeChecker();
 
@@ -60,25 +88,26 @@ export function tsResolveEdges(
   }
 
   const relForAbs = (abs: string): string | undefined => absToRel.get(normalize(abs));
-  const edges = new Map<string, GraphEdge>();
-  const covered = new Set<string>();
-  const stats = empty.stats;
-  // A method call on an interface-typed receiver resolves to the interface (its
-  // method signatures are not graph nodes), so DI-injected services never got a
-  // call edge to the concrete implementation. Record such calls and, once all
-  // `implements` edges are known, bridge each to the SINGLE implementation's
-  // matching method — the DI reality (the impl choice lives in module config,
-  // not the caller). Only when exactly one class implements the interface, so it
-  // never guesses among several. { srcId, interfaceId, method } tuples.
-  const interfaceCalls: Array<{ srcId: string; interfaceId: string; method: string }> = [];
-  const byId = new Map<string, GraphNode>();
-  for (const list of nodesByFile.values()) for (const n of list) byId.set(n.id, n);
 
-  for (const file of tsFiles) {
+  for (const file of walkFiles) {
     const sf = program.getSourceFile(file.abs);
-    if (!sf) continue;
-    covered.add(file.rel);
-    stats.files++;
+    if (!sf) {
+      partials.set(file.rel, {
+        covered: false,
+        edges: [],
+        interfaceCalls: [],
+        stats: { calls: 0, jsx: 0, heritage: 0, resolved: 0 },
+      });
+      continue;
+    }
+    const edges = new Map<string, GraphEdge>();
+    const stats = { calls: 0, jsx: 0, heritage: 0, resolved: 0 };
+    // A method call on an interface-typed receiver resolves to the interface
+    // (its method signatures are not graph nodes), so DI-injected services never
+    // got a call edge to the concrete implementation. Record such calls here;
+    // the cross-file bridge runs in assembleTsResult once ALL covered files'
+    // `implements` edges are known.
+    const interfaceCalls: Array<{ srcId: string; interfaceId: string; method: string }> = [];
     const fileNodes = nodesByFile.get(file.rel) ?? [];
     const fileNode = fileNodeByRel.get(file.rel);
 
@@ -138,14 +167,61 @@ export function tsResolveEdges(
       ts.forEachChild(node, visit);
     };
     visit(sf);
+
+    partials.set(file.rel, { covered: true, edges: [...edges.values()], interfaceCalls, stats });
   }
 
-  // Single-implementation bridge: for each interface with EXACTLY ONE
-  // implementing class, redirect its recorded interface-typed calls to the
-  // implementation's matching method. This is the DI edge that makes impact_of /
-  // tests_for / find_path work on the concrete service. Skipped when an
-  // interface has zero or several implementations (genuinely ambiguous — the
-  // references→interface edge already recorded the dependency).
+  return partials;
+}
+
+/**
+ * Merge per-file partials (fresh walks and cache hits alike) into the final
+ * result, then run the single-implementation interface bridge over the merged
+ * edge set. `orderedRels` fixes iteration order to the original file order so
+ * the output — including edge `count` accumulation — is byte-identical to a
+ * single full walk regardless of which files came from cache.
+ *
+ * Single-implementation bridge: for each interface with EXACTLY ONE
+ * implementing class, redirect its recorded interface-typed calls to the
+ * implementation's matching method. This is the DI edge that makes impact_of /
+ * tests_for / find_path work on the concrete service. Skipped when an
+ * interface has zero or several implementations (genuinely ambiguous — the
+ * references→interface edge already recorded the dependency).
+ */
+export function assembleTsResult(
+  orderedRels: string[],
+  partials: Map<string, TsFilePartial>,
+  nodes: GraphNode[],
+): TsResolveResult {
+  const nodesByFile = new Map<string, GraphNode[]>();
+  for (const n of nodes) {
+    if (n.kind === 'file' || n.kind === 'external') continue;
+    const list = nodesByFile.get(n.file);
+    if (list) list.push(n);
+    else nodesByFile.set(n.file, [n]);
+  }
+  const byId = new Map<string, GraphNode>();
+  for (const list of nodesByFile.values()) for (const n of list) byId.set(n.id, n);
+
+  const edges = new Map<string, GraphEdge>();
+  const covered = new Set<string>();
+  const stats = { files: 0, calls: 0, jsx: 0, heritage: 0, resolved: 0 };
+  const interfaceCalls: Array<{ srcId: string; interfaceId: string; method: string }> = [];
+  for (const rel of orderedRels) {
+    const p = partials.get(rel);
+    if (!p || !p.covered) continue;
+    covered.add(rel);
+    stats.files++;
+    stats.calls += p.stats.calls;
+    stats.jsx += p.stats.jsx;
+    stats.heritage += p.stats.heritage;
+    stats.resolved += p.stats.resolved;
+    // Edge ids never collide across files (src always lives in the walked
+    // file), so re-seeding a shared map reproduces the full-walk map exactly.
+    for (const e of p.edges) edges.set(e.id, { ...e });
+    interfaceCalls.push(...p.interfaceCalls);
+  }
+
   const implsByInterface = new Map<string, string[]>();
   for (const e of edges.values()) {
     if (e.kind !== 'implements' && e.kind !== 'extends') continue;

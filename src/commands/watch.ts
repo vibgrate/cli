@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { buildGraph } from '../engine/build.js';
 import { writeArtifacts } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
+import { isRelevantChange } from '../engine/watch-filter.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { c, info } from '../util/output.js';
@@ -16,20 +17,6 @@ import { CliError, ExitCode } from '../util/exit.js';
  */
 
 const DEFAULT_DEBOUNCE_MS = 400;
-const SKIP_NAME = new Set([
-  '.git',
-  'node_modules',
-  '.vibgrate',
-  'dist',
-  'build',
-  'out',
-  'coverage',
-  '.next',
-  'target',
-  '__pycache__',
-  '.venv',
-  'venv',
-]);
 
 export function registerWatch(program: Command): void {
   const cmd = program
@@ -117,12 +104,7 @@ export function registerWatch(program: Command): void {
               schedule('change');
               return;
             }
-            const parts = filename.split(path.sep);
-            if (parts.some((p) => SKIP_NAME.has(p))) return;
-            // Ignore our own artifacts.
-            if (filename.includes(`${path.sep}.vibgrate${path.sep}`) || filename.startsWith('.vibgrate')) {
-              return;
-            }
+            if (!isRelevantChange(filename)) return;
             schedule(filename);
           });
           watchers.push(watcher);

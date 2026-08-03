@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  condenseSession,
   newSession,
   recordTask,
   saveSession,
@@ -45,6 +46,22 @@ describe('session-store', () => {
     expect(recap).toContain('do X');
     expect(recap).toContain('do Y');
     expect(recap).toContain('a.ts');
+  });
+
+  it('condenseSession collapses tasks into one checkpoint the recap still covers', () => {
+    let s = newSession('s', 'ollama', 'm', 0);
+    s = recordTask(s, { instruction: 'do X', summary: 'did X', changes: [change('a.ts')], stopped: 'finished' }, 1);
+    s = recordTask(s, { instruction: 'do Y', summary: 'did Y', changes: [change('b.ts')], stopped: 'finished' }, 2);
+    const c = condenseSession(s, 3);
+    expect(c.tasks).toHaveLength(1);
+    expect(c.tasks[0].stopped).toBe('compacted');
+    expect(c.tasks[0].files.sort()).toEqual(['a.ts', 'b.ts']);
+    const recap = summarizeSession(c);
+    expect(recap).toContain('do X');
+    expect(recap).toContain('do Y');
+    // A single-task (or empty) session has nothing to condense.
+    const single = recordTask(newSession('t', 'p', 'm', 0), { instruction: 'only', summary: 's', changes: [], stopped: 'finished' }, 1);
+    expect(condenseSession(single, 2)).toBe(single);
   });
 
   it('returns undefined when there is no session', () => {
