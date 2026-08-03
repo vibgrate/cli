@@ -10,6 +10,9 @@ export default defineConfig({
     cli: 'src/cli.ts',
     index: 'src/index.ts',
     'parse-worker': 'src/engine/parse-worker.ts',
+    // Spawned by vgd's EmbedBroker: the only process that loads the native
+    // embedding backend, so a crash there cannot take the daemon with it.
+    'embed-worker-main': 'src/runtime/vgd/embed-worker-main.ts',
   },
   format: ['esm'],
   dts: true,

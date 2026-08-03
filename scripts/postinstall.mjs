@@ -4,11 +4,32 @@
 // Exits 0 regardless — a conflict is not an install failure.
 
 import { execFileSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import { realpathSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 const isWindows = process.platform === 'win32';
+
+// Forget any "the native embedding backend crashed" verdict
+// (engine/embed-health.ts). That verdict is sticky on purpose — it is what
+// keeps a SIGTRAP-ing onnxruntime-node from being loaded again — but THIS
+// script only runs when install scripts are permitted, which is precisely the
+// situation where a previously blocked postinstall has just been allowed to
+// fetch the native binaries. So an install that could have fixed it always
+// earns a fresh probe, including a reinstall of the same version.
+//
+// Runs before every early exit below, and swallows everything: a cache that
+// cannot be cleaned is not an install failure.
+try {
+  const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+  rmSync(
+    path.join(base, 'vibgrate', 'models', `embed-health-${process.platform}-${process.arch}.json`),
+    { force: true },
+  );
+} catch {
+  /* nothing stored, or no permission — the version stamp still re-probes */
+}
 
 // Resolve the directory this package installed its own bin links into.
 // __filename → scripts/postinstall.mjs → ../../dist/cli.js (the actual binary)

@@ -305,6 +305,15 @@ const NUDGE_AT = 3;
 const STOP_AT = 5;
 /** Empty / non-prose no-tool replies tolerated (nudge + retry) before stopping. */
 const EMPTY_REPLY_RETRIES = 2;
+/**
+ * Continuations allowed when the model stops on the output cap rather than
+ * because it finished (`finish_reason: 'length'`). Without this the tail of a
+ * long answer is simply lost — the user sees a reply that stops mid-sentence
+ * and nothing says why. Bounded: a model that cannot finish in three caps'
+ * worth of output is not going to, and the partial answer is still shown with
+ * an explicit truncation note.
+ */
+const TRUNCATED_REPLY_CONTINUES = 2;
 
 export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const { root, instruction, providers } = options;
@@ -414,6 +423,10 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const changes: FileChange[] = [];
   const repeats = new Map<string, number>();
   let emptyReplies = 0;
+  /** Continuations spent recovering the tail of cap-truncated replies this run. */
+  let truncatedContinues = 0;
+  /** Text already emitted for a reply the cap cut short, awaiting its remainder. */
+  let truncatedPrefix = '';
   let recordedSearch = false;
   let commandCount = 0;
   let verifyRounds = verifyConfig?.maxRounds ?? 2;
@@ -819,10 +832,43 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     const toolCalls = result.toolCalls ?? [];
     if (toolCalls.length === 0) {
       messages.push({ role: 'assistant', content: result.text });
+
+      // The provider stopped on the output cap, so this text is a prefix of the
+      // answer rather than the answer. Ask for the remainder and stitch it on —
+      // otherwise the reply simply ends mid-sentence with nothing to say why.
+      if (result.truncated && truncatedContinues < TRUNCATED_REPLY_CONTINUES && step < maxSteps) {
+        truncatedContinues++;
+        // Accumulate RAW text, not the trimmed display copy: the continuation
+        // resumes mid-sentence, so the whitespace at the seam is part of the
+        // answer. Sanitizing per-chunk would glue "starts" to "with".
+        truncatedPrefix += result.text ?? '';
+        messages.push({
+          role: 'user',
+          content:
+            'Your previous message was cut off at the output limit. Continue it from exactly where it stopped. ' +
+            'Do not repeat what you already wrote and do not restart the answer.',
+        });
+        continue;
+      }
+
+      // Whatever survived earlier continuations belongs in front of this reply,
+      // sanitized once over the joined text rather than per fragment.
+      const fullText = truncatedPrefix
+        ? sanitizeAgentDisplayText(truncatedPrefix + (result.text ?? ''))
+        : displayText;
+      const stillTruncated = !!result.truncated;
+      truncatedPrefix = '';
+
       // Clean prose/Markdown answer (Q&A, explanations) is a successful finish —
       // same as Claude Code free-text, not a failed no-tools dump.
-      if (isUserFacingProse(displayText)) {
-        return finish('finished', displayText, step);
+      if (isUserFacingProse(fullText)) {
+        return finish(
+          'finished',
+          stillTruncated
+            ? `${fullText}\n\n_(Answer cut short at the model's output limit after ${truncatedContinues + 1} attempts — ask a narrower question, or raise the output cap, to see the rest.)_`
+            : fullText,
+          step,
+        );
       }
       // An empty or non-prose reply (weak/local models do this) is not an
       // answer — the user would see nothing. Nudge and retry before giving up.
@@ -839,12 +885,13 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       }
       return finish(
         'no-tools',
-        displayText ||
+        fullText ||
           `The model (${providerInfo.model}) returned no usable output after ${emptyReplies} attempt(s). Try a stronger model, or re-ask with a more specific instruction.`,
         step,
       );
     }
     emptyReplies = 0;
+    truncatedPrefix = '';
 
     messages.push({ role: 'assistant', content: result.text, toolCalls });
 

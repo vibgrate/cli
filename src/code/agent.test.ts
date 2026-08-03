@@ -783,3 +783,43 @@ describe('compact', () => {
     expect(called).toBe(0);
   });
 });
+
+describe('cap-truncated replies', () => {
+  const base = () => ({
+    graph: fixtureGraph(),
+    root: process.cwd(),
+    instruction: 'explain the billing flow',
+    fsImpl: memFs(),
+    run: () => ({ stdout: '', exitCode: 0 }),
+    approve: async () => true,
+    noAudit: true,
+  });
+
+  it('continues a reply cut off at the output cap and stitches the halves together', async () => {
+    const provider = new ScriptedProvider('m', [
+      { text: 'Stripe billing lives in lib/stripe.ts. The flow starts', truncated: true },
+      { text: ' with a checkout session and settles on the webhook.' },
+    ]);
+    const result = await runAgent({ ...base(), providers: [provider] });
+    expect(result.stopped).toBe('finished');
+    expect(result.finalText).toBe(
+      'Stripe billing lives in lib/stripe.ts. The flow starts with a checkout session and settles on the webhook.',
+    );
+    expect(result.finalText).not.toMatch(/cut short/);
+  });
+
+  it('keeps every partial and says so when the model never stops hitting the cap', async () => {
+    // Always truncated: continuations are bounded, and the user still gets all
+    // the text that was produced plus an explicit note.
+    const provider = new ScriptedProvider('m', [{ text: 'part. ', truncated: true }]);
+    const result = await runAgent({ ...base(), providers: [provider] });
+    expect(result.finalText).toMatch(/^part\. part\. part\./);
+    expect(result.finalText).toMatch(/cut short at the model's output limit/);
+  });
+
+  it('leaves an untruncated reply exactly as the model wrote it', async () => {
+    const provider = new ScriptedProvider('m', [{ text: 'The billing flow is in lib/stripe.ts.' }]);
+    const result = await runAgent({ ...base(), providers: [provider] });
+    expect(result.finalText).toBe('The billing flow is in lib/stripe.ts.');
+  });
+});

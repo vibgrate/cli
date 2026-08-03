@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { MockProvider, OpenAiCompatibleProvider, OllamaProvider, redactSecrets, OPENAI_COMPATIBLE } from './providers.js';
+import { MockProvider, OpenAiCompatibleProvider, OllamaProvider, redactSecrets, relayErrorDetail, statusHint, accumulateOpenAiDelta, OPENAI_COMPATIBLE } from './providers.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -143,5 +143,105 @@ describe('OllamaProvider', () => {
   it('gives an actionable error when the daemon is unreachable', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNREFUSED'); }));
     await expect(new OllamaProvider('qwen').chat([{ role: 'user', content: 'x' }])).rejects.toThrow(/ollama serve/);
+  });
+});
+
+describe('relayErrorDetail', () => {
+  it('prefers the server\'s own reason over a status-code guess', () => {
+    const body = JSON.stringify({
+      error: 'upstream rejected the request',
+      detail: 'No endpoints found matching your data policy',
+      correlation_id: 'abc-123',
+    });
+    expect(relayErrorDetail(body)).toBe(
+      'upstream rejected the request — No endpoints found matching your data policy (correlation id abc-123)',
+    );
+  });
+
+  it('reads the OpenAI-shaped { error: { message } } form', () => {
+    expect(relayErrorDetail(JSON.stringify({ error: { message: 'insufficient credits' } }))).toBe('insufficient credits');
+  });
+
+  it('does not repeat an identical message and detail', () => {
+    expect(relayErrorDetail(JSON.stringify({ error: 'boom', detail: 'boom' }))).toBe('boom');
+  });
+
+  it('returns null when there is nothing usable, so the caller keeps its hint', () => {
+    expect(relayErrorDetail('')).toBeNull();
+    expect(relayErrorDetail('{}')).toBeNull();
+    expect(relayErrorDetail(JSON.stringify({ error: {} }))).toBeNull();
+    expect(relayErrorDetail(JSON.stringify({ error: '   ' }))).toBeNull();
+  });
+
+  it('passes through a short non-JSON body but drops a long one as noise', () => {
+    expect(relayErrorDetail('Bad Gateway')).toBe('Bad Gateway');
+    expect(relayErrorDetail('x'.repeat(500))).toBeNull();
+  });
+
+  it('salvages the title of a long CDN error page instead of dropping it', () => {
+    const page = `<!DOCTYPE html><html><head><title>api.vibgrate.com | 502: Bad gateway</title></head><body>${'filler '.repeat(200)}</body></html>`;
+    expect(relayErrorDetail(page)).toBe('api.vibgrate.com | 502: Bad gateway');
+  });
+
+  it('salvages a Cloudflare error code from a titleless page', () => {
+    const page = `<html><body><h1>Worker threw exception</h1><p>Error 1101</p>${'filler '.repeat(200)}</body></html>`;
+    expect(relayErrorDetail(page)).toBe('Error 1101');
+  });
+
+  it('reads the typed relay error body (nested message + flat detail)', () => {
+    const body = JSON.stringify({
+      error: { type: 'upstream_rate_limited', message: 'The upstream provider is rate limiting this model right now.', correlation_id: 'rl_9' },
+      detail: 'rate limit exceeded',
+    });
+    expect(relayErrorDetail(body)).toBe(
+      'The upstream provider is rate limiting this model right now. — rate limit exceeded (correlation id rl_9)',
+    );
+  });
+});
+
+describe('statusHint', () => {
+  it('does not blame the model id for a gateway failure', () => {
+    for (const status of [500, 502, 503]) {
+      const hint = statusHint(status, 'openai/gpt-5.1', 'VIBGRATE_RELAY_TOKEN');
+      expect(hint).toMatch(/upstream\/gateway failure/);
+      expect(hint).not.toMatch(/^check the model id/);
+    }
+  });
+
+  it('blames the model id only when the endpoint says it has no such model', () => {
+    expect(statusHint(404, 'openai/gpt-5.1', undefined)).toMatch(/no model "openai\/gpt-5\.1"/);
+    expect(statusHint(400, 'openai/gpt-5.1', undefined)).toMatch(/check the model id/);
+  });
+
+  it('names the key env var on an auth rejection, and the real cause otherwise', () => {
+    expect(statusHint(401, 'm', 'VIBGRATE_RELAY_TOKEN')).toMatch(/VIBGRATE_RELAY_TOKEN/);
+    expect(statusHint(402, 'm', undefined)).toMatch(/out of credit/);
+    expect(statusHint(429, 'm', undefined)).toMatch(/rate limited/);
+    expect(statusHint(504, 'm', undefined)).toMatch(/timed out/);
+  });
+});
+
+describe('accumulateOpenAiDelta — finish_reason', () => {
+  const fresh = () => ({
+    text: '',
+    tools: new Map<number, { id?: string; name?: string; args: string }>(),
+    usage: {} as { promptTokens?: number; completionTokens?: number },
+    finishReason: undefined as string | undefined,
+  });
+
+  it('records the terminal finish_reason so a capped reply is distinguishable from a complete one', () => {
+    const acc = fresh();
+    accumulateOpenAiDelta(acc, { choices: [{ delta: { content: 'partial' }, finish_reason: null }] });
+    expect(acc.finishReason).toBeUndefined();
+    accumulateOpenAiDelta(acc, { choices: [{ delta: {}, finish_reason: 'length' }] });
+    expect(acc.finishReason).toBe('length');
+    expect(acc.text).toBe('partial');
+  });
+
+  it('keeps a normal stop reason and never overwrites it with a later null', () => {
+    const acc = fresh();
+    accumulateOpenAiDelta(acc, { choices: [{ delta: { content: 'hi' }, finish_reason: 'stop' }] });
+    accumulateOpenAiDelta(acc, { choices: [{ delta: {}, finish_reason: null }] });
+    expect(acc.finishReason).toBe('stop');
   });
 });

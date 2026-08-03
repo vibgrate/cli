@@ -71,6 +71,83 @@ describe('parseTextToolCalls', () => {
   });
 });
 
+// Weaker models answer by writing the call in source syntax inside a fence,
+// which used to surface as a code block containing the user's own answer.
+describe('parseTextToolCalls — source-syntax calls', () => {
+  const SCHEMA_TOOLS: ToolSpec[] = [
+    {
+      name: 'finish',
+      description: 'Finish with a summary.',
+      parameters: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] },
+    },
+    {
+      name: 'edit_file',
+      description: 'Edit a file.',
+      parameters: {
+        type: 'object',
+        properties: { file: { type: 'string' }, contents: { type: 'string' } },
+        required: ['file', 'contents'],
+      },
+    },
+  ];
+
+  it('recovers a fenced finish("…") as a real finish call', () => {
+    const raw = 'Next Steps\n\n```\nfinish("Stripe payments live in lib/stripe.ts")\n```';
+    const { calls, text } = parseTextToolCalls(raw, SCHEMA_TOOLS);
+    expect(calls).toEqual([
+      { id: 'text_0', name: 'finish', arguments: { summary: 'Stripe payments live in lib/stripe.ts' } },
+    ]);
+    expect(text).toBe('Next Steps');
+  });
+
+  it('recovers single-quoted and object-argument forms', () => {
+    expect(parseTextToolCalls("```\nfinish('done')\n```", SCHEMA_TOOLS).calls[0]?.arguments).toEqual({ summary: 'done' });
+    expect(parseTextToolCalls('```\nfinish({"summary":"done"})\n```', SCHEMA_TOOLS).calls[0]?.arguments).toEqual({
+      summary: 'done',
+    });
+  });
+
+  it('unescapes a JSON string literal rather than passing it through raw', () => {
+    const { calls } = parseTextToolCalls('```\nfinish("line one\\nline \\"two\\"")\n```', SCHEMA_TOOLS);
+    expect(calls[0]?.arguments).toEqual({ summary: 'line one\nline "two"' });
+  });
+
+  it('recovers an unfenced call that is the entire reply', () => {
+    const { calls, text } = parseTextToolCalls('finish("all done")', SCHEMA_TOOLS);
+    expect(calls[0]?.name).toBe('finish');
+    expect(text).toBe('');
+  });
+
+  it('refuses a tool that is not offered', () => {
+    const raw = '```\nrm_rf("/")\n```';
+    expect(parseTextToolCalls(raw, SCHEMA_TOOLS).calls).toHaveLength(0);
+    expect(parseTextToolCalls(raw, SCHEMA_TOOLS).text).toBe(raw);
+  });
+
+  it('refuses a bare positional argument when the schema has more than one required param', () => {
+    // Nothing tells us whether "a.ts" is `file` or `contents` — guessing could
+    // truncate or overwrite a file.
+    expect(parseTextToolCalls('```\nedit_file("a.ts")\n```', SCHEMA_TOOLS).calls).toHaveLength(0);
+  });
+
+  it('refuses multiple positional arguments and non-literal expressions', () => {
+    expect(parseTextToolCalls('```\nfinish("a", "b")\n```', SCHEMA_TOOLS).calls).toHaveLength(0);
+    expect(parseTextToolCalls('```\nfinish(someVariable)\n```', SCHEMA_TOOLS).calls).toHaveLength(0);
+    expect(parseTextToolCalls('```\nfinish({bad json})\n```', SCHEMA_TOOLS).calls).toHaveLength(0);
+  });
+
+  it('does nothing without a tool list — prose about a tool stays prose', () => {
+    const raw = '```\nfinish("x")\n```';
+    expect(parseTextToolCalls(raw).calls).toHaveLength(0);
+    expect(parseTextToolCalls(raw).text).toBe(raw);
+  });
+
+  it('leaves a fence that merely mentions a call inside a longer block alone', () => {
+    const raw = '```\n// when done:\nfinish("x")\n```';
+    expect(parseTextToolCalls(raw, SCHEMA_TOOLS).calls).toHaveLength(0);
+  });
+});
+
 describe('withToolCallFallback', () => {
   const base: ChatMessage[] = [
     { role: 'system', content: 'You are an agent.' },

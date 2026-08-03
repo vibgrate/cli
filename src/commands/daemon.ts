@@ -39,12 +39,31 @@ export function registerDaemon(program: Command): void {
       }
       const res = await vgdRequest({ op: 'status' }, { socketPath });
       if (!res.ok) throw new CliError(res.error, ExitCode.ERROR);
-      if (global.json) json({ running: true, ...res });
+      // "Warm" used to mean the code map only, while every client still loaded
+      // its own embedder — so the semantic state is reported next to the graph
+      // slots rather than left to be inferred.
+      const semantic = await vgdRequest({ op: 'embed-status' }, { socketPath }).catch(() => null);
+      const semanticPayload = semantic && semantic.ok && 'semantic' in semantic ? semantic.semantic : undefined;
+      if (global.json) json({ running: true, ...res, semantic: semanticPayload });
       else if ('pid' in res) {
         const slots = typeof res.graphSlots === 'number' ? ` · ${res.graphSlots} graph slot(s)` : '';
         info(
           `vgd · running pid ${res.pid} · ${res.workspaces} workspace(s)${slots} · ${res.uptimeMs}ms up · ${c.dim(res.socketPath)}`,
         );
+        if (semanticPayload) {
+          const ready = semanticPayload.slots.filter((sl) => sl.state === 'ready');
+          const vectors = ready.reduce((n, sl) => n + sl.vectors, 0);
+          const detail =
+            semanticPayload.worker === 'unavailable'
+              ? c.dim(semanticPayload.reason ?? 'semantic off — lexical only')
+              : `${ready.length}/${semanticPayload.slots.length} index(es) ready · ${vectors} vector(s)` +
+                (semanticPayload.model ? ` · ${semanticPayload.model}` : '');
+          info(`  semantic · worker ${semanticPayload.worker} · ${detail}`);
+          for (const sl of semanticPayload.slots) {
+            if (sl.state === 'ready') continue;
+            info(c.dim(`    ${sl.repositoryId}@${sl.gitRef} · ${sl.state}${sl.error ? ` — ${sl.error}` : ''}`));
+          }
+        }
       }
     });
   applyGlobalOptions(status);
@@ -61,7 +80,13 @@ export function registerDaemon(program: Command): void {
       // The shutdown closure needs the server; the server needs the hook.
       // Bridge with a mutable ref so `vg daemon stop` can reach us.
       let requestShutdown: () => void = () => {};
-      const server = await startVgdServer({ socketPath, onShutdownRequest: () => requestShutdown() });
+      const server = await startVgdServer({
+        socketPath,
+        onShutdownRequest: () => requestShutdown(),
+        // Show the daemon working: graph publishes, branch switches, new repos,
+        // and every semantic index build. Silent under --quiet/--json.
+        log: global.quiet || global.json ? undefined : (message) => info(c.dim(`vgd · ${message}`)),
+      });
       if (!global.quiet) {
         info(`vgd · listening on ${c.dim(server.socketPath)} (${VGD_PROTOCOL_VERSION})`);
         info(c.dim('  register a workspace: vg daemon register'));

@@ -9,6 +9,7 @@ import { loadGraph } from '../../engine/load.js';
 import { impactOf } from '../../engine/impact.js';
 import { resolveOne } from '../../engine/lookup.js';
 import { getVgdHostBroker, type VgdHostBroker } from './host-broker.js';
+import { EmbedBroker } from './embed-broker.js';
 import type { VgGraph } from '../../schema.js';
 
 export interface VgdServerOptions {
@@ -22,6 +23,14 @@ export interface VgdServerOptions {
   pid?: number;
   /** Inject host broker (tests); default process-wide broker. */
   hostBroker?: VgdHostBroker;
+  /** Inject the semantic broker (tests); default owns a worker child. */
+  embedBroker?: EmbedBroker;
+  /**
+   * Diagnostic sink. `vg daemon start` points this at stdout so the daemon's
+   * work — graph publishes, branch switches, index builds — is visible while
+   * it happens instead of being inferred after the fact.
+   */
+  log?: (message: string) => void;
   /**
    * Invoked (shortly after the reply is written) when a client sends the
    * `shutdown` op. Only a standalone `vg daemon start` passes this — an
@@ -48,6 +57,12 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
   const pidPath = options.pidPath ?? vgdPidPath();
   const registry = options.registry ?? new WorkspaceRegistry();
   const hostBroker = options.hostBroker ?? getVgdHostBroker();
+  const log = options.log ?? ((): void => {});
+  // Semantic warm: the index is slot-scoped like the graph, so it attaches to
+  // the registry's lifecycle rather than being managed alongside it by hand.
+  const embedBroker = options.embedBroker ?? new EmbedBroker({ log });
+  embedBroker.setGraphProvider((repositoryId, gitRef) => registry.graphs.get(repositoryId, gitRef)?.graph);
+  registry.setSlotListener(embedBroker);
   const onShutdownRequest = options.onShutdownRequest;
   const now = options.now ?? (() => new Date());
   const pid = options.pid ?? process.pid;
@@ -76,7 +91,7 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
         buffer = buffer.slice(nl + 1);
         if (!line) continue;
         void Promise.resolve(
-          handleLine(line, { registry, hostBroker, now, pid, startedAt, socketPath, onShutdownRequest }),
+          handleLine(line, { registry, hostBroker, embedBroker, now, pid, startedAt, socketPath, onShutdownRequest, log }),
         ).then(
           (response) => {
             socket.write(JSON.stringify(response) + '\n');
@@ -106,6 +121,8 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
     registry,
     startedAt,
     async close() {
+      // The worker is a child of this process — never leave it orphaned.
+      embedBroker.stop();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       try {
         fs.unlinkSync(pidPath);
@@ -128,6 +145,8 @@ async function handleLine(
   ctx: {
     registry: WorkspaceRegistry;
     hostBroker: VgdHostBroker;
+    embedBroker: EmbedBroker;
+    log: (message: string) => void;
     now: () => Date;
     pid: number;
     startedAt: number;
@@ -164,6 +183,37 @@ async function handleLine(
       const hook = ctx.onShutdownRequest;
       setTimeout(() => hook(), 150);
       return { ok: true, stopping: true };
+    }
+    case 'embed-status':
+      return { ok: true, semantic: ctx.embedBroker.status() };
+    case 'embed-query': {
+      const vector = await ctx.embedBroker.embedQuery(req.text);
+      if (!vector) {
+        return {
+          ok: false,
+          error: 'semantic unavailable — rank lexically',
+          code: 'semantic_unavailable',
+        };
+      }
+      return { ok: true, vector, model: ctx.embedBroker.status().model };
+    }
+    case 'embed-index': {
+      const gitRef = req.gitRef ?? ctx.registry.graphs.selectedRef(req.repositoryId);
+      if (!gitRef) return { ok: false, error: 'no current gitRef for this repository', code: 'no_slot' };
+      const slot = ctx.registry.graphs.get(req.repositoryId, gitRef);
+      if (!slot) {
+        return { ok: false, error: `no graph slot for ${req.repositoryId}@${gitRef} — publish the map first`, code: 'no_slot' };
+      }
+      const idx = await ctx.embedBroker.ensureIndex(req.repositoryId, gitRef, slot.graph);
+      return {
+        ok: true,
+        indexed: true,
+        repositoryId: req.repositoryId,
+        gitRef,
+        state: idx.state,
+        vectors: idx.vectors.size,
+        buildMs: idx.buildMs,
+      };
     }
     case 'host-status':
       return { ok: true, host: ctx.hostBroker.status() };
@@ -205,11 +255,16 @@ async function handleLine(
     }
     case 'list':
       return { ok: true, workspaces: ctx.registry.list() };
-    case 'register':
-      return {
-        ok: true,
-        workspace: ctx.registry.register(req.root, ctx.now, { label: req.label, role: req.role }),
-      };
+    case 'register': {
+      const known = ctx.registry.size();
+      const workspace = ctx.registry.register(req.root, ctx.now, { label: req.label, role: req.role });
+      // A repo the daemon has not seen before is the interesting case — that is
+      // when a warm daemon still has cold work to do.
+      if (ctx.registry.size() > known) {
+        ctx.log(`register: new workspace ${workspace.id} (${workspace.root}${workspace.gitRef ? ` @${workspace.gitRef}` : ''})`);
+      }
+      return { ok: true, workspace };
+    }
     case 'unregister':
       return { ok: true, removed: ctx.registry.unregister(req.root) };
     case 'register-federation': {
@@ -221,6 +276,10 @@ async function handleLine(
       return { ok: true, slots: ctx.registry.graphs.list(req.repositoryId) };
     }
     case 'select-git-ref': {
+      const before = ctx.registry.graphs.selectedRef(req.repositoryId);
+      if (before !== req.gitRef) {
+        ctx.log(`select-git-ref: ${req.repositoryId} ${before ?? '(none)'} → ${req.gitRef}`);
+      }
       ctx.registry.selectGitRef(req.repositoryId, req.gitRef);
       return { ok: true, selected: true, repositoryId: req.repositoryId, gitRef: req.gitRef };
     }
@@ -230,6 +289,7 @@ async function handleLine(
         // large repo's graph (`parseGraph(JSON.stringify(...))`) blocked the
         // daemon's event loop for seconds, timing out every concurrent client.
         const graph = req.graph as VgGraph;
+        ctx.log(`put-graph: ${req.repositoryId}@${req.gitRef} · ${graph.nodes?.length ?? 0} nodes`);
         ctx.registry.putGraph(req.repositoryId, req.gitRef, graph);
         return {
           ok: true,
@@ -249,6 +309,7 @@ async function handleLine(
       // large repos.
       const record = ctx.registry.register(req.root, ctx.now, { gitRef: req.gitRef });
       const gitRef = req.gitRef ?? record.gitRef ?? 'HEAD';
+      ctx.log(`load-graph: ${record.id}@${gitRef} from ${req.root}`);
       const graph = loadGraph(req.root, req.graphPath);
       if (!graph) {
         return {
