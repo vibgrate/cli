@@ -146,6 +146,28 @@ export function newSession(id: string, provider: string, model: string, now: num
   return { id, provider, model, startedAt: now, updatedAt: now, tasks: [], lastChanges: [] };
 }
 
+/**
+ * Manually compact a session: collapse all recorded tasks into a single
+ * checkpoint entry so the recap seeded into future turns shrinks to one line
+ * per prior task, capped. Deterministic (no model call) — the in-turn LLM
+ * compaction handles rich summaries; this is the user-invoked `/compact`.
+ */
+export function condenseSession(session: StoredSession, now: number): StoredSession {
+  if (session.tasks.length <= 1) return session;
+  const files = [...new Set(session.tasks.flatMap((t) => t.files))];
+  const lines = session.tasks
+    .slice(-12)
+    .map((t) => `${t.instruction.slice(0, 80)} — ${t.summary.slice(0, 80)}`);
+  const checkpoint: SessionTask = {
+    instruction: `(compacted: ${session.tasks.length} earlier task(s))`,
+    summary: lines.join(' · ').slice(0, 1500),
+    files,
+    stopped: 'compacted',
+    ts: now,
+  };
+  return { ...session, updatedAt: now, tasks: [checkpoint] };
+}
+
 /** Append a completed task (immutably updating the record's timestamps). */
 export function recordTask(
   session: StoredSession,

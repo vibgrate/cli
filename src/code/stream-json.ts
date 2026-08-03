@@ -15,6 +15,19 @@
 
 import { runAgent, type AgentEvent, type AgentOptions, type AgentResult } from './agent.js';
 import type { AskUserRequest, MutatingAction } from './tools.js';
+import type { ImageAttachment } from './types.js';
+
+/** Per-turn approval posture a host can send with `submit` (session mode). */
+export type TurnAgentMode = 'agent' | 'plan' | 'auto';
+
+/** One queued task from the host: instruction plus optional mode/attachments. */
+export interface TurnRequest {
+  instruction: string;
+  /** Overrides the spawn-time posture for this turn only (plan blocks writes engine-side). */
+  agentMode?: TurnAgentMode;
+  /** Images attached to this turn (multimodal providers encode them). */
+  images?: ImageAttachment[];
+}
 
 /** A single line written to the host. Discriminated by `event`. */
 export type StreamJsonOut =
@@ -45,8 +58,10 @@ export type StreamJsonOut =
 export type HostMessage =
   | { kind: 'approve'; id: number; approve: boolean }
   | { kind: 'answer'; id: number; answer: string }
-  | { kind: 'submit'; instruction: string }
+  | { kind: 'submit'; instruction: string; agentMode?: TurnAgentMode; images?: ImageAttachment[] }
   | { kind: 'restore'; commit: string; files: string[] }
+  /** Manual compaction: condense the stored session so the recap shrinks. */
+  | { kind: 'compact' }
   | { kind: 'cancel' }
   | { kind: 'end' };
 
@@ -69,7 +84,28 @@ export function parseHostMessage(raw: string): HostMessage | null {
     return { kind: 'answer', id: msg.answerId, answer: String(msg.answer ?? '') };
   }
   if (typeof msg.submit === 'string' && msg.submit.trim()) {
-    return { kind: 'submit', instruction: msg.submit.trim() };
+    const agentMode =
+      msg.agentMode === 'plan' || msg.agentMode === 'auto' || msg.agentMode === 'agent'
+        ? msg.agentMode
+        : undefined;
+    const images = Array.isArray(msg.images)
+      ? (msg.images as unknown[])
+          .filter(
+            (a): a is ImageAttachment =>
+              !!a &&
+              typeof a === 'object' &&
+              typeof (a as ImageAttachment).name === 'string' &&
+              typeof (a as ImageAttachment).mediaType === 'string' &&
+              typeof (a as ImageAttachment).dataBase64 === 'string',
+          )
+          .slice(0, 8)
+      : undefined;
+    return {
+      kind: 'submit',
+      instruction: msg.submit.trim(),
+      ...(agentMode ? { agentMode } : {}),
+      ...(images?.length ? { images } : {}),
+    };
   }
   if (
     msg.restore &&
@@ -81,6 +117,7 @@ export function parseHostMessage(raw: string): HostMessage | null {
     if (files.length) return { kind: 'restore', commit: r.commit, files };
     return null;
   }
+  if (msg.compactSession === true) return { kind: 'compact' };
   if (msg.cancel === true) return { kind: 'cancel' };
   if (msg.end === true) return { kind: 'end' };
   return null;
@@ -101,8 +138,16 @@ export class StreamJsonSession {
 
   constructor(
     private readonly emit: (line: StreamJsonOut) => void,
-    private readonly auto = false,
+    private auto = false,
   ) {}
+
+  /**
+   * Per-turn approval posture (session mode): a host `submit` can flip auto on
+   * or off for the coming turn without respawning the process.
+   */
+  setAuto(auto: boolean): void {
+    this.auto = auto;
+  }
 
   /** The agent's onEvent → one NDJSON line per event. */
   readonly onEvent = (e: AgentEvent): void => {
@@ -204,8 +249,10 @@ export interface StreamJsonSessionRunOptions {
   resumed: boolean;
   /** Instruction for the first turn. Omit to wait for the host's first `submit`. */
   instruction?: string;
-  /** Await the host's next instruction; resolve null to end the session. */
-  nextTurn: () => Promise<string | null>;
+  /** Spawn-time approval posture; per-turn `agentMode` on `submit` overrides it. */
+  spawnAuto?: boolean;
+  /** Await the host's next task; resolve null to end the session. */
+  nextTurn: () => Promise<TurnRequest | null>;
   /**
    * Run one turn. Injected so the heavy agent wiring (graph, providers, MCP,
    * sandbox) is built once by the caller and reused across turns — the whole
@@ -216,6 +263,11 @@ export interface StreamJsonSessionRunOptions {
     priorSummary?: string;
     signal: { aborted: boolean };
     session: StreamJsonSession;
+    /** Per-turn posture from the host (plan blocks writes engine-side). */
+    agentMode?: TurnAgentMode;
+    /** Effective auto for this turn (spawn flag overridden by agentMode). */
+    auto: boolean;
+    images?: ImageAttachment[];
   }) => Promise<AgentResult>;
   /**
    * Record a finished turn. Returns the recap to seed the next turn, so
@@ -238,19 +290,34 @@ export async function runCodeStreamJsonSession(
   options: StreamJsonSessionRunOptions,
 ): Promise<StreamJsonTurn[]> {
   const { emit, bindDecisions, auto, sessionId, resumed, nextTurn, runTurn, onTurnEnd } = options;
-  const session = new StreamJsonSession(emit, !!auto);
+  const spawnAuto = options.spawnAuto ?? !!auto;
+  const session = new StreamJsonSession(emit, spawnAuto);
   bindDecisions?.(session);
   emit({ event: 'session-start', sessionId, resumed });
 
   const turns: StreamJsonTurn[] = [];
   let priorSummary: string | undefined;
-  let instruction = options.instruction?.trim() || (await nextTurn());
+  const first = options.instruction?.trim();
+  let request: TurnRequest | null = first ? { instruction: first } : await nextTurn();
 
-  while (instruction) {
+  while (request) {
     const signal = session.beginTurn();
+    // Per-turn posture: an explicit agentMode overrides the spawn flag; plan
+    // never auto-approves. First turn without a mode keeps the spawn posture.
+    const turnAuto = request.agentMode ? request.agentMode === 'auto' : spawnAuto;
+    session.setAuto(turnAuto && request.agentMode !== 'plan');
+    const instruction = request.instruction;
     let turn: StreamJsonTurn;
     try {
-      const result = await runTurn({ instruction, priorSummary, signal, session });
+      const result = await runTurn({
+        instruction,
+        priorSummary,
+        signal,
+        session,
+        agentMode: request.agentMode,
+        auto: turnAuto && request.agentMode !== 'plan',
+        images: request.images,
+      });
       emit({ event: 'done', result });
       turn = { instruction, result };
     } catch (e) {
@@ -262,7 +329,7 @@ export async function runCodeStreamJsonSession(
     turns.push(turn);
     priorSummary = onTurnEnd?.(turn) ?? priorSummary;
     emit({ event: 'idle', turns: turns.length });
-    instruction = await nextTurn();
+    request = await nextTurn();
   }
   return turns;
 }

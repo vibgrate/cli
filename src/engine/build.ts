@@ -4,7 +4,7 @@ import { discover, type DiscoveredFile } from './discover.js';
 import { parseFiles } from './pool.js';
 import { resolve } from './resolve.js';
 import { buildModuleResolver } from './module-resolver.js';
-import { tsResolveEdges } from './ts-resolver.js';
+import { assembleTsResult, tsWalkFiles, type TsFilePartial } from './ts-resolver.js';
 import { decodeScipIndex, scipEdges } from './scip.js';
 import { analyze, type AnalysisTier, type ClusterMode } from './analyze.js';
 import { applyStaticTestLinkage } from './tests.js';
@@ -12,6 +12,7 @@ import { loadCoverage, applyCoverage } from './coverage.js';
 import { buildFacts } from './facts.js';
 import { groundGraph } from './grounding.js';
 import { loadCache } from './cache.js';
+import { ambientFingerprint, loadTscCache, tsConfigFingerprint, tscKeys } from './tsc-cache.js';
 import {
   resolveLimits,
   checkMemoryBudget,
@@ -120,6 +121,9 @@ export interface BuildResult {
     heritage: number;
     resolved: number;
     shards?: number;
+    /** Files whose checker output was reused from the tsc cache (change-scoped
+     * downstream, gap-closure 2c). Subset of `files`. */
+    reusedFiles?: number;
   };
   /** Present when a SCIP index was ingested. */
   scip?: { documents: number; references: number; resolved: number; tool?: string };
@@ -356,11 +360,50 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     let jsx = 0;
     let heritage = 0;
     let resolvedCount = 0;
+    let tscReusedFiles = 0;
     const coveredAll = new Set<string>();
     const preciseAll: GraphEdge[] = [];
 
+    // Change-scoped downstream (gap-closure 2c): per-file checker results are
+    // cached under a key covering the file's content, its transitive import
+    // closure, and the shard's ambient surface — so a warm refresh re-walks
+    // only the changed files and their reverse-dependency closure instead of
+    // the whole corpus. assembleTsResult re-merges cached + fresh partials in
+    // original file order, so the output is byte-identical to a full walk
+    // (enforced by incremental-identity.test.ts).
+    const tscCache = loadTscCache(root, { toolVersion: VERSION, disabled: options.noCache });
+    const cfgFingerprint = tsConfigFingerprint(root);
+
     for (const shard of shards) {
-      const res = tsResolveEdges(root, shard.files, resolved.nodes);
+      const ambientFiles = shard.files.filter((f) => tscCache.isAmbient(f.rel, hashes.get(f.rel)!, f.abs));
+      const ambientHash = ambientFingerprint(
+        ambientFiles.map((f) => ({ rel: f.rel, hash: hashes.get(f.rel)! })),
+        cfgFingerprint,
+      );
+      const keys = tscKeys(shard.files.map((f) => f.rel), hashes, resolved.importsByFile, ambientHash);
+
+      const partials = new Map<string, TsFilePartial>();
+      const walkFiles: typeof shard.files = [];
+      for (const f of shard.files) {
+        const cached = tscCache.get(f.rel, keys.get(f.rel)!);
+        if (cached) {
+          partials.set(f.rel, cached);
+          tscReusedFiles++;
+        } else {
+          walkFiles.push(f);
+        }
+      }
+      // Ambient files must be in the program even when their own results are
+      // cached — their global declarations shape checker answers everywhere.
+      const walkRels = new Set(walkFiles.map((f) => f.rel));
+      const extraRoots = ambientFiles.filter((f) => !walkRels.has(f.rel));
+      const fresh = tsWalkFiles(root, walkFiles, shard.files, extraRoots, resolved.nodes);
+      for (const [rel, partial] of fresh) {
+        partials.set(rel, partial);
+        tscCache.set(rel, hashes.get(rel)!, keys.get(rel)!, partial);
+      }
+
+      const res = assembleTsResult(shard.files.map((f) => f.rel), partials, resolved.nodes);
       if (res.stats.files === 0) continue;
       filesCovered += res.stats.files;
       calls += res.stats.calls;
@@ -370,6 +413,9 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
       for (const f of res.coveredFiles) coveredAll.add(f);
       preciseAll.push(...res.edges);
     }
+
+    tscCache.prune(new Set(tsFiles.map((f) => f.rel)));
+    tscCache.save();
 
     if (filesCovered > 0) {
       edges = mergePreciseEdges(edges, preciseAll, coveredAll, nodeFileById);
@@ -382,6 +428,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
         heritage,
         resolved: resolvedCount,
         shards: shards.length,
+        reusedFiles: tscReusedFiles,
       };
     }
     checkMemoryBudget('typescript resolution', limits.memoryBudgetMb);

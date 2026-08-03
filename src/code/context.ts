@@ -12,6 +12,7 @@
  */
 
 import { extractLiteralNeedles, queryGraph } from '../engine/query.js';
+import type { RelevanceAnalysis } from '../engine/relevance-provider.js';
 import { indexFor } from '../engine/relations.js';
 import { impactOf } from '../engine/impact.js';
 import type { CodeContext } from './types.js';
@@ -26,6 +27,11 @@ export interface BuildContextOptions {
   impactDepth?: number;
   /** Restrict the edit surface to these files (from `--file`), if given. */
   files?: string[];
+  /** Optional pre-computed relevance analysis (engine/relevance-provider.ts),
+   *  loaded by the async caller; widens seed vocabulary deterministically. */
+  relevance?: RelevanceAnalysis | null;
+  /** Optional per-node topic tags (engine/relevance-enrich.ts). */
+  topicTags?: Map<string, readonly string[]> | null;
 }
 
 /**
@@ -46,7 +52,7 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
   // files (but still let impact reach outside them, so the review is honest).
   // URL / quoted-string needles are stripped inside queryGraph so path tokens
   // cannot poison seeds (dash→dashboard, exist→NonExisting, …).
-  const q = queryGraph(graph, instruction, { budget: Math.floor(budget * 0.6), limit: seedLimit * 2 });
+  const q = queryGraph(graph, instruction, { budget: Math.floor(budget * 0.6), limit: seedLimit * 2, relevance: options.relevance, topicTags: options.topicTags });
   let seeds = q.matches.map((m) => ({ node: m.node, why: m.why }));
   if (options.files && options.files.length) {
     const set = new Set(options.files.map(normalize));

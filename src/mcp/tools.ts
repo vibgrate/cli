@@ -1,10 +1,18 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { queryGraph, queryGraphSemantic } from '../engine/query.js';
+import { analyzeQuestion } from '../engine/relevance-provider.js';
+import { loadTopicTags } from '../engine/relevance-enrich.js';
 import { loadEmbedder, getNodeEmbeddings, isModelReady, withTimeout, type Embedder } from '../engine/embeddings.js';
 import { resolveOne } from '../engine/lookup.js';
 import { indexFor } from '../engine/relations.js';
 import { pathDisconnect, shortestPath } from '../engine/paths.js';
 import { impactOf } from '../engine/impact.js';
 import { coveringTests } from '../engine/test-query.js';
+import { loadOrDiscoverFederation } from '../runtime/federation.js';
+import { highConfidenceBridges } from '../runtime/bridge-edges.js';
+import { repositoryIdFromRoot } from '../runtime/paths.js';
+import { parseGraph } from '../engine/serialize.js';
 import { loadVulnerabilities, filterBySeverity, resolvePackageTarget, openFixableAdvisories } from './vuln-data.js';
 import { attributedInventory } from './attribution.js';
 import { computeUpgradeImpact, getChangelogSignals, type VulnSeverity } from '../core-open/index.js';
@@ -41,6 +49,8 @@ export interface ToolContext {
   dedup?: boolean;
   /** Per-session set of node ids already returned in full (drives `--dedup`). */
   seen?: Set<string>;
+  /** Path the served graph was loaded from (locates its tags sidecar). */
+  graphPath?: string;
 }
 
 export interface VgTool {
@@ -111,6 +121,12 @@ function readyEmbedder(local?: boolean): Promise<Embedder | null> {
  */
 async function retrieve(graph: VgGraph, question: string, budget: number, ctx: ToolContext) {
   let mode = 'lexical';
+  // Optional relevance provider: widens seed vocabulary on both the semantic
+  // and lexical paths when installed; null (the default) changes nothing.
+  // analyzeQuestion never throws and the provider is memoized, so this adds
+  // no meaningful latency to the navigation path.
+  const relevance = await analyzeQuestion(question);
+  const topicTags = relevance ? await loadTopicTags(graph, ctx.root, ctx.graphPath) : null;
   try {
     const q = await withTimeout(
       (async () => {
@@ -120,7 +136,7 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
         // cancel it, so the work continues in the background and caches to disk —
         // this call answers lexically, the next hits the warm cache and is fast.
         const nodeVectors = await getNodeEmbeddings(graph, embedder, ctx.root);
-        const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors });
+        const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors, relevance, topicTags });
         mode = `semantic (${embedder.id})`;
         return r;
       })(),
@@ -131,7 +147,7 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
   } catch {
     // Over the latency budget or a semantic fault — answer from the lexical floor.
   }
-  return { q: queryGraph(graph, question, { budget }), mode: 'lexical' };
+  return { q: queryGraph(graph, question, { budget, relevance, topicTags }), mode: 'lexical' };
 }
 
 /**
@@ -449,6 +465,99 @@ export const TOOLS: VgTool[] = [
           : r.affected.length > 0
             ? { hint: 'response_format:"detailed" lists the affected nodes' }
             : {}),
+      };
+    },
+  },
+  {
+    name: 'cross_impact_of',
+    description:
+      'Blast radius ACROSS the federated workspace: impact in this repo plus which member repos consume it over confidence-scored bridges (workspace/package links). Every cross-repo hop carries confidence, evidence, and the member graph identity.',
+    inputSchema: obj(
+      {
+        name: { type: 'string' },
+        pick: { type: 'number', description: 'nth candidate if ambiguous' },
+        max_members: { type: 'number', description: 'member repos to inspect (default 4)' },
+      },
+      ['name'],
+    ),
+    handler: (graph, args, ctx) => {
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
+      if (!node) return unresolved(candidates);
+      const home = impactOf(graph, node.id, { depth: 4 });
+      const homeSummary = `${home.direct} direct dependent${home.direct === 1 ? '' : 's'}, ${home.transitive} transitive in this repo`;
+
+      let federation: ReturnType<typeof loadOrDiscoverFederation> | null = null;
+      try {
+        federation = loadOrDiscoverFederation(ctx.root);
+      } catch {
+        federation = null;
+      }
+      if (!federation || federation.members.length <= 1) {
+        return {
+          root: node.name,
+          home: homeSummary,
+          federation: 'single-repo workspace — no member repos declared (.vibgrate/federation.json) or discovered',
+          summary: `${node.name}: ${homeSummary}; no federated members to check.`,
+        };
+      }
+
+      const homeId = repositoryIdFromRoot(ctx.root);
+      // Consumers of THIS repo: bridges whose dependency target is home —
+      // changing a symbol here can break the bridge's `from` member. Only
+      // high-confidence bridges qualify (the capsule rule, applied to MCP).
+      const bridges = highConfidenceBridges(federation.bridges ?? []).filter((b) => b.toRepositoryId === homeId);
+      const maxMembers = Math.max(1, Math.min(8, numOr(args.max_members, 4)));
+      const byConsumer = new Map<string, typeof bridges>();
+      for (const b of bridges) {
+        const list = byConsumer.get(b.fromRepositoryId) ?? [];
+        list.push(b);
+        byConsumer.set(b.fromRepositoryId, list);
+      }
+
+      const members = federation.members.filter((m) => byConsumer.has(m.repositoryId)).slice(0, maxMembers);
+      const crossRepo = members.map((m) => {
+        const via = byConsumer.get(m.repositoryId)!.map((b) => ({
+          kind: b.kind,
+          confidence: b.confidence,
+          evidence: b.evidence,
+          ...(b.packageName ? { package: b.packageName } : {}),
+        }));
+        // Prefer the member's registered graph artifact; fall back to the
+        // legacy in-repo layout. A member without a built map is still
+        // reported — with the bridge evidence and how to get the answer.
+        const graphFile = [m.graphPath, path.join(m.root, '.vibgrate', 'graph.json')].find((p) => p && fs.existsSync(p));
+        if (!graphFile) {
+          return { member: m.label, root: m.root, via, graph: null, note: `no code map built — run \`vg\` in ${m.root}` };
+        }
+        try {
+          const mg = parseGraph(fs.readFileSync(graphFile, 'utf8'));
+          const matches = mg.nodes
+            .filter((n) => n.name === node.name && n.kind !== 'file')
+            .sort((a, b) => b.importance - a.importance || (a.qualifiedName < b.qualifiedName ? -1 : 1))
+            .slice(0, 10)
+            .map((n) => ({ qualifiedName: n.qualifiedName, file: n.file, line: n.span.start }));
+          return {
+            member: m.label,
+            root: m.root,
+            via,
+            // Reproducibility: WHICH map answered, exactly.
+            graph: { corpusHash: mg.provenance.corpusHash },
+            matches,
+          };
+        } catch {
+          return { member: m.label, root: m.root, via, graph: null, note: 'member map unreadable — rebuild with `vg`' };
+        }
+      });
+
+      const matchTotal = crossRepo.reduce((n, c) => n + ('matches' in c ? (c.matches?.length ?? 0) : 0), 0);
+      return {
+        root: node.name,
+        home: homeSummary,
+        federation: { members: federation.members.length, consumingMembers: crossRepo.length, bridgesConsidered: bridges.length },
+        crossRepo,
+        summary:
+          `${node.name}: ${homeSummary}; ${crossRepo.length} member repo(s) consume this repo over high-confidence bridges` +
+          ` (${matchTotal} same-name symbol match${matchTotal === 1 ? '' : 'es'} across members).`,
       };
     },
   },
@@ -973,12 +1082,58 @@ export function deferredToolNames(): string[] {
 }
 
 /**
+ * Server-side listing surface (the complement of the client-side deferral
+ * below, for hosts that cannot defer): `--surface hot` / `VG_MCP_SURFACE=hot`
+ * lists only the hot core, and `--tools a,b` / `VG_MCP_TOOLS=a,b` lists an
+ * explicit subset. LISTING ONLY — every tool in `TOOLS` stays callable
+ * whatever is listed (dispatch always resolves against the full array), so
+ * behaviour, ranking, and responses are byte-identical across surfaces; the
+ * only thing that changes is which schemas the host bills per step. Unknown
+ * names are dropped; an empty resolved set falls back to the full surface
+ * (fail-open — a typo must never produce a toolless server).
+ */
+export interface ToolSurface {
+  /** 'hot' lists only HOT_TOOLS; 'full' (default) lists everything. */
+  surface?: 'hot' | 'full';
+  /** Explicit tool names to list (wins over `surface`). */
+  tools?: string[];
+}
+
+export function listedToolNames(opts: ToolSurface = {}): string[] {
+  const all = TOOLS.map((t) => t.name);
+  if (opts.tools?.length) {
+    const known = new Set(all);
+    const picked = [...new Set(opts.tools.map((t) => t.trim()).filter((t) => known.has(t)))];
+    if (picked.length) return all.filter((n) => picked.includes(n));
+  }
+  if (opts.surface === 'hot') return all.filter((n) => (HOT_TOOLS as readonly string[]).includes(n));
+  return all;
+}
+
+/**
+ * Suggested per-task graph-call budget, injected into `orient`'s listed
+ * description so the agent sees the stop-discipline where it decides —
+ * alongside the schema, not buried in server instructions. Deterministic in
+ * the file count.
+ */
+export function graphCallBudget(fileCount: number): number {
+  if (fileCount < 150) return 3;
+  if (fileCount < 1000) return 4;
+  return 5;
+}
+
+export function budgetSuffix(fileCount: number): string {
+  return ` Repo size: ~${fileCount} file(s) indexed — aim for at most ${graphCallBudget(fileCount)} graph calls for this task.`;
+}
+
+/**
  * The Anthropic `mcp_toolset` deferral block for embedding `vg serve` in an
  * agent built on the Claude API: the hot core stays loaded, the rest defer and
  * are found via tool-search. Real, measured lever on hosts that support
- * `defer_loading` (~350–450 schema tokens/step vs 1,881 for the full set);
+ * `defer_loading` (~350–450 schema tokens/step vs ~1.9k for the full 20-tool set);
  * hosts that don't support it simply serve the whole optimized set. The server
- * is unchanged either way — one tool set, no modes.
+ * tool SET is one either way — the listing surface above changes what is
+ * advertised, never what is callable.
  */
 export function navigationToolsetConfig(serverName = 'vibgrate'): Record<string, unknown> {
   return {

@@ -49,7 +49,10 @@ export function registerServe(program: Command): void {
     .option('--share-stats', 'ALSO upload the counts-only usage ledger to Vibgrate to improve the local MCP (opt-in; off by default; implies --savings; disabled under --local)')
     .option('--dedup', "collapse a node's heavy relation lists on repeat reads within a session (opt-in; saves tokens)")
     .option('--no-refresh', 'serve the map as built — skip the auto-rebuild when files change')
-    .action(async function (this: Command, opts: { http?: boolean; port?: string; host?: string; savings?: boolean; shareStats?: boolean; dedup?: boolean; refresh?: boolean }) {
+    .option('--no-watch', 'disable the event-driven file watcher — freshness falls back to the periodic poll')
+    .option('--surface <mode>', 'tool listing surface: "hot" lists only the navigation core (orient/search_symbols/query_graph/get_node); "full" lists all tools. Every tool stays callable either way. Env: VG_MCP_SURFACE')
+    .option('--tools <names>', 'comma-separated tool names to list (listing only — all tools remain callable). Env: VG_MCP_TOOLS')
+    .action(async function (this: Command, opts: { http?: boolean; port?: string; host?: string; savings?: boolean; shareStats?: boolean; dedup?: boolean; refresh?: boolean; watch?: boolean; surface?: string; tools?: string }) {
       const global = readGlobal(this);
       const root = rootOf(global);
       const graphPath = resolveGraphPath(root, global.graph);
@@ -85,8 +88,15 @@ export function registerServe(program: Command): void {
         local,
         dedup: opts.dedup === true,
         refresh,
+        watch: opts.watch !== false,
         root,
         stats,
+        // Listing surface: flags win over env; unknown values fall back to the
+        // full surface inside listedToolNames (fail-open).
+        toolSurface: {
+          surface: (opts.surface ?? process.env.VG_MCP_SURFACE) === 'hot' ? 'hot' : 'full',
+          tools: (opts.tools ?? process.env.VG_MCP_TOOLS)?.split(',').map((s) => s.trim()).filter(Boolean),
+        },
       };
 
       // Check the map is up to date and, when it isn't, run the build before we
@@ -262,6 +272,7 @@ async function serveHttp(
   // and refresh debounce live across requests (re-parsing per request would be
   // wasteful and would probe freshness on every call).
   const source = new GraphSource(graphPath, opts.refresh !== false, { root: opts.root });
+  if (opts.refresh !== false && opts.watch !== false) source.startWatching();
 
   const httpServer = createHttp(async (req, res) => {
     if (req.url !== '/mcp') {

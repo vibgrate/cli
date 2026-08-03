@@ -38,6 +38,9 @@ export interface ResolveResult {
   edges: GraphEdge[];
   /** References the heuristic rung could not resolve (deduped, sorted). */
   unresolved: UnresolvedRef[];
+  /** File-level resolved import targets (rel → rels), for downstream
+   * change-scoping (the tsc cache's dependency-closure keys). Not serialized. */
+  importsByFile: Map<string, Set<string>>;
   /** Diagnostic counts, surfaced by `vg status`. */
   stats: {
     callsResolved: number;
@@ -296,7 +299,7 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
       a.from.localeCompare(b.from) || a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name),
   );
 
-  return { nodes, edges: edges.toArray(), unresolved: unresolvedList, stats };
+  return { nodes, edges: edges.toArray(), unresolved: unresolvedList, stats, importsByFile: importedFilesByRel };
 }
 
 // --- helpers ---

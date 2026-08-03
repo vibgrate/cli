@@ -11,8 +11,10 @@ import type { FileParse } from './types.js';
  *
  * The cache is a pure performance optimisation: a reused FileParse is identical
  * to a freshly-parsed one (parsing is pure over content), so the graph is
- * byte-identical whether or not the cache was warm. `--no-cache` / `vg verify`
- * prove this.
+ * byte-identical whether or not the cache was warm. CI-enforced by the
+ * mutation-corpus identity gate (incremental-identity.test.ts): warm
+ * incremental rebuild ≡ cold full rebuild, byte for byte, across
+ * edit/add/delete/rename/touch mutations and the production refresh path.
  */
 
 // Bumped to /4: optional mtime+size fingerprint for stat-skip fast path.

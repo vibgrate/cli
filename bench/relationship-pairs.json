@@ -1,0 +1,420 @@
+{
+ "version": "2026.08.4",
+ "pairs": [
+  {
+   "term": "adyen",
+   "domain": "payments",
+   "expansions": [
+    "card",
+    "checkout",
+    "terminal"
+   ]
+  },
+  {
+   "term": "ansible",
+   "domain": "ci",
+   "expansions": [
+    "agentless",
+    "ansible",
+    "automation",
+    "configuration",
+    "yaml"
+   ]
+  },
+  {
+   "term": "argocd",
+   "domain": "ci",
+   "expansions": [
+    "argo",
+    "automation",
+    "continuous",
+    "declarative",
+    "delivery",
+    "devops",
+    "gitops",
+    "kubernetes"
+   ]
+  },
+  {
+   "term": "auth0",
+   "domain": "auth",
+   "expansions": [
+    "auth",
+    "auth0",
+    "developer",
+    "identity",
+    "mfa",
+    "sso",
+    "tenant"
+   ]
+  },
+  {
+   "term": "braintree",
+   "domain": "payments",
+   "expansions": [
+    "card",
+    "checkout",
+    "paypal"
+   ]
+  },
+  {
+   "term": "circleci",
+   "domain": "ci",
+   "expansions": [
+    "automation",
+    "circleci",
+    "cloud",
+    "devops",
+    "parallel"
+   ]
+  },
+  {
+   "term": "clerk",
+   "domain": "auth",
+   "expansions": [
+    "auth",
+    "authentication",
+    "identity",
+    "nextjs",
+    "react",
+    "saas",
+    "session",
+    "user"
+   ]
+  },
+  {
+   "term": "cloudevents",
+   "domain": "ci",
+   "expansions": [
+    "cloud",
+    "cncf",
+    "migration",
+    "native",
+    "software"
+   ]
+  },
+  {
+   "term": "datadog",
+   "domain": "observability",
+   "expansions": [
+    "apm",
+    "cloud",
+    "datadog",
+    "logs",
+    "monitoring",
+    "observability",
+    "security"
+   ]
+  },
+  {
+   "term": "flagsmith",
+   "domain": "flags",
+   "expansions": [
+    "toggle"
+   ]
+  },
+  {
+   "term": "flux",
+   "domain": "ci",
+   "expansions": [
+    "flux",
+    "gitops",
+    "helm",
+    "kubernetes",
+    "kustomize"
+   ]
+  },
+  {
+   "term": "formatjs",
+   "domain": "i18n",
+   "expansions": [
+    "icu"
+   ]
+  },
+  {
+   "term": "github",
+   "domain": "ci",
+   "expansions": [
+    "actions",
+    "automation",
+    "devops",
+    "github",
+    "workflow"
+   ]
+  },
+  {
+   "term": "gitlab",
+   "domain": "ci",
+   "expansions": [
+    "automation",
+    "devops",
+    "gitlab"
+   ]
+  },
+  {
+   "term": "gocardless",
+   "domain": "payments",
+   "expansions": [
+    "ach",
+    "bacs",
+    "debit",
+    "direct",
+    "mandate",
+    "sepa"
+   ]
+  },
+  {
+   "term": "grafana",
+   "domain": "observability",
+   "expansions": [
+    "analytics",
+    "dashboards",
+    "grafana",
+    "monitoring",
+    "observability",
+    "visualization"
+   ]
+  },
+  {
+   "term": "helm",
+   "domain": "deps",
+   "expansions": [
+    "charts",
+    "deployment",
+    "devops",
+    "helm",
+    "kubernetes",
+    "package"
+   ]
+  },
+  {
+   "term": "i18next",
+   "domain": "i18n",
+   "expansions": [
+    "fallback",
+    "language",
+    "namespace",
+    "translation"
+   ]
+  },
+  {
+   "term": "jaeger",
+   "domain": "observability",
+   "expansions": [
+    "distributed",
+    "microservices",
+    "monitoring",
+    "observability",
+    "opentelemetry",
+    "performance",
+    "tracing"
+   ]
+  },
+  {
+   "term": "jenkins",
+   "domain": "ci",
+   "expansions": [
+    "automation",
+    "devops",
+    "jenkins",
+    "pipeline"
+   ]
+  },
+  {
+   "term": "keycloak",
+   "domain": "auth",
+   "expansions": [
+    "access",
+    "connect",
+    "control",
+    "iam",
+    "identity",
+    "keycloak",
+    "oauth",
+    "openid",
+    "realm"
+   ]
+  },
+  {
+   "term": "klarna",
+   "domain": "payments",
+   "expansions": [
+    "checkout",
+    "installment"
+   ]
+  },
+  {
+   "term": "launchdarkly",
+   "domain": "flags",
+   "expansions": [
+    "rollout",
+    "rule",
+    "targeting"
+   ]
+  },
+  {
+   "term": "newrelic",
+   "domain": "observability",
+   "expansions": [
+    "analytics",
+    "apm",
+    "distributed",
+    "logs",
+    "monitoring",
+    "new",
+    "observability",
+    "performance",
+    "relic",
+    "tracing"
+   ]
+  },
+  {
+   "term": "oauth",
+   "domain": "auth",
+   "expansions": [
+    "challenges",
+    "compliance",
+    "integrity",
+    "interoperability",
+    "migration",
+    "protocols",
+    "security"
+   ]
+  },
+  {
+   "term": "okta",
+   "domain": "auth",
+   "expansions": [
+    "identity",
+    "saml",
+    "workforce"
+   ]
+  },
+  {
+   "term": "opentelemetry",
+   "domain": "ci",
+   "expansions": [
+    "cloud",
+    "cncf",
+    "native"
+   ]
+  },
+  {
+   "term": "opentracing",
+   "domain": "ci",
+   "expansions": [
+    "cloud",
+    "cncf",
+    "native"
+   ]
+  },
+  {
+   "term": "paddle",
+   "domain": "payments",
+   "expansions": [
+    "billing",
+    "subscription",
+    "tax"
+   ]
+  },
+  {
+   "term": "paypal",
+   "domain": "payments",
+   "expansions": [
+    "checkout",
+    "wallet"
+   ]
+  },
+  {
+   "term": "prometheus",
+   "domain": "observability",
+   "expansions": [
+    "alerting",
+    "cloud",
+    "metrics",
+    "monitoring",
+    "native",
+    "prometheus",
+    "series",
+    "time"
+   ]
+  },
+  {
+   "term": "saml",
+   "domain": "auth",
+   "expansions": [
+    "interoperability",
+    "oasis",
+    "security"
+   ]
+  },
+  {
+   "term": "scim",
+   "domain": "auth",
+   "expansions": [
+    "compliance",
+    "interoperability",
+    "migration",
+    "security"
+   ]
+  },
+  {
+   "term": "semver",
+   "domain": "ci",
+   "expansions": [
+    "dependencies",
+    "migration",
+    "semver",
+    "software",
+    "versioning"
+   ]
+  },
+  {
+   "term": "statsig",
+   "domain": "flags",
+   "expansions": [
+    "experiment"
+   ]
+  },
+  {
+   "term": "stripe",
+   "domain": "payments",
+   "expansions": [
+    "card",
+    "charge",
+    "checkout",
+    "subscription",
+    "webhook"
+   ]
+  },
+  {
+   "term": "unleash",
+   "domain": "flags",
+   "expansions": [
+    "strategy",
+    "toggle"
+   ]
+  },
+  {
+   "term": "wise",
+   "domain": "payments",
+   "expansions": [
+    "currency",
+    "multi",
+    "transfer"
+   ]
+  },
+  {
+   "term": "zipkin",
+   "domain": "observability",
+   "expansions": [
+    "distributed",
+    "latency",
+    "microservices",
+    "observability",
+    "performance",
+    "tracing"
+   ]
+  }
+ ]
+}

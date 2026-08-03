@@ -5,6 +5,7 @@ import { resolveProviders } from '../code/router.js';
 import { loadCodeConfig, contextBudgetFor } from '../code/config.js';
 import { discoverMcpServers } from '../code/mcp-discovery.js';
 import { runCodeSession } from '../code/session.js';
+import { ensureRelevanceModule } from '../install/relevance-module.js';
 import { summarizeDiffs } from '../code/diff.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
@@ -81,6 +82,15 @@ export function registerCode(program: Command): void {
     ) {
       const global = readGlobal(this);
       const instruction = (instructionParts ?? []).join(' ').trim();
+
+      // Auto-provision the optional relevance module: fully silent — installs
+      // automatically when absent; on any failure the run proceeds without it
+      // (the seam degrades to the built-in lexicon). VIBGRATE_NO_KERNEL=1 or
+      // an explicit `vg module` decline skips this entirely; `--local` stays
+      // network-free.
+      if (!global.local) {
+        await ensureRelevanceModule();
+      }
 
       // Project config (.vibgrate/code.json): flags win, then the file, then
       // built-in defaults — so an indie dev sets model/preferences once.
@@ -196,7 +206,10 @@ export function registerCode(program: Command): void {
 
       // No instruction → guided interactive mode (needs a TTY). Piped/CI use
       // must pass an instruction (or --mock), so automation never hangs on a prompt.
-      if (!instruction && !opts.mock) {
+      // Exception: a --stream-json --session host may start with no argv task and
+      // send the first turn as a `submit` frame (so it can carry mode/attachments).
+      const stdinFirstTurn = !instruction && !!opts.streamJson && !!opts.session;
+      if (!instruction && !opts.mock && !stdinFirstTurn) {
         if (!(process.stdin.isTTY && process.stdout.isTTY)) {
           throw usageError('say what to change, e.g. `vg code "add a --timeout flag to the scan command"` (guided mode needs an interactive terminal)');
         }
@@ -228,7 +241,7 @@ export function registerCode(program: Command): void {
         );
         return;
       }
-      if (!instruction) throw usageError('say what to change, e.g. `vg code "add a --timeout flag to the scan command"`');
+      if (!instruction && !stdinFirstTurn) throw usageError('say what to change, e.g. `vg code "add a --timeout flag to the scan command"`');
 
       // Auto-build a missing map (same contract as guided mode / `vg serve`) so
       // host UIs never fail the first turn with "no map found". Under
@@ -502,6 +515,8 @@ export function registerCode(program: Command): void {
             capsule,
             files: opts.file.length ? opts.file : undefined,
             worktreeOverlay: true,
+            // Real-model host: compaction writes a model checkpoint summary.
+            llmCompaction: true,
             // Full coding agent: free discovery by default. Capsule is context only.
             advancedMode: true,
             externalTools,
@@ -519,6 +534,7 @@ export function registerCode(program: Command): void {
               const { runCodeStreamJsonSession } = await import('../code/stream-json.js');
               const { runAgent } = await import('../code/agent.js');
               const {
+                condenseSession,
                 loadLatestSession,
                 newSession,
                 recordTask,
@@ -538,23 +554,24 @@ export function registerCode(program: Command): void {
 
               // One stdin reader for the whole session: approvals and answers go
               // to the live turn, `submit` queues the next one.
-              const pendingTurns: string[] = [];
-              let wakeTurn: ((instruction: string | null) => void) | undefined;
+              type TurnRequest = import('../code/stream-json.js').TurnRequest;
+              const pendingTurns: TurnRequest[] = [];
+              let wakeTurn: ((turn: TurnRequest | null) => void) | undefined;
               let ended = false;
-              const pushTurn = (instruction: string | null): void => {
+              const pushTurn = (turn: TurnRequest | null): void => {
                 if (wakeTurn) {
                   const wake = wakeTurn;
                   wakeTurn = undefined;
-                  wake(instruction);
-                } else if (instruction !== null) {
-                  pendingTurns.push(instruction);
+                  wake(turn);
+                } else if (turn !== null) {
+                  pendingTurns.push(turn);
                 }
               };
-              const nextTurn = (): Promise<string | null> => {
+              const nextTurn = (): Promise<TurnRequest | null> => {
                 if (ended) return Promise.resolve(null);
                 const queued = pendingTurns.shift();
                 if (queued !== undefined) return Promise.resolve(queued);
-                return new Promise<string | null>((resolve) => {
+                return new Promise<TurnRequest | null>((resolve) => {
                   wakeTurn = resolve;
                 });
               };
@@ -578,7 +595,8 @@ export function registerCode(program: Command): void {
                       runOutcome.noteDecision(msg.id, msg.approve);
                     }
                     else if (msg.kind === 'answer') session.submitAnswer(msg.id, msg.answer);
-                    else if (msg.kind === 'submit') pushTurn(msg.instruction);
+                    else if (msg.kind === 'submit')
+                      pushTurn({ instruction: msg.instruction, agentMode: msg.agentMode, images: msg.images });
                     else if (msg.kind === 'restore') {
                       // Undo an approved change. Scoped to the files that change
                       // touched — never a sweeping restore of the tree.
@@ -589,6 +607,17 @@ export function registerCode(program: Command): void {
                         });
                         emitStream({ event: 'checkpoint-restored', commit: msg.commit, ...outcome });
                       });
+                    }
+                    else if (msg.kind === 'compact') {
+                      // Manual `/compact`: condense the stored record now; the
+                      // next turn's recap is computed from it (see runTurn).
+                      record = condenseSession(record, Date.now());
+                      saveSession(root, record);
+                      emitStream({
+                        event: 'event',
+                        type: 'notice',
+                        text: 'Conversation compacted — earlier turns condensed into a checkpoint.',
+                      } as never);
                     }
                     else if (msg.kind === 'cancel') { session.cancelTurn(); runOutcome.cancelPending(); }
                     else if (msg.kind === 'end') {
@@ -605,14 +634,24 @@ export function registerCode(program: Command): void {
                     pushTurn(null);
                   });
                 },
-                runTurn: ({ instruction: turnInstruction, priorSummary, signal, session }) => {
+                runTurn: ({ instruction: turnInstruction, signal, session, agentMode, auto: turnAuto, images }) => {
+                  // Recap always reflects the *current* record, so a manual
+                  // `/compact` between turns takes effect on the very next one.
+                  const priorSummary = summarizeSession(record) || undefined;
                   turnIndex++;
                   runOutcome.beginRun(turnRunId(record.id, turnIndex), turnInstruction);
+                  const plan = agentMode === 'plan';
+                  // Project MCP tools go through the same per-turn posture:
+                  // plan denies mutating external tools engine-side.
+                  streamApprove = plan ? async () => false : (action) => session.approve(action);
                   return runAgent({
                     ...baseAgentOptions,
                     instruction: turnInstruction,
                     priorSummary,
                     signal,
+                    auto: turnAuto,
+                    plan,
+                    images,
                     approve: session.approve,
                     askUser: session.askUser,
                     onEvent: session.onEvent,
@@ -782,6 +821,7 @@ export function registerCode(program: Command): void {
               executionEnv,
               graphBackend,
               modelProfile,
+              llmCompaction: true,
             });
             if (global.json) json(agentResult);
             if (agentResult.stopped === 'error') process.exitCode = ExitCode.ERROR;

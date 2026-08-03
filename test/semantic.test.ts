@@ -94,6 +94,31 @@ describe('semantic hybrid (stub embedder)', () => {
     expect(cosine([1, 0, 0], [1, 0, 0])).toBeCloseTo(1);
     expect(cosine([1, 0, 0], [0, 1, 0])).toBe(0);
   });
+
+  it('RRF: agreement across both signals outranks a single-signal outlier', async () => {
+    const embedder = stubEmbedder();
+    const targets = graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external');
+    const vecs = await embedder.embed(targets.map(nodeEmbedText));
+    const nodeVectors = new Map(targets.map((n, i) => [n.id, vecs[i]]));
+
+    // "verify the token" hits verifyToken lexically AND semantically (auth
+    // concept); catchException can appear on at most one list. The
+    // both-signals node must rank first — that is the point of rank fusion.
+    const r = await queryGraphSemantic(graph, 'verify the auth token', { embedder, nodeVectors });
+    expect(r.matches[0]!.node.name).toBe('verifyToken');
+    const names = r.matches.map((m) => m.node.name);
+    expect(names.indexOf('verifyToken')).toBeLessThan(Math.max(names.indexOf('catchException'), 1));
+  });
+
+  it('RRF is deterministic given the same vectors', async () => {
+    const embedder = stubEmbedder();
+    const targets = graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external');
+    const vecs = await embedder.embed(targets.map(nodeEmbedText));
+    const nodeVectors = new Map(targets.map((n, i) => [n.id, vecs[i]]));
+    const a = await queryGraphSemantic(graph, 'where do we handle errors', { embedder, nodeVectors });
+    const b = await queryGraphSemantic(graph, 'where do we handle errors', { embedder, nodeVectors });
+    expect(a.matches.map((m) => [m.node.id, m.score])).toEqual(b.matches.map((m) => [m.node.id, m.score]));
+  });
 });
 
 describe('embedder loading', () => {
