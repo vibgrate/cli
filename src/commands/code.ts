@@ -648,6 +648,10 @@ export function registerCode(program: Command): void {
                     ...baseAgentOptions,
                     instruction: turnInstruction,
                     priorSummary,
+                    // Carry-over for capsule seed ranking: the previous
+                    // turn's instruction (the current turn is recorded only
+                    // in onTurnEnd, so .at(-1) is the prior ask).
+                    priorInstruction: record.tasks.at(-1)?.instruction,
                     signal,
                     auto: turnAuto,
                     plan,
@@ -726,10 +730,14 @@ export function registerCode(program: Command): void {
 
         // Optional continuity + external MCP tools for one-shot runs too.
         let priorSummary: string | undefined;
+        let priorInstruction: string | undefined;
         if (opts.continue) {
           const { loadLatestSession, summarizeSession } = await import('../code/session-store.js');
           const prev = loadLatestSession(root);
-          if (prev) priorSummary = summarizeSession(prev);
+          if (prev) {
+            priorSummary = summarizeSession(prev);
+            priorInstruction = prev.tasks.at(-1)?.instruction;
+          }
         }
         const prompter = tty ? new TtyPrompter() : undefined;
         const { createVgBuiltinMcpTools, mergeExternalToolsets } = await import('../code/vg-mcp-bridge.js');
@@ -814,6 +822,7 @@ export function registerCode(program: Command): void {
                 ? { command: verify.command, maxRounds: modelProfile.maxRepairRounds }
                 : undefined,
               priorSummary,
+              priorInstruction,
               externalTools: mcpTools,
               prompter,
               capsule,

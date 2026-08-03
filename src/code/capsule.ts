@@ -30,7 +30,14 @@ export const TASK_CAPSULE_SCHEMA_VERSION = 'task-capsule/0' as const;
  *  join term preparation (own 0..1 weight capped at EXPANSION_WEIGHT; weak-provenance
  *  dropped); provider version recorded as `relevanceVersion` provenance. Absent
  *  provider = 2026.08.1 behaviour exactly — gated by the same corpus, dual-mode. */
-export const CAPSULE_RANKING_VERSION = 'capsule-rank@2026.08.2' as const;
+/** Bumped 2026.08.3: multi-turn field report ("do we support direct debits?" after a
+ *  stripe ask seeded direct* distractors). (a) Tokens consumed by a fired bigram
+ *  concept are demoted to the weak role — "direct" corroborates, never seeds.
+ *  (b) Conversation carry-over: the previous ask's content terms join ranking at
+ *  CARRY_WEIGHT when the caller passes `priorInstruction`. (c) A plain-language
+ *  "how the ask was interpreted" concept map is rendered for small local models.
+ *  No prior instruction + no bigram ask = 2026.08.2 behaviour exactly. */
+export const CAPSULE_RANKING_VERSION = 'capsule-rank@2026.08.3' as const;
 export const CAPSULE_COMPILER_ID = 'vg-task-capsule/0' as const;
 
 export interface BuildCapsuleOptions extends BuildContextOptions {
@@ -94,6 +101,9 @@ export interface TaskCapsule {
   sourceSlices: SourceSlice[];
   relationships: CapsuleRelationship[];
   pinnedFacts: string[];
+  /** Plain-language interpretation of the ask (concept expansions, relevance
+   *  topics, carried prior-turn terms) — see engine/query.ts conceptMapLines. */
+  conceptMap: string[];
   targetFiles: string[];
   verificationPlan: VerificationPlan;
   rendered: string;
@@ -186,7 +196,7 @@ export function buildTaskCapsule(graph: VgGraph, instruction: string, options: B
   const extraFacts = (options.extraPinnedFacts ?? []).filter((f) => typeof f === 'string' && f.trim());
   const pinnedFacts = [...base.pinnedFacts, ...extraFacts];
   const verificationPlan = buildVerificationPlan(graph, base);
-  const rendered = renderCapsule(instruction, primary, supporting, sourceSlices, pinnedFacts, base.targetFiles, verificationPlan, relationships, budget);
+  const rendered = renderCapsule(instruction, primary, supporting, sourceSlices, pinnedFacts, base.conceptMap, base.targetFiles, verificationPlan, relationships, budget);
 
   return {
     schemaVersion: TASK_CAPSULE_SCHEMA_VERSION,
@@ -196,6 +206,7 @@ export function buildTaskCapsule(graph: VgGraph, instruction: string, options: B
     sourceSlices,
     relationships,
     pinnedFacts,
+    conceptMap: base.conceptMap,
     targetFiles: base.targetFiles,
     verificationPlan,
     rendered,
@@ -233,6 +244,7 @@ export function capsuleToCodeContext(capsule: TaskCapsule): CodeContext {
       why: p.why,
     })),
     targetFiles: capsule.targetFiles,
+    conceptMap: capsule.conceptMap,
     impacted: capsule.supporting.map((s) => ({
       node: {
         id: s.id,
@@ -394,6 +406,7 @@ function renderCapsule(
   supporting: CapsuleSymbolRef[],
   slices: SourceSlice[],
   pinnedFacts: string[],
+  conceptMap: string[],
   targetFiles: string[],
   verification: VerificationPlan,
   relationships: CapsuleRelationship[],
@@ -408,6 +421,15 @@ function renderCapsule(
   if (pinnedFacts.length) {
     lines.push('## Hard constraints (do not violate)');
     for (const f of pinnedFacts) lines.push(`- ${f}`);
+    lines.push('');
+  }
+
+  // Rendered before the symbol list on purpose: a small local model reads the
+  // interpretation first, so the `a→b` provenance slugs on each seed line are
+  // decodable instead of noise.
+  if (conceptMap.length) {
+    lines.push('## How the ask was interpreted');
+    for (const l of conceptMap) lines.push(l);
     lines.push('');
   }
 

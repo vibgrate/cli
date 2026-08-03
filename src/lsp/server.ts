@@ -752,14 +752,32 @@ export class VibgrateLanguageServer {
 
   private async onGraphQuery(params: unknown): Promise<GraphQueryResult> {
     const p = params as GraphQueryParams;
+    // The client renders a "Searching…" placeholder for the whole of this call,
+    // so each stage is traced: a query that stalls should say where, not just
+    // spin. Traces carry counts and timings only — never workspace text.
+    const trace = (message: string): void =>
+      this.conn.notify('window/logMessage', { type: 3, message: `Vibgrate graph: ${message}` });
+
     if (!this.opts.graph) {
+      trace(`${p.mode} refused — the local Vibgrate Graph is turned off (--no-graph)`);
       return { ok: false, mode: p.mode, error: 'disabled', message: 'the local Vibgrate Graph is turned off' };
     }
+    const started = Date.now();
     const graph = await this.graphForQuery();
     if (!graph) {
+      trace(`${p.mode} has no code map yet — it is still building`);
       return { ok: false, mode: p.mode, error: 'not-found', message: 'no code map yet — it is still building' };
     }
-    return runGraphQuery(graph, p, { root: this.opts.root, offline: this.opts.offline, semantic: this.opts.semantic });
+    trace(
+      `${p.mode} over ${graph.nodes.length} nodes / ${graph.edges.length} edges ` +
+        `(map ready in ${Date.now() - started}ms)`,
+    );
+    return runGraphQuery(graph, p, {
+      root: this.opts.root,
+      offline: this.opts.offline,
+      semantic: this.opts.semantic,
+      log: trace,
+    });
   }
 
   /**

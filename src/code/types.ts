@@ -163,6 +163,10 @@ export interface CodeContext {
   impacted: { node: GraphNode; via: string }[];
   /** Hard constraints (declared facts) pinned so compaction can't drop them. */
   pinnedFacts: string[];
+  /** Plain-language concept-map lines: how the ask's words were interpreted
+   *  (concept expansions, relevance topics, carried prior-turn terms). Empty
+   *  when nothing fired. Rendered so small models can follow the inference. */
+  conceptMap: string[];
   /** The rendered, budget-bounded prompt block. */
   rendered: string;
   tokensEstimate: number;

@@ -1,6 +1,6 @@
 import { indexFor, type GraphIndex } from './relations.js';
 import { cosine, type Embedder } from './embeddings.js';
-import { WEAK_TERMS, expandConcepts } from './concepts.js';
+import { WEAK_TERMS, expandConcepts, bigramConsumedTokens } from './concepts.js';
 import type { RelevanceAnalysis } from './relevance-provider.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
@@ -31,6 +31,12 @@ export interface QueryOptions {
    *  tagged with a topic the question is about ranks above an equal textual
    *  match outside it. Never seeds alone — it multiplies existing evidence. */
   topicTags?: Map<string, readonly string[]> | null;
+  /** Previous conversational ask (multi-turn `vg code`). Its content terms —
+   *  never its process verbs — join ranking at a damped weight (CARRY_WEIGHT)
+   *  so a follow-up like "can we use direct debits?" keeps the prior turn's
+   *  topic ("where is stripe used?") instead of ranking the repo on the
+   *  follow-up's words alone. Absent → behaviour is unchanged. */
+  priorQuestion?: string | null;
 }
 
 export interface QueryMatch {
@@ -171,7 +177,7 @@ export function queryGraph(graph: VgGraph, question: string, options: QueryOptio
   // than path-token false positives that poison Task Capsules.
   const literals = extractLiteralNeedles(question);
   const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
-  const prep = prepareTerms(forTokens, options.relevance);
+  const prep = prepareTerms(forTokens, options.relevance, priorResidual(options.priorQuestion));
   const weightOf = termWeights(graph, prep.terms.map((t) => t.term));
   const index = indexFor(graph);
 
@@ -243,7 +249,7 @@ export async function queryGraphSemantic(
   const limit = options.limit ?? 12;
   const literals = extractLiteralNeedles(question);
   const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
-  const prep = prepareTerms(forTokens, options.relevance);
+  const prep = prepareTerms(forTokens, options.relevance, priorResidual(options.priorQuestion));
   const terms = prep.terms.map((t) => t.term);
   const weightOf = termWeights(graph, terms);
   const index = indexFor(graph);
@@ -349,6 +355,9 @@ interface QueryTerm {
   /** Provider-supplied confidence (0..1) when this term came from the optional
    *  relevance provider; replaces the flat EXPANSION_WEIGHT for that term. */
   providerWeight?: number;
+  /** True when this term was carried over from the previous conversational
+   *  turn (QueryOptions.priorQuestion); scores at CARRY_WEIGHT. */
+  carried?: boolean;
 }
 
 interface PreparedTerms {
@@ -366,13 +375,22 @@ const EXPANSION_WEIGHT = 0.7;
  *  Multi-topic evidence ("direct" + "debit" + "payments") must beat any
  *  single-term surface hit ("add") by construction, not by luck. */
 const COVERAGE_BONUS = 0.35;
+/** Terms carried from the previous conversational turn score at half weight:
+ *  enough to keep a follow-up anchored to the conversation's topic (and to
+ *  rescue weak-only follow-ups like "can we use it?"), never enough for stale
+ *  context to outrank a clearly-named new topic in the current ask. */
+const CARRY_WEIGHT = 0.5;
 
 /** Resolve term roles + concept expansions for the residual ask text. */
-function prepareTerms(forTokens: string, relevance?: RelevanceAnalysis | null): PreparedTerms {
+function prepareTerms(forTokens: string, relevance?: RelevanceAnalysis | null, prior?: string | null): PreparedTerms {
   const base = tokenize(forTokens);
   const ordered = tokenizeOrdered(forTokens);
   const baseSet = new Set(base);
-  const terms: QueryTerm[] = base.map((t) => ({ term: t, weak: WEAK_TERMS.has(t) }));
+  // A token consumed by a fired bigram concept ("direct" in "direct debits")
+  // is demoted to the weak role: the bigram's expansions carry the topic, and
+  // the constituent alone is a distractor magnet (directGet, redirectUrl, …).
+  const consumed = bigramConsumedTokens(ordered);
+  const terms: QueryTerm[] = base.map((t) => ({ term: t, weak: WEAK_TERMS.has(t) || consumed.has(t) }));
   const have = new Set(base);
   for (const e of expandConcepts(ordered)) {
     if (baseSet.has(e.term)) continue;
@@ -388,8 +406,104 @@ function prepareTerms(forTokens: string, relevance?: RelevanceAnalysis | null): 
     terms.push({ term: e.term, weak: false, from: e.from, providerWeight: e.weight });
     have.add(e.term);
   }
+  // Conversation carry-over: the previous turn's CONTENT terms (plus their
+  // lexicon expansions) join at CARRY_WEIGHT. Weak process verbs from the
+  // prior turn are dropped outright — carrying "add"/"use" forward would
+  // re-open the grab-bag failure this module exists to prevent. A term the
+  // current ask already produced is never re-added, so the current turn
+  // always wins ties and single-turn behaviour is byte-identical.
+  if (prior?.trim()) {
+    const priorOrdered = tokenizeOrdered(prior);
+    const priorConsumed = bigramConsumedTokens(priorOrdered);
+    for (const t of tokenize(prior)) {
+      if (have.has(t) || WEAK_TERMS.has(t) || priorConsumed.has(t)) continue;
+      terms.push({ term: t, weak: false, carried: true });
+      have.add(t);
+    }
+    for (const e of expandConcepts(priorOrdered)) {
+      if (have.has(e.term)) continue;
+      terms.push({ term: e.term, weak: false, from: e.from, carried: true });
+      have.add(e.term);
+    }
+  }
   const hasContent = terms.some((t) => !t.weak);
   return { terms, hasContent };
+}
+
+/** Residual text of the previous ask, with URL/quoted needles stripped so a
+ *  pasted link in turn N-1 cannot poison turn N's carried vocabulary. */
+function priorResidual(prior: string | null | undefined): string | null {
+  const raw = prior?.trim();
+  if (!raw) return null;
+  return extractLiteralNeedles(raw).length > 0 ? stripLiteralNeedles(raw) : raw;
+}
+
+/**
+ * Plain-language concept map for one ask: how its words were interpreted —
+ * fired concept/bigram expansions, relevance-kernel topics and vocabulary,
+ * and terms carried from the previous conversational turn. Rendered into the
+ * Task Capsule so a model (especially a small local one) can read the
+ * inference chain ("direct debits" → debit/mandate/…; topic payments →
+ * stripe/billing/…) as sentences instead of reverse-engineering the `a→b`
+ * slugs in per-seed match provenance. Deterministic and bounded; empty when
+ * nothing fired (honest-empty asks stay empty).
+ */
+export function conceptMapLines(
+  question: string,
+  relevance?: RelevanceAnalysis | null,
+  priorQuestion?: string | null,
+): string[] {
+  const cap = (xs: string[]) => [...new Set(xs)].slice(0, 8).join(', ');
+  const literals = extractLiteralNeedles(question);
+  const residual = literals.length > 0 ? stripLiteralNeedles(question) : question;
+  const lines: string[] = [];
+
+  // Lexicon / bigram expansions, grouped by the ask term that fired them.
+  const byFrom = new Map<string, string[]>();
+  for (const e of expandConcepts(tokenizeOrdered(residual))) {
+    const list = byFrom.get(e.from) ?? [];
+    list.push(e.term);
+    byFrom.set(e.from, list);
+  }
+  for (const [from, terms] of byFrom) {
+    lines.push(`- "${from}" in the ask implies these codebase identifiers: ${cap(terms)}.`);
+  }
+
+  // Relevance-kernel topics + their vocabulary (provider seam, when active).
+  if (relevance?.topics?.length) {
+    const topicVocab = new Map<string, string[]>();
+    for (const e of relevance.expansions ?? []) {
+      const list = topicVocab.get(e.from) ?? [];
+      list.push(e.term);
+      topicVocab.set(e.from, list);
+    }
+    for (const t of relevance.topics.slice(0, 3)) {
+      const vocab = topicVocab.get(t.id);
+      lines.push(
+        vocab?.length
+          ? `- The ask is about the "${t.id}" domain; code for it typically uses: ${cap(vocab)}.`
+          : `- The ask is about the "${t.id}" domain.`,
+      );
+    }
+  }
+
+  // Conversation carry-over provenance.
+  const priorText = priorResidual(priorQuestion);
+  if (priorText) {
+    const current = new Set(tokenize(residual));
+    const consumed = bigramConsumedTokens(tokenizeOrdered(priorText));
+    const carried = tokenize(priorText).filter((t) => !current.has(t) && !WEAK_TERMS.has(t) && !consumed.has(t));
+    if (carried.length) {
+      lines.push(`- This is a follow-up; topic words carried from the previous ask: ${cap(carried)}.`);
+    }
+  }
+
+  if (lines.length) {
+    lines.push(
+      '- Seed notation below: `a→b` = ask term "a" implied identifier "b"; `~t` = word-form match; `↩t` = carried from the previous ask.',
+    );
+  }
+  return lines;
 }
 
 function scoreNode(node: GraphNode, terms: QueryTerm[], weightOf: (t: string) => number = () => 1): { score: number; why: string } {
@@ -406,7 +520,7 @@ function scoreNode(node: GraphNode, terms: QueryTerm[], weightOf: (t: string) =>
   // Split the ORIGINAL name on camelCase / snake_case, then lowercase the parts
   // (splitting must see the capitals, so it happens before lowercasing).
   const nameParts = identifierParts(node.name);
-  for (const { term: t, weak, from, providerWeight } of terms) {
+  for (const { term: t, weak, from, providerWeight, carried } of terms) {
     // Each term's contribution is weighted by its specificity (IDF over symbol
     // names): a match on a distinctive term ("toComparable", "layoutFor") counts
     // for more than a match on a term shared by hundreds of symbols ("code",
@@ -420,8 +534,8 @@ function scoreNode(node: GraphNode, terms: QueryTerm[], weightOf: (t: string) =>
     // provider can widen vocabulary but never outrank the reviewed lexicon's
     // evidence class); lexicon expansions keep the flat EXPANSION_WEIGHT.
     const expansionW = providerWeight !== undefined ? Math.min(providerWeight, EXPANSION_WEIGHT) : from ? EXPANSION_WEIGHT : 1;
-    const w = weightOf(t) * (weak ? WEAK_TERM_WEIGHT : 1) * expansionW;
-    const label = from ? `${from}→${t}` : t;
+    const w = weightOf(t) * (weak ? WEAK_TERM_WEIGHT : 1) * expansionW * (carried ? CARRY_WEIGHT : 1);
+    const label = (carried ? '↩' : '') + (from ? `${from}→${t}` : t);
     let contribution = 0;
     if (name === t) {
       contribution = 10 * w;
@@ -440,7 +554,7 @@ function scoreNode(node: GraphNode, terms: QueryTerm[], weightOf: (t: string) =>
       // (shared prefix), so lexical ask survives word-form differences without
       // a model. The semantic path handles non-shared-root synonyms.
       contribution = 2 * w;
-      hits.push(from ? `~${from}→${t}` : `~${t}`);
+      hits.push((carried ? '↩' : '') + (from ? `~${from}→${t}` : `~${t}`));
     } else if (dirSegments.has(t)) {
       contribution = 2 * w;
       hits.push(label);

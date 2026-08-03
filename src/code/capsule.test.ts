@@ -81,6 +81,28 @@ describe('buildTaskCapsule', () => {
     expect(ctx.seeds.some((s) => s.node.qualifiedName === 'scanDir')).toBe(true);
   });
 
+  it('renders a plain-language concept map before the symbol list (multi-turn field report)', () => {
+    const capsule = buildTaskCapsule(fixtureGraph(), 'do we support direct debits?', {
+      readFile: readFixture,
+      priorInstruction: 'where is stripe used in the repo?',
+    });
+    const r = capsule.rendered;
+    expect(capsule.conceptMap.length).toBeGreaterThan(0);
+    expect(r).toContain('## How the ask was interpreted');
+    expect(r).toContain('"direct debits"');
+    expect(r).toMatch(/carried from the previous ask: .*stripe/);
+    // Interpretation renders before the seeds so the a→b/↩ slugs are decodable.
+    expect(r.indexOf('## How the ask was interpreted')).toBeLessThan(r.indexOf('## Primary symbols'));
+    // Projection keeps the concept map for the legacy path.
+    expect(capsuleToCodeContext(capsule).conceptMap).toEqual(capsule.conceptMap);
+  });
+
+  it('omits the concept map when nothing fired', () => {
+    const capsule = buildTaskCapsule(fixtureGraph(), 'add a timeout to scanDir', { readFile: readFixture });
+    expect(capsule.conceptMap).toEqual([]);
+    expect(capsule.rendered).not.toContain('## How the ask was interpreted');
+  });
+
   it('does not invent primary symbols from a URL occurrence locate (field report)', () => {
     const capsule = buildTaskCapsule(
       fixtureGraph(),
