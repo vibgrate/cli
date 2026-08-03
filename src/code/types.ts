@@ -68,6 +68,13 @@ export interface ProviderResult {
   usage?: { promptTokens?: number; completionTokens?: number };
   /** True when the router fell back to a lower-preference provider. */
   fellBack?: boolean;
+  /**
+   * The model stopped because it hit the output cap, not because it was done
+   * (`finish_reason: 'length'`). The text is a prefix of the real answer, so a
+   * caller that renders it as final silently loses the tail — the agent
+   * continues the reply instead. Undefined means the provider did not say.
+   */
+  truncated?: boolean;
 }
 
 /** Options a caller passes to a completion (kept minimal + provider-neutral). */

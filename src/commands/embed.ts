@@ -10,6 +10,7 @@ import {
   unavailableMessage,
   type EmbedUnavailable,
 } from '../engine/embeddings.js';
+import { embedderHealth, clearEmbedderHealth } from '../engine/embed-health.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
 import { c, info, json } from '../util/output.js';
@@ -65,6 +66,16 @@ export function registerEmbed(program: Command): void {
         return;
       }
 
+      // Same guard as the LSP: a crashed native backend would take this
+      // process down too, which is what made the background warm-up exit by
+      // signal ("code null") on every retry instead of reporting anything.
+      const health = await embedderHealth();
+      if (health.status === 'crashed') {
+        if (global.json) json({ embedded: 0, model: modelId, semantic: false, reason: 'native-crash', signal: health.signal });
+        else if (speak) info(c.dim(`vg embed · ${health.message}`));
+        return;
+      }
+
       let reason: EmbedUnavailable | undefined;
       const embedder = await loadEmbedder({
         local: global.local,
@@ -110,6 +121,9 @@ function showWhere(root: string, modelId: string, asJson?: boolean): void {
 function doClear(asJson?: boolean): void {
   const before = modelCacheInfo();
   const freed = clearModelCache();
+  // Forget any crash verdict too: `--clear` is what someone runs after fixing
+  // a broken install, and a sticky verdict would keep semantic off.
+  clearEmbedderHealth();
   if (asJson) {
     json({ removed: before.present, bytesFreed: freed, dir: before.dir });
     return;

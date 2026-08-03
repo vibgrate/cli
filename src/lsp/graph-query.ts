@@ -20,6 +20,7 @@ import {
   withTimeout,
   type EmbedUnavailable,
 } from '../engine/embeddings.js';
+import { embedderHealth, type EmbedHealth } from '../engine/embed-health.js';
 import { resolveOne } from '../engine/lookup.js';
 import { impactOf } from '../engine/impact.js';
 import { shortestPath } from '../engine/paths.js';
@@ -111,7 +112,14 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
   if (!question) return { ok: false, mode: 'ask', error: 'bad-request', message: 'question is required' };
 
   const budget = params.budget ?? 2000;
-  const wantSemantic = !!params.semantic && !ctx.offline && ctx.semantic !== false;
+  const semanticRequested = !!params.semantic && !ctx.offline && ctx.semantic !== false;
+  // The native backend can kill this process outright: a blocked
+  // onnxruntime-node postinstall SIGTRAPs on first inference, and no
+  // try/catch, timeout or lexical floor below survives a signal — the
+  // language server dies mid-request and the host restarts it. A sacrificial
+  // child process settles that question before this one loads the addon.
+  const health: EmbedHealth = semanticRequested ? await embedderHealth() : { status: 'unknown' };
+  const wantSemantic = semanticRequested && health.status !== 'crashed';
   const log = ctx.log ?? (() => {});
 
   let result: QueryResult | null = null;
@@ -156,6 +164,9 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
           `(${err instanceof Error ? err.message : String(err)}) — falling back to lexical`,
       );
     }
+  } else if (health.status === 'crashed') {
+    note = health.message;
+    log(`ask: semantic disabled — native backend crashed with ${health.signal}; answering lexically`);
   } else if (params.semantic && ctx.semantic === false) {
     note = 'semantic search is turned off — used lexical';
   } else if (params.semantic && ctx.offline) {

@@ -17,7 +17,7 @@ const ROBOT = [
 function getBrand(version: string): string[] {
   return [
     chalk.bold.white('  V I B G R A T E'),
-    chalk.dim(`  Drift Intelligence Engine`) + chalk.dim(` v${version}`),
+    chalk.dim(`  Code Intelligence Engine`) + chalk.dim(` v${version}`),
   ];
 }
 

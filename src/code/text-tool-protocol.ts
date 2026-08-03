@@ -34,6 +34,75 @@ interface RawCall {
   input?: unknown;
 }
 
+/**
+ * A whole fence that is nothing but one call written in source syntax:
+ * `finish("…")`, `finish('…')`, or `finish({ "summary": "…" })`. Weaker models
+ * routinely answer this way instead of emitting a tool call or the JSON form
+ * above, and the result is that the user is shown a code block containing
+ * their own answer rather than the answer.
+ */
+const CALL_SYNTAX_RE = /^([A-Za-z_][\w]*)\s*\(([\s\S]*)\)\s*;?$/;
+
+/**
+ * Recover a call written in source syntax, using the tool's schema to place a
+ * bare positional argument. Deliberately narrow — a call is only recovered
+ * when the tool is one we actually offer, the whole block is the call, and
+ * either the argument is a JSON object or the tool takes exactly one required
+ * parameter for a bare string to belong to. Anything looser would turn a model
+ * *discussing* `edit_file(...)` in prose into a real edit.
+ */
+function toCallSyntaxToolCall(blob: string, index: number, tools: ToolSpec[]): ToolCall | null {
+  if (!tools.length) return null;
+  const m = CALL_SYNTAX_RE.exec(blob.trim());
+  if (!m) return null;
+  const [, name, rawArgs] = m;
+  const spec = tools.find((t) => t.name === name);
+  if (!spec) return null;
+
+  const args = rawArgs.trim();
+  if (!args) return { id: `text_${index}`, name, arguments: {} };
+
+  if (args.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(args) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { id: `text_${index}`, name, arguments: parsed as Record<string, unknown> };
+      }
+    } catch {
+      return null; // object-ish but not parseable — do not guess
+    }
+    return null;
+  }
+
+  // A bare positional argument only has an unambiguous home when the schema
+  // has exactly one required parameter.
+  const required = Array.isArray(spec.parameters?.required) ? (spec.parameters.required as string[]) : [];
+  if (required.length !== 1) return null;
+  const literal = parseStringLiteral(args);
+  if (literal === null) return null;
+  return { id: `text_${index}`, name, arguments: { [required[0]!]: literal } };
+}
+
+/** A single quoted string literal, or null for anything else (expressions, multiple args). */
+function parseStringLiteral(src: string): string | null {
+  const s = src.trim();
+  if (s.length < 2) return null;
+  const quote = s[0];
+  if ((quote !== '"' && quote !== "'" && quote !== '`') || s[s.length - 1] !== quote) return null;
+  const inner = s.slice(1, -1);
+  // A second unescaped quote of the same kind means this was not one literal
+  // (e.g. two positional args) — refuse rather than truncate the user's answer.
+  if (new RegExp(`(?<!\\\\)${quote === '`' ? '`' : quote}`).test(inner)) return null;
+  if (quote === '"') {
+    try {
+      return JSON.parse(s) as string;
+    } catch {
+      return null;
+    }
+  }
+  return inner.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(new RegExp(`\\\\${quote}`, 'g'), quote);
+}
+
 /** Parse one candidate JSON blob into a ToolCall, or null when it isn't one. */
 function toToolCall(blob: string, index: number): ToolCall | null {
   let parsed: RawCall;
@@ -58,7 +127,7 @@ function toToolCall(blob: string, index: number): ToolCall | null {
  * then one bare top-level JSON object. Anything that doesn't parse into a
  * `{name, arguments}` shape is left in the text untouched.
  */
-export function parseTextToolCalls(text: string): { calls: ToolCall[]; text: string } {
+export function parseTextToolCalls(text: string, tools: ToolSpec[] = []): { calls: ToolCall[]; text: string } {
   const calls: ToolCall[] = [];
   let cleaned = text ?? '';
 
@@ -71,7 +140,8 @@ export function parseTextToolCalls(text: string): { calls: ToolCall[]; text: str
 
   if (calls.length === 0) {
     cleaned = cleaned.replace(FENCE_RE, (whole, body: string) => {
-      const call = toToolCall(body.trim(), calls.length);
+      const blob = body.trim();
+      const call = toToolCall(blob, calls.length) ?? toCallSyntaxToolCall(blob, calls.length, tools);
       if (!call) return whole;
       calls.push(call);
       return '';
@@ -82,6 +152,13 @@ export function parseTextToolCalls(text: string): { calls: ToolCall[]; text: str
     const t = cleaned.trim();
     if (t.startsWith('{') && t.endsWith('}')) {
       const call = toToolCall(t, 0);
+      if (call) {
+        calls.push(call);
+        cleaned = '';
+      }
+    } else {
+      // Unfenced source syntax as the entire reply — same narrow rules.
+      const call = toCallSyntaxToolCall(t, 0, tools);
       if (call) {
         calls.push(call);
         cleaned = '';
@@ -152,7 +229,7 @@ export function withToolCallFallback(
       if (native || !opts.tools?.length) {
         const result = await provider.chat(messages, opts);
         if ((!result.toolCalls || result.toolCalls.length === 0) && result.text) {
-          const rescued = parseTextToolCalls(result.text);
+          const rescued = parseTextToolCalls(result.text, opts.tools ?? []);
           if (rescued.calls.length) return { ...result, text: rescued.text, toolCalls: rescued.calls };
         }
         return result;
@@ -168,7 +245,7 @@ export function withToolCallFallback(
         withProtocol.unshift({ role: 'system', content: instruction });
       }
       const result = await provider.chat(withProtocol, { ...opts, tools: undefined });
-      const parsed = parseTextToolCalls(result.text ?? '');
+      const parsed = parseTextToolCalls(result.text ?? '', opts.tools);
       if (parsed.calls.length) return { ...result, text: parsed.text, toolCalls: parsed.calls };
       return result;
     },

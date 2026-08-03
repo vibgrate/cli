@@ -34,6 +34,14 @@ export interface ActiveGraphCacheOptions {
   /** Max resident graphs process-wide (default 32). */
   maxTotal?: number;
   now?: () => number;
+  /**
+   * Called for every slot leaving the cache, whatever removed it (idle
+   * timeout, overflow, clear). Anything keyed by the same slot — the semantic
+   * index in vgd — hangs off this so it can never outlive the graph it
+   * describes. Must not throw; a listener error is swallowed rather than
+   * corrupting eviction.
+   */
+  onEvict?: (slot: { repositoryId: string; gitRef: string }) => void;
 }
 
 export interface ActiveGraphSlotSummary {
@@ -58,8 +66,10 @@ export class ActiveGraphCache {
   private readonly maxPerRepo: number;
   private readonly maxTotal: number;
   private readonly now: () => number;
+  private readonly onEvict?: (slot: { repositoryId: string; gitRef: string }) => void;
 
   constructor(options: ActiveGraphCacheOptions = {}) {
+    this.onEvict = options.onEvict;
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_ACTIVE_GRAPH_IDLE_MS;
     this.maxPerRepo = options.maxPerRepo ?? 8;
     this.maxTotal = options.maxTotal ?? 32;
@@ -159,8 +169,18 @@ export class ActiveGraphCache {
   }
 
   clear(): void {
+    for (const slot of this.slots.values()) this.notifyEvict(slot);
     this.slots.clear();
     this.currentRef.clear();
+  }
+
+  private notifyEvict(slot: { repositoryId: string; gitRef: string }): void {
+    if (!this.onEvict) return;
+    try {
+      this.onEvict({ repositoryId: slot.repositoryId, gitRef: slot.gitRef });
+    } catch {
+      // A listener problem must never break cache maintenance.
+    }
   }
 
   private evict(now: number, forceOverflow: boolean): string[] {
@@ -171,6 +191,7 @@ export class ActiveGraphCache {
       if (!slot) return;
       this.slots.delete(key);
       removed.push(key);
+      this.notifyEvict(slot);
     };
 
     // 1) Idle timeout: LILO among idle (earliest loadedAt first).

@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { VERSION } from '../version.js';
+import { clearEmbedderHealth } from '../../engine/embed-health.js';
 import { fetchLatestVersion } from '../utils/update-check.js';
 import { pathExists } from '../utils/fs.js';
 import { liveStatsDir, reapOtherVersionServers, type ReapedServer } from '../../mcp/live-stats.js';
@@ -336,8 +337,47 @@ export const updateCommand = new Command('update')
       // Same story for the Fusion Runtime daemon: a vgd started before the
       // update keeps running the old build until something restarts it.
       if (opts.reap !== false) await restartVgdAndReport();
+
+      // An update is a chance for a broken native embedding backend to have
+      // been fixed, so never let a stale "crashed" verdict outlive it. The
+      // package's own postinstall clears this too, but only runs when install
+      // scripts are permitted — and a blocked postinstall is the very thing
+      // that causes the crash. Clearing here covers the update path
+      // regardless.
+      try {
+        clearEmbedderHealth();
+      } catch {
+        /* best-effort: a cache problem must not fail a successful update */
+      }
+
+      // A restarted daemon is an empty daemon. Re-publish this repo's map and
+      // rebuild its semantic index now, so the first command after an update
+      // is fast instead of being the one that pays for the restart.
+      if (opts.reap !== false) await rewarmVgdAndReport(cwd);
     },
   );
+
+/**
+ * Re-warm the daemon after it was restarted: publish this repo's map into the
+ * fresh process and build its semantic index. Best-effort and never throws —
+ * an unbuilt map or an unavailable embedding backend just means the next
+ * command warms it instead, exactly as before.
+ */
+async function rewarmVgdAndReport(cwd: string): Promise<void> {
+  try {
+    const { vgdIsRunning, vgdRequest } = await import('../../runtime/vgd/index.js');
+    if (!(await vgdIsRunning())) return;
+    const loaded = await vgdRequest({ op: 'load-graph', root: cwd });
+    if (!loaded.ok || !('repositoryId' in loaded)) return; // no map built yet — nothing to warm
+    console.log(chalk.dim('Re-published the code map into the restarted daemon.'));
+    const indexed = await vgdRequest({ op: 'embed-index', repositoryId: loaded.repositoryId });
+    if (indexed.ok && 'vectors' in indexed && indexed.state === 'ready') {
+      console.log(chalk.dim(`Semantic index warm again (${indexed.vectors} vectors).`));
+    }
+  } catch {
+    /* daemon busy, no map, semantic off — all fine, the next command warms */
+  }
+}
 
 /**
  * Restart a running vgd so it picks up the just-installed build. Best-effort

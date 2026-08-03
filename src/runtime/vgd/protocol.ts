@@ -65,6 +65,12 @@ export type VgdRequest =
   | { op: 'impact-of'; repositoryId: string; symbol: string; depth?: number; gitRef?: string }
   /** Compact graph meta for the current (or named) slot — not the full graph. */
   | { op: 'graph-summary'; repositoryId: string; gitRef?: string }
+  /** Semantic warm (docs/VGD-SEMANTIC-WARM-SPEC.md): worker + per-slot index state. */
+  | { op: 'embed-status'; repositoryId?: string }
+  /** Embed one string in the daemon's warm worker; the caller ranks locally. */
+  | { op: 'embed-query'; text: string }
+  /** Ensure the slot's vector index exists, building it if needed. */
+  | { op: 'embed-index'; repositoryId: string; gitRef?: string }
   /** Approach B host broker: warm model status inside vgd. */
   | { op: 'host-status' }
   | { op: 'host-load'; modelPath: string }
@@ -78,6 +84,25 @@ export type VgdRequest =
       maxTokens?: number;
       temperature?: number;
     };
+
+/** Semantic warm state: the worker, and one row per resident slot index. */
+export interface EmbedStatusPayload {
+  worker: 'stopped' | 'starting' | 'ready' | 'unavailable';
+  pid?: number;
+  model?: string;
+  crashes: number;
+  reason?: string;
+  slots: Array<{
+    repositoryId: string;
+    gitRef: string;
+    state: string;
+    vectors: number;
+    nodeCount: number;
+    builtAt?: number;
+    buildMs?: number;
+    error?: string;
+  }>;
+}
 
 /** Compact match row for query-graph (no full node payloads). */
 export interface VgdQueryMatch {
@@ -118,6 +143,17 @@ export type VgdResponse =
   | { ok: true; removed: boolean }
   | { ok: true; stopping: true }
   | { ok: true; slots: GraphSlotSummary[] }
+  | { ok: true; semantic: EmbedStatusPayload }
+  | { ok: true; vector: number[]; model?: string }
+  | {
+      ok: true;
+      indexed: true;
+      repositoryId: string;
+      gitRef: string;
+      state: string;
+      vectors: number;
+      buildMs?: number;
+    }
   | { ok: true; selected: true; repositoryId: string; gitRef: string }
   | { ok: true; stored: true; repositoryId: string; gitRef: string; nodeCount: number }
   | {
@@ -217,6 +253,30 @@ export function parseRequest(line: string): VgdRequest | { error: string } {
       root: root.trim(),
       gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
       graphPath: typeof graphPath === 'string' && graphPath.trim() ? graphPath.trim() : undefined,
+    };
+  }
+  if (op === 'embed-status') {
+    const repositoryId = (raw as { repositoryId?: unknown }).repositoryId;
+    return {
+      op: 'embed-status',
+      repositoryId: typeof repositoryId === 'string' && repositoryId.trim() ? repositoryId.trim() : undefined,
+    };
+  }
+  if (op === 'embed-query') {
+    const text = (raw as { text?: unknown }).text;
+    if (typeof text !== 'string' || !text.trim()) return { error: 'embed-query requires text' };
+    // Socket input is untrusted like every other op's; bound it so one caller
+    // cannot make the worker chew on an arbitrarily large string.
+    return { op: 'embed-query', text: text.trim().slice(0, 8_000) };
+  }
+  if (op === 'embed-index') {
+    const repositoryId = (raw as { repositoryId?: unknown }).repositoryId;
+    const gitRef = (raw as { gitRef?: unknown }).gitRef;
+    if (typeof repositoryId !== 'string' || !repositoryId.trim()) return { error: 'embed-index requires repositoryId' };
+    return {
+      op: 'embed-index',
+      repositoryId: repositoryId.trim(),
+      gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
     };
   }
   if (op === 'query-graph') {
