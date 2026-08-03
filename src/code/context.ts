@@ -11,7 +11,7 @@
  * is fully offline-testable and benchmarkable.
  */
 
-import { extractLiteralNeedles, queryGraph } from '../engine/query.js';
+import { conceptMapLines, extractLiteralNeedles, queryGraph } from '../engine/query.js';
 import type { RelevanceAnalysis } from '../engine/relevance-provider.js';
 import { indexFor } from '../engine/relations.js';
 import { impactOf } from '../engine/impact.js';
@@ -32,6 +32,11 @@ export interface BuildContextOptions {
   relevance?: RelevanceAnalysis | null;
   /** Optional per-node topic tags (engine/relevance-enrich.ts). */
   topicTags?: Map<string, readonly string[]> | null;
+  /** The previous conversational ask (multi-turn `vg code`). Its content
+   *  terms join seed ranking at a damped weight so follow-ups ("do we
+   *  support direct debits?" after "where is stripe used?") stay anchored to
+   *  the conversation's topic. Absent → single-turn behaviour, unchanged. */
+  priorInstruction?: string | null;
 }
 
 /**
@@ -52,7 +57,13 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
   // files (but still let impact reach outside them, so the review is honest).
   // URL / quoted-string needles are stripped inside queryGraph so path tokens
   // cannot poison seeds (dash→dashboard, exist→NonExisting, …).
-  const q = queryGraph(graph, instruction, { budget: Math.floor(budget * 0.6), limit: seedLimit * 2, relevance: options.relevance, topicTags: options.topicTags });
+  const q = queryGraph(graph, instruction, {
+    budget: Math.floor(budget * 0.6),
+    limit: seedLimit * 2,
+    relevance: options.relevance,
+    topicTags: options.topicTags,
+    priorQuestion: options.priorInstruction,
+  });
   let seeds = q.matches.map((m) => ({ node: m.node, why: m.why }));
   if (options.files && options.files.length) {
     const set = new Set(options.files.map(normalize));
@@ -87,13 +98,15 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
     ...pinnedFactsFor(graph, seedIds),
   ];
 
-  const rendered = render(instruction, seeds, [...impacted.values()], targetFiles, pinnedFacts, index, budget);
+  const conceptMap = conceptMapLines(instruction, options.relevance, options.priorInstruction);
+  const rendered = render(instruction, seeds, [...impacted.values()], targetFiles, pinnedFacts, conceptMap, index, budget);
   return {
     instruction,
     seeds,
     targetFiles,
     impacted: [...impacted.values()],
     pinnedFacts,
+    conceptMap,
     rendered,
     tokensEstimate: estimateTokens(rendered),
   };
@@ -129,6 +142,7 @@ function render(
   impacted: { node: GraphNode; via: string }[],
   targetFiles: string[],
   pinnedFacts: string[],
+  conceptMap: string[],
   index: ReturnType<typeof indexFor>,
   budget: number,
 ): string {
@@ -139,6 +153,12 @@ function render(
   if (pinnedFacts.length) {
     lines.push('## Hard constraints (do not violate)');
     for (const f of pinnedFacts) lines.push(`- ${f}`);
+    lines.push('');
+  }
+
+  if (conceptMap.length) {
+    lines.push('## How the ask was interpreted');
+    for (const l of conceptMap) lines.push(l);
     lines.push('');
   }
 

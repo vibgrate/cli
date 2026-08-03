@@ -17,6 +17,7 @@ import {
   loadEmbedder,
   getNodeEmbeddings,
   unavailableMessage,
+  withTimeout,
   type EmbedUnavailable,
 } from '../engine/embeddings.js';
 import { resolveOne } from '../engine/lookup.js';
@@ -47,6 +48,20 @@ export interface GraphQueryContext {
   offline: boolean;
   /** Mirrors `vg ask --no-semantic` — `false` forces lexical search regardless of the request. */
   semantic?: boolean;
+  /** Progress trace for the client's output channel. Never carries user text. */
+  log?: (message: string) => void;
+}
+
+/**
+ * Hard ceiling for the semantic path on an editor Ask. Loading the model and
+ * embedding an un-cached corpus can take minutes on a large repo; the panel has
+ * no way to show that, so past this budget we answer from the lexical floor and
+ * let the (uncancelled) embedding keep warming the on-disk cache for next time.
+ * Matches the MCP navigation path's guarantee. Override via VG_SEMANTIC_BUDGET_MS.
+ */
+function semanticBudgetMs(): number {
+  const n = Number(process.env.VG_SEMANTIC_BUDGET_MS);
+  return Number.isFinite(n) && n > 0 ? n : 20_000;
 }
 
 interface CandidateSummary {
@@ -97,27 +112,60 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
 
   const budget = params.budget ?? 2000;
   const wantSemantic = !!params.semantic && !ctx.offline && ctx.semantic !== false;
+  const log = ctx.log ?? (() => {});
 
-  let result: QueryResult;
+  let result: QueryResult | null = null;
   let mode = 'lexical';
   let note: string | undefined;
 
   if (wantSemantic) {
+    const budgetMs = semanticBudgetMs();
+    log(`ask: trying the semantic path (budget ${Math.round(budgetMs / 1000)}s)`);
     let reason: EmbedUnavailable | undefined;
-    const embedder = await loadEmbedder({ onUnavailable: (r) => (reason = r) });
-    if (embedder) {
-      const vectors = await getNodeEmbeddings(graph, embedder, ctx.root);
-      result = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors: vectors });
-      mode = `semantic (${embedder.id})`;
-    } else {
-      result = queryGraph(graph, question, { budget });
-      note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
+    const started = Date.now();
+    try {
+      // Every step here is bounded and fallible — a missing backend, a cold
+      // model, an un-embedded corpus. None of them may hold the request open:
+      // the lexical floor below always answers.
+      result = await withTimeout(
+        (async () => {
+          const embedder = await loadEmbedder({ onUnavailable: (r) => (reason = r) });
+          if (!embedder) return null;
+          log(`ask: embedder "${embedder.id}" loaded in ${Date.now() - started}ms; embedding nodes…`);
+          const vectors = await getNodeEmbeddings(graph, embedder, ctx.root);
+          log(`ask: ${vectors.size} node vectors ready in ${Date.now() - started}ms; ranking…`);
+          const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors: vectors });
+          mode = `semantic (${embedder.id})`;
+          return r;
+        })(),
+        budgetMs,
+        'semantic search went over its time budget',
+      );
+      if (!result) {
+        note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
+        log(`ask: semantic unavailable (${reason ?? 'no backend'}) — falling back to lexical`);
+      }
+    } catch (err) {
+      mode = 'lexical';
+      result = null;
+      note =
+        'semantic search did not finish in time — answered with fast lexical search. ' +
+        'It keeps warming in the background, so the next Ask should be semantic.';
+      log(
+        `ask: semantic path abandoned after ${Date.now() - started}ms ` +
+          `(${err instanceof Error ? err.message : String(err)}) — falling back to lexical`,
+      );
     }
-  } else {
-    result = queryGraph(graph, question, { budget });
-    if (params.semantic && ctx.semantic === false) note = 'semantic search is turned off — used lexical';
-    else if (params.semantic && ctx.offline) note = 'semantic skipped — Vibgrate is running offline';
+  } else if (params.semantic && ctx.semantic === false) {
+    note = 'semantic search is turned off — used lexical';
+  } else if (params.semantic && ctx.offline) {
+    note = 'semantic skipped — Vibgrate is running offline';
   }
+
+  if (!result) {
+    result = queryGraph(graph, question, { budget });
+  }
+  log(`ask: answered with ${mode} — ${result.matches.length} match(es)`);
 
   return {
     ok: true,

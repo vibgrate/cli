@@ -446,6 +446,9 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
           ? { ...opts.verify, maxRounds: opts.verify.maxRounds ?? modelProfile.maxRepairRounds }
           : undefined,
         priorSummary,
+        // Conversation carry-over for capsule seed ranking: the previous
+        // task's instruction keeps follow-up asks anchored to the topic.
+        priorInstruction: store.tasks.at(-1)?.instruction,
         externalTools: externalToolsMerged,
         meter,
         prompter,
@@ -556,6 +559,7 @@ export async function agentTask(params: {
   stream?: boolean;
   verify?: { command: string; maxRounds?: number };
   priorSummary?: string;
+  priorInstruction?: string;
   externalTools?: AgentOptions['externalTools'];
   meter?: SessionMeter;
   prompter?: Prompter;
@@ -675,6 +679,7 @@ export async function agentTask(params: {
     stream: params.stream,
     verify: params.verify,
     priorSummary: params.priorSummary,
+    priorInstruction: params.priorInstruction,
     externalTools: params.externalTools,
     capsule: params.capsule,
     files: params.files,

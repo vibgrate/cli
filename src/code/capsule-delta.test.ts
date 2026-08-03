@@ -32,6 +32,7 @@ function miniCapsule(over: Partial<TaskCapsule> & { sourceContent?: string } = {
     ],
     relationships: [],
     pinnedFacts: [],
+    conceptMap: [],
     targetFiles: ['src/scan.ts'],
     verificationPlan: { syntaxFiles: ['src/scan.ts'], suggestedTests: [], notes: [] },
     rendered: content,

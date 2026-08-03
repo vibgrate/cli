@@ -173,6 +173,13 @@ export interface AgentOptions {
   /** A recap of earlier tasks (from `--continue`) to seed continuity. */
   priorSummary?: string;
   /**
+   * The previous turn's instruction (multi-turn REPL / VS Code chat). Feeds
+   * capsule seed ranking as damped carry-over vocabulary so a follow-up like
+   * "do we support direct debits?" keeps the prior turn's topic; never sent
+   * to the model verbatim (priorSummary covers the transcript recap).
+   */
+  priorInstruction?: string;
+  /**
    * When the transcript exceeds the context budget, ask the model to write a
    * structured checkpoint summary of the dropped rounds (Cline/OpenCode-style
    * compaction) instead of the static note. One bounded extra completion per
@@ -559,6 +566,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
             files: options.files,
             relevance,
             topicTags,
+            priorInstruction: options.priorInstruction,
             readFile: (rel) => fsImpl.read(rel),
             repositoryId: repositoryIdFromRoot(root),
             provenance: {
@@ -1083,13 +1091,17 @@ function buildAgentContext(
   const relevance = options.relevance;
   const topicTags = options.topicTags;
   if (!options.capsule) {
-    return { context: buildCodeContext(graph, instruction, { budget, files, relevance, topicTags }), capsule: null };
+    return {
+      context: buildCodeContext(graph, instruction, { budget, files, relevance, topicTags, priorInstruction: options.priorInstruction }),
+      capsule: null,
+    };
   }
   const capsule = buildTaskCapsule(graph, instruction, {
     budget,
     files,
     relevance,
     topicTags,
+    priorInstruction: options.priorInstruction,
     readFile: (rel) => options.fsImpl.read(rel),
     repositoryId: repositoryIdFromRoot(options.root),
     extraPinnedFacts: options.extraPinnedFacts,

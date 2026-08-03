@@ -327,3 +327,25 @@ export function expandConcepts(orderedTokens: string[]): ConceptExpansion[] {
   }
   return out;
 }
+
+/**
+ * Tokens CONSUMED by a fired bigram concept that carry no standalone domain
+ * meaning of their own — "direct" in "direct debit", "sign" in "sign in".
+ * The bigram's expansion vocabulary re-supplies the topical words (debit,
+ * mandate, login, …), so the consumed token must stop acting as independent
+ * content evidence: left at full weight it seeds every `directGet`/
+ * `redirectUrl`/`directoryListing` in the repo — the exact distractor set the
+ * BIGRAM_CONCEPTS comment above documents. A constituent that is itself a
+ * lexicon concept ("debit", "card") keeps its content role.
+ */
+export function bigramConsumedTokens(orderedTokens: string[]): Set<string> {
+  const consumed = new Set<string>();
+  for (let i = 0; i + 1 < orderedTokens.length; i++) {
+    const bigram = `${orderedTokens[i]} ${orderedTokens[i + 1]}`;
+    if (!BIGRAM_CONCEPTS[bigram]) continue;
+    for (const tok of [orderedTokens[i], orderedTokens[i + 1]]) {
+      if (!lexiconKey(tok)) consumed.add(tok);
+    }
+  }
+  return consumed;
+}
