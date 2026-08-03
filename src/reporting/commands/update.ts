@@ -17,6 +17,31 @@ export type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'bun';
 const PACKAGE_NAME = '@vibgrate/cli';
 
 /**
+ * The packages whose install scripts the CLI actually needs, in the form npm's
+ * `allow-scripts` policy expects.
+ *
+ * npm (12+) blocks install scripts by default and lists the skipped ones as a
+ * warning. Three of ours matter: `@vibgrate/cli`'s own postinstall (which
+ * clears the stale embedder verdict), `onnxruntime-node`'s (which downloads the
+ * native embedding binaries), and `msgpackr-extract`'s (a native build). When
+ * they are skipped, semantic search silently degrades to lexical with a
+ * "backend crashed" verdict — see crashedMessage() in engine/embed-health.ts,
+ * which tells users to reinstall with exactly this flag. An update that doesn't
+ * pass it re-creates that state every single time, so the advice can never
+ * stick.
+ *
+ * Scoped deliberately: this permits our three packages, not every dependency.
+ * Older npm (≤11) has no such config and ignores the flag, so passing it
+ * unconditionally is safe.
+ */
+const SCRIPT_PACKAGES = [PACKAGE_NAME, 'onnxruntime-node', 'msgpackr-extract'];
+
+/** `--allow-scripts=a,b,c` — npm only; other managers gate scripts differently. */
+export function allowScriptsFlag(pm: PackageManager): string {
+  return pm === 'npm' ? ` --allow-scripts=${SCRIPT_PACKAGES.join(',')}` : '';
+}
+
+/**
  * Check if the CLI is running from a global install by examining where it's
  * running from. Returns the package manager if global, null if local.
  *
@@ -97,7 +122,7 @@ export async function findGlobalInstall(
   return null;
 }
 
-function getGlobalUpdateCommand(pm: PackageManager, pkg: string, version: string): string {
+export function getGlobalUpdateCommand(pm: PackageManager, pkg: string, version: string): string {
   const spec = `${pkg}@${version}`;
   switch (pm) {
     case 'pnpm':
@@ -108,7 +133,7 @@ function getGlobalUpdateCommand(pm: PackageManager, pkg: string, version: string
       return `bun add -g ${spec}`;
     case 'npm':
     default:
-      return `npm install -g ${spec}`;
+      return `npm install -g${allowScriptsFlag('npm')} ${spec}`;
   }
 }
 
@@ -168,8 +193,10 @@ export function getInstallCommand(
     case 'bun':
       return isDev ? `bun add -d ${spec}` : `bun add ${spec}`;
     case 'npm':
-    default:
-      return isDev ? `npm install --save-dev ${spec}` : `npm install ${spec}`;
+    default: {
+      const allow = allowScriptsFlag('npm');
+      return isDev ? `npm install${allow} --save-dev ${spec}` : `npm install${allow} ${spec}`;
+    }
   }
 }
 

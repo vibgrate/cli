@@ -158,6 +158,24 @@ describe('relayErrorDetail', () => {
     );
   });
 
+  it('renders a JSON detail as a sentence instead of a wall of braces cut mid-token', () => {
+    const body = JSON.stringify({
+      error: { type: 'relay_model_not_routable', message: 'Relay cannot route this model right now.' },
+      detail: JSON.stringify({
+        error: {
+          message: 'No allowed providers are available for the selected model.',
+          code: 404,
+          metadata: { available_providers: ['anthropic', 'azure'], requested_providers: ['google-ai-studio'] },
+        },
+      }),
+      correlation_id: 'abc-123',
+    });
+    const rendered = relayErrorDetail(body);
+    expect(rendered).toContain('No allowed providers are available for the selected model.');
+    expect(rendered).toContain('requested provider(s): google-ai-studio');
+    expect(rendered).not.toContain('{');
+  });
+
   it('reads the OpenAI-shaped { error: { message } } form', () => {
     expect(relayErrorDetail(JSON.stringify({ error: { message: 'insufficient credits' } }))).toBe('insufficient credits');
   });

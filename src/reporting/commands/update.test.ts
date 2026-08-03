@@ -3,13 +3,18 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import {
+  allowScriptsFlag,
   detectGlobalInstall,
   detectPackageManager,
   detectWorkspaceRoot,
   findGlobalInstall,
+  getGlobalUpdateCommand,
   getInstallCommand,
   getLocalDependencyState,
 } from './update.js';
+
+/** npm's install-script allowance, spelled once so the expectations stay readable. */
+const ALLOW = ' --allow-scripts=@vibgrate/cli,onnxruntime-node,msgpackr-extract';
 
 // The update command is difficult to unit-test end-to-end because it shells out
 // via execSync. Instead we test the exported helper logic (pm detection,
@@ -103,15 +108,43 @@ describe('update command helpers', () => {
     });
   });
 
+  describe('allow-scripts', () => {
+    // The bug this guards: a global update that omits the flag leaves npm's
+    // default script block in place, so onnxruntime-node never downloads its
+    // native binaries and semantic search silently stays lexical — on every
+    // single update, defeating the fix crashedMessage() tells users to run.
+    it('permits the three packages whose install scripts the CLI needs', () => {
+      expect(getGlobalUpdateCommand('npm', '@vibgrate/cli', '2.0.0'))
+        .toBe(`npm install -g${ALLOW} @vibgrate/cli@2.0.0`);
+    });
+
+    it('names @vibgrate/cli, onnxruntime-node and msgpackr-extract — and nothing else', () => {
+      const listed = allowScriptsFlag('npm').split('=')[1]?.split(',');
+      expect(listed).toEqual(['@vibgrate/cli', 'onnxruntime-node', 'msgpackr-extract']);
+    });
+
+    it('is npm-only — other managers gate install scripts their own way', () => {
+      for (const pm of ['pnpm', 'yarn', 'bun'] as const) {
+        expect(allowScriptsFlag(pm)).toBe('');
+        expect(getGlobalUpdateCommand(pm, '@vibgrate/cli', '2.0.0')).not.toContain('allow-scripts');
+      }
+    });
+
+    it('keeps the global command shape npm expects (flag before the spec)', () => {
+      const cmd = getGlobalUpdateCommand('npm', '@vibgrate/cli', '2.0.0');
+      expect(cmd.indexOf('--allow-scripts')).toBeLessThan(cmd.indexOf('@vibgrate/cli@2.0.0'));
+    });
+  });
+
   describe('getInstallCommand', () => {
     it('generates npm install for production dep', () => {
       expect(getInstallCommand('npm', '@vibgrate/cli', '2.0.0', false))
-        .toBe('npm install @vibgrate/cli@2.0.0');
+        .toBe(`npm install${ALLOW} @vibgrate/cli@2.0.0`);
     });
 
     it('generates npm install --save-dev for dev dep', () => {
       expect(getInstallCommand('npm', '@vibgrate/cli', '2.0.0', true))
-        .toBe('npm install --save-dev @vibgrate/cli@2.0.0');
+        .toBe(`npm install${ALLOW} --save-dev @vibgrate/cli@2.0.0`);
     });
 
     it('generates pnpm add for production dep', () => {
@@ -136,7 +169,7 @@ describe('update command helpers', () => {
 
     it('does not add -w for non-pnpm managers even at a workspace root', () => {
       expect(getInstallCommand('npm', '@vibgrate/cli', '2.0.0', true, { workspaceRoot: true }))
-        .toBe('npm install --save-dev @vibgrate/cli@2.0.0');
+        .toBe(`npm install${ALLOW} --save-dev @vibgrate/cli@2.0.0`);
       expect(getInstallCommand('yarn', '@vibgrate/cli', '2.0.0', false, { workspaceRoot: true }))
         .toBe('yarn add @vibgrate/cli@2.0.0');
     });
