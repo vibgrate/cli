@@ -238,7 +238,7 @@ function ranksOf(scores: Map<string, number>, nameOf: (id: string) => string): M
  * like "where do we handle auth failures?" can surface `verify_token` even
  * with no shared identifier. Topic affinity and importance stay multiplicative
  * tiebreakers on the fused score. Deterministic given the same model + cached
- * vectors; embeddings live only in the cache, never in `graph.json`.
+ * vectors; embeddings live in a binary sidecar next to the map, never in `graph.json`.
  */
 export async function queryGraphSemantic(
   graph: VgGraph,
