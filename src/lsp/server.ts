@@ -61,6 +61,21 @@ import type { VgGraph } from '../schema.js';
 /** DriftScore band. Mirrors the engine — clients must never re-derive it. */
 export type Band = 'low' | 'moderate' | 'high';
 
+/**
+ * `vibgrate/scanArtifact` — full Drift scan artifact as prettified JSON for
+ * Output ▸ Vibgrate Scan. Kept off the main log channel so operational noise
+ * (graph, engine, install) stays readable. Clients must not parse this for UI
+ * state — score, band, and inventory still come from `vibgrate/score`.
+ */
+export interface ScanArtifactNotification {
+  /** Pretty-printed scan artifact JSON (same shape as `vg scan --format json`). */
+  json: string;
+  rootPath: string;
+  scannedAt: string;
+  /** True when the artifact was replayed from the local LSP scan cache. */
+  fromCache?: boolean;
+}
+
 /** `vibgrate/score` — pushed whenever the score changes. Drives the status bar. */
 export interface ScoreNotification {
   score: number;
@@ -471,10 +486,12 @@ export class VibgrateLanguageServer {
       const cacheKey = { manifestHash: manifestHash(this.opts.root), toolVersion: VERSION, offline: this.opts.offline };
       const cached = force ? null : loadScanCache(this.opts.root, cacheKey);
 
+      let fromCache = false;
       if (cached) {
         // Drop projects under pruned trees (e.g. `.claude/worktrees`) even when
         // replaying a cache written before those dirs were excluded.
         this.artifact = pruneArtifactProjects(cached.artifact);
+        fromCache = true;
       } else {
         const scanOpts: ScanOptions = {
           format: 'json',
@@ -488,12 +505,21 @@ export class VibgrateLanguageServer {
 
         // Same hook `vg scan` uses, so the number the editor shows is the number
         // the CLI shows — by construction, not by coincidence (plan §8.3).
+        //
+        // `format: 'json'` makes runCoreScan console.log the full prettified
+        // artifact. In the LSP process stdout is redirected to stderr, and the
+        // extension used to dump that into Output ▸ Vibgrate — drowning the
+        // operational log. Suppress that dump here; we re-emit the same JSON
+        // on `vibgrate/scanArtifact` for Output ▸ Vibgrate Scan instead.
         const advanced = await loadAdvancedScanHook();
-        this.artifact = pruneArtifactProjects(await runCoreScan(this.opts.root, scanOpts, advanced));
+        this.artifact = pruneArtifactProjects(
+          await runCoreScanSilently(this.opts.root, scanOpts, advanced),
+        );
         writeScanCache(this.opts.root, cacheKey, this.artifact);
       }
 
       this.publishScore();
+      this.publishScanArtifact(fromCache);
       for (const uri of this.docs.keys()) this.publishForDoc(uri);
     } catch (err) {
       // A failed scan is silent — no red banner because a lockfile was mid-write.
@@ -516,6 +542,21 @@ export class VibgrateLanguageServer {
   }
 
   // ── Publishing ───────────────────────────────────────────────────────────
+
+  /**
+   * Full scan artifact for Output ▸ Vibgrate Scan. Operational messages stay
+   * on window/logMessage → Output ▸ Vibgrate.
+   */
+  private publishScanArtifact(fromCache: boolean): void {
+    const a = this.artifact;
+    if (!a) return;
+    this.conn.notify('vibgrate/scanArtifact', {
+      json: JSON.stringify(a, null, 2),
+      rootPath: a.rootPath,
+      scannedAt: a.timestamp,
+      ...(fromCache ? { fromCache: true } : {}),
+    } satisfies ScanArtifactNotification);
+  }
 
   private publishScore(): void {
     const a = this.artifact;
@@ -947,6 +988,47 @@ function uriToPath(uri: string): string {
   } catch {
     return uri;
   }
+}
+
+/**
+ * Run the same core scan as the CLI, but drop the `format: 'json'` console dump.
+ *
+ * `runCoreScan` always `console.log`s the prettified artifact when format is
+ * json and `out` is unset. In the LSP process that lands on stderr (stdout is
+ * reserved for the protocol) and used to flood Output ▸ Vibgrate. The return
+ * value is unchanged; the full JSON is re-emitted on `vibgrate/scanArtifact`.
+ *
+ * Non-JSON console.log lines (timeouts, "no projects found", …) still pass
+ * through so operational warnings remain visible on the main log channel.
+ */
+async function runCoreScanSilently(
+  root: string,
+  opts: ScanOptions,
+  advanced: Awaited<ReturnType<typeof loadAdvancedScanHook>>,
+): Promise<ScanArtifact> {
+  const realLog = console.log.bind(console);
+  console.log = (...args: unknown[]) => {
+    if (args.length === 1 && typeof args[0] === 'string' && looksLikeScanArtifactJson(args[0])) {
+      return;
+    }
+    realLog(...args);
+  };
+  try {
+    return await runCoreScan(root, opts, advanced);
+  } finally {
+    console.log = realLog;
+  }
+}
+
+/** Heuristic: the prettified scan artifact dump from `format: 'json'`. */
+function looksLikeScanArtifactJson(text: string): boolean {
+  const t = text.trimStart();
+  if (!t.startsWith('{')) return false;
+  // Artifact shape — projects inventory plus either drift score or timestamp.
+  return (
+    t.includes('"projects"') &&
+    (t.includes('"drift"') || t.includes('"timestamp"') || t.includes('"dependencies"'))
+  );
 }
 
 /**

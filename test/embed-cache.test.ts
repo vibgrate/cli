@@ -85,9 +85,9 @@ describe('embed pending count + single-writer lock', () => {
     const dir = makeProject(SAMPLE_FILES);
     dirs.push(dir);
     const g = (await buildGraph({ root: dir, inline: true, generatedAt: '2020-01-01T00:00:00.000Z' })).graph;
-    const cdir = path.join(dir, '.vibgrate', 'cache');
-    fs.mkdirSync(cdir, { recursive: true });
-    const lock = path.join(cdir, 'embeddings-stub-emb.json.lock');
+    const vdir = path.join(dir, '.vibgrate');
+    fs.mkdirSync(vdir, { recursive: true });
+    const lock = path.join(vdir, 'embeddings.lock');
     fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now() })); // live → not stale
 
     const held = counting();
@@ -105,14 +105,30 @@ describe('embed pending count + single-writer lock', () => {
     const dir = makeProject(SAMPLE_FILES);
     dirs.push(dir);
     const g = (await buildGraph({ root: dir, inline: true, generatedAt: '2020-01-01T00:00:00.000Z' })).graph;
-    const cdir = path.join(dir, '.vibgrate', 'cache');
-    fs.mkdirSync(cdir, { recursive: true });
-    const lock = path.join(cdir, 'embeddings-stub-emb.json.lock');
+    const vdir = path.join(dir, '.vibgrate');
+    fs.mkdirSync(vdir, { recursive: true });
+    const lock = path.join(vdir, 'embeddings.lock');
     fs.writeFileSync(lock, JSON.stringify({ pid: 2147483646, at: Date.now() })); // implausible pid → dead
 
     const emb = counting();
     await getNodeEmbeddings(g, emb, dir);
     expect(emb.calls).toBeGreaterThan(0); // stale lock reclaimed → embeds
+  });
+
+  it('writes a binary embeddings file next to the map (not model-named JSON in cache)', async () => {
+    const dir = makeProject(SAMPLE_FILES);
+    dirs.push(dir);
+    const g = (await buildGraph({ root: dir, inline: true, generatedAt: '2020-01-01T00:00:00.000Z' })).graph;
+    await getNodeEmbeddings(g, counting(), dir);
+    const bin = path.join(dir, '.vibgrate', 'embeddings');
+    expect(fs.existsSync(bin)).toBe(true);
+    const raw = fs.readFileSync(bin);
+    expect(raw.subarray(0, 8).toString('latin1')).toBe('VGEMB01\0');
+    expect(fs.existsSync(path.join(dir, '.vibgrate', 'cache', 'embeddings-stub-emb.json'))).toBe(false);
+    // Second run is a pure cache hit.
+    const emb = counting();
+    await getNodeEmbeddings(g, emb, dir);
+    expect(emb.calls).toBe(0);
   });
 });
 

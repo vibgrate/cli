@@ -173,15 +173,18 @@ describe('embed model id + cache detection (drives the ask setup note)', () => {
     expect(resolveEmbedModel('custom-model')).toBe('custom-model');
   });
 
-  it('embeddingsCached is false until this repo has a vector cache, true after', () => {
-    const dir = makeProject({});
+  it('embeddingsCached is false until this repo has a vector cache, true after', async () => {
+    const dir = makeProject(FILES);
     try {
-      const model = resolveEmbedModel();
+      const model = 'stub-emb';
       expect(embeddingsCached(dir, model)).toBe(false);
-      const cdir = path.join(dir, '.vibgrate', 'cache');
-      fs.mkdirSync(cdir, { recursive: true });
-      fs.writeFileSync(path.join(cdir, `embeddings-${model}.json`), '{}');
+      const g = (await buildGraph({ root: dir, generatedAt: '2020-01-01T00:00:00.000Z', inline: true })).graph;
+      await getNodeEmbeddings(g, countingEmbedder(), dir);
       expect(embeddingsCached(dir, model)).toBe(true);
+      // Binary file next to the map — not model-named, not under .vibgrate/cache/.
+      const embPath = path.join(dir, '.vibgrate', 'embeddings');
+      expect(fs.existsSync(embPath)).toBe(true);
+      expect(fs.existsSync(path.join(dir, '.vibgrate', 'cache', `embeddings-${model}.json`))).toBe(false);
     } finally {
       cleanup(dir);
     }
@@ -250,17 +253,34 @@ describe('getNodeEmbeddings — cached, resumable, progress', () => {
       const targets = g.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external').length;
       await getNodeEmbeddings(g, countingEmbedder(), dir); // full embed → cache written
 
-      // Simulate an interrupted run: drop two cached entries.
-      const file = path.join(dir, '.vibgrate', 'cache', `embeddings-${resolveEmbedModel('stub-emb')}.json`);
-      const cache = JSON.parse(fs.readFileSync(file, 'utf8'));
-      const drop = Object.keys(cache.entries).slice(0, 2);
-      for (const id of drop) delete cache.entries[id];
-      fs.writeFileSync(file, JSON.stringify(cache));
+      // Simulate an interrupted run: drop two cached entries via a partial
+      // legacy JSON (still accepted once), then confirm binary migration.
+      const targetsIds = g.nodes
+        .filter((n) => n.kind !== 'file' && n.kind !== 'external')
+        .map((n) => n.id);
+      const drop = targetsIds.slice(0, 2);
+      const keep = targetsIds.slice(2);
+      const bin = path.join(dir, '.vibgrate', 'embeddings');
+      fs.rmSync(bin, { force: true });
+      const cdir = path.join(dir, '.vibgrate', 'cache');
+      fs.mkdirSync(cdir, { recursive: true });
+      const legacy = path.join(cdir, 'embeddings-stub-emb.json');
+      const { hashString } = await import('../src/engine/hash.js');
+      const areaLabel = new Map(g.areas.map((a) => [a.id, a.label] as const));
+      const entries: Record<string, { hash: string; vec: number[] }> = {};
+      for (const id of keep) {
+        const n = g.nodes.find((x) => x.id === id)!;
+        entries[id] = { hash: hashString(nodeEmbedText(n, areaLabel.get(n.area))), vec: [1, 0] };
+      }
+      fs.writeFileSync(legacy, JSON.stringify({ model: 'stub-emb', entries }));
 
       const emb = countingEmbedder();
       const vecs = await getNodeEmbeddings(g, emb, dir);
       expect(emb.calls).toBe(drop.length); // only the dropped ones re-embedded
       expect(vecs.size).toBe(targets); // full set still returned
+      // Migrated to binary next to the map; legacy JSON purged.
+      expect(fs.existsSync(bin)).toBe(true);
+      expect(fs.existsSync(legacy)).toBe(false);
     } finally {
       cleanup(dir);
     }

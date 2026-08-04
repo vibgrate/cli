@@ -5,6 +5,7 @@ import {
   resolveEmbedModel,
   countPending,
   embeddingsCached,
+  embeddingsPath,
   modelCacheInfo,
   clearModelCache,
   unavailableMessage,
@@ -26,7 +27,9 @@ function mb(bytes: number): string {
  * `vg embed` — precompute the semantic index (node embeddings) so the next
  * `vg ask` is instant. The model is downloaded once per machine into a central,
  * home-folder cache (XDG `~/.cache/vibgrate/models`; no admin/sudo needed) shared
- * across all repos; per-repo vectors live in `.vibgrate/cache/`.
+ * across all repos. Per-repo vectors are a binary `embeddings` file next to the
+ * code map (global application store / in-repo `.vibgrate/`), not under
+ * `.vibgrate/cache/` and not named after the model.
  *
  * `--where` shows the cache location/size; `--clear` removes the model. The
  * hidden `--bg` flag warms silently and never downloads (the `vg build` warm-up).
@@ -105,8 +108,16 @@ export function registerEmbed(program: Command): void {
 function showWhere(root: string, modelId: string, asJson?: boolean): void {
   const m = modelCacheInfo(modelId);
   const repoCached = embeddingsCached(root, modelId);
+  const repoPath = embeddingsPath(root);
   if (asJson) {
-    json({ model: modelId, cacheDir: m.dir, present: m.present, bytes: m.bytes, repoEmbeddings: repoCached });
+    json({
+      model: modelId,
+      cacheDir: m.dir,
+      present: m.present,
+      bytes: m.bytes,
+      repoEmbeddings: repoCached,
+      embeddingsPath: repoPath,
+    });
     return;
   }
   info(`${c.cyan('vg embed')} · model cache`);
@@ -114,7 +125,9 @@ function showWhere(root: string, modelId: string, asJson?: boolean): void {
   info(`  shared at ${m.dir}`);
   info(`            ${m.present ? c.green(`present · ~${mb(m.bytes)}`) : c.dim('not downloaded yet (fetched on first semantic ask)')}`);
   info(`  this repo ${repoCached ? c.green('embeddings cached') : c.dim('not embedded yet — run `vg embed`')}`);
-  info(c.dim('  no admin/sudo needed — the cache is in your home folder, shared across all repos.'));
+  info(`            ${c.dim(repoPath)}`);
+  info(c.dim('  no admin/sudo needed — the model cache is in your home folder, shared across all repos.'));
+  info(c.dim('  vectors sit next to the code map (binary `embeddings`), not under .vibgrate/cache/.'));
   info(c.dim('  turn off: run with --local · relocate: XDG_CACHE_HOME=<dir> · remove: vg embed --clear'));
 }
 

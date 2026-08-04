@@ -43,7 +43,15 @@ export type { FileParse } from './engine/types.js';
 // Phase 1 — query, navigation, analysis, MCP.
 export { queryGraph, queryGraphSemantic, identifierParts } from './engine/query.js';
 export type { QueryOptions, QueryResult, QueryMatch, SemanticQueryOptions } from './engine/query.js';
-export { loadEmbedder, getNodeEmbeddings, cosine, nodeEmbedText } from './engine/embeddings.js';
+export {
+  loadEmbedder,
+  getNodeEmbeddings,
+  cosine,
+  nodeEmbedText,
+  embeddingsPath,
+  embeddingsPathFor,
+  embeddingsCached,
+} from './engine/embeddings.js';
 export type { Embedder, LoadEmbedderOptions } from './engine/embeddings.js';
 export { findNodes, resolveOne, nodeById } from './engine/lookup.js';
 export { impactOf } from './engine/impact.js';
