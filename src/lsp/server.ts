@@ -40,7 +40,9 @@ import { buildGraph } from '../engine/build.js';
 import { loadGraph } from '../engine/load.js';
 import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
-import { refreshIfStale } from '../engine/refresh.js';
+import { loadGraphPreferIndex } from '../engine/index-db.js';
+import type { RefreshOutcome } from '../engine/refresh.js';
+import { RefreshScheduler } from '../engine/refresh-scheduler.js';
 import { manifestHash, loadScanCache, writeScanCache, isDependencyFile } from './scan-cache.js';
 import { SKIP_DIRS } from '../engine/discover.js';
 import { recordScore, lastEntry, deltaFrom, recentHistory, type ScoreHistoryEntry } from './score-history.js';
@@ -333,12 +335,24 @@ export class VibgrateLanguageServer {
   private shuttingDown = false;
   private graph: VgGraph | null = null;
   private graphBuilding = false;
+  /**
+   * Keeps the freshness probe / incremental rebuild OFF the query path. The
+   * probe alone stat-walks the whole corpus synchronously (seconds on a 20k-file
+   * workspace) and a real drift rebuilds the map; awaiting either inline made a
+   * single Ask block for over a minute. See engine/refresh-scheduler.ts.
+   */
+  private readonly refresher: RefreshScheduler;
 
   constructor(
     private readonly opts: ServerOptions,
     output: NodeJS.WritableStream = process.stdout,
   ) {
     this.conn = new Connection(process.stdin, output);
+    this.refresher = new RefreshScheduler({
+      root: opts.root,
+      graphPath: () => resolveGraphPath(opts.root),
+      onSettled: (outcome) => this.onRefreshSettled(outcome),
+    });
     this.register();
   }
 
@@ -778,17 +792,30 @@ export class VibgrateLanguageServer {
     }
   }
 
-  /** The graph, refreshed if the working tree drifted since the last build (same probe `vg ask` uses). */
+  /**
+   * The graph for a query. The first call still builds the map (there is
+   * nothing to answer from otherwise), but a *refresh* is only ever kicked off
+   * here — never awaited to completion. The scheduler waits a micro-budget so a
+   * warm probe can land, then we answer from the map we have; a rebuild that
+   * outruns the budget is picked up by `onRefreshSettled` for the next query.
+   */
   private async graphForQuery(): Promise<VgGraph | null> {
     await this.ensureGraph();
     if (!this.graph) return null;
-    const graphPath = resolveGraphPath(this.opts.root);
-    const refreshed = await refreshIfStale(this.opts.root, { graphPath });
-    if (refreshed.status === 'refreshed' && refreshed.wrote) {
-      const reloaded = loadGraph(this.opts.root);
-      if (reloaded) this.graph = reloaded;
-    }
+    await this.refresher.maybeRefresh();
     return this.graph;
+  }
+
+  /**
+   * A refresh finished. Reload only when it actually rewrote the map — and
+   * prefer the SQLite index, because re-parsing a six-figure-node `graph.json`
+   * is itself multi-second work we must not do more often than the map changes.
+   */
+  private onRefreshSettled(outcome: RefreshOutcome | null): void {
+    if (outcome?.status !== 'refreshed' || !outcome.wrote) return;
+    const graphPath = resolveGraphPath(this.opts.root);
+    const reloaded = loadGraphPreferIndex(this.opts.root, graphPath)?.graph ?? loadGraph(this.opts.root);
+    if (reloaded) this.graph = reloaded;
   }
 
   private async onGraphQuery(params: unknown): Promise<GraphQueryResult> {

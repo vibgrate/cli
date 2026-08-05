@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildGraph } from '../src/engine/build.js';
-import { queryGraph } from '../src/engine/query.js';
+import { queryGraph, conceptMapLines } from '../src/engine/query.js';
+import { sanitizeAnalysis } from '../src/engine/relevance-provider.js';
 import { findNodes, resolveOne } from '../src/engine/lookup.js';
 import { impactOf } from '../src/engine/impact.js';
 import { shortestPath } from '../src/engine/paths.js';
@@ -246,5 +247,101 @@ describe('shortestPath', () => {
     expect(typeof disc.hint).toBe('string');
     // deleteAsync should have callees in this fixture.
     expect(disc.from.calls.length + disc.from.calledBy.length).toBeGreaterThan(0);
+  });
+});
+
+describe('concept map — deepest topic first, then vendor, then up the tree', () => {
+  /** Shape of a schema-4 analysis, as the provider seam delivers it. */
+  const analysis = {
+    version: 'vg-relevance@1.3.0+pack.test',
+    topics: [{ id: 'infrastructure', score: 1 }],
+    expansions: [],
+    taxonomy: [
+      {
+        path: 'infrastructure/networking/dns/cname',
+        levels: [
+          { id: 'infrastructure', path: 'infrastructure', score: 1, terms: ['provisioning'] },
+          { id: 'networking', path: 'infrastructure/networking', score: 1, terms: ['subnet'] },
+          { id: 'dns', path: 'infrastructure/networking/dns', score: 1, terms: ['dns record'] },
+          { id: 'cname', path: 'infrastructure/networking/dns/cname', score: 1, terms: ['cname record'] },
+        ],
+        score: 1,
+        evidence: 3.2,
+        via: ['cname record'],
+        terms: ['cname record', 'alias record'],
+        files: ['.zone'],
+        standards: [],
+      },
+    ],
+    vendors: [{ name: 'cloudflare', from: 'cloud flre', node: 'infrastructure/cloud/cloudflare', topic: 'infrastructure', score: 0.4, files: ['wrangler.toml'] }],
+    corrections: [{ from: 'cloud flre', to: 'cloudflare', distance: 1 }],
+    files: ['wrangler.toml', '.zone'],
+    standards: [
+      { name: 'W3C WCAG 2.2', publisher: 'World Wide Web Consortium', node: 'accessibility', kind: 'standard', categories: ['accessibility', 'frontend'] },
+      { name: 'GDPR', publisher: 'European Union', node: 'compliance', kind: 'regulation', categories: ['compliance', 'data-privacy'] },
+    ],
+    categories: ['accessibility', 'frontend', 'compliance', 'data-privacy'],
+  };
+
+  it('orders the lines specific → vendor → broader → files → corrections', () => {
+    const lines = conceptMapLines('add to cloud flre cname record for xyz.com', analysis as never, null);
+    const idx = (needle: string) => lines.findIndex((l) => l.includes(needle));
+
+    expect(idx('specifically about cname')).toBe(0);
+    expect(idx('names the product "cloudflare"')).toBe(1);
+    // Then widening, deepest ancestor first.
+    expect(idx('this is dns')).toBeLessThan(idx('this is networking'));
+    expect(idx('this is networking')).toBeLessThan(idx('this is infrastructure'));
+    // Standards after the hierarchy, then files, then corrections.
+    expect(idx('this is infrastructure')).toBeLessThan(idx('Standards that govern'));
+    expect(idx('Standards that govern')).toBeLessThan(idx('usually named or extended'));
+    expect(idx('usually named or extended')).toBeLessThan(idx('Read "cloud flre"'));
+    // Each level speaks with its own vocabulary, not the leaf's.
+    expect(lines[idx('this is dns')]).toContain('dns record');
+    expect(lines[idx('this is infrastructure')]).not.toContain('cname record');
+  });
+
+  it('does not repeat a product that is already the most specific topic', () => {
+    const withVendorLevel = {
+      ...analysis,
+      taxonomy: [
+        {
+          ...analysis.taxonomy[0]!,
+          path: 'infrastructure/cloud/cloudflare',
+          levels: [
+            { id: 'infrastructure', path: 'infrastructure', score: 1, terms: [] },
+            { id: 'cloud', path: 'infrastructure/cloud', score: 1, terms: [] },
+            { id: 'cloudflare', path: 'infrastructure/cloud/cloudflare', score: 1, terms: ['wrangler'] },
+          ],
+        },
+      ],
+    };
+    const lines = conceptMapLines('cloudflare workers', withVendorLevel as never, null);
+    // The level line names it; the vendor line degrades to the typed form only.
+    expect(lines.some((l) => l.includes('specifically about cloudflare'))).toBe(true);
+    expect(lines.some((l) => l.includes('names the product'))).toBe(false);
+    expect(lines.some((l) => l.includes('That product was typed "cloud flre"'))).toBe(true);
+  });
+
+  it('separates specs from legal duties, and lists category slugs', () => {
+    const lines = conceptMapLines('accessibility work', analysis as never, null);
+    expect(lines.some((l) => l.includes('Standards that govern this area: W3C WCAG 2.2 (World Wide Web Consortium)'))).toBe(true);
+    // A regulation is an obligation, not a spec — it gets its own sentence.
+    expect(lines.some((l) => l.includes('Regulations that apply here: GDPR (European Union)'))).toBe(true);
+    expect(lines.some((l) => l.includes('Related categories: accessibility, frontend, compliance, data-privacy'))).toBe(true);
+    const hostile = sanitizeAnalysis({
+      ...analysis,
+      standards: [{ name: 'Fake', publisher: 'x', node: '../../etc/passwd', kind: 'standard', categories: [] }],
+      categories: ['Data Privacy', '../etc', 'data-privacy', 'data-privacy'],
+    } as never);
+    expect(hostile?.standards).toEqual([]);
+    // Categories must be slugs, deduped — a display name or a path is dropped.
+    expect(hostile?.categories).toEqual(['data-privacy']);
+  });
+
+  it('falls back to flat topics for a provider without a taxonomy', () => {
+    const flat = { version: 'old', topics: [{ id: 'payments', score: 1 }], expansions: [{ term: 'mandate', from: 'payments', weight: 0.45 }] };
+    const lines = conceptMapLines('collect the direct debit', flat as never, null);
+    expect(lines.some((l) => l.includes('the "payments" domain'))).toBe(true);
   });
 });

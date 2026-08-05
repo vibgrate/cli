@@ -7,7 +7,8 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { parseGraph } from '../engine/serialize.js';
 import { mapFileStat } from '../engine/snapshot.js';
 import { loadGraphPreferIndex } from '../engine/index-db.js';
-import { refreshIfStale } from '../engine/refresh.js';
+import type { RefreshOutcome, refreshIfStale } from '../engine/refresh.js';
+import { RefreshScheduler, REFRESH_BUDGET_MS as SCHEDULER_BUDGET_MS } from '../engine/refresh-scheduler.js';
 import { TOOLS, budgetSuffix, listedToolNames, warmEmbedderInBackground, type ToolSurface } from './tools.js';
 import { isRelevantChange } from '../engine/watch-filter.js';
 import { renderToolResult } from './response.js';
@@ -36,12 +37,6 @@ import type { VgGraph } from '../schema.js';
  * vg's own artifacts under `.vibgrate/`, never user code.
  */
 
-/** Min gap between freshness probes — bounds stat-walk cost under bursty tool calls. */
-const PROBE_INTERVAL_MS = 2000;
-/** Ceiling for the self-tuned probe interval on very large repos. */
-const MAX_PROBE_INTERVAL_MS = 30_000;
-/** Probe/rebuild may consume at most ~1/PROBE_DUTY_FACTOR of serve wall-time (20 → ≤5%). */
-const PROBE_DUTY_FACTOR = 20;
 /**
  * How long a tool call waits for an in-flight refresh before answering from
  * the current map. Kept deliberately small: MCP tool latency is sub-10ms on
@@ -50,10 +45,11 @@ const PROBE_DUTY_FACTOR = 20;
  * large-repo rebuild into a multi-second stall — measured as TypeScript p50
  * ~5.2s on the release benchmark for the `vg-cli-public` corpus entry.
  * Warm probes still finish inside this window; heavy rebuilds never should.
+ *
+ * Re-exported from the shared scheduler, which owns this and the probe-interval
+ * tuning for every surface (`vg serve` and `vg lsp` alike).
  */
-export const REFRESH_BUDGET_MS = 100;
-/** After a refresh failure (e.g. read-only checkout), don't retry for this long. */
-const FAILURE_COOLDOWN_MS = 60_000;
+export const REFRESH_BUDGET_MS = SCHEDULER_BUDGET_MS;
 /** Settle time between a watcher event and the background refresh it triggers. */
 const WATCH_DEBOUNCE_MS = 400;
 
@@ -119,12 +115,8 @@ export class GraphSource {
   private cached: VgGraph | null = null;
   /** Project root used for freshness probes and rebuilds. */
   readonly root: string;
-  private lastProbeAt = 0;
-  private failedUntil = 0;
-  private inflight: Promise<void> | null = null;
-  /** Self-tuned: grows with measured probe/rebuild cost so huge repos aren't penalized. */
-  private probeIntervalMs = PROBE_INTERVAL_MS;
-  private readonly refreshImpl: RefreshImpl;
+  /** Debounce, single-flight, self-tuning and budget cap — shared with `vg lsp`. */
+  private readonly refresher: RefreshScheduler;
   /**
    * Files seen changing since the last COMMITTED refresh (watcher events,
    * filename → last-seen ms). Entries are cleared only after a refresh that
@@ -145,7 +137,14 @@ export class GraphSource {
     // Prefer an explicit root. Fallback assumes legacy `root/.vibgrate/graph.json`
     // (dirname twice); wrong for the global store — callers should pass `root`.
     this.root = tuning.root ?? path.dirname(path.dirname(graphPath));
-    this.refreshImpl = tuning.refreshImpl ?? refreshIfStale;
+    this.refresher = new RefreshScheduler({
+      root: this.root,
+      graphPath,
+      probeIntervalMs: tuning.probeIntervalMs,
+      refreshBudgetMs: tuning.refreshBudgetMs,
+      refreshImpl: tuning.refreshImpl,
+      onSettled: (outcome, startedAt) => this.onRefreshSettled(outcome, startedAt),
+    });
   }
 
   /** Current graph: auto-refreshed if the tree drifted, reloaded if the file changed. */
@@ -166,48 +165,25 @@ export class GraphSource {
   }
 
   /**
-   * Debounced, single-flight refresh. Never throws — a refresh problem must
-   * degrade to "answer from the current map", not break the tool call.
+   * Debounced, single-flight refresh — the shared scheduler does the work (see
+   * engine/refresh-scheduler.ts). Never throws: a refresh problem must degrade
+   * to "answer from the current map", not break the tool call.
    */
-  private async maybeRefresh(): Promise<void> {
-    const now = Date.now();
-    if (!this.inflight) {
-      const interval = this.tuning.probeIntervalMs ?? this.probeIntervalMs;
-      if (now < this.failedUntil || now - this.lastProbeAt < interval) return;
-      this.lastProbeAt = now;
-      const startedAt = now;
-      this.inflight = this.refreshImpl(this.root, { graphPath: this.graphPath })
-        .then((r) => {
-          if (r.status === 'error') this.failedUntil = Date.now() + FAILURE_COOLDOWN_MS;
-          // A COMMITTED outcome (map verified fresh, or rebuilt) clears the
-          // pending set — but only entries whose last event predates the
-          // refresh start. 'locked'/'error'/'no-snapshot' clear nothing:
-          // the map may still be behind those changes.
-          if (r.status === 'fresh' || r.status === 'refreshed') {
-            for (const [file, seenAt] of this.pendingChanges) {
-              if (seenAt <= startedAt) this.pendingChanges.delete(file);
-            }
-          }
-          // Self-tune off the full wall cost of *every* outcome — including a
-          // multi-second incremental rebuild. Previously only probe-only
-          // outcomes (fresh/no-snapshot/locked) backed off, so a 20s rebuild
-          // of a large repo re-armed after the 2s floor and every sequential
-          // tool call blocked on the refresh budget for the whole suite.
-          const cost =
-            r.status === 'refreshed' && typeof r.ms === 'number' ? Math.max(r.ms, Date.now() - now) : Date.now() - now;
-          this.probeIntervalMs = Math.min(
-            MAX_PROBE_INTERVAL_MS,
-            Math.max(PROBE_INTERVAL_MS, cost * PROBE_DUTY_FACTOR),
-          );
-        })
-        .catch(() => {
-          this.failedUntil = Date.now() + FAILURE_COOLDOWN_MS;
-        })
-        .finally(() => {
-          this.inflight = null;
-        });
+  private maybeRefresh(): Promise<void> {
+    return this.refresher.maybeRefresh();
+  }
+
+  /**
+   * A COMMITTED outcome (map verified fresh, or rebuilt) clears the pending
+   * set — but only entries whose last event predates the refresh start.
+   * 'locked'/'error'/'no-snapshot' clear nothing: the map may still be behind
+   * those changes.
+   */
+  private onRefreshSettled(outcome: RefreshOutcome | null, startedAt: number): void {
+    if (outcome?.status !== 'fresh' && outcome?.status !== 'refreshed') return;
+    for (const [file, seenAt] of this.pendingChanges) {
+      if (seenAt <= startedAt) this.pendingChanges.delete(file);
     }
-    await Promise.race([this.inflight, sleep(this.tuning.refreshBudgetMs ?? REFRESH_BUDGET_MS)]);
   }
 
   /**
@@ -218,8 +194,7 @@ export class GraphSource {
    */
   notePendingChange(filename: string): void {
     this.pendingChanges.set(filename, Date.now());
-    this.lastProbeAt = 0;
-    this.failedUntil = 0;
+    this.refresher.arm();
     if (!this.refresh) return;
     if (this.watchTimer) clearTimeout(this.watchTimer);
     this.watchTimer = setTimeout(() => {

@@ -469,8 +469,66 @@ export function conceptMapLines(
     lines.push(`- "${from}" in the ask implies these codebase identifiers: ${cap(terms)}.`);
   }
 
-  // Relevance-kernel topics + their vocabulary (provider seam, when active).
-  if (relevance?.topics?.length) {
+  // ---------------------------------------------------------------------
+  // What the ask is about, deepest first.
+  //
+  // Order is the message. A reader (or a model) wants the most specific thing
+  // first — "cname" — then the product that makes it concrete — "cloudflare" —
+  // then the containing levels, widening out to "infrastructure". Files come
+  // after that, because they are where to look once you know what you are
+  // looking for. Corrections come last: they explain how the ask was read,
+  // which only matters once the reading itself is on the page.
+  // ---------------------------------------------------------------------
+  const matches = relevance?.taxonomy ?? [];
+  if (matches.length) {
+    // Every matched level, deduped, deepest first. Ties keep provider order,
+    // which is evidence-ranked.
+    const seenPath = new Set<string>();
+    const levels: Array<{ path: string; id: string; depth: number; terms: string[] }> = [];
+    for (const m of matches) {
+      for (const l of m.levels) {
+        if (seenPath.has(l.path)) continue;
+        seenPath.add(l.path);
+        levels.push({ path: l.path, id: l.id, depth: l.path.split('/').length, terms: l.terms });
+      }
+    }
+    const deepest = Math.max(...levels.map((l) => l.depth));
+    const describe = (l: { id: string; terms: string[] }, lead: string) =>
+      l.terms.length
+        ? `${lead} ${l.id}; code for it typically uses: ${cap(l.terms)}.`
+        : `${lead} ${l.id}.`;
+
+    for (const l of levels.filter((l) => l.depth === deepest)) {
+      lines.push(describe(l, '- The ask is specifically about'));
+    }
+
+    // The product named sits directly under the most specific topic — it is
+    // what turns that topic into this codebase's version of it. When the
+    // product IS the most specific topic, the line above already said so, and
+    // only the typed form is worth adding.
+    const deepestIds = new Set(levels.filter((l) => l.depth === deepest).map((l) => l.id));
+    for (const v of (relevance?.vendors ?? []).filter((v) => v.score > 0).slice(0, 3)) {
+      if (deepestIds.has(v.name)) {
+        if (v.from !== v.name) lines.push(`- That product was typed "${v.from}".`);
+        continue;
+      }
+      lines.push(
+        v.from === v.name
+          ? `- It names the product "${v.name}".`
+          : `- It names the product "${v.name}" (typed "${v.from}").`,
+      );
+    }
+
+    // Then widen, one level at a time — skipping any level the vendor line
+    // already named, so a Cloudflare ask does not say "cloudflare" twice.
+    const named = new Set((relevance?.vendors ?? []).map((v) => v.name));
+    for (let d = deepest - 1; d >= 1; d--) {
+      for (const l of levels.filter((l) => l.depth === d && !named.has(l.id))) {
+        lines.push(describe(l, '- More broadly, this is'));
+      }
+    }
+  } else if (relevance?.topics?.length) {
+    // Provider without a taxonomy (or an older one): flat topics, as before.
     const topicVocab = new Map<string, string[]>();
     for (const e of relevance.expansions ?? []) {
       const list = topicVocab.get(e.from) ?? [];
@@ -485,6 +543,42 @@ export function conceptMapLines(
           : `- The ask is about the "${t.id}" domain.`,
       );
     }
+  }
+
+  // What governs the work, named at the revision the provider tracks. This is
+  // the difference between "this is accessibility work" and "this is
+  // accessibility work, and WCAG 2.2 is what it has to satisfy".
+  const standards = relevance?.standards ?? [];
+  if (standards.length) {
+    const specs = standards.filter((st) => st.kind !== 'regulation');
+    const rules = standards.filter((st) => st.kind === 'regulation');
+    const render = (list: typeof standards) =>
+      list
+        .slice(0, 3)
+        .map((st) => (st.publisher ? `${st.name} (${st.publisher})` : st.name))
+        .join('; ');
+    // A spec and a legal duty are not the same obligation, so they are not
+    // pooled into one sentence.
+    if (specs.length) lines.push(`- Standards that govern this area: ${render(specs)}.`);
+    if (rules.length) lines.push(`- Regulations that apply here: ${render(rules)}.`);
+  }
+
+  // The site's own category slugs for everything above, so a reader (or a
+  // lookup) can cross-reference content by the same key.
+  const categories = relevance?.categories ?? [];
+  if (categories.length) {
+    lines.push(`- Related categories: ${cap(categories)}.`);
+  }
+
+  // Where that work usually lives — the concrete lead, after the abstract one.
+  const fileHints = relevance?.files ?? [];
+  if (fileHints.length) {
+    lines.push(`- Files for this kind of work are usually named or extended: ${cap(fileHints)}.`);
+  }
+
+  // How the ask was read, if it was read as something other than typed.
+  for (const c of (relevance?.corrections ?? []).slice(0, 3)) {
+    lines.push(`- Read "${c.from}" in the ask as "${c.to}".`);
   }
 
   // Conversation carry-over provenance.
@@ -597,14 +691,63 @@ const IMPORTANCE_WEIGHT = 0.4;
 const TOPIC_AFFINITY_WEIGHT = 0.3;
 
 /** Affinity multiplier + provenance for one node under the current analysis. */
+/**
+ * Shared root-first path depth between two taxonomy paths.
+ * "infrastructure/networking/dns/cname" vs "infrastructure/networking/dns" → 3.
+ */
+function sharedDepth(a: string, b: string): number {
+  const as = a.split('/');
+  const bs = b.split('/');
+  let n = 0;
+  while (n < as.length && n < bs.length && as[n] === bs[n]) n++;
+  return n;
+}
+
+/**
+ * How strongly a node's taxonomy tags match what the ask is about.
+ *
+ * Tags and query matches are both PATHS, so agreement is measured by how far
+ * down the tree they agree, not merely whether they share a label. A DNS ask
+ * and a file tagged `infrastructure/networking/dns` agree three levels deep
+ * and get most of the bonus; the same ask and a file tagged
+ * `infrastructure/containers` agree only at the root and get a fraction of it.
+ * That is the whole reason tags carry paths.
+ *
+ * Falls back to flat topic-id matching when the provider predates the
+ * taxonomy (or a stale sidecar still holds flat tags), so an older install
+ * ranks exactly as it did before.
+ */
 function topicAffinity(
   nodeId: string,
   relevance: RelevanceAnalysis | null | undefined,
   topicTags: Map<string, readonly string[]> | null | undefined,
 ): { boost: number; label: string } {
-  if (!relevance?.topics?.length || !topicTags) return { boost: 1, label: '' };
+  if (!topicTags) return { boost: 1, label: '' };
   const tags = topicTags.get(nodeId);
   if (!tags?.length) return { boost: 1, label: '' };
+
+  const paths = relevance?.taxonomy ?? [];
+  if (paths.length && tags.some((t) => t.includes('/'))) {
+    let best = 0;
+    let label = '';
+    for (const match of paths) {
+      const askDepth = match.path.split('/').length;
+      for (const tag of tags) {
+        const shared = sharedDepth(match.path, tag);
+        if (shared === 0) continue;
+        // Specificity of agreement × confidence in the match.
+        const affinity = (shared / askDepth) * match.score;
+        if (affinity > best) {
+          best = affinity;
+          label = shared === askDepth ? match.path : match.path.split('/').slice(0, shared).join('/');
+        }
+      }
+    }
+    if (best <= 0) return { boost: 1, label: '' };
+    return { boost: 1 + TOPIC_AFFINITY_WEIGHT * Math.min(best, 1), label: `, topic:${label}` };
+  }
+
+  if (!relevance?.topics?.length) return { boost: 1, label: '' };
   let affinity = 0;
   const matched: string[] = [];
   for (const t of relevance.topics) {
