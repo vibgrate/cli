@@ -12,7 +12,7 @@
   <a href="https://www.npmjs.com/package/@vibgrate/cli"><img src="https://img.shields.io/npm/v/@vibgrate/cli?color=blue&label=npm" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/@vibgrate/cli"><img src="https://img.shields.io/npm/dm/@vibgrate/cli?color=green" alt="npm downloads" /></a>
   <a href="https://vibgrate.com/cli"><img src="https://img.shields.io/badge/live%20demo-vibgrate.com%2Fcli-3FB0A4" alt="live demo" /></a>
-  <a href="https://vibgrate.com/mcp"><img src="https://img.shields.io/badge/Vibgrate%20MCP%20(hosted)-vibgrate.com%2Fmcp-8B5CF6" alt="Vibgrate MCP (hosted)" /></a>
+  <a href="https://vibgrate.com/mcp"><img src="https://img.shields.io/badge/Vibgrate%20Cloud%20MCP-vibgrate.com%2Fmcp-8B5CF6" alt="Vibgrate Cloud MCP" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="node 22+" />
 </p>
@@ -20,7 +20,7 @@
 `vg` answers two questions for any repo:
 
 1. **What is this codebase?** — A deterministic [code graph](https://vibgrate.com/graph): call trees, import paths, impact surfaces, dependency facts.
-2. **How far behind is it?** — A ranked **[DriftScore](https://vibgrate.com/driftscore)** (0–100) with runtime/framework lag, dependency age and EOL proximity, and a prioritised fix list.
+2. **How far behind is it?** — A ranked **[DriftScore](https://vibgrate.com/driftscore)** (0–100) with runtime/framework lag, dependency age and EOL proximity, and a prioritised fix list. Exposure is scored separately as a **[RiskScore](https://vibgrate.com/riskscore)**; the two together are the **[DriftRisk Index](https://vibgrate.com/driftrisk)**. The full methodology — formulas, sources, and limitations — is published as a [whitepaper](https://vibgrate.com/whitepapers/software-risk-and-drift-scoring-methodology) under CC BY 4.0 (DOI [10.5281/zenodo.21336304](https://doi.org/10.5281/zenodo.21336304)).
 
 Everything runs **on your machine**. No API key, no network call, no data leaving your repo unless you explicitly push. The `vibgrate` command is an alias for `vg` — they are interchangeable.
 
@@ -113,7 +113,7 @@ Browse all 21+ supported assistants and their skill descriptions at **[vibgrate.
 - **resolve_library** — resolve a library to its canonical id and the version your project uses.
 - **library_docs** — version-correct usage docs for a library, sliced to a token budget.
 
-Prefer the hosted server over your team's scan data? **[Vibgrate MCP](https://vibgrate.com/mcp)** connects your assistant to Vibgrate Cloud (OAuth 2.1, 51 tools).
+Prefer the hosted server over your team's scan data? **[Vibgrate Cloud MCP](https://vibgrate.com/mcp)** connects your assistant to Vibgrate Cloud (OAuth 2.1, 51 tools).
 
 ---
 
@@ -169,7 +169,7 @@ vg scan --vulns                 # drift score + known vulnerabilities
 vg scan --full                  # drift + vulnerabilities + a banned-dependency report
 ```
 
-In a git repository, every finding is attributed from history: who introduced the vulnerable version, in which commit, and how long you have been exposed. Those exposure windows roll up into remediation metrics framed around the [EU Cyber Resilience Act (CRA)](https://vibgrate.com/compliance/cra) — per-severity time-exposed and SLA breaches — so "are we fixing things fast enough?" has a number.
+In a git repository, every finding is attributed from history: who introduced the vulnerable version, in which commit, and how long you have been exposed. Those exposure windows roll up into remediation metrics framed around the [EU Cyber Resilience Act (CRA)](https://vibgrate.com/cra) — and feed [Vibgrate Evidence](https://vibgrate.com/evidence), which freezes shipped-release manifests so "which shipped products contain this vulnerability?" has a signed, offline-verifiable answer — per-severity time-exposed and SLA breaches — so "are we fixing things fast enough?" has a number.
 
 ```bash
 vg why lodash                   # who added a dependency, every version since, and any open vulnerabilities
@@ -270,7 +270,7 @@ vg scan --offline --package-manifest ./package-versions.zip --max-privacy --form
 
 Add `.vibgrate/` to your `.gitignore` — those are regenerated local outputs.
 
-More on how Vibgrate handles code and data: [vibgrate.com/security](https://vibgrate.com/security).
+More on how Vibgrate handles code and data: [vibgrate.com/security](https://vibgrate.com/security), and the [subprocessor register](https://vibgrate.com/subprocessors).
 
 ---
 
@@ -375,13 +375,13 @@ vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [
   [--drift-budget <score>] [--drift-worsening <percent>] [--baseline <file>]
 ```
 
-Full flag and configuration reference: **[DOCS.md](./DOCS.md)** · **[vibgrate.com/cli](https://vibgrate.com/cli)**.
+Full flag and configuration reference: **[DOCS.md](./DOCS.md)** · **[vibgrate.com/cli](https://vibgrate.com/cli)** · [help centre](https://vibgrate.com/help) · [glossary](https://vibgrate.com/glossary).
 
 ---
 
 ## Why teams adopt Vibgrate
 
-Most systems don't fail all at once — they accumulate upgrade debt and architectural [drift](https://vibgrate.com/glossary/code-drift) silently until migrations become expensive. `vg` makes that debt measurable and repeatable — the practice we call [Code Drift Intelligence](https://vibgrate.com/code-drift-intelligence) — and gives AI assistants the local context they need to be useful:
+Most systems don't fail all at once — they accumulate upgrade debt and architectural [drift](https://vibgrate.com/glossary/code-drift) silently until migrations become expensive. `vg` makes that debt measurable and repeatable — the practice we call [Code Drift Intelligence](https://vibgrate.com/code-drift-intelligence) — and gives AI assistants the local context they need to be useful. See how it lands for [teams](https://vibgrate.com/solutions/teams) and [enterprises](https://vibgrate.com/solutions/enterprise), or compare it with what you already run: [vs Renovate](https://vibgrate.com/vs/renovate) · [vs Dependabot](https://vibgrate.com/vs/dependabot) · [vs Snyk](https://vibgrate.com/vs/snyk).
 
 | Mode | What you get | Best for |
 | --- | --- | --- |
@@ -414,18 +414,26 @@ When `@vibgrate/cli` is installed, it registers **both** bin entries uncondition
 
 ---
 
+## Everything else Vibgrate makes
+
+| | |
+|---|---|
+| [**Vibgrate CLI**](https://vibgrate.com/cli) | This package — scan, score, and map any repository. [Live demo](https://vibgrate.com/cli) · [benchmarks](https://vibgrate.com/cli/benchmarks) · [token savings](https://vibgrate.com/cli/benchmarks/token-savings) |
+| [**Vibgrate for VS Code**](https://vibgrate.com/vscode) | The same score in your editor, plus VG Code. [Marketplace](https://marketplace.visualstudio.com/items?itemName=vibgrate.vibgrate-vscode) · [Open VSX](https://open-vsx.org/extension/vibgrate/vibgrate-vscode) |
+| [**Vibgrate Graph**](https://vibgrate.com/graph) | The deterministic local code map behind `vg map`, `vg impact` and `vg show` |
+| [**Vibgrate AI Context**](https://vibgrate.com/library) | `vg serve` — version-correct library docs, your code map, and offline drift, served to any assistant. [Supported assistants](https://vibgrate.com/skills) · [on mcp.so](https://mcp.so/servers/cli-a2b26f) |
+| [**Vibgrate Cloud MCP**](https://vibgrate.com/mcp) | The hosted MCP server over your workspace data (OAuth 2.1) |
+| [**Vibgrate Cloud**](https://vibgrate.com/cloud) | History, trends, and team rollups. [Create a workspace](https://dash.vibgrate.com) · [pricing](https://vibgrate.com/pricing) |
+| [**Vibgrate Evidence**](https://vibgrate.com/evidence) | Signed, reproducible release evidence — including for the [EU CRA](https://vibgrate.com/cra) |
+
+**How the scores work:** [DriftScore](https://vibgrate.com/driftscore) · [RiskScore](https://vibgrate.com/riskscore) · [DriftRisk Index](https://vibgrate.com/driftrisk) · [published methodology](https://vibgrate.com/whitepapers/software-risk-and-drift-scoring-methodology) · [public index of real scans](https://vibgrate.com/driftrisk/index) · [README badges](https://vibgrate.com/badges)
+
+**Reference:** [package registry](https://vibgrate.com/packages) · [integrations marketplace](https://vibgrate.com/marketplace) · [glossary](https://vibgrate.com/glossary) · [help centre](https://vibgrate.com/help) · [security](https://vibgrate.com/security) · [mission](https://vibgrate.com/mission)
+
 <p align="center">
   <a href="https://dash.vibgrate.com"><strong>Create a free workspace →</strong></a>
   &nbsp;·&nbsp;
   <a href="https://vibgrate.com/cli">Try the live demo</a>
-  &nbsp;·&nbsp;
-  <a href="https://vibgrate.com/cli/benchmarks">Benchmarks</a>
-  &nbsp;·&nbsp;
-  <a href="https://vibgrate.com/library">Vibgrate AI Context (local MCP)</a>
-  &nbsp;·&nbsp;
-  <a href="https://vibgrate.com/mcp">Vibgrate MCP (hosted)</a>
-  &nbsp;·&nbsp;
-  <a href="https://vibgrate.com/skills">AI agent skills</a>
   &nbsp;·&nbsp;
   <a href="./DOCS.md">Full docs</a>
 </p>

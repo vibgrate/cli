@@ -1970,7 +1970,7 @@ import type {
 - [Vibgrate AI Context (local-first MCP)](https://vibgrate.com/library)
 - [Vibgrate Graph](https://vibgrate.com/graph)
 - [Vibgrate Cloud](https://vibgrate.com/cloud) · [create a free workspace](https://dash.vibgrate.com)
-- [Vibgrate MCP (hosted)](https://vibgrate.com/mcp)
+- [Vibgrate Cloud MCP](https://vibgrate.com/mcp)
 - [AI agent skills](https://vibgrate.com/skills)
 - [Glossary](https://vibgrate.com/glossary)
 - [Help center](https://vibgrate.com/help)
