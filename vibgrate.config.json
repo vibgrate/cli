@@ -1,0 +1,9 @@
+{
+  "$comment": "Self-scan configuration for this package (and for the public vibgrate/cli mirror it seeds). Excludes the vendored sample repos used as scanner test targets so their deliberately-frozen dependencies do not distort this repo's own DriftScore, SCA findings, or project count. The monorepo root config (../../vibgrate.config.json) covers the same paths for root-level scans; this file is what applies when the scan is rooted here or in the public mirror. Keep $excludeNotes in sync when editing `exclude`.",
+  "$excludeNotes": {
+    "packages/test-solutions/**": "Vendored real-world sample repos (Next.js SaaS, Turborepo, Clean Architecture, …) used as scan test targets and as the recorded CLI-simulator scenarios — their dependencies are intentionally frozen in time and are never installed or executed."
+  },
+  "exclude": [
+    "packages/test-solutions/**"
+  ]
+}
