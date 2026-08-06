@@ -512,6 +512,15 @@ export const OPENAI_COMPATIBLE: Record<string, Omit<OpenAiCompatibleConfig, 'lab
   litellm: { baseUrl: process.env.LITELLM_BASE_URL || 'http://127.0.0.1:4000', apiKeyEnv: 'LITELLM_API_KEY', local: false, label: 'LiteLLM' },
   openai: { baseUrl: 'https://api.openai.com/v1', apiKeyEnv: 'OPENAI_API_KEY', local: false, label: 'OpenAI' },
   together: { baseUrl: 'https://api.together.xyz/v1', apiKeyEnv: 'TOGETHER_API_KEY', local: false, label: 'Together' },
+  /**
+   * VS Code language models (Copilot Chat etc.) via the extension's loopback
+   * OpenAI-compatible proxy. Base URL is injected as VSCODE_LM_BASE_URL at spawn.
+   */
+  'vscode-lm': {
+    baseUrl: process.env.VSCODE_LM_BASE_URL || 'http://127.0.0.1:0/v1',
+    local: true,
+    label: 'VS Code Language Model',
+  },
   lmstudio: { baseUrl: process.env.LMSTUDIO_BASE_URL || 'http://127.0.0.1:1234/v1', local: true, label: 'LM Studio (local)' },
   /**
    * Microsoft Foundry Local — OpenAI-compatible local endpoint (Windows NPU/GPU).

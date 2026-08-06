@@ -27,29 +27,29 @@ describe('compileVerificationLadder', () => {
 });
 
 describe('runVerificationLadder', () => {
-  it('passes when syntax files exist and command exits 0', () => {
+  it('passes when syntax files exist and command exits 0', async () => {
     const files: Record<string, string> = { 'src/a.ts': 'x', 'src/b.ts': 'y' };
     const run = vi.fn(() => ({ stdout: 'ok', exitCode: 0 }));
     const steps = compileVerificationLadder(plan({ notes: [], suggestedTests: [] }), { testCommand: 'npm test' });
-    const result = runVerificationLadder(steps, { readFile: (f) => files[f] ?? null, run });
+    const result = await runVerificationLadder(steps, { readFile: (f) => files[f] ?? null, run });
     expect(result.ok).toBe(true);
     expect(result.ranCommands).toBe(true);
     expect(run).toHaveBeenCalledWith('npm test');
   });
 
-  it('fails fast on missing syntax file', () => {
+  it('fails fast on missing syntax file', async () => {
     const run = vi.fn(() => ({ stdout: '', exitCode: 0 }));
     const steps = compileVerificationLadder(plan({ notes: [], suggestedTests: [] }), { testCommand: 'npm test' });
-    const result = runVerificationLadder(steps, { readFile: (f) => (f === 'src/a.ts' ? 'x' : null), run });
+    const result = await runVerificationLadder(steps, { readFile: (f) => (f === 'src/a.ts' ? 'x' : null), run });
     expect(result.ok).toBe(false);
     expect(result.steps.some((s) => !s.ok && s.message.includes('missing'))).toBe(true);
     expect(run).not.toHaveBeenCalled();
   });
 
-  it('fails when the test command exits non-zero', () => {
+  it('fails when the test command exits non-zero', async () => {
     const files: Record<string, string> = { 'src/a.ts': 'x', 'src/b.ts': 'y' };
     const steps = compileVerificationLadder(plan({ notes: [], suggestedTests: [] }), { testCommand: 'npm test' });
-    const result = runVerificationLadder(steps, {
+    const result = await runVerificationLadder(steps, {
       readFile: (f) => files[f] ?? null,
       run: () => ({ stdout: 'FAIL', exitCode: 1 }),
     });

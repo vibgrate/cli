@@ -44,7 +44,12 @@ export interface LoadEmbedderOptions {
   model?: string; // override the embedding model id
   noDownload?: boolean; // only load if the model is already cached (never fetch)
   showDownloadProgress?: boolean; // let fastembed print its one-time download progress
-  onUnavailable?: (reason: EmbedUnavailable) => void; // called (not thrown) when it can't load
+  /**
+   * Called (not thrown) when the backend can't load. `detail` carries the
+   * underlying loader error when there is one, so a host can log something
+   * actionable instead of a bare category.
+   */
+  onUnavailable?: (reason: EmbedUnavailable, detail?: string) => void;
 }
 
 /** The embedding model id in effect (explicit override → default). */
@@ -198,15 +203,16 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
   const modelId = resolveEmbedModel(options.model);
   // noDownload (used by the background warm-up): never fetch — bail if not cached.
   if (options.noDownload && !isModelReady(modelId)) return null;
-  const fail = (reason: EmbedUnavailable): null => {
-    options.onUnavailable?.(reason);
+  const fail = (reason: EmbedUnavailable, detail?: string): null => {
+    options.onUnavailable?.(reason, detail);
     return null;
   };
 
   // Lazy, optional dependency (native ONNX): loaded only for `vg ask`/`embed`,
   // never by build/verify, so the graph artifact stays deterministic.
-  const mod: any = await importEmbedBackend();
-  if (!mod?.FlagEmbedding) return fail('not-installed');
+  const backend = await importEmbedBackend();
+  const mod: any = backend.mod;
+  if (!mod?.FlagEmbedding) return fail('not-installed', backend.error);
 
   const cache = modelCacheDir(); // central, shared across all repos
   try {
@@ -251,7 +257,7 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
       },
     };
   } catch (e) {
-    return fail(isPermissionError(e) ? 'no-permission' : 'download-failed');
+    return fail(isPermissionError(e) ? 'no-permission' : 'download-failed', errText(e));
   }
 }
 
@@ -264,20 +270,44 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
  * dependency tree so the copy the user consented to is the one that loads.
  * Any resolution failure falls through — never throws.
  */
-async function importEmbedBackend(): Promise<any> {
+async function importEmbedBackend(): Promise<{ mod: any | null; error?: string }> {
   const hostDir = process.env.VIBGRATE_EMBEDDER_PATH;
+  let error: string | undefined;
   if (hostDir) {
     try {
       const req = createRequire(path.join(hostDir, 'package.json'));
       const mod: any = await import(pathToFileURL(req.resolve('fastembed')).href);
-      // A CJS entry imported over ESM may nest its exports under `default`.
-      const resolved = mod?.FlagEmbedding ? mod : mod?.default;
-      if (resolved?.FlagEmbedding) return resolved;
-    } catch {
-      /* fall through to normal resolution */
+      const resolved = unwrapBackend(mod);
+      if (resolved) return { mod: resolved };
+      error = `${hostDir}: fastembed loaded but exported no FlagEmbedding`;
+    } catch (e) {
+      // Keep the reason. A host-supplied backend that resolves but won't load
+      // (native binary built for another ABI, a half-extracted tree, a missing
+      // transitive dep) is indistinguishable from "never installed" once the
+      // error is dropped — and that is the one failure a user cannot act on.
+      error = `${hostDir}: ${errText(e)}`;
     }
   }
-  return await import('fastembed' as string).catch(() => null);
+  try {
+    const mod: any = await import('fastembed' as string);
+    const resolved = unwrapBackend(mod);
+    return resolved ? { mod: resolved } : { mod: null, error: error ?? 'fastembed exported no FlagEmbedding' };
+  } catch (e) {
+    return { mod: null, error: error ?? errText(e) };
+  }
+}
+
+/** A CJS entry imported over ESM may nest its exports one or two `default`s deep. */
+function unwrapBackend(mod: any): any | null {
+  for (const candidate of [mod, mod?.default, mod?.default?.default]) {
+    if (candidate?.FlagEmbedding) return candidate;
+  }
+  return null;
+}
+
+function errText(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  return msg.replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
 /** Ceiling for the one-time model fetch/init; override via VG_EMBED_TIMEOUT_MS. */

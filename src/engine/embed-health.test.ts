@@ -3,8 +3,15 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { embedderHealth, clearEmbedderHealth, embedHealthPath, crashedMessage } from './embed-health.js';
+import {
+  embedderHealth,
+  clearEmbedderHealth,
+  embedHealthPath,
+  crashedMessage,
+  probeModuleUrl,
+} from './embed-health.js';
 import { VERSION } from '../version.js';
+import { pathToFileURL } from 'node:url';
 
 let dir: string;
 beforeEach(() => {
@@ -185,5 +192,35 @@ describe('crashedMessage', () => {
     expect(m).toMatch(/SIGTRAP/);
     expect(m).toMatch(/npm install -g --allow-scripts=/);
     expect(m).toMatch(/--local/);
+  });
+});
+
+describe('probeModuleUrl', () => {
+  it('prefers a sibling embeddings.js when present (unbundled / source layout)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-probe-mod-'));
+    try {
+      fs.writeFileSync(path.join(tmp, 'embed-health.js'), '');
+      fs.writeFileSync(path.join(tmp, 'embeddings.js'), 'export function loadEmbedder() {}');
+      fs.writeFileSync(path.join(tmp, 'index.js'), 'export function loadEmbedder() {}');
+      const url = probeModuleUrl(pathToFileURL(path.join(tmp, 'embed-health.js')).href);
+      expect(url).toBe(pathToFileURL(path.join(tmp, 'embeddings.js')).href);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to index.js when embeddings.js is absent (tsup-bundled layout)', () => {
+    // This is the published shape: health code lives in dist/cli.js, loadEmbedder
+    // is re-exported from dist/index.js, and there is no dist/embeddings.js.
+    // The old hard-coded ./embeddings.js URL made every probe return unknown.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-probe-mod-'));
+    try {
+      fs.writeFileSync(path.join(tmp, 'cli.js'), '');
+      fs.writeFileSync(path.join(tmp, 'index.js'), 'export function loadEmbedder() {}');
+      const url = probeModuleUrl(pathToFileURL(path.join(tmp, 'cli.js')).href);
+      expect(url).toBe(pathToFileURL(path.join(tmp, 'index.js')).href);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

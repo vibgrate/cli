@@ -951,7 +951,9 @@ Idempotent and repo-local (changes can be committed and shared with your team).
 
 **Supported assistant ids:** `claude`, `cursor`, `windsurf`, `vscode`, `codex`, `gemini`, `grok`, `opencode`, `kilo`, `aider`, `factory`, `trae`, `kiro`, `amp`, `kimi`, `codebuddy`, `copilot-cli`, `pi`, `devin`, `hermes`, `openclaw`, `agents`
 
-Run `vg install --list` for the live support matrix (ids can grow over time).
+Run `vg install --list` for the live support matrix (ids can grow over time) — it shows, per assistant, whether the install writes an MCP registration, a skill, and a nudge.
+
+**Where the MCP server is registered.** Each host reads its own config file, so `vg install` writes the one that host actually loads: `.mcp.json` (Claude Code), `.cursor/mcp.json`, `.windsurf/mcp.json`, `.vscode/mcp.json`, and `.grok/config.toml` (a `[mcp_servers.vg]` table — what `grok mcp add --scope project` writes). Assistants without an MCP entry in the matrix get the skill and nudge, and their AI reaches the graph through the `vg` CLI instead. Existing entries, sections, and comments in these files are preserved — only the `vg` entry is written.
 
 | Flag | Description |
 |------|-------------|

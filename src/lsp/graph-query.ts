@@ -130,6 +130,7 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
     const budgetMs = semanticBudgetMs();
     log(`ask: trying the semantic path (budget ${Math.round(budgetMs / 1000)}s)`);
     let reason: EmbedUnavailable | undefined;
+    let detail: string | undefined;
     const started = Date.now();
     try {
       // Every step here is bounded and fallible — a missing backend, a cold
@@ -137,7 +138,12 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
       // the lexical floor below always answers.
       result = await withTimeout(
         (async () => {
-          const embedder = await loadEmbedder({ onUnavailable: (r) => (reason = r) });
+          const embedder = await loadEmbedder({
+            onUnavailable: (r, d) => {
+              reason = r;
+              detail = d;
+            },
+          });
           if (!embedder) return null;
           log(`ask: embedder "${embedder.id}" loaded in ${Date.now() - started}ms; embedding nodes…`);
           const vectors = await getNodeEmbeddings(graph, embedder, ctx.root);
@@ -151,7 +157,13 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
       );
       if (!result) {
         note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
-        log(`ask: semantic unavailable (${reason ?? 'no backend'}) — falling back to lexical`);
+        // Log the loader's own error too: "not-installed" on a machine where the
+        // backend *is* installed means it failed to load, and only this line
+        // says why (wrong ABI, missing transitive dep, unreadable tree).
+        log(
+          `ask: semantic unavailable (${reason ?? 'no backend'}) — falling back to lexical` +
+            (detail ? ` · ${detail}` : ''),
+        );
       }
     } catch (err) {
       mode = 'lexical';

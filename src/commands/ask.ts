@@ -81,7 +81,14 @@ export function registerAsk(program: Command): void {
           info(c.dim('  preparing semantic search (first use embeds the map; cached, resumable & offline after)…'));
         }
         let reason: EmbedUnavailable | undefined;
-        const embedder = await loadEmbedder({ local: global.local, onUnavailable: (r) => (reason = r) });
+        let detail: string | undefined;
+        const embedder = await loadEmbedder({
+          local: global.local,
+          onUnavailable: (r, d) => {
+            reason = r;
+            detail = d;
+          },
+        });
         if (embedder) {
           const bar = !global.json && firstRun ? new ProgressBar(c.dim('embedding')) : undefined;
           const vectors = await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
@@ -91,6 +98,7 @@ export function registerAsk(program: Command): void {
         } else {
           result = queryGraph(graph, q, { budget, relevance, topicTags });
           note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
+          if (detail) note += ` (${detail})`;
         }
       } else {
         result = queryGraph(graph, q, { budget, relevance, topicTags });
