@@ -524,10 +524,14 @@ Check for and install updates.
 vg update [--check] [--pm <manager>]
 ```
 
-| Flag      | Description                                            |
-| --------- | ------------------------------------------------------ |
-| `--check` | Only check for updates, don't install                  |
-| `--pm`    | Force a package manager (`npm`, `pnpm`, `yarn`, `bun`) |
+| Flag        | Description                                            |
+| ----------- | ------------------------------------------------------ |
+| `--check`   | Only check for updates, don't install                  |
+| `--pm`      | Force a package manager (`npm`, `pnpm`, `yarn`, `bun`) |
+| `--global`  | Update the global installation                         |
+| `-y, --yes` | Skip confirmation prompts                              |
+
+**On Windows**, updating a global install replaces files the running `vg` process has open — Windows locks loaded native modules (`.node`), so npm fails with `EBUSY: resource busy or locked`. `vg update` handles this: it stops the vgd daemon and any older `vg serve` first, and if the install still hits a locked file it offers to finish the update from a detached script that waits for `vg` to exit. Pass `-y` to accept that without a prompt. The script writes a transcript whose path is printed; check the result with `vg --version`.
 
 ---
 

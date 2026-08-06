@@ -172,7 +172,8 @@ describe('relayErrorDetail', () => {
     });
     const rendered = relayErrorDetail(body);
     expect(rendered).toContain('No allowed providers are available for the selected model.');
-    expect(rendered).toContain('requested provider(s): google-ai-studio');
+    expect(rendered).toContain('routing was restricted to: google-ai-studio');
+    expect(rendered).toContain('this model is served by: anthropic, azure');
     expect(rendered).not.toContain('{');
   });
 
