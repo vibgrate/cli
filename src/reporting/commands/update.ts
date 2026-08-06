@@ -10,7 +10,8 @@ import { clearEmbedderHealth } from '../../engine/embed-health.js';
 import { fetchLatestVersion } from '../utils/update-check.js';
 import { pathExists } from '../utils/fs.js';
 import { liveStatsDir, reapOtherVersionServers, type ReapedServer } from '../../mcp/live-stats.js';
-import { restartVgdIfRunning } from '../../commands/daemon.js';
+import { restartVgdIfRunning, stopVgd } from '../../commands/daemon.js';
+import { isFileLockError, scheduleDeferredUpdate } from './update-windows.js';
 
 export type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'bun';
 
@@ -232,15 +233,121 @@ export async function getLocalDependencyState(
  * the aggressive add never runs unattended (e.g. in CI) without an explicit flag.
  */
 async function confirmWorkspaceRoot(pm: PackageManager): Promise<boolean> {
+  return confirm(`Update the ${pm} workspace root with -w? [y/N]: `);
+}
+
+/**
+ * Ask a yes/no question. Returns false when not attached to a TTY so nothing
+ * aggressive ever runs unattended (e.g. in CI) without an explicit flag.
+ */
+async function confirm(question: string): Promise<boolean> {
   if (!(process.stdin.isTTY && process.stdout.isTTY)) return false;
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => {
-    rl.question(chalk.yellow(`Update the ${pm} workspace root with -w? [y/N]: `), (ans) => {
+    rl.question(chalk.yellow(question), (ans) => {
       rl.close();
       const t = ans.trim().toLowerCase();
       resolve(t === 'y' || t === 'yes');
     });
   });
+}
+
+/**
+ * Run the install command, streaming its output live while keeping a copy so a
+ * failure can be classified (a locked file on Windows reads very differently
+ * from a registry or packaging error). Only the tail is retained — npm can be
+ * extremely chatty and we only ever inspect the error summary.
+ */
+const CAPTURED_OUTPUT_LIMIT = 64_000;
+
+async function runInstall(cmd: string, cwd: string): Promise<{ ok: boolean; output: string }> {
+  const { spawn } = await import('node:child_process');
+  return new Promise((resolve) => {
+    const child = spawn(cmd, { cwd, shell: true, stdio: ['inherit', 'pipe', 'pipe'] });
+    let output = '';
+    const tee = (src: NodeJS.ReadableStream | null, dest: NodeJS.WriteStream): void => {
+      if (!src) return;
+      src.setEncoding('utf8');
+      src.on('data', (chunk: string) => {
+        dest.write(chunk);
+        output += chunk;
+        if (output.length > CAPTURED_OUTPUT_LIMIT) output = output.slice(-CAPTURED_OUTPUT_LIMIT);
+      });
+    };
+    tee(child.stdout, process.stdout);
+    tee(child.stderr, process.stderr);
+    child.on('error', (err) => resolve({ ok: false, output: `${output}\n${String(err)}` }));
+    child.on('close', (code) => resolve({ ok: code === 0, output }));
+  });
+}
+
+/**
+ * Windows cannot overwrite a loaded native addon, so every vg process holding
+ * one blocks a global update (see update-windows.ts). Retire the ones we can
+ * before installing: `vg serve` instances on an older build, and the vgd
+ * daemon — which is deliberately left stopped rather than restarted, because a
+ * restarted daemon re-locks the files we are about to replace. It comes back
+ * on the next command that needs it.
+ */
+async function releaseWindowsFileLocks(cwd: string, keepVersion: string): Promise<void> {
+  reapAndReport(cwd, keepVersion);
+  try {
+    const { vgdSocketPath } = await import('../../runtime/vgd/index.js');
+    const result = await stopVgd(vgdSocketPath());
+    if (result === 'stopped') {
+      console.log(chalk.dim('Stopped the vgd daemon so its files can be replaced — it restarts on the next command.'));
+    } else if (result === 'refused') {
+      console.log(
+        chalk.dim(
+          'A vgd embedded in another process (e.g. vg code) is running — close that session if the update reports a locked file.',
+        ),
+      );
+    }
+  } catch {
+    /* best-effort: a daemon problem must not stop the update from being tried */
+  }
+}
+
+/**
+ * Handle a Windows update that failed because a file was locked. Offers to run
+ * the install from a detached script once this process exits and releases its
+ * own locks. Returns true when a deferred update was scheduled (the caller must
+ * then exit promptly so the script can proceed).
+ */
+async function offerDeferredWindowsUpdate(cmd: string, assumeYes: boolean): Promise<boolean> {
+  console.error(
+    chalk.yellow('\nWindows could not replace a file that is still in use.') +
+      chalk.dim(
+        '\nThis is the self-update case: vg loads native modules (.node), and Windows locks them' +
+          '\nfor as long as a process has them open — including this one. Re-running the same' +
+          '\ncommand by hand hits the identical lock.',
+      ),
+  );
+
+  const proceed = assumeYes || (await confirm('Finish the update automatically after vg exits? [y/N]: '));
+  if (!proceed) {
+    console.error(
+      chalk.dim(
+        'Skipped. To update manually, close every terminal and editor running vg (including' +
+          '\nMCP servers started by your AI client), then run:\n  ' +
+          cmd,
+      ),
+    );
+    return false;
+  }
+
+  const scheduled = scheduleDeferredUpdate(cmd);
+  if (!scheduled) {
+    console.error(chalk.red(`Could not schedule the deferred update. Run manually once vg is closed: ${cmd}`));
+    return false;
+  }
+  console.log(
+    chalk.green('✔') +
+      ' Update scheduled — it runs as soon as this process exits.\n' +
+      chalk.dim(`  Transcript: ${scheduled.logPath}\n`) +
+      chalk.dim('  Check the new version with "vg --version" in a few seconds.'),
+  );
+  return true;
 }
 
 export const updateCommand = new Command('update')
@@ -348,10 +455,24 @@ export const updateCommand = new Command('update')
         console.log(chalk.dim(`Using ${pm}: ${cmd}`));
       }
 
-      try {
-        execSync(cmd, { cwd, stdio: 'inherit' });
+      // Windows locks loaded native addons, so retire the other vg processes
+      // holding them before npm tries to move the install tree aside.
+      if (process.platform === 'win32' && isGlobal && opts.reap !== false) {
+        await releaseWindowsFileLocks(cwd, latest);
+      }
+
+      const install = await runInstall(cmd, cwd);
+      if (install.ok) {
         console.log(chalk.green('✔') + ` Updated to ${PACKAGE_NAME}@${latest}`);
-      } catch {
+      } else if (process.platform === 'win32' && isFileLockError(install.output)) {
+        // Only this process's own locks are left. It cannot release them and
+        // keep running, so hand the install to a script that waits for us.
+        const scheduled = await offerDeferredWindowsUpdate(cmd, Boolean(opts.yes));
+        // Exit either way: the post-update steps below assume the new build is
+        // on disk, and when a deferred update is pending we must get out of its
+        // way immediately.
+        process.exit(scheduled ? 0 : 1);
+      } else {
         console.error(chalk.red(`Update failed. Run manually: ${cmd}`));
         process.exit(1);
       }

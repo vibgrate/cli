@@ -148,8 +148,11 @@ export function unwrapNestedErrorJson(text: string): string {
   const requested = names(metadata.requested_providers);
   const available = names(metadata.available_providers);
   const parts = [message.trim()];
-  if (requested.length) parts.push(`requested provider(s): ${requested.join(', ')}`);
-  if (available.length) parts.push(`permitted provider(s): ${available.join(', ')}`);
+  // OpenRouter's own meaning, which is easy to get backwards: `requested` is
+  // what the routing was RESTRICTED to, `available` is who actually serves the
+  // model. Labelling `available` as "permitted" sent debugging the wrong way.
+  if (requested.length) parts.push(`routing was restricted to: ${requested.join(', ')}`);
+  if (available.length) parts.push(`this model is served by: ${available.join(', ')}`);
   return parts.join(' — ');
 }
 
