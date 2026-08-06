@@ -165,6 +165,7 @@ describe('embedder loading', () => {
       cleanup(host);
     }
   });
+
 });
 
 describe('embed model id + cache detection (drives the ask setup note)', () => {

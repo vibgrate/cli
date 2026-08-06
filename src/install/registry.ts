@@ -24,7 +24,9 @@ import { navigationToolsetConfig, HOT_TOOLS, deferredToolNames } from '../mcp/to
 
 export interface McpTarget {
   file: string; // project-relative
-  key: 'mcpServers' | 'servers';
+  key: 'mcpServers' | 'servers' | 'mcp_servers';
+  /** Config syntax. Defaults to JSON; Grok's project config is TOML. */
+  format?: 'json' | 'toml';
   vscode?: boolean; // VS Code uses { servers: { vg: { type:'stdio', ... } } }
 }
 export interface NudgeTarget {
@@ -101,10 +103,24 @@ export const ASSISTANTS: Assistant[] = [
     homeMarkers: ['.gemini'],
     bin: ['gemini'],
   },
+  {
+    // Grok reads project-scoped MCP servers from `.grok/config.toml` — a TOML
+    // `[mcp_servers.<name>]` table, the same thing `grok mcp add --scope
+    // project` writes. Without it Grok sees the skill but no `vg` server, says
+    // it "isn't listed among connected servers", and falls back to shelling the
+    // CLI (slow, and killed by its command timeout on a stale map).
+    id: 'grok',
+    label: 'Grok CLI',
+    skill: '.grok/skills/vg/SKILL.md',
+    mcp: { file: '.grok/config.toml', key: 'mcp_servers', format: 'toml' },
+    nudge: { file: 'AGENTS.md', kind: 'block' },
+    markers: ['.grok', 'GROK.md'],
+    homeMarkers: ['.grok'],
+    bin: ['grok'],
+  },
   // Skill + advisory AGENTS.md nudge (the broad-reach common denominator). MCP
   // registration for these hosts is host-specific and added as their formats
   // stabilise; the skill + nudge work today.
-  { id: 'grok', label: 'Grok CLI', skill: '.grok/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.grok', 'GROK.md'], homeMarkers: ['.grok'], bin: ['grok'] },
   { id: 'opencode', label: 'OpenCode', skill: '.opencode/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.opencode', 'opencode.json'], homeMarkers: ['.config/opencode'], bin: ['opencode'] },
   { id: 'kilo', label: 'Kilo Code', skill: '.kilo/skills/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.kilo', '.kilocode'], homeMarkers: ['.kilocode'] },
   { id: 'aider', label: 'Aider', skill: '.aider/vg/SKILL.md', nudge: { file: 'AGENTS.md', kind: 'block' }, markers: ['.aider', '.aider.conf.yml'], homeMarkers: ['.aider.conf.yml'], bin: ['aider'] },
@@ -279,7 +295,9 @@ export function isAssistantInstalled(a: Assistant, root: string): boolean {
   if (a.skill && fs.existsSync(path.join(root, a.skill))) return true;
   if (a.mcp) {
     const file = path.join(root, a.mcp.file);
-    if (fs.existsSync(file)) {
+    if (a.mcp.format === 'toml') {
+      if (hasTomlMcp(file, a.mcp)) return true;
+    } else if (fs.existsSync(file)) {
       try {
         const config = readJson(file);
         const bag = config[a.mcp.key];
@@ -339,6 +357,10 @@ export function writeNavigationConfig(root: string): string {
 }
 
 function upsertMcp(file: string, target: McpTarget, launch: ServeLaunch): void {
+  if (target.format === 'toml') {
+    upsertTomlMcp(file, target, launch);
+    return;
+  }
   const config = readJson(file);
   const entry = mcpServerEntry(launch);
   const value = target.vscode ? { type: 'stdio', ...entry } : entry;
@@ -350,7 +372,60 @@ function upsertMcp(file: string, target: McpTarget, launch: ServeLaunch): void {
   writeFileEnsured(file, `${JSON.stringify(config, null, 2)}\n`);
 }
 
+/**
+ * The `[<key>.vg]` table in a TOML config (Grok's `.grok/config.toml`), and
+ * everything up to the next top-level table header. Anchored to a line start so
+ * a key *value* that happens to contain the text can't match.
+ */
+function tomlTableRe(key: string): RegExp {
+  return new RegExp(`(^|\\n)[ \\t]*\\[${escapeRe(key)}\\.vg\\][^\\n]*\\n(?:(?![ \\t]*\\[)[^\\n]*\\n?)*`);
+}
+
+function tomlString(s: string): string {
+  return JSON.stringify(s); // TOML basic strings share JSON's escaping
+}
+
+/**
+ * Merge our `vg` server into a TOML config, rewriting only our own table.
+ * Everything else in the file — the user's other servers, their comments and
+ * formatting — is preserved verbatim, which a parse-and-reserialize round trip
+ * could not promise.
+ */
+function upsertTomlMcp(file: string, target: McpTarget, launch: ServeLaunch): void {
+  const entry = mcpServerEntry(launch);
+  const table =
+    `[${target.key}.vg]\n` +
+    `command = ${tomlString(entry.command)}\n` +
+    `args = [${entry.args.map(tomlString).join(', ')}]\n`;
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const re = tomlTableRe(target.key);
+  const next = re.test(existing)
+    ? existing.replace(re, (m) => (m.startsWith('\n') ? `\n${table}` : table))
+    : existing.length
+      ? `${existing.replace(/\s*$/, '')}\n\n${table}`
+      : table;
+  writeFileEnsured(file, next);
+}
+
+function removeTomlMcp(file: string, target: McpTarget): boolean {
+  if (!fs.existsSync(file)) return false;
+  const existing = readTextSafe(file);
+  if (existing === null) return false;
+  const re = tomlTableRe(target.key);
+  if (!re.test(existing)) return false;
+  const next = existing.replace(re, (m) => (m.startsWith('\n') ? '\n' : '')).replace(/\n{3,}/g, '\n\n');
+  writeFileEnsured(file, next.trim().length ? next : '');
+  return true;
+}
+
+function hasTomlMcp(file: string, target: McpTarget): boolean {
+  if (!fs.existsSync(file)) return false;
+  const text = readTextSafe(file);
+  return text !== null && tomlTableRe(target.key).test(text);
+}
+
 function removeMcp(file: string, target: McpTarget): boolean {
+  if (target.format === 'toml') return removeTomlMcp(file, target);
   if (!fs.existsSync(file)) return false;
   const config = readJson(file);
   const bag = config[target.key] as Record<string, unknown> | undefined;

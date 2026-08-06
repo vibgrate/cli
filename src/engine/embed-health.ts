@@ -29,6 +29,7 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION } from '../version.js';
 
 /** Verdict for the native backend on this machine. */
@@ -119,18 +120,54 @@ function writeVerdict(dir: string, verdict: StoredVerdict): void {
 }
 
 /**
- * The child: load the backend and embed one string. Anything else is a crash.
- * Asynchronous on purpose — `vg lsp` calls this from a request handler, and a
- * synchronous spawn would freeze the server for the whole model load.
+ * Module the probe child imports to call `loadEmbedder`.
+ *
+ * After tsup, this file is inlined into `dist/cli.js` (and other entry chunks):
+ * there is **no** sibling `embeddings.js`, so the historical
+ * `new URL('./embeddings.js', import.meta.url)` always failed with
+ * `ERR_MODULE_NOT_FOUND`, the probe wrote `{"ok":false}`, and health stayed
+ * `unknown`. The language server then loaded onnxruntime in-process, hit
+ * SIGTRAP on first inference, and died mid-Ask — the exact failure mode this
+ * module exists to prevent.
+ *
+ * Published layout ships `dist/index.js`, which re-exports `loadEmbedder`.
+ * Unbundled / source-adjacent layouts still have `embeddings.js` next to this
+ * file. Prefer whichever exists.
+ */
+export function probeModuleUrl(from: string = import.meta.url): string {
+  const dir = path.dirname(fileURLToPath(from));
+  for (const name of ['embeddings.js', 'index.js']) {
+    const candidate = path.join(dir, name);
+    if (fs.existsSync(candidate)) return pathToFileURL(candidate).href;
+  }
+  // Last resort: keep a stable URL so the child fails cleanly as unknown
+  // rather than throwing before spawn.
+  return pathToFileURL(path.join(dir, 'index.js')).href;
+}
+
+/**
+ * The child: load the backend and embed one query + one document. Anything
+ * else is a crash. Asynchronous on purpose — `vg lsp` calls this from a
+ * request handler, and a synchronous spawn would freeze the server for the
+ * whole model load.
+ *
+ * Both query and document paths are exercised: some backends (and some
+ * Electron/Node ABI mismatches) survive `queryEmbed` and only abort on the
+ * passage/`embed` path that Ask uses when indexing nodes.
  */
 function defaultRunProbe(timeoutMs: number): Promise<{ signal: string | null; status: number | null; stdout: string }> {
-  const moduleUrl = new URL('./embeddings.js', import.meta.url).href;
+  const moduleUrl = probeModuleUrl();
   const script = `
     import(${JSON.stringify(moduleUrl)})
       .then(async (m) => {
+        if (typeof m.loadEmbedder !== 'function') {
+          process.stdout.write('{"ok":false}');
+          return;
+        }
         const e = await m.loadEmbedder({ noDownload: true });
         if (!e) { process.stdout.write('{"ok":false}'); return; }
         await e.embedQuery('probe');
+        await e.embed(['probe document']);
         process.stdout.write('{"ok":true}');
       })
       .catch(() => process.stdout.write('{"ok":false}'));

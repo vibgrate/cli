@@ -85,23 +85,23 @@ export function compileVerificationLadder(plan: VerificationPlan, options: Compi
 
 export interface RunLadderOptions {
   readFile: (relativePath: string) => string | null;
-  run?: (command: string) => { stdout: string; exitCode: number };
+  run?: (command: string) => { stdout: string; exitCode: number } | Promise<{ stdout: string; exitCode: number }>;
   /** When false, command steps are skipped (reported as ok notes). Default true. */
   runCommands?: boolean;
 }
 
 /** Execute a compiled ladder. Stops early on the first failing non-note step when `failFast` is true (default). */
-export function runVerificationLadder(
+export async function runVerificationLadder(
   steps: LadderStep[],
   options: RunLadderOptions,
   failFast = true,
-): LadderResult {
+): Promise<LadderResult> {
   const results: LadderStepResult[] = [];
   let ranCommands = false;
   let ok = true;
 
   for (const step of steps) {
-    const result = runStep(step, options);
+    const result = await runStep(step, options);
     if (result.step.kind === 'command' && options.runCommands !== false) ranCommands = true;
     results.push(result);
     if (!result.ok) {
@@ -113,7 +113,7 @@ export function runVerificationLadder(
   return { ok, steps: results, ranCommands };
 }
 
-function runStep(step: LadderStep, options: RunLadderOptions): LadderStepResult {
+async function runStep(step: LadderStep, options: RunLadderOptions): Promise<LadderStepResult> {
   if (step.kind === 'note') {
     return { step, ok: true, message: step.detail };
   }
@@ -139,7 +139,7 @@ function runStep(step: LadderStep, options: RunLadderOptions): LadderStepResult 
   if (options.runCommands === false || !options.run) {
     return { step, ok: true, message: `skipped command (not configured): ${step.command}` };
   }
-  const res = options.run(step.command);
+  const res = await Promise.resolve(options.run(step.command));
   if (res.exitCode === 0) {
     return { step, ok: true, message: `\`${step.command}\` exit 0` };
   }

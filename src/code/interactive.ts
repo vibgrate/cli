@@ -660,6 +660,8 @@ export async function agentTask(params: {
     providers: params.providers,
     fsImpl: params.fsImpl,
     run: shellRunner(params.root),
+    streamShell: !params.executionEnv,
+    allowSubagents: true,
     executionEnv: params.executionEnv,
     graphBackend: params.graphBackend,
     modelProfile: params.modelProfile,
@@ -714,7 +716,9 @@ function briefArgs(args: Record<string, unknown>): string {
 }
 
 /** A shell runner for the agent's run_command tool, scoped to the repo root. */
-function shellRunner(root: string): (command: string) => ShellResult {
+function shellRunner(root: string): (command: string) => ShellResult | Promise<ShellResult> {
+  // Prefer async streaming when streamShell is enabled on the agent options;
+  // this sync wrapper remains for callers that do not set streamShell.
   return (command: string) => {
     const res = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
     const stdout = (res.stdout ?? '') + (res.stderr ? `\n${res.stderr}` : '');

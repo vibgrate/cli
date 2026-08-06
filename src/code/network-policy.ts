@@ -48,6 +48,9 @@ export const DEFAULT_NETWORK_POLICY: NetworkPolicy = {
     'raw.githubusercontent.com',
     'vibgrate.com',
     'api.vibgrate.com',
+    // Governed web_search (DuckDuckGo HTML) — engine tool, not free agent shell egress.
+    'duckduckgo.com',
+    'html.duckduckgo.com',
   ],
 };
 

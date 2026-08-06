@@ -499,6 +499,10 @@ export function registerCode(program: Command): void {
             providers: route.providers,
             fsImpl: nodeCodeFs(root),
             run,
+            // Live command-output events for the VG Code panel (async shell).
+            // Sandboxed executionEnv still uses its own runner when set.
+            streamShell: !executionEnv,
+            allowSubagents: true,
             executionEnv,
             graphBackend,
             modelProfile,

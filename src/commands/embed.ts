@@ -60,11 +60,12 @@ export function registerEmbed(program: Command): void {
       const speak = !bg && !global.json;
 
       if (global.local) {
-        if (speak) info(c.dim('vg embed · semantic is off (--local) — lexical search only'));
+        if (global.json) json({ embedded: 0, model: modelId, semantic: false, reason: 'local' });
+        else if (speak) info(c.dim('vg embed · semantic is off (--local) — lexical search only'));
         return;
       }
       if (countPending(graph, root, modelId) === 0) {
-        if (global.json) json({ embedded: 0, pending: 0, upToDate: true, model: modelId });
+        if (global.json) json({ embedded: 0, pending: 0, upToDate: true, model: modelId, semantic: true });
         else if (speak) info(`${c.cyan('vg embed')} · semantic index already up to date`);
         return;
       }
@@ -80,6 +81,7 @@ export function registerEmbed(program: Command): void {
       }
 
       let reason: EmbedUnavailable | undefined;
+      let detail: string | undefined;
       const embedder = await loadEmbedder({
         local: global.local,
         // Background warm-ups skip the download unless explicitly asked to fetch
@@ -87,11 +89,22 @@ export function registerEmbed(program: Command): void {
         // time `vg serve`/`vg ask` needs it).
         noDownload: bg && opts.download !== true,
         showDownloadProgress: !bg,
-        onUnavailable: (r) => (reason = r),
+        onUnavailable: (r, d) => {
+          reason = r;
+          detail = d;
+        },
       });
       if (!embedder) {
-        // Calm, specific fallback — never a stack trace. (bg stays silent.)
-        if (speak && reason) info(c.dim(`vg embed · ${unavailableMessage(reason)}`));
+        // Calm, specific fallback — never a stack trace. But never *silent*
+        // either: a warm-up that reports plain success while nothing was
+        // embedded is what makes a host say "semantic search ready" and then
+        // answer every question lexically. `--json` carries the reason so the
+        // host can repair (or say so honestly); `--bg` says one dim line.
+        if (global.json) {
+          json({ embedded: 0, model: modelId, semantic: false, reason: reason ?? 'init-failed', detail: detail ?? null });
+        } else if (reason) {
+          info(c.dim(`vg embed · ${unavailableMessage(reason)}${detail ? ` (${detail})` : ''}`));
+        }
         return;
       }
 
@@ -99,7 +112,7 @@ export function registerEmbed(program: Command): void {
       const bar = speak ? new ProgressBar(c.dim('embedding')) : undefined;
       await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
       bar?.done();
-      if (global.json) json({ embedded: pending, model: modelId });
+      if (global.json) json({ embedded: pending, model: modelId, semantic: true });
       else if (speak) info(`${c.green('✔')} vg embed · semantic index ready (~${pending} node(s) · model ${modelId})`);
     });
   applyGlobalOptions(cmd);

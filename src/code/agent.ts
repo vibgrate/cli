@@ -48,6 +48,7 @@ import {
   type ToolContext,
   type ToolResult,
 } from './tools.js';
+import { runShellAsync } from './shell-runner.js';
 import { localGraphBackend, type GraphBackend } from './graph-backend.js';
 import type { ModelExecutionProfile } from '../runtime/model-execution-profile.js';
 import { SessionOverlay } from './overlay.js';
@@ -113,7 +114,13 @@ export type AgentEvent =
   | { type: 'capsule-delta'; delta: CapsuleDelta }
   | { type: 'failure-capsule'; capsule: FailureCapsule }
   | { type: 'checkpoint'; ref: string; commit: string; seq: number; files: string[] }
-  | { type: 'metrics'; metrics: AgentMetrics };
+  | { type: 'metrics'; metrics: AgentMetrics }
+  /** Live shell stream for host UIs (async run_command). */
+  | { type: 'command-start'; command: string }
+  | { type: 'command-output'; command: string; chunk: string; stream: 'stdout' | 'stderr' }
+  | { type: 'command-end'; command: string; exitCode: number; timedOut?: boolean; cancelled?: boolean }
+  /** Focus-chain / todo checklist for the panel. */
+  | { type: 'progress'; items: Array<{ id: string; title: string; status: string }> };
 
 export interface AgentOptions {
   graph: VgGraph;
@@ -121,13 +128,28 @@ export interface AgentOptions {
   instruction: string;
   providers: Provider[];
   fsImpl: CodeFs;
-  /** Run a shell command (injected). Prefer {@link executionEnv} when set. */
-  run: (command: string) => ShellResult;
+  /** Run a shell command (injected). Prefer {@link executionEnv} when set. May be async. */
+  run: (command: string) => ShellResult | Promise<ShellResult>;
   /**
    * Security ladder substrate for shell (ADR-002). When set, `run_command` and
    * verify steps use `executionEnv.run` instead of the bare `run` callback.
    */
-  executionEnv?: { tier: string; label: string; reason: string; run: (command: string, opts: { cwd: string }) => ShellResult };
+  executionEnv?: {
+    tier: string;
+    label: string;
+    reason: string;
+    run: (command: string, opts: { cwd: string }) => ShellResult | Promise<ShellResult>;
+  };
+  /**
+   * When true (default), advertise spawn_subagent and allow one level of child
+   * agent under the parent approval gate.
+   */
+  allowSubagents?: boolean;
+  /**
+   * When true, `run_command` uses the async streaming shell (live command-output
+   * events). Tests that inject a fake `run` leave this false/undefined.
+   */
+  streamShell?: boolean;
   /**
    * Graph query backend (vgd ActiveGraph when a daemon session is attached).
    * When omitted, tools use the in-process {@link graph}.
@@ -376,7 +398,11 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const advancedMode = options.advancedMode ?? true;
   const discoveryGate = createDiscoveryGateState();
 
-  const allTools = [...AGENT_TOOLS, ...(options.externalTools?.specs ?? [])];
+  const allowSubagents = options.allowSubagents !== false && !options.plan;
+  const agentToolSpecs = allowSubagents
+    ? AGENT_TOOLS
+    : AGENT_TOOLS.filter((t) => t.name !== 'spawn_subagent');
+  const allTools = [...agentToolSpecs, ...(options.externalTools?.specs ?? [])];
   // Optional relevance provider: widens capsule seed vocabulary when
   // installed; null (the default) changes nothing. Loaded once per run and
   // reused by the capsule-delta recompile below.
@@ -501,8 +527,16 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     }
   }
 
-  const runShell = (command: string): ShellResult => {
+  const runShell = (command: string): ShellResult | Promise<ShellResult> => {
     if (options.executionEnv) return options.executionEnv.run(command, { cwd: root });
+    if (options.streamShell) {
+      return runShellAsync(command, {
+        cwd: root,
+        onChunk: (chunk, stream) => {
+          onEvent({ type: 'command-output', command, chunk, stream });
+        },
+      });
+    }
     return options.run(command);
   };
 
@@ -541,6 +575,25 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     fsImpl,
     spans,
     run: runShell,
+    onShellStream: (ev) => {
+      if (ev.phase === 'start') onEvent({ type: 'command-start', command: ev.command });
+      else if (ev.phase === 'chunk') {
+        onEvent({
+          type: 'command-output',
+          command: ev.command,
+          chunk: ev.chunk,
+          stream: ev.stream,
+        });
+      } else if (ev.phase === 'end') {
+        onEvent({
+          type: 'command-end',
+          command: ev.command,
+          exitCode: ev.exitCode,
+          timedOut: ev.timedOut,
+          cancelled: ev.cancelled,
+        });
+      }
+    },
     approve: approveAndCheckpoint,
     askUser: options.askUser,
     auto: options.auto,
@@ -553,6 +606,23 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     // B3: enforce-before-apply against the live graph trie.
     identifierTrie: identifierTrie ?? null,
     enforceIdentifiers: options.identifierMask !== false,
+    progress: undefined,
+    onProgress: (state) => {
+      onEvent({
+        type: 'progress',
+        items: state.items.map((i) => ({ id: i.id, title: i.title, status: i.status })),
+      });
+    },
+    subagentHost: {
+      providers,
+      allowSubagents,
+      depth: 0,
+      onEvent: (e) => {
+        if (e.type === 'notice' || e.type === 'tool-call' || e.type === 'tool-result' || e.type === 'change') {
+          onEvent(e as AgentEvent);
+        }
+      },
+    },
   };
 
   /** Recompute the tool-visible graph from the session overlay after mutations. */
@@ -678,7 +748,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
    * On finish: graph-derived ladder (syntax / hints / testCommand), then optional
    * explicit verify command. Failure feeds a Failure Capsule + retries while rounds remain.
    */
-  const verifyOnFinish = (): 'retry' | 'done' => {
+  const verifyOnFinish = async (): Promise<'retry' | 'done'> => {
     if (changes.length === 0) return 'done';
 
     if (useLadder && capsule) {
@@ -687,7 +757,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       });
       // Shell steps need real files — flush before the ladder.
       flushOverlay();
-      const ladder = runVerificationLadder(steps, {
+      const ladder = await runVerificationLadder(steps, {
         readFile: (f) => options.fsImpl.read(f),
         run: runShell,
         // Prefer the dedicated verify command path below when both are set, so we
@@ -728,7 +798,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       return 'done';
     }
     flushOverlay();
-    const res = runShell(v.command);
+    const res = await Promise.resolve(runShell(v.command));
     onEvent({ type: 'verify', command: v.command, passed: res.exitCode === 0 });
     lastVerification = [
       ...lastVerification,
@@ -959,7 +1029,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 
       if (toolResult.finished) {
         // Auto-verify: on failure, keep going so the model fixes it.
-        if (verifyOnFinish() === 'retry') break;
+        if ((await verifyOnFinish()) === 'retry') break;
         return finish('finished', toolResult.finalSummary ?? 'done', step);
       }
       if (stopNoProgress) return finish('no-progress', `stopped: the model repeated \`${call.name}\` without making progress`, step);

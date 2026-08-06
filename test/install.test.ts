@@ -1,7 +1,14 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { assistantById, detectServeLaunch, installAssistant, uninstallAssistant, writeNavigationConfig } from '../src/install/registry.js';
+import {
+  assistantById,
+  detectServeLaunch,
+  installAssistant,
+  isAssistantInstalled,
+  uninstallAssistant,
+  writeNavigationConfig,
+} from '../src/install/registry.js';
 import { HOT_TOOLS, deferredToolNames, navigationToolsetConfig, TOOLS } from '../src/mcp/tools.js';
 import { CliError } from '../src/util/exit.js';
 import { makeProject, cleanup } from './helpers.js';
@@ -74,6 +81,76 @@ describe('vg install registry', () => {
     const mdc = fs.readFileSync(path.join(root, '.cursor/rules/vg.mdc'), 'utf8');
     expect(mdc).toContain('alwaysApply: true');
     expect(mdc).toContain('small enough');
+  });
+});
+
+describe('vg install · Grok TOML MCP registration', () => {
+  const grokConfig = (root: string) => path.join(root, '.grok/config.toml');
+
+  it('registers the vg server in .grok/config.toml so Grok sees a connected server', () => {
+    const root = project();
+    installAssistant(assistantById('grok')!, { root, smallRepo: false, launch: VG_LAUNCH });
+    const toml = fs.readFileSync(grokConfig(root), 'utf8');
+    expect(toml).toContain('[mcp_servers.vg]');
+    expect(toml).toContain('command = "vg"');
+    expect(toml).toContain('args = ["serve"]');
+    expect(fs.existsSync(path.join(root, '.grok/skills/vg/SKILL.md'))).toBe(true);
+  });
+
+  it('reports mcp as written, not skipped', () => {
+    const root = project();
+    const r = installAssistant(assistantById('grok')!, { root, smallRepo: false, launch: VG_LAUNCH });
+    expect(r.wrote).toContain('.grok/config.toml');
+    expect(r.skipped).toHaveLength(0);
+  });
+
+  it('is idempotent and preserves other servers, sections, and comments', () => {
+    const root = project();
+    fs.mkdirSync(path.join(root, '.grok'), { recursive: true });
+    fs.writeFileSync(
+      grokConfig(root),
+      '# my project config\n[mcp_servers.other]\ncommand = "x"\nargs = []\n',
+    );
+    const grok = assistantById('grok')!;
+    installAssistant(grok, { root, smallRepo: false, launch: VG_LAUNCH });
+    installAssistant(grok, { root, smallRepo: false, launch: VG_LAUNCH });
+    const toml = fs.readFileSync(grokConfig(root), 'utf8');
+    expect(toml.match(/\[mcp_servers\.vg\]/g)).toHaveLength(1);
+    expect(toml).toContain('# my project config');
+    expect(toml).toContain('[mcp_servers.other]');
+    expect(toml).toContain('command = "x"');
+  });
+
+  it('rewrites a stale entry in place rather than appending a second one', () => {
+    const root = project();
+    const grok = assistantById('grok')!;
+    installAssistant(grok, { root, smallRepo: false, launch: detectServeLaunch(() => null) });
+    installAssistant(grok, { root, smallRepo: false, launch: VG_LAUNCH });
+    const toml = fs.readFileSync(grokConfig(root), 'utf8');
+    expect(toml.match(/\[mcp_servers\.vg\]/g)).toHaveLength(1);
+    expect(toml).toContain('command = "vg"');
+    expect(toml).not.toContain('npx');
+  });
+
+  it('uninstall removes only our table', () => {
+    const root = project();
+    fs.mkdirSync(path.join(root, '.grok'), { recursive: true });
+    fs.writeFileSync(grokConfig(root), '[mcp_servers.other]\ncommand = "x"\n');
+    const grok = assistantById('grok')!;
+    installAssistant(grok, { root, smallRepo: false, launch: VG_LAUNCH });
+    uninstallAssistant(grok, root, true);
+    const toml = fs.readFileSync(grokConfig(root), 'utf8');
+    expect(toml).not.toContain('[mcp_servers.vg]');
+    expect(toml).toContain('[mcp_servers.other]');
+  });
+
+  it('isAssistantInstalled sees the TOML registration on its own', () => {
+    const root = project();
+    const grok = assistantById('grok')!;
+    expect(isAssistantInstalled(grok, root)).toBe(false);
+    installAssistant(grok, { root, smallRepo: false, hook: false, launch: VG_LAUNCH });
+    fs.rmSync(path.join(root, '.grok/skills/vg/SKILL.md'));
+    expect(isAssistantInstalled(grok, root)).toBe(true);
   });
 });
 

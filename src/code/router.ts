@@ -81,7 +81,7 @@ export interface RouteResult {
   managerLine: string;
 }
 
-const HOSTED_IDS = new Set(['vibgrate-relay', 'openrouter', 'litellm', 'openai', 'together']);
+const HOSTED_IDS = new Set(['vibgrate-relay', 'openrouter', 'litellm', 'openai', 'together', 'vscode-lm']);
 
 /** Resolve the ordered provider list for a run. Throws an actionable CliError when nothing is eligible. */
 export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): RouteResult {
@@ -118,6 +118,13 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
 
   // Explicit provider wins.
   if (opts.provider) {
+    // vscode-lm requires the extension loopback proxy URL.
+    if (opts.provider === 'vscode-lm' && !env.VSCODE_LM_BASE_URL) {
+      throw new CliError(
+        'vscode-lm needs the VS Code extension proxy (VSCODE_LM_BASE_URL). Select a Language Model in Manage models from Vibgrate for VS Code, or use another --provider.',
+        ExitCode.USAGE_ERROR,
+      );
+    }
     const provider = buildExplicit(opts.provider, opts, env, discover);
     // Code Mode + explicit custom backend (ollama, lmstudio, …): still no surprise chain.
     if (opts.codeMode) {
@@ -149,7 +156,7 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
   // the no-surprise-egress rule above.
   if (env.VIBGRATE_RELAY_TOKEN) {
     const model = resolveHostedModel(opts, env, 'vibgrate-relay');
-    const primary = buildHosted('vibgrate-relay', model);
+    const primary = buildHosted('vibgrate-relay', model, env);
     return finish(
       [primary, ...localFallbacks(opts, env, discover, 'vibgrate-relay', { allowLmStudio: false })],
       'VIBGRATE_RELAY_TOKEN is set → Vibgrate Relay (with local fallback)',
@@ -158,7 +165,7 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
   // 2) Another configured hosted router key.
   if (env.OPENROUTER_API_KEY) {
     const model = resolveHostedModel(opts, env, 'openrouter');
-    const primary = buildHosted('openrouter', model);
+    const primary = buildHosted('openrouter', model, env);
     return finish(
       [primary, ...localFallbacks(opts, env, discover, 'openrouter', { allowLmStudio: false })],
       'OPENROUTER_API_KEY is set → OpenRouter (with local fallback)',
@@ -172,7 +179,7 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
     const keyEnv = OPENAI_COMPATIBLE[id].apiKeyEnv;
     if (keyEnv && env[keyEnv]) {
       const model = resolveHostedModel(opts, env, id);
-      return finish([buildHosted(id, model)], `${keyEnv} is set → ${OPENAI_COMPATIBLE[id].label}`);
+      return finish([buildHosted(id, model, env)], `${keyEnv} is set → ${OPENAI_COMPATIBLE[id].label}`);
     }
   }
 
@@ -216,20 +223,34 @@ function buildExplicit(id: string, opts: RouteOptions, env: NodeJS.ProcessEnv, d
     }
     return new LocalLlamaProvider(opts.model ?? basename(resolved.path), resolved.path, undefined, !!opts.consent);
   }
-  if (id === 'lmstudio') return buildHosted('lmstudio', resolveHostedModel(opts, env, 'lmstudio'));
+  if (id === 'lmstudio') return buildHosted('lmstudio', resolveHostedModel(opts, env, 'lmstudio'), env);
   if (id === 'foundry-local' || id === 'foundry') {
-    return buildHosted('foundry-local', resolveHostedModel(opts, env, 'foundry-local'));
+    return buildHosted('foundry-local', resolveHostedModel(opts, env, 'foundry-local'), env);
   }
-  if (HOSTED_IDS.has(id)) return buildHosted(id, resolveHostedModel(opts, env, id));
+  if (HOSTED_IDS.has(id)) return buildHosted(id, resolveHostedModel(opts, env, id), env);
   throw new CliError(
-    `unknown --provider "${id}". Known: vibgrate-relay, ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp.`,
+    `unknown --provider "${id}". Known: vibgrate-relay, ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, vscode-lm, llama-cpp.`,
     ExitCode.USAGE_ERROR,
   );
 }
 
-function buildHosted(id: string, model: string): OpenAiCompatibleProvider {
+function buildHosted(id: string, model: string, env: NodeJS.ProcessEnv = process.env): OpenAiCompatibleProvider {
   const base = OPENAI_COMPATIBLE[id];
-  const config: OpenAiCompatibleConfig = { ...base, id };
+  // Resolve baseUrl at build time so VSCODE_LM_BASE_URL (and similar) from the
+  // host process env are picked up even when the module was loaded earlier.
+  let baseUrl = base.baseUrl;
+  if (id === 'vscode-lm') {
+    baseUrl = env.VSCODE_LM_BASE_URL || base.baseUrl;
+  } else if (id === 'vibgrate-relay') {
+    baseUrl = env.VIBGRATE_RELAY_URL || base.baseUrl;
+  } else if (id === 'litellm') {
+    baseUrl = env.LITELLM_BASE_URL || base.baseUrl;
+  } else if (id === 'lmstudio') {
+    baseUrl = env.LMSTUDIO_BASE_URL || base.baseUrl;
+  } else if (id === 'foundry-local') {
+    baseUrl = env.FOUNDRY_LOCAL_BASE_URL || base.baseUrl;
+  }
+  const config: OpenAiCompatibleConfig = { ...base, id, baseUrl };
   return new OpenAiCompatibleProvider(model, config);
 }
 
@@ -275,14 +296,14 @@ function localFallbacks(
   // LM Studio only when explicitly allowed (user chose --provider lmstudio).
   if (fb.allowLmStudio && exclude !== 'lmstudio') {
     const lmModel = opts.model ?? firstOfRuntime(models, 'lm-studio');
-    if (lmModel) out.push(buildHosted('lmstudio', lmModel));
+    if (lmModel) out.push(buildHosted('lmstudio', lmModel, env));
   }
 
   // Foundry Local when server/env is configured.
   if (exclude !== 'foundry-local' && exclude !== 'foundry' && (env.FOUNDRY_LOCAL_BASE_URL || env.VG_CODE_PROVIDER === 'foundry-local')) {
     try {
       const m = opts.model || env.VG_CODE_MODEL;
-      if (m) out.push(buildHosted('foundry-local', m));
+      if (m) out.push(buildHosted('foundry-local', m, env));
     } catch {
       /* skip if no model */
     }
