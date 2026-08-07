@@ -536,6 +536,47 @@ describe('runAgent — the agentic loop', () => {
     expect(result.steps).toBeLessThanOrEqual(5); // stops well before the step cap
   });
 
+  it('auto-completes open set_progress items when the model finishes', async () => {
+    const provider = new ScriptedProvider('m', [
+      {
+        toolCalls: [
+          tc(
+            'set_progress',
+            {
+              items: [
+                { id: '1', title: 'Inspect routes', status: 'done' },
+                { id: '2', title: 'Summarize endpoints', status: 'in_progress' },
+              ],
+            },
+            'p1',
+          ),
+        ],
+      },
+      { toolCalls: [tc('finish', { summary: 'Here are the invoice endpoints.' }, 'f1')] },
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'find invoice endpoints',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      onEvent: (e) => events.push(e),
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    const progressEvents = events.filter((e) => e.type === 'progress');
+    expect(progressEvents.length).toBeGreaterThanOrEqual(2);
+    const last = progressEvents[progressEvents.length - 1];
+    expect(last?.type).toBe('progress');
+    if (last?.type === 'progress') {
+      expect(last.items.every((i) => i.status === 'done')).toBe(true);
+      expect(last.items.map((i) => i.title)).toEqual(['Inspect routes', 'Summarize endpoints']);
+    }
+  });
+
   it('auto-verify: keeps going until the test command passes', async () => {
     const provider = new ScriptedProvider('m', [
       { toolCalls: [tc('edit_file', { path: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 1;' }, 'e1')] },

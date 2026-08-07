@@ -24,10 +24,31 @@ describe('unifiedDiff', () => {
     expect(d).toContain('+hello');
   });
 
-  it('renders a deleted file to /dev/null', () => {
+  it('renders a small deleted file with full body', () => {
     const d = unifiedDiff('bye\n', null, 'old.ts');
     expect(d).toContain('+++ /dev/null');
     expect(d).toContain('-bye');
+  });
+
+  it('summarizes large whole-file deletes instead of dumping every line', () => {
+    const body = Array.from({ length: 80 }, (_, i) => `line-${i}`).join('\n') + '\n';
+    const d = unifiedDiff(body, null, 'big-page.tsx');
+    expect(d).toContain('--- a/big-page.tsx');
+    expect(d).toContain('+++ /dev/null');
+    expect(d).toContain('@@ -1,80 +0,0 @@');
+    expect(d).toContain('-… 80 lines deleted …');
+    expect(d).not.toContain('-line-0');
+    expect(d).not.toContain('-line-79');
+    // Rollup still reports the true removed count.
+    expect(summarizeDiffs([{ file: 'big-page.tsx', diff: d }])).toBe('+0 -80 across 1 file(s)');
+  });
+
+  it('summarizes large whole-file creates instead of dumping every line', () => {
+    const body = Array.from({ length: 50 }, (_, i) => `new-${i}`).join('\n') + '\n';
+    const d = unifiedDiff(null, body, 'new-page.tsx');
+    expect(d).toContain('+… 50 lines added …');
+    expect(d).not.toContain('+new-0');
+    expect(summarizeDiffs([{ file: 'new-page.tsx', diff: d }])).toBe('+50 -0 across 1 file(s)');
   });
 
   it('is deterministic', () => {

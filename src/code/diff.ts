@@ -29,16 +29,34 @@ export function unifiedDiff(before: string | null, after: string | null, file: s
   return out.join('\n');
 }
 
+/**
+ * Whole-file create/delete bodies larger than this are summarized instead of
+ * line-dumped. Small files stay fully visible for review; large page deletes
+ * (hundreds/thousands of lines) only need path + line count in the transcript.
+ */
+const FULL_BODY_LINE_CAP = 40;
+
 function newFileDiff(after: string, file: string): string {
   const lines = splitLines(after);
   const out = [`--- /dev/null`, `+++ b/${file}`, `@@ -0,0 +1,${lines.length} @@`];
+  if (lines.length > FULL_BODY_LINE_CAP) {
+    out.push(`+… ${lines.length} lines added …`);
+    return out.join('\n');
+  }
   for (const l of lines) out.push(`+${l}`);
   return out.join('\n');
 }
 
 function deletedFileDiff(before: string, file: string): string {
   const lines = splitLines(before);
-  const out = [`--- a/${file}`, `+++ /dev/null`, `@@ -1,${lines.length} +0,0 @@`];
+  const n = lines.length;
+  const out = [`--- a/${file}`, `+++ /dev/null`, `@@ -1,${n} +0,0 @@`];
+  // No — we do not need the full body in the panel when a page is deleted.
+  // Undo still keeps FileChange.before; approval is path-only for delete_file.
+  if (n > FULL_BODY_LINE_CAP) {
+    out.push(`-… ${n} lines deleted …`);
+    return out.join('\n');
+  }
   for (const l of lines) out.push(`-${l}`);
   return out.join('\n');
 }
@@ -160,6 +178,40 @@ function groupHunks(ops: Op[], context: number): Hunk[] {
   return hunks;
 }
 
+/**
+ * Count +/− lines in a unified diff. Whole-file create/delete summaries
+ * (`+… N lines added …` / `-… N lines deleted …`) use the hunk header for the
+ * true line count so the rollup stays accurate when bodies are compacted.
+ */
+export function countDiffStats(diff: string): { added: number; removed: number } {
+  if (!diff) return { added: 0, removed: 0 };
+
+  const isWholeDelete = /^\+\+\+ \/dev\/null$/m.test(diff);
+  const isWholeCreate = /^--- \/dev\/null$/m.test(diff);
+  if (isWholeDelete) {
+    const m = diff.match(/@@ -(\d+)(?:,(\d+))? \+0(?:,0)? @@/);
+    if (m) {
+      const n = m[2] != null ? Number(m[2]) : Number(m[1]) || 0;
+      return { added: 0, removed: Number.isFinite(n) ? n : 0 };
+    }
+  }
+  if (isWholeCreate) {
+    const m = diff.match(/@@ -0(?:,0)? \+(\d+)(?:,(\d+))? @@/);
+    if (m) {
+      const n = m[2] != null ? Number(m[2]) : Number(m[1]) || 0;
+      return { added: Number.isFinite(n) ? n : 0, removed: 0 };
+    }
+  }
+
+  let added = 0;
+  let removed = 0;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) added++;
+    else if (line.startsWith('-') && !line.startsWith('---')) removed++;
+  }
+  return { added, removed };
+}
+
 /** A compact one-line changeset summary: `+adds -dels across N file(s)`. */
 export function summarizeDiffs(diffs: { file: string; diff: string }[]): string {
   let adds = 0;
@@ -168,10 +220,9 @@ export function summarizeDiffs(diffs: { file: string; diff: string }[]): string 
   for (const { diff } of diffs) {
     if (!diff) continue;
     touched++;
-    for (const line of diff.split('\n')) {
-      if (line.startsWith('+') && !line.startsWith('+++')) adds++;
-      else if (line.startsWith('-') && !line.startsWith('---')) dels++;
-    }
+    const { added, removed } = countDiffStats(diff);
+    adds += added;
+    dels += removed;
   }
   return `+${adds} -${dels} across ${touched} file(s)`;
 }

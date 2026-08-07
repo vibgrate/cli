@@ -3,6 +3,8 @@
  *
  * The model updates items via `set_progress`; the host renders a live checklist.
  * Verification-ladder steps can mark items done when their commands pass.
+ * On a successful `finish`, open items are completed automatically so the panel
+ * does not leave a trailing "still working" row after the answer lands.
  */
 
 export type ProgressStatus = 'pending' | 'in_progress' | 'done' | 'cancelled';
@@ -22,15 +24,49 @@ export function emptyProgress(): ProgressState {
   return { items: [], updatedAt: Date.now() };
 }
 
+/**
+ * Glyph for a checklist status. Prefer hollow/filled circles over ellipsis —
+ * `…` read as "loading forever" for items that were simply not started yet.
+ * Hosts may use SVG instead; keep these as the plain-text / CLI contract.
+ */
+export function progressMark(status: ProgressStatus | string): string {
+  switch (status) {
+    case 'done':
+      return '✓';
+    case 'in_progress':
+      return '◎';
+    case 'cancelled':
+      return '✗';
+    default:
+      return '○';
+  }
+}
+
 export function summarizeProgress(state: ProgressState): string {
   if (!state.items.length) return 'No progress items.';
   const lines = state.items.map((i) => {
-    const mark =
-      i.status === 'done' ? '✔' : i.status === 'in_progress' ? '…' : i.status === 'cancelled' ? '✗' : '·';
-    return `${mark} [${i.status}] ${i.id}: ${i.title}`;
+    return `${progressMark(i.status)} [${i.status}] ${i.id}: ${i.title}`;
   });
   const done = state.items.filter((i) => i.status === 'done').length;
   return `Progress ${done}/${state.items.length}\n` + lines.join('\n');
+}
+
+/**
+ * Mark every open item done (pending / in_progress). Cancelled stays cancelled.
+ * Returns the same reference when nothing changed.
+ */
+export function completeOpenProgress(state: ProgressState): ProgressState {
+  if (!state.items.length) return state;
+  let changed = false;
+  const items = state.items.map((i) => {
+    if (i.status === 'pending' || i.status === 'in_progress') {
+      changed = true;
+      return { ...i, status: 'done' as const };
+    }
+    return i;
+  });
+  if (!changed) return state;
+  return { items, updatedAt: Date.now() };
 }
 
 /**

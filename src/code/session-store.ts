@@ -1,13 +1,12 @@
 /**
  * Session persistence for VG Code (VG-CLI-CODE §16) — `vg code --continue`.
  *
- * A coding session is a series of tasks; this stores a compact record of them
- * (what you asked, a one-line outcome, which files changed) plus the last
- * change-set so `/undo` survives a restart. `--continue` reloads the most recent
- * session and hands the model a short summary of what was already done, so you
- * can pick a conversation back up instead of re-explaining. We persist a
- * *summary*, never raw file contents or tool transcripts — small, private, and
- * safe to keep on disk.
+ * A coding session is a series of tasks; this stores each turn's instruction and
+ * final answer (plus which files changed) and the last change-set so `/undo`
+ * survives a restart. History → pick reloads those turns into the panel so the
+ * user can re-read the full thread. `--continue` reloads the most recent session
+ * and seeds the model with a *short recap* of prior turns (see
+ * {@link summarizeSession}) — never raw file bodies or tool transcripts.
  *
  * Pure over an injected clock; the store is JSON under `.vibgrate/code-sessions/`.
  */
@@ -134,10 +133,30 @@ export function setLatestSession(root: string, id: string): boolean {
   }
 }
 
+/**
+ * Cap stored fields so a runaway answer cannot fill the disk, while still
+ * keeping enough of each prompt/answer for History → reload to repaint the
+ * full panel transcript (the old 300-char cap cut answers mid-sentence).
+ */
+const MAX_INSTRUCTION_CHARS = 32_000;
+const MAX_SUMMARY_CHARS = 200_000;
+
+/** Truncate for model recaps only — disk storage keeps the longer form. */
+function recapSnippet(text: string, max: number): string {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (s.length <= max) return s;
+  return s.slice(0, Math.max(0, max - 1)) + '…';
+}
+
 /** A short natural-language recap of a session to seed a continued run's context. */
 export function summarizeSession(session: StoredSession): string {
   if (session.tasks.length === 0) return '';
-  const lines = session.tasks.slice(-8).map((t, i) => `${i + 1}. ${t.instruction} — ${t.summary}${t.files.length ? ` (${t.files.join(', ')})` : ''}`);
+  const lines = session.tasks.slice(-8).map((t, i) => {
+    const instr = recapSnippet(t.instruction, 120);
+    const sum = recapSnippet(t.summary, 200);
+    const files = t.files.length ? ` (${t.files.join(', ')})` : '';
+    return `${i + 1}. ${instr} — ${sum}${files}`;
+  });
   return `Earlier in this session (${session.provider}/${session.model}) you did:\n${lines.join('\n')}`;
 }
 
@@ -175,10 +194,12 @@ export function recordTask(
   now: number,
 ): StoredSession {
   const files = [...new Set(task.changes.map((c) => c.file))];
+  const instruction = String(task.instruction ?? '').slice(0, MAX_INSTRUCTION_CHARS);
+  const summary = String(task.summary ?? '').slice(0, MAX_SUMMARY_CHARS);
   return {
     ...session,
     updatedAt: now,
-    tasks: [...session.tasks, { instruction: task.instruction.slice(0, 300), summary: task.summary.slice(0, 300), files, stopped: task.stopped, ts: now }],
+    tasks: [...session.tasks, { instruction, summary, files, stopped: task.stopped, ts: now }],
     lastChanges: task.changes.length ? task.changes : session.lastChanges,
   };
 }

@@ -666,7 +666,8 @@ export function registerCode(program: Command): void {
                   });
                 },
                 onTurnEnd: (turn) => {
-                  // Persist a summary only — never file bodies or transcripts.
+                  // Persist the prompt + final answer for History reload; never
+                  // file bodies or tool transcripts. Caps live in recordTask.
                   record = recordTask(
                     record,
                     {
