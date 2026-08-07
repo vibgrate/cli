@@ -266,13 +266,10 @@ export interface GraphStatusNotification {
 /**
  * Per-dependency band, from the engine's drift classification.
  *
- * NOTE (P0, plan §0.3): the repo currently ships two band systems — the score
- * bands here (low ≤30 / moderate ≤60 / high >60, `drift-score.ts`) and the
- * badge/dashboard bands (green ≤20 / amber ≤50 / red >50, `drift-badge.ts`).
- * They disagree for scores in 21–30 and 51–60. DRIFTSCORE-V3-SPEC §6 item 5
- * schedules the reconciliation. When it lands, this is the ONLY place in the
- * IDE stack that changes — which is the entire reason clients are forbidden
- * from deriving a band themselves.
+ * Score and badge bands are one system (driftscore-3.0 §6.5): low/green ≤30 ·
+ * moderate/amber ≤60 · high/red >60. Clients must still not re-derive a band
+ * from a bare number — always use the engine's `band` / classification so a
+ * future threshold change stays in one place.
  */
 function bandForDependency(dep: DependencyRow): Band {
   if (dep.drift === 'major-behind') {

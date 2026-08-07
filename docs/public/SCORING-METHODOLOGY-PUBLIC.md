@@ -51,8 +51,8 @@ with no runtime metadata is not unfairly penalised.
 | Dependency | 0.30 | Per-dependency drift (see §1.1) |
 | Support / EOL | 0.20 | Real end-of-life dates for runtimes (expanding to base images, DB engines, infra) |
 
-Bands: **0–30 low · 31–60 moderate · 61–100 high**. Badge colours: 0–20 green ·
-21–50 amber · 51–100 red.
+Bands (and badge colours — one system): **0–30 low/green · 31–60 moderate/amber ·
+61–100 high/red**.
 
 ### 1.1 Dependency drift — libyear backbone
 

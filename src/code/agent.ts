@@ -48,6 +48,7 @@ import {
   type ToolContext,
   type ToolResult,
 } from './tools.js';
+import { completeOpenProgress } from './progress.js';
 import { runShellAsync } from './shell-runner.js';
 import { localGraphBackend, type GraphBackend } from './graph-backend.js';
 import type { ModelExecutionProfile } from '../runtime/model-execution-profile.js';
@@ -1030,6 +1031,16 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       if (toolResult.finished) {
         // Auto-verify: on failure, keep going so the model fixes it.
         if ((await verifyOnFinish()) === 'retry') break;
+        // Successful finish: close any open checklist items so the host panel
+        // does not stick on "Progress N-1/N" after the answer is already in.
+        // Abort keeps open items as-is (work was not completed).
+        if (call.name === 'finish' && ctx.progress?.items.length) {
+          const completed = completeOpenProgress(ctx.progress);
+          if (completed !== ctx.progress) {
+            ctx.progress = completed;
+            ctx.onProgress?.(completed);
+          }
+        }
         return finish('finished', toolResult.finalSummary ?? 'done', step);
       }
       if (stopNoProgress) return finish('no-progress', `stopped: the model repeated \`${call.name}\` without making progress`, step);

@@ -38,6 +38,25 @@ describe('session-store', () => {
     }
   });
 
+  it('keeps long prompts and answers for History reload (not a 300-char stub)', () => {
+    const longInstr = 'find every DriftScore mention\n' + 'x'.repeat(2000);
+    const longAnswer =
+      '# Top 10 DriftScore mention locations\n\n' +
+      'Ranked by importance.\n\n' +
+      Array.from({ length: 40 }, (_, i) => `${i + 1}. **packages/foo/bar-${i}.ts** — detail about DriftScore`).join(
+        '\n',
+      );
+    expect(longAnswer.length).toBeGreaterThan(300);
+    let s = newSession('long1', 'ollama', 'm', 0);
+    s = recordTask(s, { instruction: longInstr, summary: longAnswer, changes: [], stopped: 'finished' }, 1);
+    expect(s.tasks[0]!.instruction).toBe(longInstr);
+    expect(s.tasks[0]!.summary).toBe(longAnswer);
+    // Model recap stays short even when disk holds the full answer.
+    const recap = summarizeSession(s);
+    expect(recap.length).toBeLessThan(longAnswer.length);
+    expect(recap).toContain('find every DriftScore');
+  });
+
   it('summarizes a session for continuation', () => {
     let s = newSession('s', 'openrouter', 'anthropic/claude-3.5-sonnet', 0);
     s = recordTask(s, { instruction: 'do X', summary: 'did X', changes: [change('a.ts')], stopped: 'finished' }, 1);
