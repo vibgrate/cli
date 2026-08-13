@@ -3,6 +3,7 @@ import { cosine, type Embedder } from './embeddings.js';
 import { WEAK_TERMS, expandConcepts, bigramConsumedTokens } from './concepts.js';
 import type { RelevanceAnalysis } from './relevance-provider.js';
 import type { GraphNode, VgGraph } from '../schema.js';
+import { userAskFromInstruction } from './user-ask.js';
 
 /**
  * Deterministic retrieval for `vg ask` (VG-CLI-SPEC §3.2).
@@ -148,7 +149,10 @@ export function residualForSymbolSearch(question: string): string {
  * dumping constrained-decoding JSON into the VG Code panel.
  */
 export function isLocateOnlyInstruction(instruction: string): boolean {
-  const q = instruction.trim();
+  // Drop host-injected "User attachments" appendix (backticked image paths)
+  // before classify — same rule as buildCodeContext. Avoids treating a screenshot
+  // filename as a locate-only occurrence search.
+  const q = userAskFromInstruction(instruction).trim();
   if (!q) return false;
   const needles = extractLiteralNeedles(q);
   const hasLocateFrame =

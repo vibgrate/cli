@@ -502,6 +502,16 @@ export async function runCoreScan(
   const dedupeKey = (p: ProjectScan): string =>
     OVERLAY_PROJECT_TYPES.has(p.type as string) ? `${p.type}:${p.path}` : p.path;
   const rawProjects: ProjectScan[] = [...nodeProjects, ...dotnetProjects, ...pythonProjects, ...javaProjects, ...rubyProjects, ...swiftProjects, ...goProjects, ...rustProjects, ...phpProjects, ...dartProjects, ...elixirProjects, ...dockerProjects, ...helmProjects, ...terraformProjects, ...polyglotProjects];
+  // Canonicalise project paths to `/` before dedupe. Scanners disagree on
+  // separators on Windows (dotnet normalises, most others emit raw
+  // `path.relative` backslashes), which broke dedupe here and left the IDE
+  // scope picker with an unsorted mix of `src\Foo` and `src/Foo`.
+  for (const project of rawProjects) {
+    project.path = project.path.replace(/\\/g, '/');
+    for (const ref of project.projectReferences ?? []) {
+      ref.path = ref.path.replace(/\\/g, '/');
+    }
+  }
   const deduplicatedMap = new Map<string, ProjectScan>();
   for (const project of rawProjects) {
     const existing = deduplicatedMap.get(dedupeKey(project));

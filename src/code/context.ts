@@ -17,6 +17,7 @@ import { indexFor } from '../engine/relations.js';
 import { impactOf } from '../engine/impact.js';
 import type { CodeContext } from './types.js';
 import type { GraphNode, VgGraph } from '../schema.js';
+import { userAskFromInstruction } from '../engine/user-ask.js';
 
 export interface BuildContextOptions {
   /** Approx token budget for the rendered block (default 3000). */
@@ -52,17 +53,26 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
   const impactDepth = options.impactDepth ?? 2;
   const index = indexFor(graph);
 
+  // Hosts (VS Code panel) append a "User attachments" block with backticked
+  // filenames/paths. Ranking and literal-locate pins must use only the user's
+  // ask — otherwise `image.png` becomes a hard constraint that aborts the task.
+  // The full instruction (with attachments) still goes in the Task section.
+  const ask = userAskFromInstruction(instruction);
+  const priorAsk = options.priorInstruction
+    ? userAskFromInstruction(options.priorInstruction)
+    : options.priorInstruction;
+
   // Retrieval seeds: reuse the deterministic lexical/structural retrieval that
   // backs `vg ask`. When `--file` narrows the surface, keep only seeds in those
   // files (but still let impact reach outside them, so the review is honest).
   // URL / quoted-string needles are stripped inside queryGraph so path tokens
   // cannot poison seeds (dash→dashboard, exist→NonExisting, …).
-  const q = queryGraph(graph, instruction, {
+  const q = queryGraph(graph, ask, {
     budget: Math.floor(budget * 0.6),
     limit: seedLimit * 2,
     relevance: options.relevance,
     topicTags: options.topicTags,
-    priorQuestion: options.priorInstruction,
+    priorQuestion: priorAsk,
   });
   let seeds = q.matches.map((m) => ({ node: m.node, why: m.why }));
   if (options.files && options.files.length) {
@@ -94,11 +104,11 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
   // hard constraints; they are surfaced explicitly and never summarized away.
   const seedIds = new Set(seeds.map((s) => s.node.id));
   const pinnedFacts = [
-    ...literalNeedleFacts(instruction),
+    ...literalNeedleFacts(ask),
     ...pinnedFactsFor(graph, seedIds),
   ];
 
-  const conceptMap = conceptMapLines(instruction, options.relevance, options.priorInstruction);
+  const conceptMap = conceptMapLines(ask, options.relevance, priorAsk);
   const rendered = render(instruction, seeds, [...impacted.values()], targetFiles, pinnedFacts, conceptMap, index, budget);
   return {
     instruction,
@@ -113,8 +123,8 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
 }
 
 /** Pin URL / quoted needles so the agent does not treat path tokens as symbols. */
-function literalNeedleFacts(instruction: string): string[] {
-  const needles = extractLiteralNeedles(instruction);
+function literalNeedleFacts(ask: string): string[] {
+  const needles = extractLiteralNeedles(ask);
   if (!needles.length) return [];
   return needles.map(
     (n) =>

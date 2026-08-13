@@ -50,5 +50,50 @@ describe('buildCodeContext', () => {
     expect(ctx.pinnedFacts.some((f) => f.includes('literal-locate'))).toBe(true);
     expect(ctx.rendered).toContain('https://dash.vibgrate.com/signup');
   });
+
+  it('does not pin host attachment basenames/paths as literal-locate hard constraints (field report)', () => {
+    // VS Code packs screenshots after a --- / User attachments fence with
+    // backticks around the filename and on-disk path. Those must never become
+    // "0 hits → finish, do not invent an edit" pins that abort a coding task.
+    const instruction = [
+      'add a timeout to scanDir and show a green health check on the version badge',
+      '',
+      '---',
+      '## User attachments (always include in your reasoning for this turn)',
+      '',
+      '### Attached image: `image.png`',
+      'The image is attached to this message for vision-capable models, and saved at: `.vibgrate/code-attachments/msioq2sz-0.png`',
+      'MIME: image/png · ~42 KiB',
+    ].join('\n');
+    const ctx = buildCodeContext(fixtureGraph(), instruction);
+    expect(ctx.pinnedFacts.some((f) => f.includes('image.png'))).toBe(false);
+    expect(ctx.pinnedFacts.some((f) => f.includes('code-attachments'))).toBe(false);
+    expect(ctx.pinnedFacts.some((f) => f.includes('literal-locate') && f.includes('image.png'))).toBe(
+      false,
+    );
+    // Full instruction (attachments) still appears in the Task section for the model.
+    expect(ctx.rendered).toContain('## Task');
+    expect(ctx.rendered).toContain('User attachments');
+    expect(ctx.rendered).toContain('image.png');
+    // Seed ranking still follows the user ask.
+    expect(ctx.seeds.some((s) => s.node.qualifiedName === 'scanDir')).toBe(true);
+  });
+
+  it('still pins user-quoted needles when an attachment appendix is also present', () => {
+    const instruction = [
+      'find every "scanDir" occurrence and document them',
+      '',
+      '---',
+      '## User attachments (always include in your reasoning for this turn)',
+      '',
+      '### Attached image: `shot.png`',
+      'saved at: `.vibgrate/code-attachments/x-0.png`',
+    ].join('\n');
+    const ctx = buildCodeContext(fixtureGraph(), instruction);
+    expect(ctx.pinnedFacts.some((f) => f.includes('literal-locate') && f.includes('scanDir'))).toBe(
+      true,
+    );
+    expect(ctx.pinnedFacts.some((f) => f.includes('shot.png'))).toBe(false);
+  });
 });
 

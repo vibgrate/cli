@@ -83,6 +83,7 @@ import { buildIdentifierTrieFromGraph } from '../runtime/identifier-trie.js';
 import type { TrieNode } from '../runtime/identifier-trie.js';
 import { graphDraftCandidates, KvBlockRegistry } from '../runtime/kv-cache.js';
 import { lookupModelCapabilities } from './model-capabilities.js';
+import { userAskFromInstruction } from '../engine/user-ask.js';
 
 export type { CapsuleSummary, RunProvenance };
 export { CONTEXT_POLICY_VERSION };
@@ -407,7 +408,9 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   // Optional relevance provider: widens capsule seed vocabulary when
   // installed; null (the default) changes nothing. Loaded once per run and
   // reused by the capsule-delta recompile below.
-  const relevance = await analyzeQuestion(instruction);
+  // Relevance ranks the user ask only — attachment basenames/paths must not
+  // become topics or seeds (same strip as buildCodeContext / literal-locate).
+  const relevance = await analyzeQuestion(userAskFromInstruction(instruction));
   const topicTags = relevance ? await loadTopicTags(graph, options.root) : null;
   const built = buildAgentContext(graph, instruction, { ...options, fsImpl, budget, relevance, topicTags });
   const context = built.context;

@@ -129,10 +129,16 @@ export function registerDaemon(program: Command): void {
 
       const child = await startDetachedVgd(socketPath);
       const res = await vgdRequest({ op: 'status' }, { socketPath });
+      if (!res.ok) {
+        throw new CliError(
+          `vgd started (pid ${child ?? '?'}) but status failed: ${res.error} (${socketPath})`,
+          ExitCode.ERROR,
+        );
+      }
       if (global.json) {
-        json({ running: true, ensured: true, ...(res.ok ? res : { socketPath }) });
+        json({ running: true, ensured: true, ...res });
       } else if (!global.quiet) {
-        const pid = res.ok && 'pid' in res ? res.pid : child;
+        const pid = 'pid' in res ? res.pid : child;
         info(`vgd · started in background pid ${pid} · ${c.dim(socketPath)}`);
       }
     });
@@ -457,20 +463,20 @@ function socketOf(cmd: Command): string {
  * Handles both `node dist/cli.js …` and a packaged `vg` binary.
  */
 function spawnDetachedDaemonStart(socketPath: string): ReturnType<typeof spawn> {
+  // windowsHide: on Windows a detached console can flash and (with some AV /
+  // job-object setups) keep the child tied to the parent session. Hide it.
+  const opts = {
+    detached: true,
+    stdio: 'ignore' as const,
+    env: process.env,
+    windowsHide: true,
+  };
   const entry = process.argv[1];
   if (entry && (entry.endsWith('.js') || entry.endsWith('.mjs') || entry.endsWith('.cjs'))) {
-    return spawn(process.execPath, [entry, 'daemon', 'start', '--socket', socketPath], {
-      detached: true,
-      stdio: 'ignore',
-      env: process.env,
-    });
+    return spawn(process.execPath, [entry, 'daemon', 'start', '--socket', socketPath], opts);
   }
   // Packaged binary: argv[0] is the executable.
-  return spawn(process.argv[0] || 'vg', ['daemon', 'start', '--socket', socketPath], {
-    detached: true,
-    stdio: 'ignore',
-    env: process.env,
-  });
+  return spawn(process.argv[0] || 'vg', ['daemon', 'start', '--socket', socketPath], opts);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -480,16 +486,33 @@ function sleep(ms: number): Promise<void> {
 /**
  * Spawn a detached background `daemon start` and wait for it to answer ping.
  * Returns the child pid; throws when the socket never becomes ready.
+ *
+ * Ready budget is long because the detached child pays a full Node + CLI cold
+ * start of its own (often >8s under Windows AV). The previous 8s window made
+ * `vg daemon ensure` report success only when ping raced ahead of the child
+ * exiting, or fail right as the child was about to listen.
  */
 async function startDetachedVgd(socketPath: string): Promise<number | undefined> {
   const child = spawnDetachedDaemonStart(socketPath);
   child.unref();
-  const deadline = Date.now() + 8_000;
+  const readyMs = 30_000;
+  const deadline = Date.now() + readyMs;
   while (Date.now() < deadline) {
-    await sleep(100);
+    await sleep(150);
     if (await vgdIsRunning({ socketPath })) return child.pid;
+    // If the child already exited without ever answering, fail fast rather
+    // than waiting out the full budget for a dead process.
+    if (child.exitCode != null && child.exitCode !== 0) {
+      throw new CliError(
+        `vgd child exited ${child.exitCode} before becoming ready at ${socketPath}`,
+        ExitCode.ERROR,
+      );
+    }
   }
-  throw new CliError(`vgd failed to become ready at ${socketPath}`, ExitCode.ERROR);
+  throw new CliError(
+    `vgd failed to become ready within ${Math.round(readyMs / 1000)}s at ${socketPath}`,
+    ExitCode.ERROR,
+  );
 }
 
 /**

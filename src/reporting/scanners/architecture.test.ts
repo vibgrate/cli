@@ -534,6 +534,245 @@ describe('scanArchitecture', () => {
     await cleanupDir(tmpDir);
   });
 
+  // ── .NET classification ──
+
+  it('classifies a .NET solution layout into layers', async () => {
+    await createFiles(tmpDir, [
+      'src/Bridge.Domain/Orders/Order.cs',
+      'src/Bridge.WebApi/Controllers/OrdersController.cs',
+      'src/Bridge.WebApi/Program.cs',
+      'src/Bridge.Database/Migrations/20240101_Init.cs',
+      'src/Bridge.Services/OrderService.cs',
+      'src/Bridge.Infrastructure/Queue/BusClient.cs',
+      'src/Bridge.WebApp/Views/Home/Index.cshtml',
+      'tests/Bridge.Worker.Tests/OrderServiceTests.cs',
+    ]);
+    const dotnetProject: ProjectScan = { ...makeProject([]), type: 'dotnet' };
+    const result = await scanArchitecture(tmpDir, [dotnetProject]);
+
+    const byLayer = (name: string) => result.layers.find((l) => l.layer === name);
+    expect(byLayer('domain')).toBeDefined();          // Orders/ under Domain project
+    expect(byLayer('routing')).toBeDefined();         // Controllers/ + *Controller.cs
+    expect(byLayer('config')).toBeDefined();          // Program.cs
+    expect(byLayer('data-access')).toBeDefined();     // Migrations/
+    expect(byLayer('services')).toBeDefined();        // *Service.cs
+    expect(byLayer('infrastructure')).toBeDefined();  // Queue/
+    expect(byLayer('presentation')).toBeDefined();    // Views/ .cshtml
+    expect(byLayer('testing')).toBeDefined();         // *.Tests/ + *Tests.cs
+    await cleanupDir(tmpDir);
+  });
+
+  it('classifies PascalCase directories case-insensitively', async () => {
+    await createFiles(tmpDir, [
+      'MyApp/Controllers/HomeController.cs',
+      'MyApp/Models/Product.cs',
+      'MyApp/Services/Billing.cs',
+    ]);
+    const result = await scanArchitecture(tmpDir, [makeProject([])]);
+    expect(result.layers.find((l) => l.layer === 'routing')).toBeDefined();
+    expect(result.layers.find((l) => l.layer === 'domain')).toBeDefined();
+    expect(result.layers.find((l) => l.layer === 'services')).toBeDefined();
+    await cleanupDir(tmpDir);
+  });
+
+  it('matches top-level conventional directories without a leading slash', async () => {
+    await createFiles(tmpDir, ['tests/unit/helpers.cs', 'controllers/api.cs']);
+    const result = await scanArchitecture(tmpDir, [makeProject([])]);
+    expect(result.layers.find((l) => l.layer === 'testing')?.fileCount).toBe(1);
+    expect(result.layers.find((l) => l.layer === 'routing')?.fileCount).toBe(1);
+    await cleanupDir(tmpDir);
+  });
+
+  it('maps NuGet packages to layers', async () => {
+    await createFiles(tmpDir, ['src/App/Program.cs']);
+    const project: ProjectScan = {
+      ...makeProject([
+        makeDep('Microsoft.EntityFrameworkCore', '8.0.0'),
+        makeDep('Serilog', '3.1.0'),
+        makeDep('xunit', '2.6.0'),
+      ]),
+      type: 'dotnet',
+    };
+    const result = await scanArchitecture(tmpDir, [project]);
+    const da = result.layers.find((l) => l.layer === 'data-access');
+    expect(da?.packages.some((p) => p.name === 'Microsoft.EntityFrameworkCore')).toBe(true);
+    const infra = result.layers.find((l) => l.layer === 'infrastructure');
+    expect(infra?.packages.some((p) => p.name === 'Serilog')).toBe(true);
+    const testing = result.layers.find((l) => l.layer === 'testing');
+    expect(testing?.packages.some((p) => p.name === 'xunit')).toBe(true);
+    await cleanupDir(tmpDir);
+  });
+
+  it('ignores bin and obj directories', async () => {
+    await createFiles(tmpDir, [
+      'src/App/Program.cs',
+      'src/App/bin/Debug/App.cs',
+      'src/App/obj/Generated.cs',
+    ]);
+    const result = await scanArchitecture(tmpDir, [makeProject([])]);
+    expect(result.totalClassified + result.unclassified).toBe(1);
+    await cleanupDir(tmpDir);
+  });
+
+  // ── Other-language classification (Java, Python, Go, Ruby, Swift, Dart, Elixir, PHP) ──
+
+  it('classifies a Java Maven/Spring layout into layers', async () => {
+    await createFiles(tmpDir, [
+      'src/main/java/com/acme/controller/UserController.java',
+      'src/main/java/com/acme/service/UserServiceImpl.java',
+      'src/main/java/com/acme/model/User.java',
+      'src/main/java/com/acme/repository/UserRepository.java',
+      'src/main/java/com/acme/config/AppConfiguration.java',
+      'src/test/java/com/acme/UserControllerTest.java',
+    ]);
+    const project: ProjectScan = { ...makeProject([]), type: 'java' };
+    const result = await scanArchitecture(tmpDir, [project]);
+    const byLayer = (name: string) => result.layers.find((l) => l.layer === name);
+    expect(byLayer('routing')).toBeDefined();
+    expect(byLayer('services')).toBeDefined();
+    expect(byLayer('domain')).toBeDefined();
+    expect(byLayer('data-access')).toBeDefined();
+    expect(byLayer('config')).toBeDefined();
+    expect(byLayer('testing')).toBeDefined();
+    await cleanupDir(tmpDir);
+  });
+
+  it('classifies a Django project layout into layers', async () => {
+    await createFiles(tmpDir, [
+      'shop/models.py',
+      'shop/views.py',
+      'shop/urls.py',
+      'shop/middleware.py',
+      'shop/tasks.py',
+      'project/settings.py',
+      'shop/tests/test_views.py',
+    ]);
+    const project: ProjectScan = { ...makeProject([]), type: 'python' };
+    const result = await scanArchitecture(tmpDir, [project]);
+    const byLayer = (name: string) => result.layers.find((l) => l.layer === name);
+    expect(byLayer('domain')).toBeDefined();
+    expect(byLayer('routing')).toBeDefined();
+    expect(byLayer('middleware')).toBeDefined();
+    expect(byLayer('services')).toBeDefined();
+    expect(byLayer('config')).toBeDefined();
+    expect(byLayer('testing')).toBeDefined();
+    await cleanupDir(tmpDir);
+  });
+
+  it('classifies a Go service layout into layers', async () => {
+    await createFiles(tmpDir, [
+      'cmd/server/main.go',
+      'internal/handlers/user.go',
+      'internal/middleware/auth.go',
+      'internal/repositories/user.go',
+      'internal/handlers/user_test.go',
+    ]);
+    const project: ProjectScan = { ...makeProject([]), type: 'go' };
+    const result = await scanArchitecture(tmpDir, [project]);
+    const byLayer = (name: string) => result.layers.find((l) => l.layer === name);
+    expect(byLayer('routing')).toBeDefined();       // cmd/ + handlers/
+    expect(byLayer('middleware')).toBeDefined();
+    expect(byLayer('data-access')).toBeDefined();
+    expect(byLayer('testing')).toBeDefined();       // _test.go
+    await cleanupDir(tmpDir);
+  });
+
+  it('classifies a Rails app layout into layers', async () => {
+    await createFiles(tmpDir, [
+      'app/controllers/users_controller.rb',
+      'app/models/user.rb',
+      'app/views/users/index.html.erb',
+      'app/mailers/user_mailer.rb',
+      'db/migrate/20240101_create_users.rb',
+      'spec/models/user_spec.rb',
+    ]);
+    const project: ProjectScan = { ...makeProject([]), type: 'ruby' };
+    const result = await scanArchitecture(tmpDir, [project]);
+    const byLayer = (name: string) => result.layers.find((l) => l.layer === name);
+    expect(byLayer('routing')).toBeDefined();        // controllers/
+    expect(byLayer('domain')).toBeDefined();         // models/
+    expect(byLayer('presentation')).toBeDefined();   // views/ .erb
+    expect(byLayer('infrastructure')).toBeDefined(); // mailers/
+    expect(byLayer('data-access')).toBeDefined();    // db/migrate/
+    expect(byLayer('testing')).toBeDefined();        // spec/ + _spec.rb
+    await cleanupDir(tmpDir);
+  });
+
+  it('classifies Swift and Flutter conventions', async () => {
+    await createFiles(tmpDir, [
+      'Sources/App/HomeViewController.swift',
+      'Tests/AppTests/HomeTests.swift',
+      'lib/screens/home_screen.dart',
+      'lib/widgets/button.dart',
+      'test/home_test.dart',
+    ]);
+    const result = await scanArchitecture(tmpDir, [makeProject([])]);
+    const pres = result.layers.find((l) => l.layer === 'presentation');
+    expect(pres).toBeDefined(); // ViewController + screens/ + widgets/
+    expect(pres!.fileCount).toBeGreaterThanOrEqual(3);
+    const testing = result.layers.find((l) => l.layer === 'testing');
+    expect(testing).toBeDefined(); // Tests/ + *Tests.swift + _test.dart
+    await cleanupDir(tmpDir);
+  });
+
+  it('classifies a Phoenix app layout into layers', async () => {
+    await createFiles(tmpDir, [
+      'lib/my_app_web/controllers/user_controller.ex',
+      'lib/my_app_web/live/user_live.ex',
+      'lib/my_app_web/controllers/user_html/index.heex',
+      'lib/my_app/repo.ex',
+      'test/my_app/user_test.exs',
+    ]);
+    const project: ProjectScan = { ...makeProject([]), type: 'elixir' };
+    const result = await scanArchitecture(tmpDir, [project]);
+    const byLayer = (name: string) => result.layers.find((l) => l.layer === name);
+    expect(byLayer('routing')).toBeDefined();       // _controller.ex + controllers/
+    expect(byLayer('presentation')).toBeDefined();  // _live.ex + .heex
+    expect(byLayer('data-access')).toBeDefined();   // repo.ex
+    expect(byLayer('testing')).toBeDefined();       // _test.exs
+    await cleanupDir(tmpDir);
+  });
+
+  it('classifies a Laravel app layout into layers', async () => {
+    await createFiles(tmpDir, [
+      'app/Http/Controllers/UserController.php',
+      'app/Http/Middleware/Authenticate.php',
+      'app/Models/User.php',
+      'resources/views/home.blade.php',
+      'database/migrations/2024_01_01_create_users.php',
+    ]);
+    const project: ProjectScan = { ...makeProject([]), type: 'php' };
+    const result = await scanArchitecture(tmpDir, [project]);
+    const byLayer = (name: string) => result.layers.find((l) => l.layer === name);
+    expect(byLayer('routing')).toBeDefined();
+    expect(byLayer('middleware')).toBeDefined();
+    expect(byLayer('domain')).toBeDefined();
+    expect(byLayer('presentation')).toBeDefined();
+    expect(byLayer('data-access')).toBeDefined();
+    await cleanupDir(tmpDir);
+  });
+
+  it('maps non-JS ecosystem packages to layers', async () => {
+    await createFiles(tmpDir, ['src/app.py']);
+    const project: ProjectScan = {
+      ...makeProject([
+        makeDep('sqlalchemy', '2.0.0'),
+        makeDep('org.springframework.boot:spring-boot-starter-web', '3.2.0'),
+        makeDep('gorm.io/gorm', '1.25.0'),
+        makeDep('phoenix', '1.7.0'),
+      ]),
+      type: 'python',
+    };
+    const result = await scanArchitecture(tmpDir, [project]);
+    const da = result.layers.find((l) => l.layer === 'data-access');
+    expect(da?.packages.some((p) => p.name === 'sqlalchemy')).toBe(true);
+    expect(da?.packages.some((p) => p.name === 'gorm.io/gorm')).toBe(true);
+    const routing = result.layers.find((l) => l.layer === 'routing');
+    expect(routing?.packages.some((p) => p.name === 'org.springframework.boot:spring-boot-starter-web')).toBe(true);
+    expect(routing?.packages.some((p) => p.name === 'phoenix')).toBe(true);
+    await cleanupDir(tmpDir);
+  });
+
   it('builds a project-level mermaid architecture diagram', async () => {
     await createFiles(tmpDir, [
       'src/components/Button.tsx',

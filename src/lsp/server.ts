@@ -1094,10 +1094,12 @@ function pruneArtifactProjects(a: ScanArtifact): ScanArtifact {
 
 /** Find a scanned project by its workspace-relative path (scope picker). */
 function projectByPath(a: ScanArtifact, projectPath: string): ProjectScan | undefined {
-  const want = path.normalize(projectPath === '' ? '.' : projectPath);
+  // Clients send `/`-separated paths; artifacts from older Windows engines may
+  // still carry `\`. Fold both to one form before comparing.
+  const norm = (p: string): string => path.normalize((p === '' ? '.' : p).replace(/\\/g, '/'));
+  const want = norm(projectPath);
   for (const proj of a.projects ?? []) {
-    const got = path.normalize(proj.path === '' ? '.' : proj.path);
-    if (got === want) return proj;
+    if (norm(proj.path) === want) return proj;
   }
   return undefined;
 }
@@ -1115,7 +1117,11 @@ function buildProjectRefs(rootDir: string, projects: ProjectScan[]): ProjectRef[
 
   const byPath = new Map<string, ProjectScan>();
   for (const p of projects) {
-    const rel = p.path === '' ? '.' : p.path;
+    // Wire paths are always `/`-separated. Scanners normalise at source now,
+    // but cached artifacts written by older engines on Windows still mix
+    // `src\foo` with `src/foo` — without this the picker neither dedupes nor
+    // sorts them together.
+    const rel = (p.path === '' ? '.' : p.path).replace(/\\/g, '/');
     const prev = byPath.get(rel);
     if (!prev) {
       byPath.set(rel, p);
