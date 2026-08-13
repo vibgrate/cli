@@ -209,6 +209,92 @@ describe('vg fix — end to end on real repos', () => {
     expect(pkg.dependencies.lodash).toBe('^2.0.0');
   });
 
+  it('--dry-run without --plan previews the recommended plan and never prompts, even with multiple non-empty tiers', async () => {
+    const root = npmFixture();
+    await scan(root);
+    // Distinct upgrade sets so dedupePlans keeps both tiers (identical sets collapse).
+    const safeUp: PlannedUpgrade = {
+      package: 'lodash',
+      ecosystem: 'npm',
+      from: '2.4.2',
+      to: '3.10.1',
+      kind: 'major',
+      blastRadius: 'low',
+      fixes: emptyDelta(),
+      reason: 'one major',
+    };
+    const balancedUp: PlannedUpgrade = {
+      package: 'lodash',
+      ecosystem: 'npm',
+      from: '2.4.2',
+      to: '4.17.21',
+      kind: 'major',
+      blastRadius: 'moderate',
+      fixes: emptyDelta(),
+      reason: 'two majors behind',
+    };
+    // Two non-empty plans so the old path would have called promptPlanSelection
+    // on a TTY (or bailed with "Multiple plans available" non-interactively).
+    mockPlanner({
+      status: 'ok',
+      requestId: 'req_dry_multi',
+      totalCandidates: 1,
+      recommended: 'safe',
+      rationale: 'Start low-risk.',
+      unresolved: emptyDelta(),
+      vulnerabilityData: 'osv',
+      deepAnalysis: false,
+      plans: [
+        {
+          tier: 'safe',
+          label: 'Low-risk',
+          description: 'One major step.',
+          upgrades: [safeUp],
+          excluded: [],
+          riskScore: 8,
+          confidence: 'high',
+          fixes: emptyDelta(),
+          introduces: emptyDelta(),
+        },
+        {
+          tier: 'balanced',
+          label: 'Balanced',
+          description: 'Jump to current.',
+          upgrades: [balancedUp],
+          excluded: [],
+          riskScore: 20,
+          confidence: 'moderate',
+          fixes: emptyDelta(),
+          introduces: emptyDelta(),
+        },
+        {
+          tier: 'aggressive',
+          label: 'Full',
+          description: '',
+          upgrades: [],
+          excluded: [],
+          riskScore: 0,
+          confidence: 'high',
+          fixes: emptyDelta(),
+          introduces: emptyDelta(),
+        },
+      ],
+    });
+
+    // Must complete without reading stdin / hanging on a plan picker.
+    await fixCommand.parseAsync([root, '--dry-run'], { from: 'user' });
+
+    const out = logSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('\n');
+    expect(out).toMatch(/Dry run/i);
+    // Recommended is safe → pin lodash@3.10.1, not the balanced 4.17.21 target.
+    expect(out).toContain('npm install lodash@3.10.1');
+    expect(out).not.toContain('npm install lodash@4.17.21');
+    expect(out).toMatch(/recommended \(safe\)/i);
+    // Nothing written.
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    expect(pkg.dependencies.lodash).toBe('^2.0.0');
+  });
+
   it('applies the chosen plan and a re-scan confirms the DriftScore actually falls', async () => {
     const root = npmFixture();
     const before = await scan(root);

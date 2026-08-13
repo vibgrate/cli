@@ -151,7 +151,7 @@ export const fixCommand = new Command('fix')
   .option('--repository-name <name>', 'Override the repository name recorded for this plan')
   .option('--plan <tier>', 'Apply a specific plan non-interactively (safe|balanced|aggressive)')
   .option('--yes', 'Apply the recommended plan without prompting')
-  .option('--dry-run', 'Show what would change without applying')
+  .option('--dry-run', 'Preview the recommended plan (or --plan <tier>) without applying; never prompts')
   .option('--no-apply', 'Only print the plans; never modify the project')
   .option('--fail-on-vulns <severity>', 'Exit non-zero if the recommended plan leaves an advisory at/above this severity unresolved (low|moderate|high|critical)')
   .action(async (targetPath: string, opts: {
@@ -467,8 +467,19 @@ async function runApplyFlow(
     }
   } else if (nonEmpty.length === 1) {
     chosen = nonEmpty[0];
-  } else if (opts.yes) {
+  } else if (opts.yes || opts.dryRun) {
+    // --yes applies the recommended plan without a pick. --dry-run previews that
+    // same plan without prompting: asking which tier to "apply" is meaningless
+    // when nothing is written. Pass --plan <tier> to dry-run a specific plan.
     chosen = response.plans.find((p) => p.tier === response.recommended) ?? nonEmpty[0];
+    if (opts.dryRun && !opts.yes && nonEmpty.length > 1) {
+      console.log(
+        chalk.dim(
+          `\nDry-run previews the recommended (${chosen.tier}) plan — nothing will be written. ` +
+            'Pass --plan <safe|balanced|aggressive> to preview another tier.',
+        ),
+      );
+    }
   } else if (process.stdin.isTTY && process.stdout.isTTY) {
     const tier = await promptPlanSelection(response);
     if (!tier) {
@@ -477,7 +488,7 @@ async function runApplyFlow(
     }
     chosen = response.plans.find((p) => p.tier === tier);
   } else {
-    console.log(chalk.dim('\nMultiple plans available — re-run with --plan <tier> or --yes to apply, or --dry-run to preview.'));
+    console.log(chalk.dim('\nMultiple plans available — re-run with --plan <tier> or --yes to apply, or --dry-run to preview the recommended plan.'));
     return;
   }
   if (!chosen || chosen.upgrades.length === 0) {

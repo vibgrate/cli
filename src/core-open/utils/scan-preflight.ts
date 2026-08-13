@@ -56,6 +56,15 @@ export interface ScanPreflightResponse {
 export interface ScanPreflightOptions {
   repositoryName?: string;
   vcsSha?: string;
+  /**
+   * Git remote URL of the scanned checkout (credential-redacted, from detectVcs).
+   * The server matches repositories by this canonical identity first, so a
+   * re-scan is recognised even when the display name differs from the one a
+   * previous scan recorded (package.json name vs clone directory vs
+   * `--repository-name`) — a name-only match falsely counted such re-scans as
+   * NEW repositories against the plan's repository cap.
+   */
+  remoteUrl?: string;
 }
 
 /**
@@ -73,6 +82,9 @@ export async function fetchScanPreflight(
   }
   if (options?.vcsSha) {
     url.searchParams.set('vcsSha', options.vcsSha);
+  }
+  if (options?.remoteUrl) {
+    url.searchParams.set('remoteUrl', options.remoteUrl);
   }
 
   const timestamp = String(Date.now());

@@ -26,6 +26,7 @@ import * as path from 'node:path';
 import { buildCodeContext } from './context.js';
 import { analyzeQuestion, type RelevanceAnalysis } from '../engine/relevance-provider.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
+import { userAskFromInstruction } from '../engine/user-ask.js';
 import { buildTaskCapsule, capsuleToCodeContext } from './capsule.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { repositoryIdFromRoot } from '../runtime/paths.js';
@@ -109,7 +110,7 @@ export async function runCodeSession(options: RunSessionOptions): Promise<CodeSe
   phase('inspect', options.capsule ? 'building source-bearing task capsule' : 'building graph-grounded context');
   // Optional relevance provider: widens capsule seed vocabulary when
   // installed; null (the default) changes nothing.
-  const relevance = await analyzeQuestion(instruction);
+  const relevance = await analyzeQuestion(userAskFromInstruction(instruction));
   const topicTags = relevance ? await loadTopicTags(graph, root) : null;
   const context = buildSessionContext(graph, instruction, {
     budget,

@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
-import { FileCache } from '../../core-open/index.js';
+import { FileCache, isSkippedDirName } from '../../core-open/index.js';
 import type {
   ProjectScan,
   DependencyRow,
@@ -235,6 +235,68 @@ const PATH_RULES: PathRule[] = [
   { pattern: /\/functions\//, layer: 'routing', confidence: 0.8, signal: 'functions/ directory', archetypes: ['serverless'] },
   { pattern: /\/lambdas\//, layer: 'routing', confidence: 0.85, signal: 'lambdas/ directory', archetypes: ['serverless'] },
   { pattern: /\/layers\//, layer: 'shared', confidence: 0.7, signal: 'Lambda layers/ directory', archetypes: ['serverless'] },
+
+  // ── .NET conventions ──
+  // Directory rules above already cover Controllers/, Services/, Models/,
+  // Views/, Migrations/, Middleware/ … because matching is case-insensitive.
+  { pattern: /\.tests?\//, layer: 'testing', confidence: 0.9, signal: '*.Tests project directory' },
+  // Layer-named project directories (`Company.Product.Domain/`,
+  // `Company.Product.Database/`) — the dotted segment carries the layer.
+  { pattern: /\.domain\//, layer: 'domain', confidence: 0.85, signal: '*.Domain project' },
+  { pattern: /\.(database|data|persistence)\//, layer: 'data-access', confidence: 0.85, signal: '*.Database project' },
+  { pattern: /\.(infrastructure|infra)\//, layer: 'infrastructure', confidence: 0.85, signal: '*.Infrastructure project' },
+  { pattern: /\.worker\//, layer: 'infrastructure', confidence: 0.8, signal: '*.Worker project' },
+  { pattern: /\.(webapi|api)\//, layer: 'routing', confidence: 0.8, signal: '*.WebApi project' },
+  { pattern: /\.(webapp|web|ui)\//, layer: 'presentation', confidence: 0.75, signal: '*.WebApp project' },
+  { pattern: /\.(services?|application)\//, layer: 'services', confidence: 0.8, signal: '*.Services project' },
+  { pattern: /\/wwwroot\//, layer: 'presentation', confidence: 0.85, signal: 'wwwroot/ static assets' },
+  { pattern: /\/properties\//, layer: 'config', confidence: 0.85, signal: 'Properties/ directory' },
+  { pattern: /\/program\.cs$/, layer: 'config', confidence: 0.9, signal: 'Program.cs entry point' },
+  { pattern: /\/startup\.cs$/, layer: 'config', confidence: 0.9, signal: 'Startup.cs' },
+  { pattern: /\.(cshtml|razor)$/, layer: 'presentation', confidence: 0.9, signal: 'Razor view' },
+
+  // ── JVM (Maven/Gradle standard layout + Spring package conventions) ──
+  { pattern: /\/src\/(test|androidtest|integrationtest)\//, layer: 'testing', confidence: 0.95, signal: 'src/test source set' },
+  { pattern: /\/controller\//, layer: 'routing', confidence: 0.8, signal: 'controller/ package' },
+  { pattern: /\/resource\//, layer: 'routing', confidence: 0.7, signal: 'resource/ package (JAX-RS)' },
+  { pattern: /\/model\//, layer: 'domain', confidence: 0.75, signal: 'model/ package' },
+  { pattern: /\/entity\//, layer: 'domain', confidence: 0.85, signal: 'entity/ package' },
+  { pattern: /\/dto\//, layer: 'domain', confidence: 0.85, signal: 'dto/ package' },
+  { pattern: /\/mappers?\//, layer: 'data-access', confidence: 0.75, signal: 'mapper/ package' },
+
+  // ── Python (Django/Flask/FastAPI module conventions) ──
+  { pattern: /\/(test_[^/]*|conftest)\.py$/, layer: 'testing', confidence: 0.95, signal: 'pytest test module' },
+  { pattern: /\/urls\.py$/, layer: 'routing', confidence: 0.95, signal: 'Django urls.py' },
+  { pattern: /\/views\.py$/, layer: 'routing', confidence: 0.9, signal: 'Django views.py (request handlers)' },
+  { pattern: /\/models\.py$/, layer: 'domain', confidence: 0.9, signal: 'Django models.py' },
+  { pattern: /\/serializers\.py$/, layer: 'domain', confidence: 0.85, signal: 'DRF serializers.py' },
+  { pattern: /\/forms\.py$/, layer: 'presentation', confidence: 0.8, signal: 'Django forms.py' },
+  { pattern: /\/(settings|admin)\.py$/, layer: 'config', confidence: 0.85, signal: 'Django settings/admin module' },
+  { pattern: /\/middleware\.py$/, layer: 'middleware', confidence: 0.9, signal: 'middleware.py' },
+  { pattern: /\/(tasks|celery)\.py$/, layer: 'services', confidence: 0.8, signal: 'task queue module' },
+
+  // ── Go / Rust / Dart / Ruby / Elixir test conventions ──
+  { pattern: /_(test|spec)\.[a-z]+$/, layer: 'testing', confidence: 0.95, signal: '_test/_spec file' },
+  { pattern: /\/spec\//, layer: 'testing', confidence: 0.85, signal: 'spec/ directory (RSpec)' },
+  { pattern: /\/cmd\//, layer: 'routing', confidence: 0.7, signal: 'cmd/ entry points (Go)' },
+
+  // ── Ruby on Rails ──
+  { pattern: /\/migrate\//, layer: 'data-access', confidence: 0.9, signal: 'db/migrate/ directory' },
+  { pattern: /\/mailers\//, layer: 'infrastructure', confidence: 0.8, signal: 'mailers/ directory' },
+  { pattern: /\.erb$/, layer: 'presentation', confidence: 0.85, signal: 'ERB view template' },
+
+  // ── PHP (Laravel/Symfony) ──
+  { pattern: /\.blade\.php$/, layer: 'presentation', confidence: 0.9, signal: 'Blade view template' },
+
+  // ── Elixir (Phoenix) ──
+  { pattern: /\/channels\//, layer: 'routing', confidence: 0.7, signal: 'channels/ directory' },
+  { pattern: /_controller\.exs?$/, layer: 'routing', confidence: 0.9, signal: 'Phoenix controller' },
+  { pattern: /_(view|live|html|component)\.exs?$/, layer: 'presentation', confidence: 0.85, signal: 'Phoenix view module' },
+  { pattern: /\/repo\.exs?$/, layer: 'data-access', confidence: 0.9, signal: 'Ecto repo' },
+  { pattern: /\.(eex|heex)$/, layer: 'presentation', confidence: 0.85, signal: 'EEx/HEEx template' },
+
+  // ── Flutter / mobile ──
+  { pattern: /\/screens\//, layer: 'presentation', confidence: 0.85, signal: 'screens/ directory' },
 ];
 
 // ── File name suffix classification (lower-priority fallback) ──
@@ -269,6 +331,47 @@ const SUFFIX_RULES: Array<{ suffix: string; layer: ArchitectureLayer; confidence
   { suffix: '.util', layer: 'shared', confidence: 0.7, signal: 'util suffix' },
   { suffix: '.helper', layer: 'shared', confidence: 0.7, signal: 'helper suffix' },
   { suffix: '.constant', layer: 'shared', confidence: 0.7, signal: 'constant suffix' },
+];
+
+/**
+ * PascalCase class-name suffixes — the .NET/Java convention (`UsersController.cs`,
+ * `OrderRepository.cs`) where the dot-suffix rules above are the JS/TS one.
+ * Matched case-sensitively so `usercontroller.ts` style names don't false-hit.
+ */
+const PASCAL_SUFFIX_RULES: Array<{ suffix: string; layer: ArchitectureLayer; confidence: number; signal: string }> = [
+  { suffix: 'Controller', layer: 'routing', confidence: 0.9, signal: 'Controller class' },
+  { suffix: 'Endpoint', layer: 'routing', confidence: 0.85, signal: 'Endpoint class' },
+  { suffix: 'Middleware', layer: 'middleware', confidence: 0.9, signal: 'Middleware class' },
+  { suffix: 'Filter', layer: 'middleware', confidence: 0.75, signal: 'Filter class' },
+  { suffix: 'Service', layer: 'services', confidence: 0.85, signal: 'Service class' },
+  { suffix: 'Handler', layer: 'services', confidence: 0.75, signal: 'Handler class' },
+  { suffix: 'UseCase', layer: 'services', confidence: 0.85, signal: 'UseCase class' },
+  { suffix: 'Entity', layer: 'domain', confidence: 0.85, signal: 'Entity class' },
+  { suffix: 'Dto', layer: 'domain', confidence: 0.8, signal: 'DTO class' },
+  { suffix: 'Validator', layer: 'domain', confidence: 0.75, signal: 'Validator class' },
+  { suffix: 'ViewModel', layer: 'presentation', confidence: 0.85, signal: 'ViewModel class' },
+  { suffix: 'Repository', layer: 'data-access', confidence: 0.9, signal: 'Repository class' },
+  { suffix: 'DbContext', layer: 'data-access', confidence: 0.95, signal: 'EF Core DbContext' },
+  { suffix: 'Migration', layer: 'data-access', confidence: 0.85, signal: 'Migration class' },
+  { suffix: 'Client', layer: 'infrastructure', confidence: 0.7, signal: 'Client class' },
+  { suffix: 'Tests', layer: 'testing', confidence: 0.95, signal: 'Tests class' },
+  { suffix: 'Test', layer: 'testing', confidence: 0.9, signal: 'Test class' },
+  // JVM (Spring/JEE/Android)
+  { suffix: 'ServiceImpl', layer: 'services', confidence: 0.9, signal: 'ServiceImpl class' },
+  { suffix: 'Dao', layer: 'data-access', confidence: 0.9, signal: 'DAO class' },
+  { suffix: 'Mapper', layer: 'data-access', confidence: 0.75, signal: 'Mapper class' },
+  { suffix: 'Resource', layer: 'routing', confidence: 0.75, signal: 'JAX-RS resource class' },
+  { suffix: 'Configuration', layer: 'config', confidence: 0.85, signal: 'Configuration class' },
+  { suffix: 'Config', layer: 'config', confidence: 0.8, signal: 'Config class' },
+  { suffix: 'Interceptor', layer: 'middleware', confidence: 0.85, signal: 'Interceptor class' },
+  { suffix: 'Activity', layer: 'presentation', confidence: 0.85, signal: 'Android Activity' },
+  { suffix: 'Fragment', layer: 'presentation', confidence: 0.85, signal: 'Android Fragment' },
+  // Swift / iOS — higher confidence than the generic Controller→routing rule
+  // so FooViewController lands in presentation, not routing.
+  { suffix: 'ViewController', layer: 'presentation', confidence: 0.95, signal: 'UIKit ViewController' },
+  // Flutter
+  { suffix: 'Screen', layer: 'presentation', confidence: 0.85, signal: 'Screen widget' },
+  { suffix: 'Widget', layer: 'presentation', confidence: 0.75, signal: 'Widget class' },
 ];
 
 // ── Dependency → layer mapping (which packages indicate which layers) ──
@@ -371,12 +474,191 @@ const PACKAGE_LAYER_MAP: Record<string, ArchitectureLayer> = {
   'pino': 'infrastructure',
   'winston': 'infrastructure',
   'dd-trace': 'infrastructure',
+
+  // ── .NET (NuGet package ids) ──
+  'Microsoft.EntityFrameworkCore': 'data-access',
+  'Dapper': 'data-access',
+  'Npgsql': 'data-access',
+  'Microsoft.Data.SqlClient': 'data-access',
+  'System.Data.SqlClient': 'data-access',
+  'MongoDB.Driver': 'data-access',
+  'StackExchange.Redis': 'data-access',
+  'MediatR': 'services',
+  'Hangfire': 'services',
+  'Quartz': 'services',
+  'FluentValidation': 'domain',
+  'AutoMapper': 'domain',
+  'Microsoft.AspNetCore.Authentication.JwtBearer': 'middleware',
+  'Swashbuckle.AspNetCore': 'routing',
+  'Serilog': 'infrastructure',
+  'NLog': 'infrastructure',
+  'Polly': 'infrastructure',
+  'RabbitMQ.Client': 'infrastructure',
+  'MassTransit': 'infrastructure',
+  'Confluent.Kafka': 'infrastructure',
+  'Azure.Storage.Blobs': 'infrastructure',
+  'AWSSDK.S3': 'infrastructure',
+  'Newtonsoft.Json': 'shared',
+  'xunit': 'testing',
+  'NUnit': 'testing',
+  'MSTest.TestFramework': 'testing',
+  'Moq': 'testing',
+  'NSubstitute': 'testing',
+  'FluentAssertions': 'testing',
+
+  // ── Python (PyPI) ──
+  'django': 'routing',
+  'flask': 'routing',
+  'fastapi': 'routing',
+  'starlette': 'routing',
+  'sqlalchemy': 'data-access',
+  'alembic': 'data-access',
+  'psycopg2': 'data-access',
+  'psycopg2-binary': 'data-access',
+  'pymongo': 'data-access',
+  'pydantic': 'domain',
+  'marshmallow': 'domain',
+  'celery': 'services',
+  'pytest': 'testing',
+  'boto3': 'infrastructure',
+  'httpx': 'infrastructure',
+  'requests': 'infrastructure',
+  'gunicorn': 'infrastructure',
+  'uvicorn': 'infrastructure',
+  'structlog': 'infrastructure',
+
+  // ── JVM (Maven groupId:artifactId, as the Java scanner keys them) ──
+  'org.springframework.boot:spring-boot-starter-web': 'routing',
+  'org.springframework:spring-webmvc': 'routing',
+  'io.ktor:ktor-server-core': 'routing',
+  'io.quarkus:quarkus-resteasy': 'routing',
+  'org.springframework.boot:spring-boot-starter-data-jpa': 'data-access',
+  'org.hibernate:hibernate-core': 'data-access',
+  'org.hibernate.orm:hibernate-core': 'data-access',
+  'org.mybatis:mybatis': 'data-access',
+  'com.zaxxer:HikariCP': 'data-access',
+  'org.jetbrains.exposed:exposed-core': 'data-access',
+  'org.springframework.boot:spring-boot-starter-security': 'middleware',
+  'jakarta.validation:jakarta.validation-api': 'domain',
+  'com.fasterxml.jackson.core:jackson-databind': 'shared',
+  'org.projectlombok:lombok': 'shared',
+  'junit:junit': 'testing',
+  'org.junit.jupiter:junit-jupiter': 'testing',
+  'org.mockito:mockito-core': 'testing',
+  'org.testng:testng': 'testing',
+  'ch.qos.logback:logback-classic': 'infrastructure',
+  'org.slf4j:slf4j-api': 'infrastructure',
+  'org.apache.kafka:kafka-clients': 'infrastructure',
+  'com.squareup.okhttp3:okhttp': 'infrastructure',
+
+  // ── Go (module paths) ──
+  'github.com/gin-gonic/gin': 'routing',
+  'github.com/labstack/echo/v4': 'routing',
+  'github.com/gorilla/mux': 'routing',
+  'github.com/go-chi/chi/v5': 'routing',
+  'github.com/gofiber/fiber/v2': 'routing',
+  'github.com/spf13/cobra': 'routing',
+  'gorm.io/gorm': 'data-access',
+  'github.com/jmoiron/sqlx': 'data-access',
+  'github.com/jackc/pgx/v5': 'data-access',
+  'go.mongodb.org/mongo-driver': 'data-access',
+  'github.com/redis/go-redis/v9': 'data-access',
+  'github.com/spf13/viper': 'config',
+  'github.com/stretchr/testify': 'testing',
+  'go.uber.org/zap': 'infrastructure',
+  'github.com/sirupsen/logrus': 'infrastructure',
+  'google.golang.org/grpc': 'infrastructure',
+
+  // ── Rust (crates) ──
+  'actix-web': 'routing',
+  'axum': 'routing',
+  'rocket': 'routing',
+  'warp': 'routing',
+  'clap': 'routing',
+  'diesel': 'data-access',
+  'sqlx': 'data-access',
+  'sea-orm': 'data-access',
+  'serde': 'domain',
+  'tokio': 'infrastructure',
+  'reqwest': 'infrastructure',
+  'tracing': 'infrastructure',
+
+  // ── Ruby (gems) ──
+  'rails': 'routing',
+  'sinatra': 'routing',
+  'activerecord': 'data-access',
+  'sequel': 'data-access',
+  'devise': 'middleware',
+  'pundit': 'middleware',
+  'sidekiq': 'services',
+  'rspec': 'testing',
+  'rspec-rails': 'testing',
+  'minitest': 'testing',
+  'puma': 'infrastructure',
+  'faraday': 'infrastructure',
+
+  // ── PHP (Composer vendor/package) ──
+  'laravel/framework': 'routing',
+  'symfony/http-kernel': 'routing',
+  'slim/slim': 'routing',
+  'doctrine/orm': 'data-access',
+  'illuminate/database': 'data-access',
+  'phpunit/phpunit': 'testing',
+  'pestphp/pest': 'testing',
+  'guzzlehttp/guzzle': 'infrastructure',
+  'monolog/monolog': 'infrastructure',
+
+  // ── Swift (SPM) ──
+  'Alamofire': 'infrastructure',
+  'vapor': 'routing',
+  'Vapor': 'routing',
+
+  // ── Dart (pub) ──
+  'dio': 'infrastructure',
+  'sqflite': 'data-access',
+  'flutter_bloc': 'services',
+  'riverpod': 'services',
+  'flutter_riverpod': 'services',
+  'go_router': 'routing',
+  'auto_route': 'routing',
+  'flutter_test': 'testing',
+  'mockito': 'testing',
+
+  // ── Elixir (Hex) ──
+  'phoenix': 'routing',
+  'phoenix_live_view': 'presentation',
+  'ecto': 'data-access',
+  'ecto_sql': 'data-access',
+  'postgrex': 'data-access',
+  'oban': 'services',
+  'ex_machina': 'testing',
+  'tesla': 'infrastructure',
+  'httpoison': 'infrastructure',
+  'finch': 'infrastructure',
+  'jason': 'shared',
 };
 
 // ── Source file walker ──
 
-const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.cts', '.cjs', '.svelte', '.vue']);
-const IGNORE_DIRS = new Set(['node_modules', '.git', '.wrangler', 'dist', 'build', '.next', '.nuxt', '.output', '.svelte-kit', 'coverage', '.vibgrate']);
+const SOURCE_EXTENSIONS = new Set([
+  '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.cts', '.cjs', '.svelte', '.vue',
+  // .NET — layer detection works off the same directory/suffix conventions
+  '.cs', '.vb', '.fs', '.cshtml', '.razor',
+  // JVM
+  '.java', '.kt', '.kts', '.scala', '.groovy',
+  // Python
+  '.py', '.pyi',
+  // Go / Rust
+  '.go', '.rs',
+  // Ruby (incl. ERB view templates)
+  '.rb', '.rake', '.erb',
+  // PHP (incl. Blade — extname is still .php)
+  '.php',
+  // Swift / Dart
+  '.swift', '.dart',
+  // Elixir (incl. EEx/HEEx view templates)
+  '.ex', '.exs', '.eex', '.heex',
+]);
 
 async function walkSourceFiles(rootDir: string, cache?: FileCache): Promise<string[]> {
   if (cache) {
@@ -408,7 +690,9 @@ async function walkSourceFiles(rootDir: string, cache?: FileCache): Promise<stri
       const fullPath = path.join(dir, entry.name);
 
       if (entry.isDirectory()) {
-        if (!IGNORE_DIRS.has(entry.name)) {
+        // Same skip list as every other scanner (SKIP_DIRS + virtualenv
+        // variants) so build output, vendored deps and caches never classify.
+        if (!isSkippedDirName(entry.name)) {
           await walk(fullPath);
         }
       } else if (entry.isFile()) {
@@ -430,7 +714,11 @@ function classifyFile(
   filePath: string,
   archetype: ProjectArchetype,
 ): LayerClassification | null {
-  const normalised = filePath.replace(/\\/g, '/');
+  // Leading `/` so `/dir/` patterns also match a top-level directory
+  // (`tests/Foo.Tests/Bar.cs`); lowercased so PascalCase conventions
+  // (.NET `Controllers/`, `Views/`…) hit the same rules as JS lowercase dirs.
+  const normalised = '/' + filePath.replace(/\\/g, '/').replace(/^\/+/, '');
+  const lowered = normalised.toLowerCase();
 
   // Try path rules first (highest priority — archetype-specific first)
   let bestMatch: { layer: ArchitectureLayer; confidence: number; signal: string } | null = null;
@@ -441,7 +729,7 @@ function classifyFile(
       continue;
     }
 
-    if (rule.pattern.test(normalised)) {
+    if (rule.pattern.test(lowered)) {
       // Archetype-specific rules get a boost
       const boost = rule.archetypes ? 0.05 : 0;
       const adjustedConfidence = Math.min(rule.confidence + boost, 1);
@@ -459,6 +747,14 @@ function classifyFile(
     const cleanBase = baseName.replace(/\.(test|spec)$/, '');
 
     for (const rule of SUFFIX_RULES) {
+      if (cleanBase.endsWith(rule.suffix)) {
+        if (!bestMatch || rule.confidence > bestMatch.confidence) {
+          bestMatch = { layer: rule.layer, confidence: rule.confidence, signal: rule.signal };
+        }
+      }
+    }
+
+    for (const rule of PASCAL_SUFFIX_RULES) {
       if (cleanBase.endsWith(rule.suffix)) {
         if (!bestMatch || rule.confidence > bestMatch.confidence) {
           bestMatch = { layer: rule.layer, confidence: rule.confidence, signal: rule.signal };

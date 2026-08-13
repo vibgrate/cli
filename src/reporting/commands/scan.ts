@@ -377,6 +377,11 @@ export const scanCommand = new Command('scan')
           const preflight = await fetchScanPreflight(parsed, ingestHost, {
             repositoryName,
             vcsSha: fingerprint.vcsSha,
+            // Canonical repo identity (credential-redacted by detectVcs) — the
+            // server matches on this first, so re-scanning an already-mapped
+            // repository under a different display name (e.g. a fresh clone in
+            // a temp dir) is not miscounted as a NEW repo against the plan cap.
+            remoteUrl: vcs.remoteUrl,
           });
           pinnedRegion = preflight.region;
           planTier = preflight.plan?.tier;

@@ -8,6 +8,7 @@
  */
 
 import { extractLiteralNeedles, isLocateOnlyInstruction } from '../engine/query.js';
+import { userAskFromInstruction } from '../engine/user-ask.js';
 import { searchSymbols, type TextHit } from '../engine/search.js';
 import type { VgGraph } from '../schema.js';
 
@@ -21,10 +22,11 @@ export interface LocateAnswer {
   summary: string;
 }
 
-/** Prefer the longest extracted URL/quote; else the trimmed instruction. */
+/** Prefer the longest extracted URL/quote; else the trimmed user ask. */
 export function primaryLocateNeedle(instruction: string): string {
-  const needles = extractLiteralNeedles(instruction);
-  if (needles.length === 0) return instruction.trim();
+  const ask = userAskFromInstruction(instruction);
+  const needles = extractLiteralNeedles(ask);
+  if (needles.length === 0) return ask.trim();
   return [...needles].sort((a, b) => b.length - a.length)[0]!;
 }
 

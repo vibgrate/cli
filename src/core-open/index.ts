@@ -137,6 +137,7 @@ export {
   readTextFile,
   ensureDir,
   FileCache,
+  isSkippedDirName,
   quickTreeCount,
   findFiles,
   findPackageJsonFiles,
