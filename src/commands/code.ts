@@ -32,7 +32,7 @@ import type { CodeSessionResult, LifecyclePhase } from '../code/types.js';
 export function registerCode(program: Command): void {
   const cmd = program
     .command('code')
-    .description('propose a graph-grounded code edit (guided mode with no instruction; dry-run by default)')
+    .description('graph-grounded coding agent (guided mode with no instruction; every edit and command is approved)')
     .argument('[instruction...]', 'what to change, in plain language (omit for guided interactive mode)')
     .option('--provider <id>', 'backend: vibgrate-relay (Vibgrate Relay), ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp')
     .option('--model <id>', 'model id (or set VG_CODE_MODEL). No model is hard-coded — pick the current best.')
@@ -40,7 +40,7 @@ export function registerCode(program: Command): void {
     .option('--model-path <gguf>', 'gguf path for --provider llama-cpp (weights are never auto-downloaded)')
     .option('-f, --file <path>', 'restrict the edit surface to this file (repeatable)', collect, [])
     .option('-b, --budget <n>', 'approx context token budget', '3000')
-    .option('--apply', 'write the change (still requires --yes or an interactive confirm)')
+    .option('--apply', 'one-shot path (--single/--mock) only: write the change (still requires --yes or an interactive confirm)')
     .option('--yes', 'consent to write / to a first-use package install, non-interactively')
     .option('--auto', 'autonomous agent: auto-approve every edit and command (use with care)')
     .option('--max-steps <n>', 'cap the number of agent steps', '24')
