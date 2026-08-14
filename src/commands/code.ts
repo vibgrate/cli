@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as readline from 'node:readline';
 import { Command } from 'commander';
 import { resolveProviders } from '../code/router.js';
+import { parseReasoningEffort } from '../code/providers.js';
 import { loadCodeConfig, contextBudgetFor } from '../code/config.js';
 import { discoverMcpServers } from '../code/mcp-discovery.js';
 import { runCodeSession } from '../code/session.js';
@@ -48,7 +49,13 @@ export function registerCode(program: Command): void {
     .option('--stream-json', 'machine protocol: NDJSON agent events on stdout, approval decisions on stdin (for host UIs like the VS Code panel)')
     .option('--session', 'with --stream-json: stay open for further turns (warm graph and tools) instead of exiting after one')
     .option('--verify [command]', 'after the agent finishes, run tests and make it fix failures (uses the config testCommand if no command is given)')
-    .option('--continue', 'resume the most recent session (recap + restore /undo)')
+    .option('--continue [id]', 'resume a session: the most recent one, or the given session id (recap + restore /undo)')
+    .option('--restore-checkpoint <commit>', 'one-shot: restore the given --file paths from a checkpoint commit, then exit (for host UIs after the original session ended)')
+    .option('--reasoning-effort <level>', 'how hard a reasoning-capable model should think: low | medium | high (ignored by models without the knob)')
+    .option('--worktree [id]', 'run the session in an isolated git worktree under .vibgrate/worktrees (bare: create a new one; with id: reuse it)')
+    .option('--worktree-diff <id>', 'one-shot: print the worktree\'s delta against its base as a patch, then exit')
+    .option('--worktree-apply <id>', 'one-shot: apply the worktree\'s delta onto the main tree (git apply --3way), then exit')
+    .option('--worktree-remove <id>', 'one-shot: remove the worktree checkout, then exit')
     .option('--capsule', 'use a source-bearing Task Capsule for first context (Fusion A/B; exact source ranges from the graph)')
     .option('--no-capsule', 'disable Task Capsule context even if enabled in .vibgrate/code.json')
     .option('--security-tier <tier>', 'shell isolation: L0 (host), L1 (Seatbelt/bubblewrap when available), L2/L3 reserved')
@@ -73,7 +80,13 @@ export function registerCode(program: Command): void {
         streamJson?: boolean;
         session?: boolean;
         verify?: string | boolean;
-        continue?: boolean;
+        continue?: boolean | string;
+        restoreCheckpoint?: string;
+        reasoningEffort?: string;
+        worktree?: boolean | string;
+        worktreeDiff?: string;
+        worktreeApply?: string;
+        worktreeRemove?: string;
         capsule?: boolean;
         securityTier?: string;
         mock?: string;
@@ -81,7 +94,188 @@ export function registerCode(program: Command): void {
       },
     ) {
       const global = readGlobal(this);
-      const instruction = (instructionParts ?? []).join(' ').trim();
+      let instruction = (instructionParts ?? []).join(' ').trim();
+
+      // `--continue [id]` takes an optional session id, and commander cannot
+      // tell an id from the first word of a bare-word instruction:
+      // `vg code --continue fix the tests` parses as continue="fix". Anything
+      // not shaped like a minted session id is the instruction's first word —
+      // fold it back and keep `--continue`'s bare meaning (resume latest).
+      if (typeof opts.continue === 'string') {
+        const { looksLikeSessionId } = await import('../code/session-store.js');
+        if (!looksLikeSessionId(opts.continue)) {
+          instruction = [opts.continue, instruction].filter(Boolean).join(' ');
+          opts.continue = true;
+        }
+      }
+
+      // One-shot checkpoint restore: no model, no map, no session — just git.
+      // Host UIs use this when the session that made a change has ended, so an
+      // Undo button keeps working after a reload / model switch / new chat.
+      if (opts.restoreCheckpoint) {
+        const { restoreCheckpoint, isValidCheckpointCommit } = await import('../code/checkpoint.js');
+        if (!isValidCheckpointCommit(opts.restoreCheckpoint)) {
+          throw usageError('--restore-checkpoint expects a checkpoint commit id (hex SHA)');
+        }
+        const files = (opts.file ?? []).filter(Boolean);
+        if (!files.length) {
+          throw usageError('--restore-checkpoint needs the files to restore, e.g. -f src/a.ts -f src/b.ts');
+        }
+        const root = rootOf(global);
+        const child = await import('node:child_process');
+        const gitRunner = (gitArgs: string[], gitEnv?: Record<string, string>) => {
+          const res = child.spawnSync('git', gitArgs, {
+            cwd: root,
+            encoding: 'utf8',
+            env: { ...process.env, ...(gitEnv ?? {}) },
+            timeout: 30_000,
+            maxBuffer: 32 * 1024 * 1024,
+          });
+          return { stdout: res.stdout ?? '', exitCode: res.status ?? 1 };
+        };
+        const outcome = restoreCheckpoint(gitRunner, { commit: opts.restoreCheckpoint, files });
+        if (opts.streamJson) {
+          process.stdout.write(
+            JSON.stringify({ event: 'checkpoint-restored', commit: opts.restoreCheckpoint, ...outcome }) + '\n',
+          );
+        } else if (global.json) {
+          json({ commit: opts.restoreCheckpoint, ...outcome });
+        } else {
+          out(
+            `restored ${outcome.restored.length}, removed ${outcome.removed.length}, failed ${outcome.failed.length}`,
+          );
+        }
+        if (outcome.failed.length) process.exitCode = 1;
+        return;
+      }
+
+      // Worktree one-shots (diff / apply / remove): plain git, no model, no
+      // map. Host UIs drive the review-then-apply flow with these after the
+      // worktree session itself has ended.
+      if (opts.worktreeDiff || opts.worktreeApply || opts.worktreeRemove) {
+        const wt = await import('../code/worktree-session.js');
+        const child = await import('node:child_process');
+        const os = await import('node:os');
+        const pathMod = await import('node:path');
+        const root = rootOf(global);
+        const gitRunner: import('../code/worktree-session.js').GitRunner = (gitArgs, gitEnv) => {
+          const res = child.spawnSync('git', gitArgs, {
+            cwd: root,
+            encoding: 'utf8',
+            env: { ...process.env, ...(gitEnv ?? {}) },
+            timeout: 60_000,
+            maxBuffer: 64 * 1024 * 1024,
+          });
+          return { stdout: (res.stdout ?? '') + (res.stderr ?? ''), exitCode: res.status ?? 1 };
+        };
+        const emitLine = (line: unknown): void => {
+          if (opts.streamJson) process.stdout.write(JSON.stringify(line) + '\n');
+          else if (global.json) json(line);
+        };
+        const findWt = (id: string) =>
+          wt.listSessionWorktrees(gitRunner, root).find((w) => w.id === id);
+        if (opts.worktreeDiff) {
+          const target = findWt(opts.worktreeDiff);
+          if (!target) throw new CliError(`no worktree ${opts.worktreeDiff} under .vibgrate/worktrees`, ExitCode.NOT_FOUND);
+          const diff = wt.worktreeDiffToBase(gitRunner, target.path, target.base);
+          if ('error' in diff) throw new CliError(diff.error, ExitCode.ERROR);
+          // Cap the transported patch: a runaway delta must not blow up the
+          // host's JSON parse. The apply path re-reads it from git, not this.
+          const MAX_PATCH = 2 * 1024 * 1024;
+          const truncated = diff.patch.length > MAX_PATCH;
+          emitLine({
+            event: 'worktree-diff',
+            id: target.id,
+            base: target.base,
+            files: diff.files,
+            patch: truncated ? diff.patch.slice(0, MAX_PATCH) : diff.patch,
+            truncated,
+          });
+          if (!opts.streamJson && !global.json) {
+            out(diff.patch || `worktree ${target.id}: no changes vs base`);
+          }
+          return;
+        }
+        if (opts.worktreeApply) {
+          const target = findWt(opts.worktreeApply);
+          if (!target) throw new CliError(`no worktree ${opts.worktreeApply} under .vibgrate/worktrees`, ExitCode.NOT_FOUND);
+          const diff = wt.worktreeDiffToBase(gitRunner, target.path, target.base);
+          if ('error' in diff) throw new CliError(diff.error, ExitCode.ERROR);
+          if (!diff.files.length) {
+            emitLine({ event: 'worktree-applied', id: target.id, applied: true, files: [] });
+            if (!opts.streamJson && !global.json) out(`worktree ${target.id}: nothing to apply`);
+            return;
+          }
+          const patchFile = pathMod.join(
+            fs.mkdtempSync(pathMod.join(os.tmpdir(), 'vg-wt-')),
+            'delta.patch',
+          );
+          fs.writeFileSync(patchFile, diff.patch);
+          const outcome = wt.applyWorktreePatch(gitRunner, root, patchFile, diff.files);
+          emitLine({ event: 'worktree-applied', id: target.id, ...outcome });
+          if (!opts.streamJson && !global.json) {
+            out(
+              outcome.applied
+                ? `applied ${outcome.files.length} file(s) from worktree ${target.id}`
+                : `apply failed: ${outcome.error}`,
+            );
+          }
+          if (!outcome.applied) process.exitCode = 1;
+          return;
+        }
+        if (opts.worktreeRemove) {
+          const outcome = wt.removeSessionWorktree(gitRunner, root, opts.worktreeRemove);
+          emitLine({ event: 'worktree-removed', id: opts.worktreeRemove, ...outcome });
+          if (!opts.streamJson && !global.json) {
+            out(outcome.removed ? `removed worktree ${opts.worktreeRemove}` : `remove failed: ${outcome.error}`);
+          }
+          if (!outcome.removed) process.exitCode = 1;
+          return;
+        }
+      }
+
+      // Worktree session (P3): root the whole run in an isolated checkout under
+      // .vibgrate/worktrees/<id>. Sessions/approvals still live in the MAIN
+      // repo's .vibgrate (shared History; consent is per-developer, not
+      // per-checkout) — everything else (map, edits, shell) happens inside the
+      // worktree. The main root is remembered before cwd is re-pointed.
+      const mainRoot = rootOf(global);
+      let activeWorktree: import('../code/worktree-session.js').WorktreeInfo | undefined;
+      if (opts.worktree) {
+        const wt = await import('../code/worktree-session.js');
+        const child = await import('node:child_process');
+        const gitRunner: import('../code/worktree-session.js').GitRunner = (gitArgs, gitEnv) => {
+          const res = child.spawnSync('git', gitArgs, {
+            cwd: mainRoot,
+            encoding: 'utf8',
+            env: { ...process.env, ...(gitEnv ?? {}) },
+            timeout: 60_000,
+            maxBuffer: 64 * 1024 * 1024,
+          });
+          return { stdout: (res.stdout ?? '') + (res.stderr ?? ''), exitCode: res.status ?? 1 };
+        };
+        if (typeof opts.worktree === 'string') {
+          const existing = wt
+            .listSessionWorktrees(gitRunner, mainRoot)
+            .find((w) => w.id === opts.worktree);
+          if (!existing) {
+            throw new CliError(`no worktree ${opts.worktree} under .vibgrate/worktrees — start one with --worktree`, ExitCode.NOT_FOUND);
+          }
+          activeWorktree = existing;
+        } else {
+          const created = wt.createSessionWorktree(
+            gitRunner,
+            mainRoot,
+            `wt${Date.now().toString(36)}`,
+          );
+          if ('error' in created) throw new CliError(created.error, ExitCode.ERROR);
+          activeWorktree = created;
+        }
+        // Everything downstream (config, map, graph, shell, checkpoints)
+        // resolves from the worktree; refs and objects are shared with the
+        // main repository by git's own worktree design.
+        global.cwd = activeWorktree.path;
+      }
 
       // Auto-provision the optional relevance module: fully silent — installs
       // automatically when absent; on any failure the run proceeds without it
@@ -481,6 +675,7 @@ export function registerCode(program: Command): void {
             });
 
 
+          const { loadApprovalRules, addApprovalRule, ruleForAction, ruleLabel } = await import('../code/approvals.js');
           const { loadProjectRules, nodeRulesReader } = await import('../code/rules.js');
           const projectRules = loadProjectRules(nodeRulesReader(root));
           if (projectRules.sources.length && !global.quiet) {
@@ -507,6 +702,9 @@ export function registerCode(program: Command): void {
             graphBackend,
             modelProfile,
             auto: !!auto,
+            // v5: spawn-time reasoning budget. Session mode lets a per-turn
+            // value override it; one-shot runs use this.
+            reasoningEffort: parseReasoningEffort(opts.reasoningEffort),
             maxSteps,
             budget: modelProfile.capsuleBudgetTokens,
             contextBudget,
@@ -532,21 +730,50 @@ export function registerCode(program: Command): void {
             now: () => Date.now(),
             projectRules: projectRules.rendered || undefined,
             checkpoint: takeCheckpoint,
+            // Standing allow-always rules, re-read per approval so an
+            // "Always allow" or a revocation applies to the very next action.
+            // Always the MAIN root: consent is per-developer, and a worktree
+            // checkout has no code-approvals.json (it is gitignored).
+            approvalRules: () => loadApprovalRules(mainRoot),
           };
           try {
             if (opts.session) {
-              const { runCodeStreamJsonSession } = await import('../code/stream-json.js');
+              const { runCodeStreamJsonSession, STREAM_JSON_PROTOCOL_VERSION } = await import(
+                '../code/stream-json.js'
+              );
               const { runAgent } = await import('../code/agent.js');
               const {
                 condenseSession,
                 loadLatestSession,
+                loadSession,
                 newSession,
                 recordTask,
                 saveSession,
+                sessionsDir,
                 summarizeSession,
               } = await import('../code/session-store.js');
+              const { VERSION } = await import('../version.js');
 
-              const resumedRecord = opts.continue ? loadLatestSession(root) : undefined;
+              // `--continue <id>` resumes that exact chat — no shared `latest`
+              // pointer, so two windows on one repo can't race each other.
+              // Bare `--continue` keeps the old most-recent behaviour.
+              // Sessions persist under the MAIN root even for worktree runs,
+              // so History is one list and survives worktree removal.
+              const resumedRecord =
+                typeof opts.continue === 'string'
+                  ? loadSession(mainRoot, opts.continue)
+                  : opts.continue
+                    ? loadLatestSession(mainRoot)
+                    : undefined;
+              if (typeof opts.continue === 'string' && !resumedRecord) {
+                // Say so instead of silently starting fresh — the host told us
+                // which chat it expected to continue.
+                emitStream({
+                  event: 'event',
+                  type: 'notice',
+                  text: `Could not load session ${opts.continue} — starting a fresh conversation.`,
+                });
+              }
               let record =
                 resumedRecord ??
                 newSession(
@@ -555,6 +782,9 @@ export function registerCode(program: Command): void {
                   route.providers[0]?.model ?? 'unknown',
                   Date.now(),
                 );
+              // A worktree run stamps its checkout on the record (History's WT
+              // badge; resume knows where to re-root).
+              if (activeWorktree) record = { ...record, worktree: activeWorktree };
 
               // One stdin reader for the whole session: approvals and answers go
               // to the live turn, `submit` queues the next one.
@@ -581,21 +811,53 @@ export function registerCode(program: Command): void {
               };
 
               let turnIndex = 0;
+              // v5: the attachment metadata for the turn currently running, so
+              // onTurnEnd can file it with the record. Carried on a variable
+              // rather than through the result because attachments are the
+              // host's input to the turn, not the agent's output from it.
+              let lastTurnAttachments: import('../code/session-store.js').SessionAttachment[] | undefined;
               await runCodeStreamJsonSession({
                 emit: emitAndRecord,
                 auto: !!auto,
                 sessionId: record.id,
                 resumed: !!resumedRecord,
+                // Environment facts for the host: where sessions live (the
+                // single source of truth for history UIs, fixing multi-root
+                // ambiguity) and the versions in play for its first-use report.
+                sessionInfo: {
+                  sessionDir: sessionsDir(mainRoot),
+                  engineVersion: VERSION,
+                  protocolVersion: STREAM_JSON_PROTOCOL_VERSION,
+                  provider: primarySlug,
+                  model: route.providers[0]?.model,
+                  ...(activeWorktree
+                    ? { worktree: { path: activeWorktree.path, base: activeWorktree.base } }
+                    : {}),
+                },
                 instruction,
                 nextTurn,
                 bindDecisions: (session) => {
                   streamApprove = (action) => session.approve(action);
+                  // v3: an approval with `always: true` persists a standing
+                  // rule so this action shape skips the card from now on.
+                  session.onAlwaysRule = (action) => {
+                    const rule = ruleForAction(action);
+                    if (!rule) return;
+                    const saved = addApprovalRule(mainRoot, rule);
+                    emitStream({
+                      event: 'event',
+                      type: 'notice',
+                      text: saved
+                        ? `Always-allow rule saved: ${ruleLabel(rule)} (manage in .vibgrate/code-approvals.json)`
+                        : 'Could not save the always-allow rule (is .vibgrate writable?) — approved this once.',
+                    });
+                  };
                   const rl = readline.createInterface({ input: process.stdin });
                   rl.on('line', (raw) => {
                     const msg = parseHostMessage(raw);
                     if (!msg) return;
                     if (msg.kind === 'approve') {
-                      session.submitDecision(msg.id, msg.approve);
+                      session.submitDecision(msg.id, msg.approve, msg.always);
                       runOutcome.noteDecision(msg.id, msg.approve);
                     }
                     else if (msg.kind === 'answer') session.submitAnswer(msg.id, msg.answer);
@@ -616,12 +878,26 @@ export function registerCode(program: Command): void {
                       // Manual `/compact`: condense the stored record now; the
                       // next turn's recap is computed from it (see runTurn).
                       record = condenseSession(record, Date.now());
-                      saveSession(root, record);
+                      saveSession(mainRoot, record);
                       emitStream({
                         event: 'event',
                         type: 'notice',
                         text: 'Conversation compacted — earlier turns condensed into a checkpoint.',
                       } as never);
+                    }
+                    else if (msg.kind === 'inject') {
+                      // v4 steer: content for the RUNNING turn, applied at its
+                      // next step boundary (or the start of the next turn when
+                      // the send races the turn's end).
+                      session.inject(msg.text);
+                    }
+                    else if (msg.kind === 'rename') {
+                      // v4: title the live chat. Persisted immediately so the
+                      // History list reflects it without waiting for turn end.
+                      const t = msg.title.slice(0, 120);
+                      if (t) record = { ...record, title: t };
+                      else { record = { ...record }; delete record.title; }
+                      saveSession(mainRoot, record);
                     }
                     else if (msg.kind === 'cancel') { session.cancelTurn(); runOutcome.cancelPending(); }
                     else if (msg.kind === 'end') {
@@ -638,7 +914,8 @@ export function registerCode(program: Command): void {
                     pushTurn(null);
                   });
                 },
-                runTurn: ({ instruction: turnInstruction, signal, session, agentMode, auto: turnAuto, images }) => {
+                runTurn: ({ instruction: turnInstruction, signal, session, agentMode, auto: turnAuto, images, reasoningEffort: turnEffort, attachments: turnAttachments }) => {
+                  lastTurnAttachments = turnAttachments;
                   // Recap always reflects the *current* record, so a manual
                   // `/compact` between turns takes effect on the very next one.
                   const priorSummary = summarizeSession(record) || undefined;
@@ -651,6 +928,8 @@ export function registerCode(program: Command): void {
                   return runAgent({
                     ...baseAgentOptions,
                     instruction: turnInstruction,
+                    // v4 steer: the loop drains injected content at each step.
+                    takeInjected: () => session.drainInjected(),
                     priorSummary,
                     // Carry-over for capsule seed ranking: the previous
                     // turn's instruction (the current turn is recorded only
@@ -660,6 +939,9 @@ export function registerCode(program: Command): void {
                     auto: turnAuto,
                     plan,
                     images,
+                    // v5: per-turn reasoning budget beats the spawn-time flag,
+                    // so a host's effort picker takes effect without a respawn.
+                    reasoningEffort: turnEffort ?? baseAgentOptions.reasoningEffort,
                     approve: session.approve,
                     askUser: session.askUser,
                     onEvent: session.onEvent,
@@ -675,10 +957,12 @@ export function registerCode(program: Command): void {
                       summary: turn.result?.finalText ?? 'turn failed',
                       changes: turn.result?.changes ?? [],
                       stopped: turn.result?.stopped ?? 'error',
+                      // Metadata only — recordTask never stores the bytes.
+                      attachments: lastTurnAttachments,
                     },
                     Date.now(),
                   );
-                  saveSession(root, record);
+                  saveSession(mainRoot, record);
                   return summarizeSession(record);
                 },
               });
@@ -690,12 +974,16 @@ export function registerCode(program: Command): void {
                 emit: emitAndRecord,
                 bindDecisions: (session) => {
                   streamApprove = (action) => session.approve(action);
+                  session.onAlwaysRule = (action) => {
+                    const rule = ruleForAction(action);
+                    if (rule) addApprovalRule(mainRoot, rule);
+                  };
                   const rl = readline.createInterface({ input: process.stdin });
                   rl.on('line', (raw) => {
                     const msg = parseHostMessage(raw);
                     if (!msg) return;
                     if (msg.kind === 'approve') {
-                      session.submitDecision(msg.id, msg.approve);
+                      session.submitDecision(msg.id, msg.approve, msg.always);
                       runOutcome.noteDecision(msg.id, msg.approve);
                     }
                     else if (msg.kind === 'answer') session.submitAnswer(msg.id, msg.answer);
@@ -737,11 +1025,16 @@ export function registerCode(program: Command): void {
         let priorSummary: string | undefined;
         let priorInstruction: string | undefined;
         if (opts.continue) {
-          const { loadLatestSession, summarizeSession } = await import('../code/session-store.js');
-          const prev = loadLatestSession(root);
+          const { loadLatestSession, loadSession, summarizeSession } = await import('../code/session-store.js');
+          const prev =
+            typeof opts.continue === 'string' ? loadSession(mainRoot, opts.continue) : loadLatestSession(mainRoot);
           if (prev) {
             priorSummary = summarizeSession(prev);
             priorInstruction = prev.tasks.at(-1)?.instruction;
+          } else if (typeof opts.continue === 'string') {
+            // The caller named an exact chat — say the recap is missing rather
+            // than silently running without the context they asked for.
+            info(`could not load session ${opts.continue} — continuing without its recap`);
           }
         }
         const prompter = tty ? new TtyPrompter() : undefined;

@@ -110,12 +110,16 @@ describe('update command helpers', () => {
 
   describe('allow-scripts', () => {
     // The bug this guards: a global update that omits the flag leaves npm's
-    // default script block in place, so onnxruntime-node never downloads its
-    // native binaries and semantic search silently stays lexical — on every
-    // single update, defeating the fix crashedMessage() tells users to run.
+    // default script block in place, so @vibgrate/cli's own postinstall never
+    // clears a stale "backend crashed" verdict — on every single update,
+    // defeating the fix crashedMessage() tells users to run. (The command
+    // string itself must NOT carry --onnxruntime-node-install=skip — npm 12
+    // rejects unknown config flags and the whole install would fail; the CUDA
+    // download is skipped via the ONNXRUNTIME_NODE_INSTALL env var that
+    // runInstall() sets instead.)
     it('permits the three packages whose install scripts the CLI needs', () => {
       expect(getGlobalUpdateCommand('npm', '@vibgrate/cli', '2.0.0'))
-        .toBe(`npm install -g${ALLOW} @vibgrate/cli@2.0.0`);
+        .toBe(`npm install -g --no-fund${ALLOW} @vibgrate/cli@2.0.0`);
     });
 
     it('names @vibgrate/cli, onnxruntime-node and msgpackr-extract — and nothing else', () => {
@@ -127,6 +131,7 @@ describe('update command helpers', () => {
       for (const pm of ['pnpm', 'yarn', 'bun'] as const) {
         expect(allowScriptsFlag(pm)).toBe('');
         expect(getGlobalUpdateCommand(pm, '@vibgrate/cli', '2.0.0')).not.toContain('allow-scripts');
+        expect(getGlobalUpdateCommand(pm, '@vibgrate/cli', '2.0.0')).not.toContain('onnxruntime-node-install');
       }
     });
 
@@ -139,12 +144,12 @@ describe('update command helpers', () => {
   describe('getInstallCommand', () => {
     it('generates npm install for production dep', () => {
       expect(getInstallCommand('npm', '@vibgrate/cli', '2.0.0', false))
-        .toBe(`npm install${ALLOW} @vibgrate/cli@2.0.0`);
+        .toBe(`npm install --no-fund${ALLOW} @vibgrate/cli@2.0.0`);
     });
 
     it('generates npm install --save-dev for dev dep', () => {
       expect(getInstallCommand('npm', '@vibgrate/cli', '2.0.0', true))
-        .toBe(`npm install${ALLOW} --save-dev @vibgrate/cli@2.0.0`);
+        .toBe(`npm install --no-fund${ALLOW} --save-dev @vibgrate/cli@2.0.0`);
     });
 
     it('generates pnpm add for production dep', () => {
@@ -169,7 +174,7 @@ describe('update command helpers', () => {
 
     it('does not add -w for non-pnpm managers even at a workspace root', () => {
       expect(getInstallCommand('npm', '@vibgrate/cli', '2.0.0', true, { workspaceRoot: true }))
-        .toBe(`npm install${ALLOW} --save-dev @vibgrate/cli@2.0.0`);
+        .toBe(`npm install --no-fund${ALLOW} --save-dev @vibgrate/cli@2.0.0`);
       expect(getInstallCommand('yarn', '@vibgrate/cli', '2.0.0', false, { workspaceRoot: true }))
         .toBe('yarn add @vibgrate/cli@2.0.0');
     });

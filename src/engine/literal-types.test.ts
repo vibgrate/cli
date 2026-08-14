@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { scanCandidates } from './literal-scan.js';
 import { searchSymbols } from './search.js';
 import type { GraphNode, VgGraph } from '../schema.js';
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+ 
 // @ts-ignore — plain-JS fixture helper shared with the benchmark
 import { generateRepo, expectedCounts } from '../../bench/fixture.mjs';
 

@@ -77,8 +77,8 @@ export type PatchFileAction = {
 /** A state-changing action the agent wants to take — shown to the gate for approval. */
 export type MutatingAction =
   | { kind: 'edit'; file: string; diff: string; sides?: PreviewSides }
-  | { kind: 'create'; file: string; bytes: number }
-  | { kind: 'delete'; file: string }
+  | { kind: 'create'; file: string; bytes: number; sides?: PreviewSides }
+  | { kind: 'delete'; file: string; sides?: PreviewSides }
   | { kind: 'run'; command: string }
   | { kind: 'tool'; name: string; args: Record<string, unknown> }
   /** Atomic multi-file PatchIR apply — one decision for the whole transaction. */
@@ -170,6 +170,12 @@ export interface ToolResult {
   finalSummary?: string;
   /** The file change produced by an approved edit/create/delete (for the transcript). */
   change?: FileChange;
+  /**
+   * True when the tool itself errored (threw, or was called with an unknown
+   * name) — hosts paint these red. Refusals and user declines are decisions,
+   * not failures, and do not set this.
+   */
+  failed?: boolean;
 }
 
 /** Max characters of file/command output we feed back, to protect the context window. */
@@ -528,10 +534,10 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
           finalSummary: `aborted: ${str(a.reason) || 'no reason given'}`,
         };
       default:
-        return { content: `unknown tool "${call.name}". Available: ${AGENT_TOOLS.map((t) => t.name).join(', ')}`, mutated: false };
+        return { content: `unknown tool "${call.name}". Available: ${AGENT_TOOLS.map((t) => t.name).join(', ')}`, mutated: false, failed: true };
     }
   } catch (e) {
-    return { content: `tool ${call.name} failed: ${(e as Error).message}`, mutated: false };
+    return { content: `tool ${call.name} failed: ${(e as Error).message}`, mutated: false, failed: true };
   }
 }
 
@@ -645,7 +651,7 @@ function readFile(ctx: ToolContext, path: string, start?: number, end?: number):
   // Never send a secrets file to the model (GUARDRAILS §1.1).
   if (isSecretPath(path)) return { content: secretRefusal(path), mutated: false };
   const content = ctx.fsImpl.read(path);
-  if (content === null) return { content: `${path} not found`, mutated: false };
+  if (content === null) return { content: `${path} not found`, mutated: false, failed: true };
   const lines = content.split('\n');
   const from = start && start > 0 ? start - 1 : 0;
   const to = end && end > 0 ? end : lines.length;
@@ -742,7 +748,9 @@ async function createFile(ctx: ToolContext, path: string, content: string): Prom
   }
   const existing = ctx.fsImpl.read(path);
   if (existing !== null) return { content: `${path} already exists — use edit_file`, mutated: false };
-  if (!(await ctx.approve({ kind: 'create', file: path, bytes: Buffer.byteLength(content) }))) {
+  // Sides ("" → content) let the host open a real diff editor for a create,
+  // same as the patch path already does.
+  if (!(await ctx.approve({ kind: 'create', file: path, bytes: Buffer.byteLength(content), sides: previewSides('', content) }))) {
     return { content: `creating ${path} was declined by the user`, mutated: false };
   }
   ctx.fsImpl.write(path, content);
@@ -752,7 +760,8 @@ async function createFile(ctx: ToolContext, path: string, content: string): Prom
 async function deleteFile(ctx: ToolContext, path: string): Promise<ToolResult> {
   const before = ctx.fsImpl.read(path);
   if (before === null) return { content: `${path} does not exist`, mutated: false };
-  if (!(await ctx.approve({ kind: 'delete', file: path }))) {
+  // Sides (content → "") so the host can show exactly what a delete removes.
+  if (!(await ctx.approve({ kind: 'delete', file: path, sides: previewSides(before, '') }))) {
     return { content: `deleting ${path} was declined by the user`, mutated: false };
   }
   ctx.fsImpl.remove(path);
@@ -770,7 +779,7 @@ async function applyPatchTool(ctx: ToolContext, raw: unknown): Promise<ToolResul
   }
   const structural = validatePatchIR(patch);
   if (!structural.ok) {
-    return { content: `invalid PatchIR: ${structural.errors.join('; ')}`, mutated: false };
+    return { content: `invalid PatchIR: ${structural.errors.join('; ')}`, mutated: false, failed: true };
   }
 
   // B3: block patches that invent identifiers not present in the graph
@@ -975,7 +984,7 @@ function readNotebookTool(ctx: ToolContext, filePath: string, cell?: number): To
   if (!filePath) return { content: 'read_notebook needs a path', mutated: false };
   if (isSecretPath(filePath)) return { content: secretRefusal(filePath), mutated: false };
   const raw = ctx.fsImpl.read(filePath);
-  if (raw == null) return { content: `file not found: ${filePath}`, mutated: false };
+  if (raw == null) return { content: `file not found: ${filePath}`, mutated: false, failed: true };
   if (cell == null || Number.isNaN(cell)) {
     const sum = summarizeNotebook(raw);
     if (!sum.ok) return { content: sum.error, mutated: false };
@@ -995,7 +1004,7 @@ async function editNotebookTool(
   if (!filePath) return { content: 'edit_notebook_cell needs a path', mutated: false };
   if (isSecretPath(filePath)) return { content: secretRefusal(filePath), mutated: false };
   const raw = ctx.fsImpl.read(filePath);
-  if (raw == null) return { content: `file not found: ${filePath}`, mutated: false };
+  if (raw == null) return { content: `file not found: ${filePath}`, mutated: false, failed: true };
   const edited = editNotebookCell(raw, cell, source);
   if (!edited.ok) return { content: edited.error, mutated: false };
   const cellPreviewDiff = unifiedDiff(edited.before, edited.after, `${filePath}#cell${cell}`);

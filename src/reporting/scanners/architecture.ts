@@ -785,11 +785,10 @@ function computeLayerDrift(packages: LayerPackageRef[]): { score: number; riskLe
   let current = 0;
   let oneBehind = 0;
   let twoPlusBehind = 0;
-  let unknown = 0;
 
   for (const pkg of packages) {
     if (pkg.majorsBehind === null) {
-      unknown++;
+      // Unknown currency — excluded from the drift ratio below.
     } else if (pkg.majorsBehind === 0) {
       current++;
     } else if (pkg.majorsBehind === 1) {

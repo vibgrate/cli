@@ -65,7 +65,20 @@ export interface ProviderResult {
   provider: string;
   /** Tool calls the model requested this turn (agentic loop), if any. */
   toolCalls?: ToolCall[];
-  usage?: { promptTokens?: number; completionTokens?: number };
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    /**
+     * Prompt tokens the provider served from its own prompt cache. Billed at a
+     * discount (or free) by every provider that reports them, so a cost
+     * estimate that ignores this over-charges long sessions — the cache hit
+     * rate climbs as the transcript grows. Undefined means the provider did
+     * not say (never assume zero cached when estimating).
+     */
+    cachedPromptTokens?: number;
+  };
+  /** Reasoning text the model emitted before its answer (providers that expose it). */
+  reasoning?: string;
   /** True when the router fell back to a lower-preference provider. */
   fellBack?: boolean;
   /**
@@ -76,6 +89,13 @@ export interface ProviderResult {
    */
   truncated?: boolean;
 }
+
+/**
+ * Provider-neutral reasoning budget. Maps to `reasoning_effort` on OpenAI-style
+ * endpoints and `reasoning.effort` on OpenRouter; backends without a knob
+ * ignore it rather than erroring, so callers never branch on model family.
+ */
+export type ReasoningEffort = 'low' | 'medium' | 'high';
 
 /** Options a caller passes to a completion (kept minimal + provider-neutral). */
 export interface ChatOptions {
@@ -91,6 +111,18 @@ export interface ChatOptions {
   stream?: boolean;
   /** Called with each text delta as it streams in. */
   onToken?: (text: string) => void;
+  /**
+   * Called with each *reasoning* delta, for providers that stream a separate
+   * thinking channel. Kept apart from {@link onToken} so a host can collapse
+   * the trace without it ever contaminating the answer text.
+   */
+  onReasoningToken?: (text: string) => void;
+  /**
+   * How hard the model should think, for providers with a reasoning knob.
+   * Provider-neutral: backends that have no such control ignore it, so a
+   * caller never has to branch on the model family.
+   */
+  reasoningEffort?: ReasoningEffort;
   /**
    * Optional GBNF / grammar string for constrained decoding (llama.cpp llm-host).
    * HTTP providers ignore this. See {@link patchIrGbnf}.

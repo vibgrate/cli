@@ -1,4 +1,3 @@
-import * as fs from 'node:fs';
 import { Command } from 'commander';
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { mapFileExists } from '../engine/snapshot.js';

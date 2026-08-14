@@ -10,11 +10,6 @@ const LOCKFILES: Record<string, string> = {
   'packages.lock.json': 'nuget',
 };
 
-/** Patterns that .gitignore should cover for security hygiene */
-const HYGIENE_PATTERNS = {
-  env: ['.env', '.env.*', '.env.local', '.env.*.local'],
-  nodeModules: ['node_modules', 'node_modules/'],
-};
 
 export async function scanSecurityPosture(rootDir: string, cache?: FileCache): Promise<SecurityPostureResult> {
   const result: SecurityPostureResult = {

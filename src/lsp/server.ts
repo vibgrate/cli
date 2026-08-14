@@ -24,7 +24,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import * as semver from 'semver';
 
 import { runCoreScan } from '../core-open/index.js';
-import type { ScanArtifact, ScanOptions, DependencyRow, ProjectScan, DriftScore } from '../core-open/index.js';
+import type { ScanArtifact, ScanOptions, DependencyRow, ProjectScan } from '../core-open/index.js';
 import { perDependencyDrift } from '../core-open/scoring/dependency-drift-v3.js';
 import { loadAdvancedScanHook } from '../reporting/advanced-hook.js';
 import { VERSION } from '../version.js';

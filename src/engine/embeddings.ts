@@ -12,8 +12,9 @@ import type { GraphNode, VgGraph } from '../schema.js';
 /**
  * Local-embedding semantic search for `vg ask --semantic`/`--deep` (no API key).
  *
- * The embedding backend is an OPTIONAL, lazily-loaded dependency (`fastembed`,
- * Apache-2.0, local ONNX) so the core install stays lean and `ask` never breaks:
+ * The embedding backend is OPTIONAL and lazily loaded (the vendored
+ * `src/vendor/fastembed` dense backend over `onnxruntime-node`, local ONNX)
+ * so the core install stays lean and `ask` never breaks:
  * if the backend or model isn't available it degrades to (prefix-fuzzy) lexical
  * search with a clear note. Per-repo vectors live in a binary `*.embeddings`
  * file **alongside the code map** (global store under Application Support /
@@ -262,12 +263,19 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
 }
 
 /**
- * Import the optional native backend. A host can supply it out-of-tree via
- * `VIBGRATE_EMBEDDER_PATH` — a directory whose `node_modules` contains
- * `fastembed`. Editor integrations use this when their bundled engine ships
- * without the native optional dependency (the VS Code extension installs it
- * into its own storage on consent); the host dir wins over this package's own
- * dependency tree so the copy the user consented to is the one that loads.
+ * Import the optional embedding backend — the VENDORED dense backend
+ * (src/vendor/fastembed). It still needs the optional native deps
+ * (`onnxruntime-node`, `@anush008/tokenizers`, `tar`), which a host can supply
+ * out-of-tree via `VIBGRATE_EMBEDDER_PATH` — a directory whose `node_modules`
+ * contains them. Editor integrations use this when their bundled engine ships
+ * without the native optional dependencies (the VS Code extension installs
+ * them into its own storage on consent); the host dir wins over this package's
+ * own dependency tree so the copies the user consented to are the ones that
+ * load (see `ensureNativeDeps` in the vendored module).
+ *
+ * Legacy host contract: a host dir holding a whole upstream `fastembed`
+ * install (what older extension versions set up) is still honored, and wins,
+ * so an engine upgrade never breaks a backend the user already consented to.
  * Any resolution failure falls through — never throws.
  */
 async function importEmbedBackend(): Promise<{ mod: any | null; error?: string }> {
@@ -276,10 +284,20 @@ async function importEmbedBackend(): Promise<{ mod: any | null; error?: string }
   if (hostDir) {
     try {
       const req = createRequire(path.join(hostDir, 'package.json'));
-      const mod: any = await import(pathToFileURL(req.resolve('fastembed')).href);
-      const resolved = unwrapBackend(mod);
-      if (resolved) return { mod: resolved };
-      error = `${hostDir}: fastembed loaded but exported no FlagEmbedding`;
+      let entry: string | null = null;
+      try {
+        entry = req.resolve('fastembed');
+      } catch {
+        // No upstream fastembed in the host dir — the normal state under the
+        // current contract (the host supplies only the native deps, resolved
+        // by the vendored backend below). Not an error worth reporting.
+      }
+      if (entry) {
+        const mod: any = await import(pathToFileURL(entry).href);
+        const resolved = unwrapBackend(mod);
+        if (resolved) return { mod: resolved };
+        error = `${hostDir}: fastembed loaded but exported no FlagEmbedding`;
+      }
     } catch (e) {
       // Keep the reason. A host-supplied backend that resolves but won't load
       // (native binary built for another ABI, a half-extracted tree, a missing
@@ -289,9 +307,14 @@ async function importEmbedBackend(): Promise<{ mod: any | null; error?: string }
     }
   }
   try {
-    const mod: any = await import('fastembed' as string);
+    const mod: any = await import('../vendor/fastembed/index.js');
     const resolved = unwrapBackend(mod);
-    return resolved ? { mod: resolved } : { mod: null, error: error ?? 'fastembed exported no FlagEmbedding' };
+    if (!resolved) return { mod: null, error: error ?? 'embed backend exported no FlagEmbedding' };
+    // Load the native deps now (host dir first — see the vendored module), so
+    // a missing or broken install surfaces here as "not-installed" with the
+    // real reason instead of failing later mid-init.
+    if (typeof resolved.ensureNativeDeps === 'function') await resolved.ensureNativeDeps();
+    return { mod: resolved };
   } catch (e) {
     return { mod: null, error: error ?? errText(e) };
   }

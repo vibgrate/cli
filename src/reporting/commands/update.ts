@@ -23,9 +23,12 @@ const PACKAGE_NAME = '@vibgrate/cli';
  *
  * npm (12+) blocks install scripts by default and lists the skipped ones as a
  * warning. Three of ours matter: `@vibgrate/cli`'s own postinstall (which
- * clears the stale embedder verdict), `onnxruntime-node`'s (which downloads the
- * native embedding binaries), and `msgpackr-extract`'s (a native build). When
- * they are skipped, semantic search silently degrades to lexical with a
+ * clears the stale embedder verdict), `msgpackr-extract`'s (a native build),
+ * and `onnxruntime-node`'s — allowed so it runs and exits cleanly under the
+ * skip flag below instead of showing up in the skipped-scripts warning every
+ * update. (Its CPU binaries ship inside the npm package; the script itself
+ * only fetches CUDA GPU extras the embedder never loads.) When our own
+ * postinstall is skipped, semantic search can stay degraded with a stale
  * "backend crashed" verdict — see crashedMessage() in engine/embed-health.ts,
  * which tells users to reinstall with exactly this flag. An update that doesn't
  * pass it re-creates that state every single time, so the advice can never
@@ -41,6 +44,23 @@ const SCRIPT_PACKAGES = [PACKAGE_NAME, 'onnxruntime-node', 'msgpackr-extract'];
 export function allowScriptsFlag(pm: PackageManager): string {
   return pm === 'npm' ? ` --allow-scripts=${SCRIPT_PACKAGES.join(',')}` : '';
 }
+
+/**
+ * Environment that tells onnxruntime-node's postinstall to skip its optional
+ * download. That script's default on linux/x64 is to fetch the CUDA GPU
+ * provider binaries from nuget.org — hundreds of MB that the CPU-only embedder
+ * never loads (the binding links no CUDA library; it would dlopen them only if
+ * the CUDA execution provider were requested, and the vendored backend pins
+ * CPU). A blocked NuGet feed also can't slow or break an update once nothing
+ * is downloaded.
+ *
+ * An env var, NOT the `--onnxruntime-node-install=skip` flag the package's
+ * README suggests: npm 12 rejects unknown config flags outright ("Run `npm
+ * help config` for supported options"), so putting the flag in the command
+ * would fail every install. The installer checks this env var first, and it
+ * rides through every package manager unchanged.
+ */
+export const ORT_INSTALL_SKIP_ENV = { ONNXRUNTIME_NODE_INSTALL: 'skip' } as const;
 
 /**
  * Check if the CLI is running from a global install by examining where it's
@@ -134,7 +154,7 @@ export function getGlobalUpdateCommand(pm: PackageManager, pkg: string, version:
       return `bun add -g ${spec}`;
     case 'npm':
     default:
-      return `npm install -g${allowScriptsFlag('npm')} ${spec}`;
+      return `npm install -g --no-fund${allowScriptsFlag('npm')} ${spec}`;
   }
 }
 
@@ -196,7 +216,10 @@ export function getInstallCommand(
     case 'npm':
     default: {
       const allow = allowScriptsFlag('npm');
-      return isDev ? `npm install${allow} --save-dev ${spec}` : `npm install${allow} ${spec}`;
+      // --no-fund drops the "N packages are looking for funding" notice — pure
+      // noise in an update transcript. Warnings stay on: they carry signal
+      // (skipped install scripts, engine mismatches).
+      return isDev ? `npm install --no-fund${allow} --save-dev ${spec}` : `npm install --no-fund${allow} ${spec}`;
     }
   }
 }
@@ -263,7 +286,14 @@ const CAPTURED_OUTPUT_LIMIT = 64_000;
 async function runInstall(cmd: string, cwd: string): Promise<{ ok: boolean; output: string }> {
   const { spawn } = await import('node:child_process');
   return new Promise((resolve) => {
-    const child = spawn(cmd, { cwd, shell: true, stdio: ['inherit', 'pipe', 'pipe'] });
+    // ORT_INSTALL_SKIP_ENV: no CUDA download during an update, ever — see the
+    // constant's doc for why this is env, not a flag.
+    const child = spawn(cmd, {
+      cwd,
+      shell: true,
+      stdio: ['inherit', 'pipe', 'pipe'],
+      env: { ...process.env, ...ORT_INSTALL_SKIP_ENV },
+    });
     let output = '';
     const tee = (src: NodeJS.ReadableStream | null, dest: NodeJS.WriteStream): void => {
       if (!src) return;

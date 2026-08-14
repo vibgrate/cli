@@ -366,9 +366,6 @@ function isEnvExampleName(baseLower: string): boolean {
   return false;
 }
 
-function docKind(rel: string): DocCategory {
-  return classifyProjectContext(rel) ?? 'other-config';
-}
 
 /**
  * Discover project-context files under root. Deterministic order.

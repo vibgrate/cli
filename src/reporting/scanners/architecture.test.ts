@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { scanArchitecture, buildProjectArchitectureMermaid } from './architecture.js';
 import type { ProjectScan, DependencyRow, ToolingInventoryResult, ServiceDependenciesResult } from '../../core-open/index.js';
 import * as fs from 'node:fs/promises';

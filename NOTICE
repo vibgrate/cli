@@ -19,6 +19,13 @@ THIRD-PARTY COMPONENTS
 
 This product bundles or depends on the following open-source components:
 
+  - fastembed-js (MIT, © Anush008) — the dense-embedding backend in
+    src/vendor/fastembed is adapted from fastembed-js v2.1.0
+    (https://github.com/Anush008/fastembed-js); see that file's header for the
+    changes made
+  - @anush008/tokenizers (MIT) — native HuggingFace tokenizers bindings
+  - onnxruntime-node (MIT) — ONNX Runtime for local embedding inference
+  - tar (ISC) — model archive extraction
   - web-tree-sitter (MIT) — WASM tree-sitter runtime
   - tree-sitter-wasms (Unlicense) — pre-compiled tree-sitter grammar .wasm files
   - graphology and graphology-* (MIT) — in-memory graph model and algorithms

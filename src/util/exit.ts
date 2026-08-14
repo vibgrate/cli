@@ -9,6 +9,12 @@ export const ExitCode = {
   NOT_FOUND: 3,
   NON_DETERMINISTIC: 4,
   USAGE_ERROR: 5,
+  /**
+   * A required optional module (engine) is not installed and could not be
+   * fetched. Deliberately distinct from GATE_FAILED so a CI gate can never
+   * read "engine missing" as "gate passed" or "gate failed".
+   */
+  ENGINE_UNAVAILABLE: 6,
 } as const;
 
 export type ExitCodeValue = (typeof ExitCode)[keyof typeof ExitCode];
@@ -29,4 +35,8 @@ export function notFound(message: string): CliError {
 
 export function usageError(message: string): CliError {
   return new CliError(message, ExitCode.USAGE_ERROR);
+}
+
+export function engineUnavailable(message: string): CliError {
+  return new CliError(message, ExitCode.ENGINE_UNAVAILABLE);
 }

@@ -50,3 +50,128 @@ export function dangerousCommand(command: string, extraDeny: string[] = []): str
   }
   return null;
 }
+
+/* ── read-only command classification (P2) ──────────────────────────────────
+ *
+ * `run_command` prompts for every command in Agent mode, even `git status`.
+ * That is the top daily friction against comparable agent UIs, and the human
+ * gate exists to review *state changes* — a pure read is not one. This
+ * classifier recognises a small allowlist of commands that cannot write to the
+ * tree, the repo, or remote state, so callers may skip the approval card for
+ * them (the command row remains the visible record).
+ *
+ * The design is fail-safe: anything the classifier does not positively
+ * recognise stays gated. Shell metacharacters that could smuggle a write
+ * (redirects, command substitution, sequencing, background) disqualify the
+ * whole line; pipes are allowed only when every segment is itself read-only.
+ * Per-command guards catch write-capable flags on otherwise read-only tools
+ * (`sort -o`, `find -exec`, `git log --output=…`).
+ */
+
+/** Commands that are read-only with any flags (no write-capable options). */
+const READ_ONLY_ANY_ARGS = new Set([
+  'ls', 'pwd', 'cat', 'head', 'tail', 'wc', 'cut', 'tr', 'nl', 'column',
+  'grep', 'egrep', 'fgrep', 'rg',
+  'file', 'stat', 'du', 'df', 'tree',
+  'which', 'whereis', 'whoami', 'id', 'uname', 'hostname', 'uptime',
+  'basename', 'dirname', 'realpath', 'readlink',
+  'echo', 'printf', 'true', 'false',
+  'diff', 'cmp', 'strings',
+  'md5sum', 'sha1sum', 'sha256sum', 'shasum', 'cksum',
+  // jq has no write-to-file flag of its own; file writes need a redirect,
+  // which the metacharacter screen already disqualifies. Membership here also
+  // applies the shared `--output` screen, unlike the old always-true guard.
+  'jq',
+]);
+
+/** Commands allowed only with a per-command guard on their arguments. */
+const GUARDED: Record<string, (args: string[]) => boolean> = {
+  // find can write via -exec/-delete/-ok and the f* output actions.
+  find: (args) => !args.some((a) => /^-(exec|execdir|ok|okdir|delete|fprint|fprintf|fprint0|fls)$/.test(a)),
+  // date -s / --set sets the clock. Prefix match catches the attached getopt
+  // form too (`-s2020-01-01`).
+  date: (args) => !args.some((a) => a.startsWith('-s') || a.startsWith('--set')),
+  // sort -o / --output writes a file — including the attached form (`-oFILE`).
+  sort: (args) => !args.some((a) => a.startsWith('-o') || a.startsWith('--output')),
+  // uniq's second positional argument is an output file.
+  uniq: (args) => args.filter((a) => !a.startsWith('-')).length <= 1,
+};
+
+/** Read-only git subcommands (any further flags allowed except --output…). */
+const GIT_READ_ONLY = new Set([
+  'status', 'log', 'diff', 'show', 'blame', 'shortlog', 'describe',
+  'ls-files', 'rev-parse', 'grep', 'show-ref', 'cat-file', 'count-objects',
+  'reflog',
+]);
+
+/** npm/pnpm/yarn subcommands that only read (no script execution, no installs). */
+const PKG_READ_ONLY = new Set(['ls', 'list', 'll', 'why', 'view', 'info', 'outdated']);
+
+/** True when a single pipeline segment is positively read-only. */
+function readOnlySegment(segment: string): boolean {
+  const tokens = segment.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return false;
+  const head = tokens[0];
+  const args = tokens.slice(1);
+  // `FOO=bar cmd`-style env prefixes are not modelled — stay gated.
+  if (head.includes('=')) return false;
+  // A bare `--version` / `--help` probe is read-only — but ONLY for a bare
+  // binary name with the long-form flag. A path (`./deploy.sh --help`) still
+  // *executes that script*, which may ignore the flag entirely, and short
+  // flags are not a version contract (`sh -v` starts a verbose shell). The
+  // probe branch must never become an execute-anything hole.
+  if (
+    args.length === 1 &&
+    /^(--version|--help)$/.test(args[0]) &&
+    /^[\w@-][\w.@-]*$/.test(head) &&
+    !head.includes('/') &&
+    !head.includes('\\')
+  ) {
+    return true;
+  }
+  if (READ_ONLY_ANY_ARGS.has(head)) {
+    // A stray write-flag style `--output=` on any of these stays gated.
+    if (args.some((a) => a.startsWith('--output'))) return false;
+    return true;
+  }
+  const guard = GUARDED[head];
+  if (guard) return guard(args);
+  if (head === 'git') {
+    const sub = args[0];
+    if (!sub || sub.startsWith('-')) return false; // `git -C x …` etc. not modelled
+    const rest = args.slice(1);
+    if (rest.some((a) => a.startsWith('--output'))) return false; // git log/diff --output writes
+    if (GIT_READ_ONLY.has(sub)) return true;
+    if (sub === 'branch') return rest.every((a) => /^(-a|-r|-v|-vv|-l|--list|--all|--verbose)$/.test(a));
+    if (sub === 'remote') return rest.every((a) => a === '-v' || a === '--verbose');
+    if (sub === 'tag') return rest.every((a) => /^(-l|--list|-n\d*)$/.test(a));
+    if (sub === 'stash') return rest[0] === 'list' || rest[0] === 'show';
+    if (sub === 'config') return rest[0] === '-l' || rest[0] === '--list' || rest[0] === '--get' || rest[0] === '--get-all' || rest[0] === '--get-regexp';
+    return false;
+  }
+  if (head === 'npm' || head === 'pnpm' || head === 'yarn') {
+    const sub = args[0];
+    return !!sub && PKG_READ_ONLY.has(sub);
+  }
+  return false;
+}
+
+/**
+ * True when `command` is positively classified as read-only — it cannot write
+ * to the working tree, the repository, or remote state — and is therefore safe
+ * to run without an approval card in Agent mode. Fail-safe: unrecognised
+ * commands, chained/sequenced commands, redirects, command substitution and
+ * env-prefixed invocations all return false and stay gated. Callers must still
+ * screen with {@link dangerousCommand} — this function classifies, it does not
+ * authorise.
+ */
+export function readOnlyCommand(command: string): boolean {
+  const cmd = command.trim();
+  if (!cmd) return false;
+  // Any construct that can write or chain disqualifies the whole line:
+  // redirects (> >> < <<), command substitution ($() and backticks), process
+  // substitution, sequencing (; &&, ||), background (&), subshells, newlines.
+  if (/[><;&`\n(){}]|\$\(/.test(cmd)) return false;
+  // Pipes are fine only when every segment is read-only (`git log | head`).
+  return cmd.split('|').every((seg) => readOnlySegment(seg));
+}

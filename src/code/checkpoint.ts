@@ -89,6 +89,17 @@ export function createCheckpoint(
   return { ref, commit: commitId, seq: opts.seq, files: [...opts.files] };
 }
 
+/**
+ * True for a commit id a host may pass to an out-of-band restore
+ * (`vg code --restore-checkpoint`). Checkpoint commits are always full or
+ * abbreviated hex SHAs (they come from {@link createCheckpoint}); anything else
+ * — a ref name, an option-shaped string starting with `-` — is rejected so a
+ * hostile or corrupted value can never reach git as something other than data.
+ */
+export function isValidCheckpointCommit(commit: string): boolean {
+  return /^[0-9a-f]{7,64}$/i.test(commit);
+}
+
 export interface RestoreOutcome {
   restored: string[];
   /** Files that did not exist in the checkpoint and were removed. */

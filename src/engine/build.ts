@@ -686,6 +686,3 @@ function computeCorpusHash(parses: FileParse[], hashes: Map<string, string>): st
   return hashString(canonicalize(list));
 }
 
-function nowMs(): number {
-  return Number(process.hrtime.bigint() / 1000n) / 1000;
-}

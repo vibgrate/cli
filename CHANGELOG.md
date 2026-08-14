@@ -14,6 +14,16 @@ backward compatible.
 
 ### Added
 
+- **`vg hcs` — Holistic Code Specification command group** — `extract`,
+  `digest`, `map`, `gate`, and `validate` over deterministic NDJSON fact
+  streams. All HCS computation runs in the optional, separately-licensed
+  engine module (`@vibgrate/hcs-engine`), auto-provisioned on first use or via
+  `vg module install hcs`, executing in a local WASM sandbox (no network, no
+  process spawns). `vg module` now manages both `relevance` and `hcs`.
+- **Exit code `6` (`ENGINE_UNAVAILABLE`)** — a required optional module is not
+  installed and could not be fetched. Deliberately distinct from `2`
+  (`GATE_FAILED`) so CI can never read "engine missing" as a gate verdict.
+
 - **Change-scoped precise resolution (incremental tsc)** — the TypeScript
   checker rung now caches per-file results under a key covering the file's
   content, its transitive import closure, and the shard's ambient surface

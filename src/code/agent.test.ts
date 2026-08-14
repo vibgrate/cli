@@ -410,6 +410,128 @@ describe('runAgent — the agentic loop', () => {
     expect(result.stopped).toBe('finished');
   });
 
+  it('read-only commands skip the approval gate; mutating commands still gate', async () => {
+    const approvals: string[] = [];
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('run_command', { command: 'git status --short' }, 't1')] },
+      { toolCalls: [tc('run_command', { command: 'touch marker.txt' }, 't2')] },
+      { toolCalls: [tc('finish', { summary: 'done' }, 't3')] },
+    ]);
+    const ran: string[] = [];
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'inspect then mutate',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: (cmd) => {
+        ran.push(cmd);
+        return { stdout: 'ok', exitCode: 0 };
+      },
+      approve: async (a) => {
+        approvals.push(a.kind === 'run' ? a.command : a.kind);
+        return true;
+      },
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    expect(ran).toEqual(['git status --short', 'touch marker.txt']);
+    // Only the mutating command reached the gate.
+    expect(approvals).toEqual(['touch marker.txt']);
+  });
+
+  it('plan mode denies even read-only commands (plan wins over the classifier)', async () => {
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('run_command', { command: 'git status' }, 't1')] },
+      { toolCalls: [tc('finish', { summary: 'plan' }, 't2')] },
+    ]);
+    const ran: string[] = [];
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'plan something',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: (cmd) => {
+        ran.push(cmd);
+        return { stdout: '', exitCode: 0 };
+      },
+      approve: async () => true,
+      plan: true,
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    expect(ran).toEqual([]); // nothing executed in plan mode
+  });
+
+  it('a standing allow-always rule skips the gate with a visible notice, and never overrides the denylist', async () => {
+    const approvals: string[] = [];
+    const notices: string[] = [];
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('run_command', { command: 'pnpm test --run' }, 't1')] },
+      { toolCalls: [tc('run_command', { command: 'git push origin main --force' }, 't2')] },
+      { toolCalls: [tc('finish', { summary: 'done' }, 't3')] },
+    ]);
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'test then push',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: 'ok', exitCode: 0 }),
+      approve: async (a) => {
+        approvals.push(a.kind === 'run' ? a.command : a.kind);
+        return true;
+      },
+      approvalRules: () => [
+        { kind: 'run', prefix: 'pnpm test' },
+        // A rule for the dangerous shape must still be screened out.
+        { kind: 'run', prefix: 'git push' },
+      ],
+      onEvent: (e) => {
+        if (e.type === 'notice') notices.push(e.text);
+      },
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    // pnpm test matched its rule (no gate); the force-push is dangerous, so
+    // its rule is ignored and the human gate is consulted.
+    expect(approvals).toEqual(['git push origin main --force']);
+    expect(notices.some((n) => n.includes('Auto-approved by standing rule'))).toBe(true);
+  });
+
+  it('a standing edit rule auto-approves the matching file edit and still checkpoints', async () => {
+    const approvals: string[] = [];
+    const checkpoints: string[][] = [];
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('edit_file', { path: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 5;' }, 't1')] },
+      { toolCalls: [tc('finish', { summary: 'done' }, 't2')] },
+    ]);
+    const fsImpl = memFs({ 'src/scan.ts': baseFile });
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'raise the timeout',
+      providers: [provider],
+      fsImpl,
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async (a) => {
+        approvals.push(a.kind);
+        return true;
+      },
+      approvalRules: () => [{ kind: 'edit', glob: 'src/**' }],
+      checkpoint: (files) => {
+        checkpoints.push(files);
+        return { ref: 'refs/vibgrate/checkpoints/t/1', commit: 'abc1234', seq: 1 };
+      },
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    expect(approvals).toEqual([]); // gate skipped by the rule
+    expect(fsImpl.files['src/scan.ts']).toContain('const timeout = 5;'); // write landed
+    expect(checkpoints).toEqual([['src/scan.ts']]); // undo still possible
+  });
+
   it('attaches user images to the task turn for the provider to encode', async () => {
     const seenMessages: ChatMessage[][] = [];
     const provider: Provider = {
@@ -862,5 +984,184 @@ describe('cap-truncated replies', () => {
     const provider = new ScriptedProvider('m', [{ text: 'The billing flow is in lib/stripe.ts.' }]);
     const result = await runAgent({ ...base(), providers: [provider] });
     expect(result.finalText).toBe('The billing flow is in lib/stripe.ts.');
+  });
+});
+
+describe('steer (v4 inject)', () => {
+  const steerFile = 'export function scanDir() {\n  const timeout = 0;\n  return timeout;\n}\n';
+
+  it('drains injected content at the step boundary: event + user message before the next model call', async () => {
+    const provider = new ScriptedProvider('m', [
+      // Step 1 keeps the loop going with a read; the steer lands before step 2.
+      { toolCalls: [{ id: 't1', name: 'read_file', arguments: { path: 'src/scan.ts' } }] },
+      { toolCalls: [{ id: 't2', name: 'finish', arguments: { summary: 'done with steer' } }] },
+    ]);
+    const chat = vi.spyOn(provider, 'chat');
+    const events: AgentEvent[] = [];
+    const pending: string[] = ['also handle the empty case'];
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'improve scanDir',
+      providers: [provider],
+      fsImpl: memFs({ 'src/scan.ts': steerFile }),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      // Nothing pending on step 1; the steer arrives before step 2.
+      takeInjected: () => (chat.mock.calls.length >= 1 ? (pending.shift() ?? null) : null),
+      onEvent: (e) => events.push(e),
+    });
+    expect(result.stopped).toBe('finished');
+    const injected = events.filter((e) => e.type === 'injected');
+    expect(injected).toEqual([{ type: 'injected', text: 'also handle the empty case' }]);
+    // The steer text reached the model as a user message on the later call.
+    const lastMessages = chat.mock.calls.at(-1)![0]!;
+    expect(
+      lastMessages.some(
+        (m) => m.role === 'user' && String(m.content).includes('also handle the empty case'),
+      ),
+    ).toBe(true);
+  });
+
+  it('emits no injected event when nothing is pending', async () => {
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [{ id: 't1', name: 'finish', arguments: { summary: 'plain' } }] },
+    ]);
+    const events: AgentEvent[] = [];
+    await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'do a thing',
+      providers: [provider],
+      fsImpl: memFs({ 'src/scan.ts': steerFile }),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      takeInjected: () => null,
+      onEvent: (e) => events.push(e),
+    });
+    expect(events.filter((e) => e.type === 'injected')).toHaveLength(0);
+  });
+});
+
+describe('reasoning traces (protocol v5)', () => {
+  const finishStep = (summary: string) => ({ toolCalls: [tc('finish', { summary }, 'f1')] });
+
+  it('streams the reasoning channel as thinking events, never folded into the answer', async () => {
+    const provider = new ScriptedProvider('m', [
+      { reasoning: 'weighing the options', ...finishStep('all set') },
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: process.cwd(),
+      instruction: 'think about it',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      onEvent: (e) => events.push(e),
+      stream: true,
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    const thinking = events.filter((e): e is Extract<AgentEvent, { type: 'thinking' }> => e.type === 'thinking');
+    expect(thinking.map((e) => e.text)).toEqual(['weighing the options']);
+    // The trace must not leak into the visible answer stream.
+    const said = events.filter((e) => e.type === 'assistant' || e.type === 'token');
+    expect(said.some((e) => JSON.stringify(e).includes('weighing'))).toBe(false);
+  });
+
+  it('emits the whole trace once when the backend does not stream', async () => {
+    const provider = new ScriptedProvider('m', [
+      { reasoning: 'one shot of thought', ...finishStep('done') },
+    ]);
+    const events: AgentEvent[] = [];
+    await runAgent({
+      graph: fixtureGraph(),
+      root: process.cwd(),
+      instruction: 'think about it',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      onEvent: (e) => events.push(e),
+      noAudit: true,
+    });
+    expect(events.filter((e) => e.type === 'thinking')).toHaveLength(1);
+  });
+
+  it('forwards the reasoning budget to the provider', async () => {
+    const provider = new ScriptedProvider('m', [finishStep('done')]);
+    await runAgent({
+      graph: fixtureGraph(),
+      root: process.cwd(),
+      instruction: 'go',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      reasoningEffort: 'high',
+      noAudit: true,
+    });
+    expect(provider.lastOpts?.reasoningEffort).toBe('high');
+  });
+
+  it('omits the knob entirely when no budget was asked for', async () => {
+    const provider = new ScriptedProvider('m', [finishStep('done')]);
+    await runAgent({
+      graph: fixtureGraph(),
+      root: process.cwd(),
+      instruction: 'go',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      noAudit: true,
+    });
+    expect(provider.lastOpts && 'reasoningEffort' in provider.lastOpts).toBe(false);
+  });
+
+  it('reports cached prompt tokens on the usage event when the provider says', async () => {
+    const provider = new ScriptedProvider('m', [
+      { usage: { promptTokens: 900, completionTokens: 40, cachedPromptTokens: 768 }, ...finishStep('done') },
+    ]);
+    const events: AgentEvent[] = [];
+    await runAgent({
+      graph: fixtureGraph(),
+      root: process.cwd(),
+      instruction: 'go',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      onEvent: (e) => events.push(e),
+      noAudit: true,
+    });
+    expect(events.find((e) => e.type === 'usage')).toEqual({
+      type: 'usage',
+      promptTokens: 900,
+      completionTokens: 40,
+      cachedPromptTokens: 768,
+    });
+  });
+
+  it('leaves cachedPromptTokens off the usage event when the provider is silent', async () => {
+    const provider = new ScriptedProvider('m', [
+      { usage: { promptTokens: 10, completionTokens: 2 }, ...finishStep('done') },
+    ]);
+    const events: AgentEvent[] = [];
+    await runAgent({
+      graph: fixtureGraph(),
+      root: process.cwd(),
+      instruction: 'go',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      onEvent: (e) => events.push(e),
+      noAudit: true,
+    });
+    const usage = events.find((e) => e.type === 'usage');
+    expect(usage && 'cachedPromptTokens' in usage).toBe(false);
   });
 });
