@@ -42,7 +42,9 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg install / vg uninstall](#vg-install)
   - [vg lib](#vg-lib)
   - [vg map / vg hubs / vg areas / vg oddities](#vg-map--vg-hubs--vg-areas--vg-oddities)
+  - [vg llm-host](#vg-llm-host)
   - [vg models](#vg-models)
+  - [vg module](#vg-module)
   - [vg path](#vg-path)
   - [vg savings](#vg-savings)
   - [vg serve](#vg-serve)
@@ -52,6 +54,12 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg tests](#vg-tests)
   - [vg tree](#vg-tree)
   - [vg unknowns](#vg-unknowns)
+- [Holistic Code Specification (vg hcs)](#holistic-code-specification-vg-hcs)
+  - [vg hcs extract](#vg-hcs-extract)
+  - [vg hcs digest](#vg-hcs-digest)
+  - [vg hcs map](#vg-hcs-map)
+  - [vg hcs gate](#vg-hcs-gate)
+  - [vg hcs validate](#vg-hcs-validate)
 - [Diagnostics, IDE & runtime](#diagnostics-ide--runtime)
   - [vg daemon](#vg-daemon)
   - [vg doctor](#vg-doctor)
@@ -463,6 +471,11 @@ vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [
 | `--package-manifest <file>` | — | JSON or ZIP package-version manifest used for offline/latest lookups (latest bundle: `https://github.com/vibgrate/manifests/latest-packages.zip`) |
 | `--no-local-artifacts` | — | Do not write `.vibgrate/*.json` scan artifacts to disk |
 | `--max-privacy` | — | Hardened privacy mode with minimal scanners and no local artifacts |
+| `--no-graph` | — | Skip building the local code map that scan produces after scoring drift |
+| `--project-scan-timeout <seconds>` | `180` | Per-project scan timeout |
+| `--repository-name <name>` | directory / `package.json` name | Override the repository name recorded for this scan |
+| `--force` | — | Always create a fresh ingest, even when the repository is unchanged since the last scan |
+| `--quiet` | — | Suppress promotional output; scan results are unaffected |
 
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
@@ -489,6 +502,8 @@ Expected results:
 - Clear score/risk output in terminal (or JSON/SARIF when selected).
 - Exit code `2` when configured quality gates are exceeded.
 - When `--push` is enabled, artifact upload is attempted after scan completion.
+
+**Plan limits never block the scan.** If your workspace is at a plan limit that gates ingestion — repository cap, scan credits, VM minutes — the CLI warns with the reason (and the upgrade link), disables the upload, and runs the **full local scan** anyway, repeating the warning after the results so it isn't lost in the output. Local scoring never depended on the cloud, and now neither does it depend on your plan. Pass `--strict` to keep the old behaviour and fail the command instead, which is usually what you want in CI.
 
 ---
 
@@ -720,13 +735,27 @@ Add `--json` for machine-readable output.
 
 ### vg code
 
-Propose a code edit for a plain-language instruction, grounded in the deterministic code graph. `vg code` is **dry-run by default**: it prints the proposed diff and writes nothing.
+A coding **agent** grounded in the deterministic code graph: its search tool resolves symbols and relations from the map, not text matches from a grep. It runs on a local model or a hosted one, and every change it makes to your working tree is approved before it lands.
 
 ```bash
+vg code                                            # guided: pick a model, then describe tasks
 vg code "add a --timeout flag to the scan command"
 ```
 
-**Agentic sessions.** With a real model, `vg code` is a coding *agent*, not just a one-shot editor: the model is given tools and works in steps — **search the code graph**, read files, check a symbol's blast radius, edit, create/delete files, and run your tests or build — until the task is done. Every mutating step (an edit or a command) is **governed**: you approve it, or run autonomously with `--auto`. Read-only steps (search/read/list/impact) run without prompting. `--single` forces the old one-shot diff; `--max-steps <n>` caps the loop.
+#### Does it write to my disk?
+
+Yes — through approved steps, and only those. This is the one thing to be clear about before you run it:
+
+| You run | What happens |
+|---|---|
+| `vg code` or `vg code "<instruction>"` at a terminal | The **agent loop**. Read-only steps (search, read, list, impact) run without prompting. Every edit and every command **asks you first**, and writes when you approve. |
+| `… --auto` | The same loop with no prompts. A denylist blocks catastrophic commands. For CI and scripted runs. |
+| `… --single` | The **one-shot planner**: one proposed edit, no tool loop, no commands. **Dry-run by default** — it prints the diff and writes nothing unless you pass `--apply` *and* `--yes`. |
+| `… --mock <file>` | The one-shot path driven by a scripted reply instead of a model (offline; tests, CI, benchmarks). |
+
+The agent loop is the default. `--apply` and `--yes` belong to `--single` / `--mock` only — in the agent loop, consent is the per-step approval instead. Without a TTY and without `--auto`, `vg code` refuses to start rather than writing unattended.
+
+**How the loop works.** The model is given tools and works in steps — search the code graph, read files, check a symbol's blast radius, edit, create/delete files, and run your tests or build — until the task is done. `--max-steps <n>` caps the loop (default 24).
 
 **Guided mode.** Run `vg code` with no instruction at an interactive terminal and it walks you through everything: it builds the code map, then asks where the model should run — a local model, or one of the current top providers (Claude, GPT, Grok, Gemini, …) surfaced live from the catalog — and which model, with an "enter a slug myself" option at every step. Before pulling any local model it runs a memory pre-flight (estimated footprint vs free RAM/VRAM and already-loaded models) and won't pull a model your machine can't run; then it drops into an agent session where you describe tasks and approve each change. For scripts and CI, pass an instruction with `--auto` (or `--mock`) — the agent only prompts at a TTY, so automation never blocks.
 
@@ -781,17 +810,50 @@ vg code
 
 Run it non-interactively with `vg code "add a --timeout flag to scan" --provider ollama --model qwen2.5-coder:7b --auto`, or against a hosted model with `--provider openrouter --model anthropic/claude-3.5-sonnet` (set `OPENROUTER_API_KEY`).
 
-**In a session** you can type slash-commands: `/undo` reverts the last change, `/diff` shows it, `/model` switches model, `/cost` shows the running token/$ cost, `/help` lists them, `/exit` quits.
+**In a session** you can type slash-commands:
+
+| Command | What it does |
+|---|---|
+| `/undo` | Revert the files changed by the last task |
+| `/diff` | Show the last change |
+| `/model` | Switch model without leaving the session |
+| `/cost` | Running token/$ cost for the session (local models are free) |
+| `/compact` | Condense the session so far into one checkpoint recap |
+| `/clear` | Explains that each task already starts fresh — nothing to clear |
+| `/help` | List the commands |
+| `/exit` | Quit (an empty line, `exit`, or `quit` also work) |
 
 **More session controls:**
 
 - `--stream` streams the model's output live as it's generated.
 - `--verify [command]` runs your tests after the agent finishes and, if they fail, feeds the failures back so it fixes them (uses the `testCommand` from config if you don't name one).
-- `--continue` resumes your most recent session — it recaps what was already done for the model and restores `/undo`.
+- `--continue [id]` resumes a session — your most recent one, or the id you name — recapping what was already done for the model and restoring `/undo`.
+- `--reasoning-effort low|medium|high` tells a reasoning-capable model how hard to think (models without the knob ignore it).
+- `--worktree` runs the session in an **isolated git worktree** under `.vibgrate/worktrees`, so an agent can work without touching your checkout. Bare `--worktree` creates one; `--worktree <id>` reuses it. Inspect and land the result with `--worktree-diff <id>` (print the delta as a patch), `--worktree-apply <id>` (apply it onto the main tree via `git apply --3way`), and `--worktree-remove <id>`.
+- `--security-tier <tier>` sets shell isolation for `run_command`: `L0` runs on the host, `L1` uses Seatbelt or bubblewrap where available (`L2`/`L3` are reserved).
 - A live **token/$ meter** shows after each task and via `/cost` (cost is shown when the model's price is known; local models are free).
 - **External MCP tools:** list servers under `mcpServers` in `.vibgrate/code.json` and the agent can call their tools (namespaced `mcp__<server>__<tool>`); read-only tools run freely, anything else is approved like a built-in mutating tool. VG Code also **adopts the standard MCP config files** already in your repo — `.mcp.json` (Claude Code), `.cursor/mcp.json` (Cursor), and `.vscode/mcp.json` (VS Code) — and merges them with your `.vibgrate/code.json` (which wins on any name clash), so servers you've already configured for another tool work here with no extra setup. Both local (`command`) and remote (`url`) servers are supported.
 
-**Tools the agent has:** searching is the code graph (`search_code`) — not a grep — plus `read_file`, `list_files`, `graph_impact` (blast radius), **`library_docs`** (version-correct docs for a dependency you actually have installed, so the model uses the right API for your version), `edit_file`, `create_file`, `delete_file`, and `run_command`.
+**Tools the agent has.** Searching is the code graph (`search_code`) — not a grep. Read-only tools run without prompting; the rest are approved per step (or auto-approved under `--auto`).
+
+| Tool | What it does | Approval |
+|---|---|---|
+| `search_code` | Search the code graph: symbols and relations, plus a literal sweep for exact phrases and URLs | free |
+| `read_file` / `list_files` | Read a file (or a line range); list files known to the map | free |
+| `graph_impact` | Blast radius of changing a symbol — callers, importers, subtypes | free |
+| `library_docs` | Version-correct docs for a dependency this project actually installs | free |
+| `set_progress` | Maintain the task checklist shown during the run | free |
+| `inspect_task` / `inspect_change` / `verify_change` | Governance steps: assess the task, review a pending change, verify the result | free |
+| `edit_file` / `create_file` / `delete_file` | Change the working tree | **approved** |
+| `apply_patch` | Apply a validated PatchIR multi-op edit transactionally | **approved** per file |
+| `run_command` | Run tests, builds, or any other shell command | **approved** |
+| `read_notebook` / `edit_notebook_cell` | Read a Jupyter notebook; edit one cell | read free · edit **approved** |
+| `web_fetch` / `web_search` | Fetch a URL or search the web — results are size-capped, secret-redacted, and treated as untrusted | **approved** |
+| `browser_*` | Drive a browser: start, navigate, snapshot, click, type, stop | start/navigate **approved** |
+| `spawn_subagent` | Delegate a sub-task to a nested agent (optionally in a worktree) | **approved** |
+| `ask_user` | Ask you a question mid-task | free |
+| `finish` / `abort` | End the task with a summary, or give up | free |
+| `mcp__<server>__<tool>` | Tools from your configured MCP servers | free if read-only, else **approved** |
 
 **Safety.** The agent never sends a secrets file (`.env`, keys, credentials) to the model, and redacts stray credential shapes from any file it reads. Under `--auto`, a denylist blocks catastrophic commands (filesystem wipes, `curl … | sh`, force-push, …); interactively you see and approve each command yourself.
 
@@ -811,31 +873,68 @@ Run it non-interactively with `vg code "add a --timeout flag to scan" --provider
 }
 ```
 
-It assembles a small, high-signal context from the map (the relevant symbols, their relations, the blast radius of changing them, and any hard constraints), asks the model you choose for a minimal edit, and applies that edit through a deterministic merge so the change lands exactly where it was meant to.
+| Key | Default | Notes |
+|---|---|---|
+| `provider` | auto | `vibgrate-relay`, `ollama`, `lmstudio`, `foundry-local`, `openrouter`, `litellm`, `openai`, `together`, `llama-cpp` |
+| `model` | — | Model id/slug (or set `VG_CODE_MODEL`) |
+| `auto` | `false` | Run autonomously (auto-approve) by default |
+| `testCommand` | — | The project's test command, surfaced to the agent and used by `--verify` |
+| `denyCommands` | — | Extra regex/substring rules blocked on top of the built-in denylist |
+| `contextWindow` | model default | Override the usable context window (tokens) for compaction sizing |
+| `maxSteps` | `24` | Default step cap for the agent loop |
+| `capsule` | — | Prefer a source-bearing Task Capsule for first context (`--capsule` / `--no-capsule`) |
+| `securityTier` | `L0` | Shell isolation: `L0` host, `L1` Seatbelt/bubblewrap where available (`L2`/`L3` reserved) |
+| `modelProfile` | derived | Overrides merged onto the model-derived profile: `mode`, `capsuleBudgetTokens`, `maxRepairRounds`, `constrainedDecoding`, `securityTier` |
+| `mcpServers` | — | External MCP servers (name → launch spec), merged with `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`; this file wins on a name clash |
 
-Writing is opt-in and confirmed. `--apply` walks the full inspect → assess → dry-run → approve → execute → verify → log lifecycle, and still requires your explicit `--yes` (or an interactive confirmation) — there is no write-without-consent path.
+A missing or malformed file is simply "no config", never an error.
+
+**How an edit is built.** It assembles a small, high-signal context from the map (the relevant symbols, their relations, the blast radius of changing them, and any hard constraints), asks the model for a minimal edit, and applies that edit through a deterministic merge so the change lands exactly where it was meant to. Before an edit is written, its replacement body is scanned against the graph's identifier trie: an edit that references a symbol the graph does not know — and that is not already local to the target file — is **blocked, not merely flagged**.
+
+**The one-shot path.** `--single` skips the tool loop and proposes a single edit. That path is dry-run by default; `--apply` walks the full inspect → assess → dry-run → approve → execute → verify → log lifecycle, and still requires your explicit `--yes` (or an interactive confirmation) — there is no write-without-consent path.
 
 ```bash
-vg code "rename readCfg to readConfig everywhere it is called" --apply --yes
+vg code "rename readCfg to readConfig everywhere it is called" --single --apply --yes
 ```
 
 Pick a backend with `--provider` and `--model`. No model is bundled, and nothing is installed until you first use a backend that needs it:
 
-- **Local** — `--provider ollama` or `--provider lmstudio` (or `--local` to force on-device only, no network).
-- **Hosted** — any OpenAI-compatible endpoint: `--provider openrouter` / `litellm` / `openai` / `together`. API keys are read from the environment only (e.g. `OPENROUTER_API_KEY`), never passed as flags.
+- **Local** — a Code Mode pack, `--provider ollama`, `--provider lmstudio`, `--provider foundry-local`, or `--provider llama-cpp --model-path <gguf>` (or `--local` to force on-device only).
+- **Vibgrate Relay** — the first-party hosted router that supplements your local models: `--provider vibgrate-relay`, authenticated with `VIBGRATE_RELAY_TOKEN` instead of a per-provider API key. Set `VIBGRATE_RELAY_URL` to point at staging or a self-hosted deployment.
+- **Other hosted** — any OpenAI-compatible endpoint: `--provider openrouter` / `litellm` / `openai` / `together`. API keys are read from the environment only (e.g. `OPENROUTER_API_KEY`), never passed as flags.
 
-With no `--provider`, `vg code` chooses from what you have already configured (a hosted key, or a locally-pulled model) and never dials a cloud endpoint you didn't set up.
+With no `--provider`, `vg code` chooses from what you have already configured, best first: **Vibgrate Relay** when `VIBGRATE_RELAY_TOKEN` is set (with local fallback if Relay is unreachable), then another configured hosted key, then a locally-pulled model. It never dials a cloud endpoint you didn't set up.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `<instruction>` | — | What to change, in plain language |
-| `--provider <id>` | auto | `ollama`, `lmstudio`, `openrouter`, `litellm`, `openai`, `together`, `llama-cpp` |
+| `<instruction>` | — | What to change, in plain language. Omit it at a TTY for guided mode. |
+| `--provider <id>` | auto | `vibgrate-relay`, `ollama`, `lmstudio`, `foundry-local`, `openrouter`, `litellm`, `openai`, `together`, `llama-cpp` |
 | `--model <id>` | — | Model id (or set `VG_CODE_MODEL`) |
-| `--file <path>` | — | Restrict the edit surface to this file (repeatable) |
-| `--budget <n>` | `3000` | Approx context token budget |
-| `--apply` | — | Write the change (still requires `--yes` or a confirmation) |
+| `--mode <mode>` | auto-fit | Code Mode: `spark` \| `flow` \| `forge` — preferred over raw model names |
+| `--model-path <gguf>` | — | GGUF path for `--provider llama-cpp` (weights are never auto-downloaded) |
+| `-f, --file <path>` | — | Restrict the edit surface to this file (repeatable) |
+| `-b, --budget <n>` | `3000` | Approx context token budget |
+| `--auto` | — | Autonomous: auto-approve every edit and command (denylist still applies) |
+| `--max-steps <n>` | `24` | Cap the number of agent steps |
+| `--single` | — | One-shot planner (single edit, no tool loop) instead of the agent |
+| `--apply` | — | `--single`/`--mock` only: write the change (still requires `--yes` or a confirmation) |
 | `--yes` | — | Consent to write, or to a first-use package install, non-interactively |
-| `--local` | — | On-device backends only; never touch the network |
+| `--stream` | — | Stream the model output live |
+| `--verify [command]` | — | After the agent finishes, run tests and feed failures back for repair (uses `testCommand` when no command is given) |
+| `--continue [id]` | — | Resume the most recent session, or the given session id (recap + restore `/undo`) |
+| `--reasoning-effort <level>` | model default | How hard a reasoning-capable model should think: `low` \| `medium` \| `high` |
+| `--worktree [id]` | — | Run the session in an isolated git worktree under `.vibgrate/worktrees` |
+| `--worktree-diff` / `--worktree-apply` / `--worktree-remove <id>` | — | One-shot worktree review flow: print the delta, apply it onto the main tree (`git apply --3way`), or remove the checkout |
+| `--capsule` / `--no-capsule` | config | Use (or disable) a source-bearing Task Capsule for first context |
+| `--security-tier <tier>` | `L0` | Shell isolation: `L0` host, `L1` Seatbelt/bubblewrap where available |
+| `--restore-checkpoint <commit>` | — | One-shot: restore the given `--file` paths from a checkpoint commit, then exit (for host UIs) |
+| `--stream-json` | — | Machine protocol: NDJSON agent events on stdout, approval decisions on stdin (host UIs such as the VS Code panel) |
+| `--session` | — | With `--stream-json`: stay open for further turns instead of exiting after one |
+| `--mock <file>` | — | Use a scripted reply instead of a model (offline; tests/CI/benchmarks) |
+| `-o, --out <file>` | — | Write the JSON result to a file (for CI/benchmarks) |
+| `--local` (global) | — | On-device model backends only — no hosted model call, no catalog fetch |
+
+`--stream-json` is the protocol **Vibgrate for VS Code** speaks to the CLI: the panel renders the agent's steps, approves or denies each mutating tool call over stdin, and with `--session` keeps one warm graph across turns. It is a supported surface for any host UI, not just ours.
 
 Add `--json` for the full machine-readable result (proposed changes, diffs, and the verification summary), or `--out <file>` to write it for CI. Requires a map — run `vg` first if you have not built one.
 
@@ -1117,6 +1216,29 @@ vg models pull qwen2.5-coder:7b --dry-run   # plan only
 
 ---
 
+### vg module
+
+Manage the **optional local modules** — separately-licensed engines the CLI can load through a narrow seam. Two are supported today: `relevance` (semantic ranking kernel) and `hcs` (the [HCS](#holistic-code-specification-vg-hcs) engine behind `vg hcs`).
+
+```bash
+vg module status                  # what is installed, and whether it loads
+vg module install hcs             # fetch + unpack (prompts once, unless --yes)
+vg module install relevance --force
+vg module remove hcs
+```
+
+Installation fetches the module from the npm registry **as a plain tarball**, verifies its integrity, and unpacks it into the Vibgrate cache. Your project is never touched, and nothing from the tarball executes at install time. State is per-user, not per-repo, and your answer to the prompt is recorded — a decline is remembered, so nothing re-prompts on every run.
+
+| Subcommand | Description |
+|------------|-------------|
+| `status` | Installed modules, their versions, whether the seam can load them, and your recorded consent |
+| `install <name>` | Install a module (`--yes` to skip the prompt, `--force` to reinstall) |
+| `remove <name>` | Delete an installed module |
+
+Set `VIBGRATE_NO_KERNEL=1` to disable optional modules entirely — installs are refused and commands that need an engine exit with `6` ([`ENGINE_UNAVAILABLE`](#exit-codes)) rather than silently degrading. `vg module status` reports the disabled state. Add `--json` to any subcommand for machine-readable output.
+
+---
+
 ### vg path
 
 Show how A connects to B — shortest path in the call graph.
@@ -1293,6 +1415,112 @@ Surfaces the symbols and imports the resolver could not tie to a definition, ord
 | `-n, --limit <n>` | `20` | How many to show |
 
 Add `--json` for machine-readable output.
+
+---
+
+## Holistic Code Specification (vg hcs)
+
+`vg hcs` turns source into a stream of **deterministic code facts** — one NDJSON line per fact — and then renders, maps, gates, and validates that stream. Same code in, same facts out, on every machine: the whole pipeline is reproducible, so a fact stream is something you can commit, diff, and gate CI on.
+
+Extraction currently covers **Rust, Ruby, PHP, Dart, Swift, Scala, C++, COBOL, and VB6** — including the legacy stacks that rarely have any machine-readable specification at all. The engine reports its own supported set, and `--language` accepts anything in it; an unsupported value lists the valid ones.
+
+**The engine is an optional module.** All HCS computation (fact parsing, decoding, scoring, diffing, rendering) runs inside `@vibgrate/hcs-engine`, a separately-licensed WASM sandbox that makes **no network calls and spawns no processes**. The CLI side is plumbing only — read input, call the engine, write output — so every host gets byte-identical results. The module is auto-provisioned on first use (one-line notice), or install it up front with [`vg module install hcs`](#vg-module).
+
+When the engine is missing and cannot be fetched, every `vg hcs` subcommand exits **`6` (`ENGINE_UNAVAILABLE`)** — deliberately distinct from `2` (`GATE_FAILED`), so CI can never read "engine missing" as a gate verdict.
+
+**Typical path:** `vg hcs extract` → `vg hcs digest` (read it) / `vg hcs map` (see the system) / `vg hcs gate` (guard CI).
+
+```bash
+vg hcs extract -o facts.ndjson              # facts for the current tree
+vg hcs digest --in facts.ndjson --format md # a readable specification
+vg hcs map --facts facts.ndjson --format mermaid
+vg hcs gate --baseline main.ndjson --facts facts.ndjson
+```
+
+### vg hcs extract
+
+Extract facts from source into an NDJSON stream. Test files are excluded by default; the walk skips vendored, build, and dependency directories, and files above 2 MiB.
+
+```bash
+vg hcs extract [dir] -o facts.ndjson
+vg hcs extract src --language rust --include-tests
+```
+
+**Incremental by default.** When the output stream already exists, extraction is incremental: the engine plans from the previous stream's file-hash index, the CLI re-extracts only added and changed files, and the engine merges — reusing unchanged facts byte-for-byte. So a repeated `-o` run costs only the delta, with output identical to a full extraction. Point `--previous` at a different stream to keep the state file separate from the output, or pass `--full` to re-extract everything from scratch (the merged result still refreshes the index, so the next run stays incremental).
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `[dir]` | `.` | Directory to extract from |
+| `--language <lang>` | all supported | Extract only this language |
+| `--include-tests` | — | Include test files (excluded by default) |
+| `-o, --out <file>` | stdout | Write the NDJSON stream to a file |
+| `--previous <file>` | the `--out` file | Previous stream to update incrementally (missing file ⇒ full extraction) |
+| `--full` | — | Ignore the previous stream and re-extract every file |
+
+### vg hcs digest
+
+Render a fact stream as a human-readable specification.
+
+```bash
+vg hcs extract | vg hcs digest --format md -o SPEC.md
+vg hcs digest --in facts.ndjson --format html --level full --title "Payments service"
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--in <file>` | stdin | NDJSON fact stream to read |
+| `-o, --out <file>` | stdout | Write output to a file |
+| `--format <format>` | `md` | `md`, `json`, or `html` |
+| `--level <level>` | `concise` | `concise` or `full` |
+| `--title <title>` | — | Override the document title |
+
+### vg hcs map
+
+Build the **System Map** from a fact stream — the components, their relations, and the structure they imply.
+
+```bash
+vg hcs map --facts facts.ndjson --format mermaid
+vg hcs map --facts facts.ndjson --profile migration -o map.json
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--facts <file>` | stdin | NDJSON fact stream to read |
+| `-o, --out <file>` | stdout | Write output to a file |
+| `--format <format>` | `json` | `json`, `md`, or `mermaid` |
+| `--profile <profile>` | — | Consumer projection: `integration`, `migration`, or `governance` |
+
+Pass the global `--generated-at <iso>` to pin the artifact timestamp for byte-deterministic output.
+
+### vg hcs gate
+
+The **governance gate**: diff two fact streams and fail on material structural regressions. This is the CI-facing command.
+
+```bash
+vg hcs gate --baseline main.ndjson --facts pr.ndjson --format sarif -o hcs.sarif
+vg hcs gate --baseline main.ndjson --facts pr.ndjson --policy .vibgrate/hcs-gate.json
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--baseline <file>` | *required* | Baseline NDJSON facts (the "before" stream) |
+| `--facts <file>` | stdin | Current NDJSON facts (the "after" stream) |
+| `--policy <file>` | — | Gate policy JSON — thresholds and disabled rules |
+| `-o, --out <file>` | stdout | Write the result to a file |
+| `--format <format>` | `text` | `text`, `json`, or `sarif` |
+
+Exit codes: `0` when the gate passes, **`2`** on a material structural regression, `6` when the engine is unavailable.
+
+### vg hcs validate
+
+Validate a fact stream against the HCS spec. Exits with the spec's Appendix-I conformance code, so a malformed stream is caught before anything downstream consumes it.
+
+```bash
+vg hcs validate facts.ndjson
+vg hcs validate facts.ndjson --json
+```
+
+Add `--json` for the full machine-readable report (every error with its code and fact id).
 
 ---
 
@@ -1937,11 +2165,19 @@ What it **does** collect:
 
 ## Exit Codes
 
-| Code | Meaning                        |
-| ---- | ------------------------------ |
-| `0`  | Success                        |
-| `1`  | Runtime error                  |
-| `2`  | `--fail-on` threshold exceeded |
+CI and agents branch on these, so they are a stable contract.
+
+| Code | Name                  | Meaning                                                                                  |
+| ---- | --------------------- | ---------------------------------------------------------------------------------------- |
+| `0`  | `OK`                  | Success                                                                                    |
+| `1`  | `ERROR`               | Runtime error                                                                              |
+| `2`  | `GATE_FAILED`         | A gate failed: `--fail-on` threshold exceeded, a drift budget breached, `vg hcs gate` regression, `vg bisect --assert` unsatisfied |
+| `3`  | `NOT_FOUND`           | The thing asked for does not exist (unknown symbol, no version history, …)                 |
+| `4`  | `NON_DETERMINISTIC`   | A verification found output that is not reproducible                                       |
+| `5`  | `USAGE_ERROR`         | Bad invocation: unknown command, invalid flag value, missing argument                      |
+| `6`  | `ENGINE_UNAVAILABLE`  | A required optional module is not installed and could not be fetched (see [`vg module`](#vg-module)) |
+
+`6` is deliberately distinct from `2`: a CI gate must never read "engine missing" as a gate verdict.
 
 ---
 

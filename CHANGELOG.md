@@ -23,6 +23,22 @@ backward compatible.
 - **Exit code `6` (`ENGINE_UNAVAILABLE`)** — a required optional module is not
   installed and could not be fetched. Deliberately distinct from `2`
   (`GATE_FAILED`) so CI can never read "engine missing" as a gate verdict.
+- **`vg hcs extract` is incremental by default** — a run that writes over an
+  existing stream (`-o`) re-extracts only added and changed files and reuses
+  every unchanged fact byte-for-byte, so repeat runs cost the delta rather than
+  the repository. The engine plans from the previous stream's file-hash index
+  and merges the result, and output stays identical to a full extraction. Point
+  `--previous <file>` at a separate state stream, or pass `--full` to
+  re-extract everything (the merged output still refreshes the index, so the
+  next run stays incremental).
+- **`vg code` session power features** — `--worktree [id]` runs a session in an
+  isolated git worktree under `.vibgrate/worktrees`, with `--worktree-diff`,
+  `--worktree-apply` (`git apply --3way`), and `--worktree-remove` to inspect,
+  land, or drop the delta; `--continue <id>` resumes a named session, not just
+  the latest; `--reasoning-effort low|medium|high` drives the thinking budget
+  on models that expose the knob; `--security-tier` selects shell isolation
+  (`L0` host, `L1` Seatbelt/bubblewrap where available); and
+  `--stream-json --session` keeps one warm graph across turns for host UIs.
 
 - **Change-scoped precise resolution (incremental tsc)** — the TypeScript
   checker rung now caches per-file results under a key covering the file's
@@ -176,6 +192,18 @@ backward compatible.
   schema was missing this field entirely, so `databaseSchema` was silently
   stripped on every `vg push` — the Cloud dashboard's database tab only ever
   had data for locally-viewed scans, never pushed ones. Both are fixed.
+
+### Fixed
+
+- **A plan limit no longer blocks the scan itself** — a limit reported by scan
+  preflight (repository cap, scan credits, VM minutes) used to abort before the
+  scan ran, so a workspace at its repository cap could not use `vg` at all. The
+  limit only gates ingestion, so it now only gates the push: the CLI warns with
+  the server's reason and the upgrade link, disables the upload, runs the full
+  local scan, and repeats the warning after the results so it isn't lost in the
+  output. `--strict` keeps the previous hard failure for CI. Removing the
+  mid-run exit on this path also fixes a Windows libuv abort seen when exiting
+  with the progress UI's handles still open.
 
 ## [Initial public release] - 2026-06-25
 
