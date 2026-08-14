@@ -341,7 +341,7 @@ export const scanCommand = new Command('scan')
     }
 
     const hasDsn = !!resolveDsn(opts.dsn);
-    const willPush = !opts.offline && (opts.push || hasDsn);
+    let willPush = !opts.offline && (opts.push || hasDsn);
 
     // `--no-local-artifacts` arrives from commander as `localArtifacts === false`
     // (the negation flag's camelCase key), so normalise it once here. Reading
@@ -364,6 +364,24 @@ export const scanCommand = new Command('scan')
     // for authenticated users rather than risk mislabelling a paid plan.
     let planTier: string | undefined;
     let upgradeUrl: string | undefined;
+    // Set when preflight says the workspace's plan cannot accept this upload
+    // (repository cap, scan credits, VM meter). A plan limit only blocks the
+    // *push* — the local scan always runs; the reason is warned up front and
+    // repeated after the results. Under --strict a blocked push is still fatal.
+    let pushBlockedReason: string | undefined;
+
+    const blockPush = (reason: string, detailLines: string[]): void => {
+      if (opts.strict) {
+        console.error(chalk.red(reason));
+        for (const line of detailLines) console.error(chalk.dim(line));
+        process.exit(1);
+      }
+      console.error(chalk.yellow(`⚠ ${reason}`));
+      for (const line of detailLines) console.error(chalk.dim(`  ${line}`));
+      console.error(chalk.dim('  Scanning locally — results will not be uploaded to Vibgrate Cloud.'));
+      pushBlockedReason = reason;
+      willPush = false;
+    };
 
     if (willPush && hasDsn) {
       const dsn = resolveDsn(opts.dsn)!;
@@ -390,68 +408,56 @@ export const scanCommand = new Command('scan')
           upgradeUrl =
             preflight.upgradeUrl ??
             `https://${dashHostForIngestHost(preflight.ingestHost ?? ingestHost)}/${parsed.workspaceId}`;
+          // A plan limit (VM meter, repository cap, scan credits) blocks only
+          // the upload — the local scan always runs. blockPush warns with the
+          // reason, disables the push, and exits only under --strict.
           if (preflight.vm && !preflight.vm.allowed) {
-            console.error(chalk.red(preflight.error ?? 'VM meter usage exhausted'));
-            console.error(
-              chalk.dim(
-                `VM minutes: ${preflight.vm.used}/${preflight.vm.limit} (${preflight.plan.label} plan) — enable overages or upgrade your plan.`,
-              ),
-            );
-            process.exit(1);
-          }
-          // A new repository that would breach the plan's repository cap is
-          // blocked before the (expensive) local scan runs. Re-scanning an
-          // already-mapped repository is never blocked here.
-          if (preflight.repositories && !preflight.repositories.allowed) {
-            console.error(
-              chalk.red(
-                preflight.error ??
-                  `Repository limit reached for the ${preflight.plan.label} plan — cannot scan a new repository.`,
-              ),
-            );
+            blockPush(preflight.error ?? 'VM meter usage exhausted', [
+              `VM minutes: ${preflight.vm.used}/${preflight.vm.limit} (${preflight.plan.label} plan) — enable overages or upgrade your plan.`,
+            ]);
+          } else if (preflight.repositories && !preflight.repositories.allowed) {
+            // A NEW repository that would breach the plan's repository cap.
+            // Re-scanning an already-mapped repository is never blocked here.
             const max =
               preflight.repositories.max < 0 ? 'unlimited' : String(preflight.repositories.max);
-            console.error(
-              chalk.dim(
-                `Repositories: ${preflight.repositories.total}/${max} (${preflight.plan.label} plan) — archive a repository or upgrade your plan.`,
-              ),
-            );
+            const detail = [
+              `Repositories: ${preflight.repositories.total}/${max} (${preflight.plan.label} plan) — archive a repository or upgrade your plan.`,
+            ];
             if (preflight.upgradeUrl) {
-              console.error(chalk.dim(`  Upgrade: ${preflight.upgradeUrl}`));
+              detail.push(`Upgrade: ${preflight.upgradeUrl}`);
             }
-            process.exit(1);
-          }
-          if (preflight.status === 'error' || !preflight.scans.allowed) {
-            console.error(chalk.red(preflight.error ?? 'Scan ingestion not allowed for this workspace.'));
-            console.error(
+            blockPush(
+              preflight.error ??
+                `Repository limit reached for the ${preflight.plan.label} plan — cannot upload a new repository.`,
+              detail,
+            );
+          } else if (preflight.status === 'error' || !preflight.scans.allowed) {
+            blockPush(preflight.error ?? 'Scan ingestion not allowed for this workspace.', [
+              `Credits: ${preflight.scans.used}/${preflight.scans.limit} (${preflight.plan.label} plan)`,
+            ]);
+          } else {
+            console.log(
               chalk.dim(
-                `Credits: ${preflight.scans.used}/${preflight.scans.limit} (${preflight.plan.label} plan)`,
+                `Plan: ${preflight.plan.label} — scan credits ${preflight.scans.used}/${preflight.scans.limit} this month`,
               ),
             );
-            if (opts.strict) process.exit(1);
-            process.exit(1);
-          }
-          console.log(
-            chalk.dim(
-              `Plan: ${preflight.plan.label} — scan credits ${preflight.scans.used}/${preflight.scans.limit} this month`,
-            ),
-          );
-          // `--force` opts out of the unchanged short-circuit so scheduled and
-          // dashboard-triggered scans always produce a fresh report.
-          if (preflight.repository?.unchanged && !opts.force) {
-            console.log(
-              chalk.green('✔')
-                + ` Repository unchanged at ${preflight.repository.lastVcsSha?.slice(0, 7) ?? 'same revision'} — skipping scan.`,
-            );
-            if (preflight.repository.lastIngestId) {
-              emitIngestIdLine(preflight.repository.lastIngestId, { unchanged: true });
-              const dashUrl = `https://${dashHostForIngestHost(ingestHost)}/${parsed.workspaceId}/scan/${preflight.repository.lastIngestId}`;
-              console.log(chalk.dim(`  Latest report: ${dashUrl}`));
-            } else if (opts.strict) {
-              console.error(chalk.red('Repository unchanged but no previous ingest id available.'));
-              process.exit(1);
+            // `--force` opts out of the unchanged short-circuit so scheduled and
+            // dashboard-triggered scans always produce a fresh report.
+            if (preflight.repository?.unchanged && !opts.force) {
+              console.log(
+                chalk.green('✔')
+                  + ` Repository unchanged at ${preflight.repository.lastVcsSha?.slice(0, 7) ?? 'same revision'} — skipping scan.`,
+              );
+              if (preflight.repository.lastIngestId) {
+                emitIngestIdLine(preflight.repository.lastIngestId, { unchanged: true });
+                const dashUrl = `https://${dashHostForIngestHost(ingestHost)}/${parsed.workspaceId}/scan/${preflight.repository.lastIngestId}`;
+                console.log(chalk.dim(`  Latest report: ${dashUrl}`));
+              } else if (opts.strict) {
+                console.error(chalk.red('Repository unchanged but no previous ingest id available.'));
+                process.exit(1);
+              }
+              return;
             }
-            return;
           }
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -603,6 +609,14 @@ export const scanCommand = new Command('scan')
 
     if (willPush) {
       await autoPush(artifact, rootDir, scanOpts);
+    } else if (pushBlockedReason) {
+      // Repeat the preflight warning after the (long) scan output so the
+      // reason the results never reached Vibgrate Cloud is the last thing seen.
+      console.error('');
+      console.error(chalk.yellow(`⚠ Results were not uploaded: ${pushBlockedReason}`));
+      if (upgradeUrl) {
+        console.error(chalk.dim(`  Upgrade: ${upgradeUrl}`));
+      }
     }
 
     // On first run with no cloud connection and text output, prompt the user

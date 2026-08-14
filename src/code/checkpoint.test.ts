@@ -5,6 +5,7 @@ import {
   restoreCheckpoint,
   deleteCheckpoints,
   isGitRepo,
+  isValidCheckpointCommit,
   type GitResult,
 } from './checkpoint.js';
 
@@ -37,6 +38,25 @@ describe('checkpointRef', () => {
   it('sanitizes an unsafe session id rather than writing a broken ref', () => {
     expect(checkpointRef('../../evil head', 1)).toBe('refs/vibgrate/checkpoints/evilhead/1');
     expect(checkpointRef('!!!', 1)).toBe('refs/vibgrate/checkpoints/session/1');
+  });
+});
+
+describe('isValidCheckpointCommit', () => {
+  it('accepts abbreviated and full hex SHAs', () => {
+    expect(isValidCheckpointCommit('abc1234')).toBe(true);
+    expect(isValidCheckpointCommit('ABC1234')).toBe(true);
+    expect(isValidCheckpointCommit('a'.repeat(40))).toBe(true);
+    expect(isValidCheckpointCommit('0123456789abcdef0123456789abcdef01234567')).toBe(true);
+  });
+
+  it('rejects refs, option-shaped strings, and anything git could parse as more than data', () => {
+    expect(isValidCheckpointCommit('')).toBe(false);
+    expect(isValidCheckpointCommit('HEAD')).toBe(false);
+    expect(isValidCheckpointCommit('refs/heads/main')).toBe(false);
+    expect(isValidCheckpointCommit('--force')).toBe(false);
+    expect(isValidCheckpointCommit('abc123')).toBe(false); // too short to be a checkpoint id
+    expect(isValidCheckpointCommit('abc1234; rm -rf')).toBe(false);
+    expect(isValidCheckpointCommit('main~1')).toBe(false);
   });
 });
 

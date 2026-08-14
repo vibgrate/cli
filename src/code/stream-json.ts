@@ -15,7 +15,50 @@
 
 import { runAgent, type AgentEvent, type AgentOptions, type AgentResult } from './agent.js';
 import type { AskUserRequest, MutatingAction } from './tools.js';
-import type { ImageAttachment } from './types.js';
+import { sanitizeAttachments, type SessionAttachment } from './session-store.js';
+import type { ImageAttachment, ReasoningEffort } from './types.js';
+
+/**
+ * Version of this NDJSON protocol, carried on `session-start`. Hosts use it to
+ * fail closed (e.g. disable features that need a newer engine) instead of
+ * silently assuming the engine honours frames it may not know. Bump when a
+ * frame is added or its meaning changes.
+ *
+ *  - 1 (implicit): the original protocol; `session-start` had no version field.
+ *  - 2: `session-start` reports sessionDir/engineVersion/protocolVersion/
+ *       provider/model; `--continue` accepts an explicit session id; checkpoint
+ *       restore is available out-of-band via `vg code --restore-checkpoint`.
+ *  - 3: approvals accept `always: true` (persist a standing allow rule from
+ *       `.vibgrate/code-approvals.json`); a completed plan turn emits
+ *       `plan-ready` before `idle` so hosts can offer Approve plan / Keep
+ *       planning; read-only commands auto-approve engine-side.
+ *  - 4: `inject` steers the running turn (content lands at the next step
+ *       boundary, announced by an `injected` event); `rename` titles the live
+ *       session; the session store keeps an `index.json` (list without parsing
+ *       every session) and supports rename/delete/fork/rewind out-of-band;
+ *       `session-start` reports `worktree` when the run is rooted in one.
+ *  - 5: reasoning models are visible — a `thinking` event streams the model's
+ *       reasoning channel separately from its answer, and `submit` carries an
+ *       optional `reasoningEffort`. The `usage` event reports
+ *       `cachedPromptTokens` when the provider says how much of the prompt it
+ *       served from cache, so a host can price a turn instead of guessing.
+ *       `submit` also carries `attachments` metadata, so a restored chat can
+ *       show what was attached to a turn (names and sizes, never the bytes).
+ */
+export const STREAM_JSON_PROTOCOL_VERSION = 5;
+
+/** Environment facts a `session-start` frame reports to the host (all optional for older callers). */
+export interface SessionStartInfo {
+  /** Absolute directory session files live in — the single source of truth for history UIs. */
+  sessionDir?: string;
+  /** Engine (CLI) version string, for host version reports. */
+  engineVersion?: string;
+  protocolVersion?: number;
+  provider?: string;
+  model?: string;
+  /** v4: set when this session runs inside an isolated git worktree. */
+  worktree?: { path: string; base: string };
+}
 
 /** Per-turn approval posture a host can send with `submit` (session mode). */
 export type TurnAgentMode = 'agent' | 'plan' | 'auto';
@@ -27,6 +70,15 @@ export interface TurnRequest {
   agentMode?: TurnAgentMode;
   /** Images attached to this turn (multimodal providers encode them). */
   images?: ImageAttachment[];
+  /** v5: reasoning budget for this turn (ignored by models without the knob). */
+  reasoningEffort?: ReasoningEffort;
+  /**
+   * v5: what the user attached, as metadata only (name/kind/size). The bytes
+   * travel separately on `images` (or already folded into the instruction for
+   * text); this exists so the stored session can show a restored chat what was
+   * attached without carrying the payload.
+   */
+  attachments?: SessionAttachment[];
 }
 
 /** A single line written to the host. Discriminated by `event`. */
@@ -38,9 +90,15 @@ export type StreamJsonOut =
   | { event: 'done'; result: AgentResult }
   | { event: 'error'; message: string }
   /** Session mode only: the process is up and owns this session id. */
-  | { event: 'session-start'; sessionId: string; resumed: boolean }
+  | ({ event: 'session-start'; sessionId: string; resumed: boolean } & SessionStartInfo)
   /** Session mode only: the turn ended; send another `submit` or `end`. */
   | { event: 'idle'; turns: number }
+  /**
+   * Session mode only (v3): a plan-mode turn just completed. Emitted before
+   * `idle` so a host can paint an Approve plan / Keep planning affordance;
+   * hosts that don't know the frame ignore it and see `idle` as before.
+   */
+  | { event: 'plan-ready'; turns: number }
   /** Outcome of a checkpoint restore the host asked for. */
   | {
       event: 'checkpoint-restored';
@@ -56,12 +114,30 @@ export type StreamJsonOut =
  * without killing the process; `end` closes the session.
  */
 export type HostMessage =
-  | { kind: 'approve'; id: number; approve: boolean }
+  | { kind: 'approve'; id: number; approve: boolean; always?: boolean }
   | { kind: 'answer'; id: number; answer: string }
-  | { kind: 'submit'; instruction: string; agentMode?: TurnAgentMode; images?: ImageAttachment[] }
+  | {
+      kind: 'submit';
+      instruction: string;
+      agentMode?: TurnAgentMode;
+      images?: ImageAttachment[];
+      /** v5: reasoning budget for this turn (ignored by models without the knob). */
+      reasoningEffort?: ReasoningEffort;
+      /** v5: attachment metadata for the session record (never the bytes). */
+      attachments?: SessionAttachment[];
+    }
   | { kind: 'restore'; commit: string; files: string[] }
   /** Manual compaction: condense the stored session so the recap shrinks. */
   | { kind: 'compact' }
+  /**
+   * v4 steer: mid-turn user content for the *running* turn, applied at the next
+   * step boundary (unlike `submit`, which queues a whole next turn). Buffered —
+   * an inject racing the turn's end is delivered at the start of the next turn
+   * rather than dropped.
+   */
+  | { kind: 'inject'; text: string }
+  /** v4: title the live session (empty text clears back to the derived name). */
+  | { kind: 'rename'; title: string }
   | { kind: 'cancel' }
   | { kind: 'end' };
 
@@ -78,7 +154,14 @@ export function parseHostMessage(raw: string): HostMessage | null {
   }
   if (!msg || typeof msg !== 'object') return null;
   if (typeof msg.approveId === 'number') {
-    return { kind: 'approve', id: msg.approveId, approve: !!msg.approve };
+    // v3: `always: true` on an approval asks the engine to persist a standing
+    // allow rule for this action shape. Only meaningful with approve: true.
+    return {
+      kind: 'approve',
+      id: msg.approveId,
+      approve: !!msg.approve,
+      ...(msg.always === true && msg.approve ? { always: true } : {}),
+    };
   }
   if (typeof msg.answerId === 'number') {
     return { kind: 'answer', id: msg.answerId, answer: String(msg.answer ?? '') };
@@ -100,11 +183,18 @@ export function parseHostMessage(raw: string): HostMessage | null {
           )
           .slice(0, 8)
       : undefined;
+    const reasoningEffort =
+      msg.reasoningEffort === 'low' || msg.reasoningEffort === 'medium' || msg.reasoningEffort === 'high'
+        ? msg.reasoningEffort
+        : undefined;
+    const attachments = sanitizeAttachments(msg.attachments);
     return {
       kind: 'submit',
       instruction: msg.submit.trim(),
       ...(agentMode ? { agentMode } : {}),
       ...(images?.length ? { images } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(attachments.length ? { attachments } : {}),
     };
   }
   if (
@@ -118,6 +208,12 @@ export function parseHostMessage(raw: string): HostMessage | null {
     return null;
   }
   if (msg.compactSession === true) return { kind: 'compact' };
+  if (typeof msg.inject === 'string' && msg.inject.trim()) {
+    return { kind: 'inject', text: msg.inject.trim() };
+  }
+  if (typeof msg.renameSession === 'string') {
+    return { kind: 'rename', title: msg.renameSession.trim() };
+  }
   if (msg.cancel === true) return { kind: 'cancel' };
   if (msg.end === true) return { kind: 'end' };
   return null;
@@ -131,10 +227,25 @@ export function parseHostMessage(raw: string): HostMessage | null {
  */
 export class StreamJsonSession {
   private nextId = 1;
-  private readonly pendingApprove = new Map<number, (approve: boolean) => void>();
+  private readonly pendingApprove = new Map<
+    number,
+    { resolve: (approve: boolean) => void; action: MutatingAction }
+  >();
   private readonly pendingAnswer = new Map<number, (answer: string) => void>();
   /** Cancellation for the turn currently running (session mode). */
   private turnSignal: { aborted: boolean } = { aborted: false };
+  /**
+   * v4 steer: user content injected mid-turn, drained by the agent loop at its
+   * next step boundary. Deliberately NOT cleared between turns — an inject that
+   * races the turn's end should land at the start of the next turn, not vanish.
+   */
+  private injected: string[] = [];
+  /**
+   * v3: called when the host approved with `always: true` — the owner persists
+   * a standing rule derived from the approved action. Injected (not imported)
+   * so this protocol class stays free of filesystem concerns.
+   */
+  onAlwaysRule?: (action: MutatingAction) => void;
 
   constructor(
     private readonly emit: (line: StreamJsonOut) => void,
@@ -162,7 +273,7 @@ export class StreamJsonSession {
       return Promise.resolve(true);
     }
     return new Promise<boolean>((resolve) => {
-      this.pendingApprove.set(id, resolve);
+      this.pendingApprove.set(id, { resolve, action });
       this.emit({ event: 'approve-request', id, action });
     });
   };
@@ -185,11 +296,14 @@ export class StreamJsonSession {
   };
 
   /** Host → agent: resolve a pending approval. Unknown ids are ignored. */
-  submitDecision(id: number, approve: boolean): void {
-    const resolve = this.pendingApprove.get(id);
-    if (resolve) {
+  submitDecision(id: number, approve: boolean, always = false): void {
+    const pending = this.pendingApprove.get(id);
+    if (pending) {
       this.pendingApprove.delete(id);
-      resolve(approve);
+      // Persist the standing rule before resolving, so the rule exists by the
+      // time the approved action (and any follow-up like it) executes.
+      if (approve && always) this.onAlwaysRule?.(pending.action);
+      pending.resolve(approve);
     }
   }
 
@@ -200,6 +314,23 @@ export class StreamJsonSession {
       this.pendingAnswer.delete(id);
       resolve(answer ?? '');
     }
+  }
+
+  /** Host → agent (v4): steer the running turn with more user content. */
+  inject(text: string): void {
+    const t = text.trim();
+    if (t) this.injected.push(t);
+  }
+
+  /**
+   * Drain pending steer content (joined, oldest first) for the agent loop's
+   * next step. Null when nothing is pending.
+   */
+  drainInjected(): string | null {
+    if (!this.injected.length) return null;
+    const text = this.injected.join('\n\n');
+    this.injected = [];
+    return text;
   }
 
   /** Start a turn: fresh cancellation signal, handed to the agent loop. */
@@ -220,7 +351,7 @@ export class StreamJsonSession {
 
   /** Reject any still-pending approvals/questions (e.g. the host disconnected). */
   cancelPending(): void {
-    for (const resolve of this.pendingApprove.values()) resolve(false);
+    for (const pending of this.pendingApprove.values()) pending.resolve(false);
     this.pendingApprove.clear();
     for (const resolve of this.pendingAnswer.values()) resolve('');
     this.pendingAnswer.clear();
@@ -247,6 +378,8 @@ export interface StreamJsonSessionRunOptions {
   sessionId: string;
   /** True when this session was reloaded from disk (`--continue`). */
   resumed: boolean;
+  /** Environment facts to report on `session-start` (dir, versions, model). */
+  sessionInfo?: SessionStartInfo;
   /** Instruction for the first turn. Omit to wait for the host's first `submit`. */
   instruction?: string;
   /** Spawn-time approval posture; per-turn `agentMode` on `submit` overrides it. */
@@ -268,6 +401,10 @@ export interface StreamJsonSessionRunOptions {
     /** Effective auto for this turn (spawn flag overridden by agentMode). */
     auto: boolean;
     images?: ImageAttachment[];
+    /** v5: per-turn reasoning budget, straight from the host's `submit`. */
+    reasoningEffort?: ReasoningEffort;
+    /** v5: attachment metadata for the session record (never the bytes). */
+    attachments?: SessionAttachment[];
   }) => Promise<AgentResult>;
   /**
    * Record a finished turn. Returns the recap to seed the next turn, so
@@ -293,7 +430,7 @@ export async function runCodeStreamJsonSession(
   const spawnAuto = options.spawnAuto ?? !!auto;
   const session = new StreamJsonSession(emit, spawnAuto);
   bindDecisions?.(session);
-  emit({ event: 'session-start', sessionId, resumed });
+  emit({ event: 'session-start', sessionId, resumed, ...(options.sessionInfo ?? {}) });
 
   const turns: StreamJsonTurn[] = [];
   let priorSummary: string | undefined;
@@ -317,6 +454,8 @@ export async function runCodeStreamJsonSession(
         agentMode: request.agentMode,
         auto: turnAuto && request.agentMode !== 'plan',
         images: request.images,
+        reasoningEffort: request.reasoningEffort,
+        attachments: request.attachments,
       });
       emit({ event: 'done', result });
       turn = { instruction, result };
@@ -328,6 +467,11 @@ export async function runCodeStreamJsonSession(
     }
     turns.push(turn);
     priorSummary = onTurnEnd?.(turn) ?? priorSummary;
+    // v3: a completed plan turn announces itself so hosts can offer
+    // Approve plan / Keep planning. A failed turn is not a ready plan.
+    if (request.agentMode === 'plan' && turn.result) {
+      emit({ event: 'plan-ready', turns: turns.length });
+    }
     emit({ event: 'idle', turns: turns.length });
     request = await nextTurn();
   }

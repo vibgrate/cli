@@ -44,7 +44,7 @@ async function scanFixture() {
   await fs.writeFile(path.join(dir, 'package-lock.json'), JSON.stringify({ name: 'fixture-app', lockfileVersion: 3, packages: {} }), 'utf8');
   await fs.writeFile(path.join(dir, '.gitignore'), 'node_modules\n.env\n', 'utf8');
   const advanced = await loadAdvancedScanHook();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const artifact = await runCoreScan(dir, { path: dir } as any, advanced);
   await fs.rm(dir, { recursive: true, force: true });
   return artifact;

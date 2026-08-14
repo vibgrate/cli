@@ -42,7 +42,7 @@ export function indexDbPath(root: string): string {
 export function writeGraphIndex(root: string, graph: VgGraph): IndexWriteResult {
   const file = indexDbPath(root);
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+     
     const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
@@ -182,7 +182,7 @@ export function lookupNameIndex(root: string, query: string, limit = 20): NameHi
   const file = indexDbPath(root);
   if (!fs.existsSync(file) || !query.trim()) return [];
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+     
     const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
     const db = new DatabaseSync(file, { readOnly: true });
     const q = query.trim();
@@ -224,7 +224,7 @@ export function lookupNeighbors(
   const file = indexDbPath(root);
   if (!fs.existsSync(file) || !nodeId) return [];
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+     
     const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
     const db = new DatabaseSync(file, { readOnly: true });
     let rows: Record<string, unknown>[] = [];
@@ -263,7 +263,7 @@ export function readIndexMeta(root: string): Record<string, string> | null {
   const file = indexDbPath(root);
   if (!fs.existsSync(file)) return null;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+     
     const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
     const db = new DatabaseSync(file, { readOnly: true });
     const rows = db.prepare('SELECT key, value FROM meta').all() as { key: string; value: string }[];
@@ -285,7 +285,7 @@ export function loadGraphFromIndex(root: string): VgGraph | null {
   const file = indexDbPath(root);
   if (!fs.existsSync(file)) return null;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+     
     const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
     const db = new DatabaseSync(file, { readOnly: true });
     const metaRows = db.prepare('SELECT key, value FROM meta').all() as {

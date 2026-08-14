@@ -51,6 +51,26 @@ describe('StreamJsonSession', () => {
     expect(await p).toBe(false);
   });
 
+  it('always: true on an approval invokes onAlwaysRule with the approved action, before resolution', async () => {
+    const s = new StreamJsonSession(() => {}, false);
+    const calls: string[] = [];
+    s.onAlwaysRule = (action) => calls.push(action.kind === 'run' ? action.command : action.kind);
+    const p = s.approve({ kind: 'run', command: 'pnpm test' });
+    s.submitDecision(1, true, true);
+    expect(await p).toBe(true);
+    expect(calls).toEqual(['pnpm test']);
+  });
+
+  it('always on a rejection saves nothing', async () => {
+    const s = new StreamJsonSession(() => {}, false);
+    const calls: unknown[] = [];
+    s.onAlwaysRule = (action) => calls.push(action);
+    const p = s.approve({ kind: 'run', command: 'rm -rf build' });
+    s.submitDecision(1, false, true);
+    expect(await p).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
   it('round-trips user-question answers', async () => {
     const out: StreamJsonOut[] = [];
     const s = new StreamJsonSession((l) => out.push(l), false);
@@ -156,6 +176,27 @@ describe('parseHostMessage', () => {
     expect(parseHostMessage('{"end":true}')).toEqual({ kind: 'end' });
   });
 
+  it('parses the v3 always flag only on an approval, never a rejection', () => {
+    expect(parseHostMessage('{"approveId":4,"approve":true,"always":true}')).toEqual({
+      kind: 'approve',
+      id: 4,
+      approve: true,
+      always: true,
+    });
+    // always on a rejection is dropped — you cannot standing-deny by accident.
+    expect(parseHostMessage('{"approveId":4,"approve":false,"always":true}')).toEqual({
+      kind: 'approve',
+      id: 4,
+      approve: false,
+    });
+    // Non-boolean always is ignored.
+    expect(parseHostMessage('{"approveId":4,"approve":true,"always":"yes"}')).toEqual({
+      kind: 'approve',
+      id: 4,
+      approve: true,
+    });
+  });
+
   it('ignores malformed, empty and unknown lines rather than taking the session down', () => {
     expect(parseHostMessage('not json')).toBeNull();
     expect(parseHostMessage('null')).toBeNull();
@@ -206,6 +247,48 @@ describe('runCodeStreamJsonSession', () => {
     ]);
   });
 
+  it('reports the session environment (dir, versions, model) on session-start when given', async () => {
+    const out: StreamJsonOut[] = [];
+    await runCodeStreamJsonSession({
+      emit: (l) => out.push(l),
+      sessionId: 's-info',
+      resumed: false,
+      sessionInfo: {
+        sessionDir: '/repo/.vibgrate/code-sessions',
+        engineVersion: '2026.813.2',
+        protocolVersion: 2,
+        provider: 'vibgrate-relay',
+        model: 'claude-sonnet-5',
+      },
+      instruction: 'only',
+      nextTurn: () => Promise.resolve(null),
+      runTurn: async () => ok('done'),
+    });
+    expect(out[0]).toEqual({
+      event: 'session-start',
+      sessionId: 's-info',
+      resumed: false,
+      sessionDir: '/repo/.vibgrate/code-sessions',
+      engineVersion: '2026.813.2',
+      protocolVersion: 2,
+      provider: 'vibgrate-relay',
+      model: 'claude-sonnet-5',
+    });
+  });
+
+  it('omits environment fields entirely for callers that do not pass sessionInfo (older hosts see the v1 frame)', async () => {
+    const out: StreamJsonOut[] = [];
+    await runCodeStreamJsonSession({
+      emit: (l) => out.push(l),
+      sessionId: 's-v1',
+      resumed: false,
+      instruction: 'only',
+      nextTurn: () => Promise.resolve(null),
+      runTurn: async () => ok('done'),
+    });
+    expect(out[0]).toEqual({ event: 'session-start', sessionId: 's-v1', resumed: false });
+  });
+
   it('passes each turn the recap the previous turn produced', async () => {
     const recaps: (string | undefined)[] = [];
     await runCodeStreamJsonSession({
@@ -221,6 +304,48 @@ describe('runCodeStreamJsonSession', () => {
       onTurnEnd: (t) => `recap after ${t.instruction}`,
     });
     expect(recaps).toEqual([undefined, 'recap after one', 'recap after two']);
+  });
+
+  it('emits plan-ready before idle when a plan turn completes, and never for agent turns', async () => {
+    const out: StreamJsonOut[] = [];
+    const queue: Array<{ instruction: string; agentMode?: 'agent' | 'plan' | 'auto' }> = [
+      { instruction: 'draft a plan', agentMode: 'plan' },
+      { instruction: 'do it', agentMode: 'agent' },
+    ];
+    await runCodeStreamJsonSession({
+      emit: (l) => out.push(l),
+      sessionId: 's-plan',
+      resumed: false,
+      nextTurn: () => Promise.resolve(queue.shift() ?? null),
+      runTurn: async () => ok('done'),
+    });
+    const events = out.map((l) => l.event);
+    // plan-ready follows the plan turn's done and precedes its idle…
+    const planReadyAt = events.indexOf('plan-ready');
+    expect(planReadyAt).toBeGreaterThan(events.indexOf('done'));
+    expect(events[planReadyAt + 1]).toBe('idle');
+    // …and exactly one is emitted (none for the agent turn).
+    expect(events.filter((e) => e === 'plan-ready')).toHaveLength(1);
+    expect(out[planReadyAt]).toEqual({ event: 'plan-ready', turns: 1 });
+  });
+
+  it('a failed plan turn is not a ready plan — no plan-ready on error', async () => {
+    const out: StreamJsonOut[] = [];
+    const queue: Array<{ instruction: string; agentMode?: 'agent' | 'plan' | 'auto' }> = [
+      { instruction: 'plan it', agentMode: 'plan' },
+    ];
+    await runCodeStreamJsonSession({
+      emit: (l) => out.push(l),
+      sessionId: 's-plan-err',
+      resumed: false,
+      nextTurn: () => Promise.resolve(queue.shift() ?? null),
+      runTurn: async () => {
+        throw new Error('provider exploded');
+      },
+    });
+    expect(out.some((l) => l.event === 'plan-ready')).toBe(false);
+    expect(out.some((l) => l.event === 'error')).toBe(true);
+    expect(out.some((l) => l.event === 'idle')).toBe(true);
   });
 
   it('keeps the session alive when a turn throws, reporting an error frame for that turn only', async () => {
@@ -311,5 +436,105 @@ describe('parseHostMessage — restore', () => {
       commit: 'c1',
       files: ['a.ts'],
     });
+  });
+});
+
+describe('protocol v4 — steer (inject) and rename frames', () => {
+  it('parses inject and rename host lines, ignoring empty inject', () => {
+    expect(parseHostMessage('{"inject":"also update the docs"}')).toEqual({
+      kind: 'inject',
+      text: 'also update the docs',
+    });
+    expect(parseHostMessage('{"inject":"   "}')).toBeNull();
+    expect(parseHostMessage('{"renameSession":"My chat"}')).toEqual({ kind: 'rename', title: 'My chat' });
+    // Empty rename is a valid "clear the title" request.
+    expect(parseHostMessage('{"renameSession":""}')).toEqual({ kind: 'rename', title: '' });
+  });
+
+  it('buffers injected content and drains it once, joined oldest-first', () => {
+    const s = new StreamJsonSession(() => {});
+    expect(s.drainInjected()).toBeNull();
+    s.inject('first thought');
+    s.inject('  ');
+    s.inject('second thought');
+    expect(s.drainInjected()).toBe('first thought\n\nsecond thought');
+    expect(s.drainInjected()).toBeNull();
+  });
+
+  it('keeps injected content across a turn boundary (a steer racing done is not lost)', async () => {
+    const out: StreamJsonOut[] = [];
+    let live!: StreamJsonSession;
+    const drained: (string | null)[] = [];
+    await runCodeStreamJsonSession({
+      emit: (l) => out.push(l),
+      sessionId: 's-steer',
+      resumed: false,
+      instruction: 'one',
+      bindDecisions: (s) => {
+        live = s;
+      },
+      nextTurn: (() => {
+        let n = 0;
+        return () => Promise.resolve(n++ === 0 ? { instruction: 'two' } : null);
+      })(),
+      runTurn: async ({ session }) => {
+        // Simulate the loop draining at a step boundary: nothing pending in
+        // turn one (the steer arrives "after" it), everything in turn two.
+        drained.push(session.drainInjected());
+        if (drained.length === 1) live.inject('late steer');
+        return { finalText: 'ok', changes: [], steps: 1, stopped: 'finished', provider: { id: 'p', model: 'm', fellBack: false }, usage: { promptTokens: 0, completionTokens: 0 } };
+      },
+    });
+    expect(drained).toEqual([null, 'late steer']);
+  });
+});
+
+describe('protocol v5 — reasoning effort on submit', () => {
+  const ok = (text: string) =>
+    ({
+      finalText: text,
+      changes: [],
+      steps: 1,
+      stopped: 'finished',
+      provider: { id: 'p', model: 'm', fellBack: false },
+      usage: { promptTokens: 1, completionTokens: 1 },
+    }) as never;
+
+  it('parses the three levels off a submit line', () => {
+    expect(parseHostMessage('{"submit":"go","reasoningEffort":"high"}')).toEqual({
+      kind: 'submit',
+      instruction: 'go',
+      reasoningEffort: 'high',
+    });
+    expect(parseHostMessage('{"submit":"go","reasoningEffort":"low"}')).toMatchObject({
+      reasoningEffort: 'low',
+    });
+  });
+
+  it('drops an unknown level rather than forwarding it to the provider', () => {
+    expect(parseHostMessage('{"submit":"go","reasoningEffort":"ludicrous"}')).toEqual({
+      kind: 'submit',
+      instruction: 'go',
+    });
+    expect(parseHostMessage('{"submit":"go"}')).toEqual({ kind: 'submit', instruction: 'go' });
+  });
+
+  it('hands the per-turn level to runTurn so an effort switch needs no respawn', async () => {
+    const seen: Array<string | undefined> = [];
+    const queue = [
+      { instruction: 'first', reasoningEffort: 'high' as const },
+      { instruction: 'second' },
+    ];
+    await runCodeStreamJsonSession({
+      emit: () => {},
+      sessionId: 's-effort',
+      resumed: false,
+      nextTurn: () => Promise.resolve(queue.shift() ?? null),
+      runTurn: async ({ reasoningEffort }) => {
+        seen.push(reasoningEffort);
+        return ok('done');
+      },
+    });
+    expect(seen).toEqual(['high', undefined]);
   });
 });

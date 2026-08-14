@@ -3,10 +3,12 @@ import { loadEmbedder } from '../src/engine/embeddings.js';
 import { makeProject, cleanup } from './helpers.js';
 
 // No ambient backend: this is the shape a host that bundles the engine without
-// the native optional dependency runs in (Vibgrate for VS Code), which is
-// exactly where the host-supplied backend is the only one there is.
-vi.mock('fastembed', () => {
-  throw new Error("Cannot find module 'fastembed'");
+// the native optional dependencies runs in (Vibgrate for VS Code), which is
+// exactly where the host-supplied backend is the only one there is. The
+// fallback is the vendored backend (src/vendor/fastembed), so that is what
+// must fail to load here.
+vi.mock('../src/vendor/fastembed/index.js', () => {
+  throw new Error("Cannot find module 'onnxruntime-node'");
 });
 
 /**

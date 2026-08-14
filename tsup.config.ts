@@ -22,10 +22,13 @@ export default defineConfig({
   // Keep these external so they load from node_modules at runtime:
   //  - web-tree-sitter / tree-sitter-wasms ship their own .wasm assets.
   //  - typescript uses CommonJS require() internally; bundling breaks the resolver.
-  //  - fastembed / onnxruntime-node carry native binaries (lazy, optional).
+  //  - onnxruntime-node / @anush008/tokenizers carry native binaries (lazy,
+  //    optional — used by the vendored src/vendor/fastembed backend).
+  //  - tar is a declared (optional) runtime dep of that backend; leave it in
+  //    node_modules rather than bundling a copy.
   //  - yaml's CJS modules call require("process"); bundling into ESM turns that
   //    into a dynamic-require shim that throws at runtime.
-  external: ['web-tree-sitter', 'tree-sitter-wasms', 'typescript', 'fastembed', 'onnxruntime-node', 'yaml'],
+  external: ['web-tree-sitter', 'tree-sitter-wasms', 'typescript', '@anush008/tokenizers', 'onnxruntime-node', 'tar', 'yaml'],
   minify: false,
   treeshake: true,
   sourcemap: true,

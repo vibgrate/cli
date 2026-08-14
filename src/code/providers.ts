@@ -18,7 +18,7 @@
  */
 
 import { ensurePackage, ensureUnavailableMessage } from './ensure.js';
-import type { ChatMessage, ChatOptions, Provider, ProviderResult, ToolCall, ToolSpec } from './types.js';
+import type { ChatMessage, ChatOptions, Provider, ProviderResult, ReasoningEffort, ToolCall, ToolSpec } from './types.js';
 
 /* ------------------------------------------------------------------ *\
  *  Tool-calling wire helpers (shared by the HTTP providers)
@@ -243,25 +243,66 @@ async function* streamLines(res: Response): AsyncGenerator<string> {
   if (buf.trim()) yield buf.trim();
 }
 
+/**
+ * Read a `--reasoning-effort` / host-supplied value into the neutral enum.
+ * Anything unrecognised (including an absent flag) is undefined — an unknown
+ * level must not be forwarded to the provider, where it would be a 400 rather
+ * than the "think normally" the user meant.
+ */
+export function parseReasoningEffort(raw: unknown): ReasoningEffort | undefined {
+  const v = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  return v === 'low' || v === 'medium' || v === 'high' ? v : undefined;
+}
+
+/** Accumulator shape for {@link accumulateOpenAiDelta}. */
+export interface OpenAiStreamAcc {
+  text: string;
+  /** Reasoning channel, kept out of `text` so a host can collapse it. */
+  reasoning: string;
+  tools: Map<number, { id?: string; name?: string; args: string }>;
+  usage: { promptTokens?: number; completionTokens?: number; cachedPromptTokens?: number };
+  /** Last non-null `finish_reason` seen — 'length' means the cap cut the reply. */
+  finishReason?: string;
+}
+
+/** A fresh accumulator (one per request). */
+export function newOpenAiStreamAcc(): OpenAiStreamAcc {
+  return { text: '', reasoning: '', tools: new Map(), usage: {} };
+}
+
+/**
+ * Prompt tokens the endpoint served from cache, under either spelling in the
+ * wild: OpenAI/OpenRouter nest it as `prompt_tokens_details.cached_tokens`,
+ * some proxies flatten it to `cached_tokens`. Returns undefined when the
+ * provider is silent — a missing number must never be read as "nothing cached".
+ */
+export function cachedPromptTokensOf(usage: unknown): number | undefined {
+  const u = usage as { prompt_tokens_details?: { cached_tokens?: unknown }; cached_tokens?: unknown } | null;
+  const raw = u?.prompt_tokens_details?.cached_tokens ?? u?.cached_tokens;
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
+}
+
 /** Accumulate an OpenAI-compatible SSE stream into text + tool calls + usage. */
 export function accumulateOpenAiDelta(
-  acc: {
-    text: string;
-    tools: Map<number, { id?: string; name?: string; args: string }>;
-    usage: { promptTokens?: number; completionTokens?: number };
-    /** Last non-null `finish_reason` seen — 'length' means the cap cut the reply. */
-    finishReason?: string;
-  },
+  acc: OpenAiStreamAcc,
   chunk: unknown,
   onToken?: (t: string) => void,
+  onReasoningToken?: (t: string) => void,
 ): void {
-  const c = chunk as { choices?: { delta?: { content?: string; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string | null }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+  const c = chunk as { choices?: { delta?: { content?: string; reasoning?: string; reasoning_content?: string; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string | null }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
   const reason = c.choices?.[0]?.finish_reason;
   if (typeof reason === 'string' && reason) acc.finishReason = reason;
   const delta = c.choices?.[0]?.delta;
   if (delta?.content) {
     acc.text += delta.content;
     onToken?.(delta.content);
+  }
+  // Reasoning arrives under `reasoning` (OpenRouter) or `reasoning_content`
+  // (DeepSeek-style). Both are the same channel; never fold into `text`.
+  const think = delta?.reasoning ?? delta?.reasoning_content;
+  if (typeof think === 'string' && think) {
+    acc.reasoning += think;
+    onReasoningToken?.(think);
   }
   for (const tc of delta?.tool_calls ?? []) {
     const idx = tc.index ?? 0;
@@ -274,6 +315,8 @@ export function accumulateOpenAiDelta(
   if (c.usage) {
     acc.usage.promptTokens = c.usage.prompt_tokens;
     acc.usage.completionTokens = c.usage.completion_tokens;
+    const cached = cachedPromptTokensOf(c.usage);
+    if (cached !== undefined) acc.usage.cachedPromptTokens = cached;
   }
 }
 
@@ -345,16 +388,25 @@ export class OllamaProvider implements Provider {
 
     if (streaming) {
       let text = '';
+      let reasoning = '';
       let toolCallsRaw: unknown;
       let truncated = false;
       const usage: { promptTokens?: number; completionTokens?: number } = {};
       for await (const line of streamLines(res)) {
         try {
-          const obj = JSON.parse(line) as { message?: { content?: string; tool_calls?: unknown }; prompt_eval_count?: number; eval_count?: number; done_reason?: string };
+          const obj = JSON.parse(line) as { message?: { content?: string; thinking?: string; tool_calls?: unknown }; prompt_eval_count?: number; eval_count?: number; done_reason?: string };
           const delta = obj.message?.content;
           if (delta) {
             text += delta;
             opts.onToken?.(delta);
+          }
+          // Ollama spells the reasoning channel `thinking`. Only thinking-capable
+          // models send it — we read it when offered and never request it, since
+          // asking a plain model to `think` is a 400 from the server.
+          const think = obj.message?.thinking;
+          if (think) {
+            reasoning += think;
+            opts.onReasoningToken?.(think);
           }
           if (obj.message?.tool_calls) toolCallsRaw = obj.message.tool_calls;
           if (typeof obj.prompt_eval_count === 'number') usage.promptTokens = obj.prompt_eval_count;
@@ -365,16 +417,17 @@ export class OllamaProvider implements Provider {
           /* skip a malformed line */
         }
       }
-      return { text, model: this.model, provider: this.id, toolCalls: parseToolCalls(toolCallsRaw), usage, truncated };
+      return { text, model: this.model, provider: this.id, toolCalls: parseToolCalls(toolCallsRaw), usage, ...(reasoning ? { reasoning } : {}), truncated };
     }
 
-    const data = (await res.json()) as { message?: { content?: string; tool_calls?: unknown }; prompt_eval_count?: number; eval_count?: number; done_reason?: string };
+    const data = (await res.json()) as { message?: { content?: string; thinking?: string; tool_calls?: unknown }; prompt_eval_count?: number; eval_count?: number; done_reason?: string };
     return {
       text: data.message?.content ?? '',
       model: this.model,
       provider: this.id,
       toolCalls: parseToolCalls(data.message?.tool_calls),
       usage: { promptTokens: data.prompt_eval_count, completionTokens: data.eval_count },
+      ...(data.message?.thinking ? { reasoning: data.message.thinking } : {}),
       truncated: data.done_reason === 'length',
     };
   }
@@ -427,6 +480,13 @@ export class OpenAiCompatibleProvider implements Provider {
       max_tokens: opts.maxTokens,
       stream: streaming,
       ...(streaming ? { stream_options: { include_usage: true } } : {}),
+      // Both spellings ride along: OpenAI reads `reasoning_effort`, OpenRouter
+      // reads `reasoning.effort`. Endpoints ignore fields they don't know, so
+      // sending both is cheaper than sniffing the backend — and a model with
+      // no reasoning knob is unaffected either way.
+      ...(opts.reasoningEffort
+        ? { reasoning_effort: opts.reasoningEffort, reasoning: { effort: opts.reasoningEffort } }
+        : {}),
     };
     let res: Response;
     try {
@@ -441,28 +501,44 @@ export class OpenAiCompatibleProvider implements Provider {
     }
 
     if (streaming) {
-      const acc = { text: '', tools: new Map<number, { id?: string; name?: string; args: string }>(), usage: {} as { promptTokens?: number; completionTokens?: number }, finishReason: undefined as string | undefined };
+      const acc = newOpenAiStreamAcc();
       for await (const line of streamLines(res)) {
         if (!line.startsWith('data:')) continue;
         const payload = line.slice(5).trim();
         if (payload === '[DONE]') break;
         try {
-          accumulateOpenAiDelta(acc, JSON.parse(payload), opts.onToken);
+          accumulateOpenAiDelta(acc, JSON.parse(payload), opts.onToken, opts.onReasoningToken);
         } catch {
           /* skip a malformed chunk */
         }
       }
       const tools = finalizeTools(acc.tools);
-      return { text: acc.text, model: this.model, provider: this.id, toolCalls: tools.length ? tools : undefined, usage: acc.usage, truncated: acc.finishReason === 'length' };
+      return {
+        text: acc.text,
+        model: this.model,
+        provider: this.id,
+        toolCalls: tools.length ? tools : undefined,
+        usage: acc.usage,
+        ...(acc.reasoning ? { reasoning: acc.reasoning } : {}),
+        truncated: acc.finishReason === 'length',
+      };
     }
-    const data = (await res.json()) as { choices?: { message?: { content?: string; tool_calls?: unknown }; finish_reason?: string | null }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+    const data = (await res.json()) as { choices?: { message?: { content?: string; reasoning?: string; reasoning_content?: string; tool_calls?: unknown }; finish_reason?: string | null }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
     const message = data.choices?.[0]?.message;
+    const reasoning = message?.reasoning ?? message?.reasoning_content;
     return {
       text: message?.content ?? '',
       model: this.model,
       provider: this.id,
       toolCalls: parseToolCalls(message?.tool_calls),
-      usage: { promptTokens: data.usage?.prompt_tokens, completionTokens: data.usage?.completion_tokens },
+      usage: {
+        promptTokens: data.usage?.prompt_tokens,
+        completionTokens: data.usage?.completion_tokens,
+        ...(cachedPromptTokensOf(data.usage) !== undefined
+          ? { cachedPromptTokens: cachedPromptTokensOf(data.usage) }
+          : {}),
+      },
+      ...(reasoning ? { reasoning } : {}),
       truncated: data.choices?.[0]?.finish_reason === 'length',
     };
   }
@@ -483,15 +559,36 @@ export class ScriptedProvider implements Provider {
   readonly label = 'Scripted (deterministic)';
   readonly local = true;
   private turn = 0;
+  /** Options the last `chat` was called with — lets tests assert what was forwarded. */
+  lastOpts?: ChatOptions;
   constructor(
     readonly model: string,
-    private readonly steps: Array<{ text?: string; toolCalls?: ToolCall[]; truncated?: boolean }>,
+    private readonly steps: Array<{
+      text?: string;
+      toolCalls?: ToolCall[];
+      truncated?: boolean;
+      /** Reasoning channel for this step (v5), as a thinking model would send. */
+      reasoning?: string;
+      usage?: ProviderResult['usage'];
+    }>,
   ) {}
   // Match Provider.chat so tests can wrap/spy with the full signature.
   async chat(_messages?: ChatMessage[], _opts?: ChatOptions): Promise<ProviderResult> {
     const step = this.steps[Math.min(this.turn, this.steps.length - 1)];
     this.turn++;
-    return { text: step.text ?? '', model: this.model, provider: this.id, toolCalls: step.toolCalls, truncated: step.truncated };
+    this.lastOpts = _opts;
+    // Stream the scripted reasoning the way a real backend does, so the agent's
+    // thinking path is exercised end-to-end and not just its non-stream branch.
+    if (step.reasoning && _opts?.stream) _opts.onReasoningToken?.(step.reasoning);
+    return {
+      text: step.text ?? '',
+      model: this.model,
+      provider: this.id,
+      toolCalls: step.toolCalls,
+      ...(step.reasoning ? { reasoning: step.reasoning } : {}),
+      ...(step.usage ? { usage: step.usage } : {}),
+      truncated: step.truncated,
+    };
   }
 }
 

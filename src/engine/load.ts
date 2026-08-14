@@ -1,4 +1,3 @@
-import * as fs from 'node:fs';
 import { resolveGraphPath } from './artifacts.js';
 import { loadGraphFileWithSnapshot } from './snapshot.js';
 import { loadGraphPreferIndex } from './index-db.js';

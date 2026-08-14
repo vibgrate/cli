@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { MockProvider, OpenAiCompatibleProvider, OllamaProvider, redactSecrets, relayErrorDetail, statusHint, accumulateOpenAiDelta, OPENAI_COMPATIBLE } from './providers.js';
+import { MockProvider, OpenAiCompatibleProvider, OllamaProvider, redactSecrets, relayErrorDetail, statusHint, accumulateOpenAiDelta, newOpenAiStreamAcc, cachedPromptTokensOf, parseReasoningEffort, OPENAI_COMPATIBLE } from './providers.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -241,12 +241,7 @@ describe('statusHint', () => {
 });
 
 describe('accumulateOpenAiDelta — finish_reason', () => {
-  const fresh = () => ({
-    text: '',
-    tools: new Map<number, { id?: string; name?: string; args: string }>(),
-    usage: {} as { promptTokens?: number; completionTokens?: number },
-    finishReason: undefined as string | undefined,
-  });
+  const fresh = () => newOpenAiStreamAcc();
 
   it('records the terminal finish_reason so a capped reply is distinguishable from a complete one', () => {
     const acc = fresh();
@@ -262,5 +257,68 @@ describe('accumulateOpenAiDelta — finish_reason', () => {
     accumulateOpenAiDelta(acc, { choices: [{ delta: { content: 'hi' }, finish_reason: 'stop' }] });
     accumulateOpenAiDelta(acc, { choices: [{ delta: {}, finish_reason: null }] });
     expect(acc.finishReason).toBe('stop');
+  });
+});
+
+describe('accumulateOpenAiDelta — reasoning channel (v5)', () => {
+  it('collects OpenRouter-style `reasoning` deltas without polluting the answer text', () => {
+    const acc = newOpenAiStreamAcc();
+    const think: string[] = [];
+    const say: string[] = [];
+    accumulateOpenAiDelta(acc, { choices: [{ delta: { reasoning: 'let me ' } }] }, (t) => say.push(t), (t) => think.push(t));
+    accumulateOpenAiDelta(acc, { choices: [{ delta: { reasoning: 'check' } }] }, (t) => say.push(t), (t) => think.push(t));
+    accumulateOpenAiDelta(acc, { choices: [{ delta: { content: 'done' } }] }, (t) => say.push(t), (t) => think.push(t));
+    expect(acc.reasoning).toBe('let me check');
+    expect(acc.text).toBe('done');
+    expect(think).toEqual(['let me ', 'check']);
+    expect(say).toEqual(['done']);
+  });
+
+  it('reads the DeepSeek-style `reasoning_content` spelling of the same channel', () => {
+    const acc = newOpenAiStreamAcc();
+    accumulateOpenAiDelta(acc, { choices: [{ delta: { reasoning_content: 'hmm' } }] });
+    expect(acc.reasoning).toBe('hmm');
+    expect(acc.text).toBe('');
+  });
+});
+
+describe('cachedPromptTokensOf', () => {
+  it('reads the nested OpenAI spelling', () => {
+    expect(cachedPromptTokensOf({ prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 64 } })).toBe(64);
+  });
+
+  it('reads the flattened proxy spelling', () => {
+    expect(cachedPromptTokensOf({ prompt_tokens: 100, cached_tokens: 8 })).toBe(8);
+  });
+
+  it('keeps zero distinct from silence, so an estimate never reads "unreported" as "nothing cached"', () => {
+    expect(cachedPromptTokensOf({ prompt_tokens_details: { cached_tokens: 0 } })).toBe(0);
+    expect(cachedPromptTokensOf({ prompt_tokens: 100 })).toBeUndefined();
+    expect(cachedPromptTokensOf(undefined)).toBeUndefined();
+    expect(cachedPromptTokensOf({ cached_tokens: 'lots' })).toBeUndefined();
+    expect(cachedPromptTokensOf({ cached_tokens: -3 })).toBeUndefined();
+  });
+
+  it('lands on the accumulator when the stream reports usage', () => {
+    const acc = newOpenAiStreamAcc();
+    accumulateOpenAiDelta(acc, {
+      choices: [{ delta: {} }],
+      usage: { prompt_tokens: 900, completion_tokens: 40, prompt_tokens_details: { cached_tokens: 768 } },
+    });
+    expect(acc.usage).toEqual({ promptTokens: 900, completionTokens: 40, cachedPromptTokens: 768 });
+  });
+});
+
+describe('parseReasoningEffort', () => {
+  it('accepts the three levels, case- and space-insensitively', () => {
+    expect(parseReasoningEffort('low')).toBe('low');
+    expect(parseReasoningEffort(' HIGH ')).toBe('high');
+    expect(parseReasoningEffort('Medium')).toBe('medium');
+  });
+
+  it('drops anything else rather than forwarding a value the provider would reject', () => {
+    for (const bad of ['max', 'none', '', '  ', undefined, null, 3, true]) {
+      expect(parseReasoningEffort(bad)).toBeUndefined();
+    }
   });
 });

@@ -34,7 +34,7 @@ import { runAgent, type AgentEvent, type AgentOptions, type AgentResult } from '
 import { readModelSavings } from '../engine/savings.js';
 import { SessionMeter } from './cost.js';
 import { McpToolset, defaultMcpConnect, type McpConnect } from './mcp-tools.js';
-import { condenseSession, loadLatestSession, saveSession, summarizeSession, newSession, recordTask, type StoredSession } from './session-store.js';
+import { condenseSession, loadLatestSession, loadSession, saveSession, summarizeSession, newSession, recordTask, type StoredSession } from './session-store.js';
 import type { McpServerConfig } from './config.js';
 import type { MutatingAction, ShellResult } from './tools.js';
 import type { FileChange, Provider } from './types.js';
@@ -75,8 +75,8 @@ export interface InteractiveOptions {
   mcpServers?: Record<string, McpServerConfig>;
   /** Which config files the MCP servers came from (for a transparent note). */
   mcpSources?: string[];
-  /** Resume the most recent session (inject a recap, restore /undo). */
-  continueSession?: boolean;
+  /** Resume a session: `true` for the most recent, or an explicit session id. */
+  continueSession?: boolean | string;
   /** Prefer source-bearing Task Capsule context (Fusion Runtime A/B). */
   capsule?: boolean;
   /**
@@ -218,7 +218,10 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
   let store: StoredSession = newSession(sessionId(), sel.providerSlug, sel.model, Date.now());
   let priorSummary: string | undefined;
   if (opts.continueSession) {
-    const prev = loadLatestSession(root);
+    const prev =
+      typeof opts.continueSession === 'string'
+        ? loadSession(root, opts.continueSession)
+        : loadLatestSession(root);
     if (prev) {
       store = prev;
       lastChanges = prev.lastChanges ?? [];

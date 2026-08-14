@@ -38,6 +38,8 @@ import {
   recordDiscoveryGateOutcome,
 } from './advanced-mode.js';
 import { materializeWorktreeGraph } from './worktree-overlay.js';
+import { dangerousCommand, readOnlyCommand } from './safety.js';
+import { findMatchingRule, ruleLabel, type ApprovalRule } from './approvals.js';
 import { buildAgentMessages } from './prompt.js';
 import {
   AGENT_TOOLS,
@@ -71,7 +73,7 @@ import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { repositoryIdFromRoot } from '../runtime/paths.js';
 import type { SymbolSpan } from './apply.js';
 import type { CodeFs } from './session.js';
-import type { ChatMessage, CodeContext, FileChange, ImageAttachment, Provider, ProviderResult, ToolCall, ToolSpec } from './types.js';
+import type { ChatMessage, CodeContext, FileChange, ImageAttachment, Provider, ProviderResult, ReasoningEffort, ToolCall, ToolSpec } from './types.js';
 import type { VgGraph } from '../schema.js';
 import { redactSecrets } from './providers.js';
 import {
@@ -102,10 +104,21 @@ export type AgentEvent =
   | { type: 'assistant'; text: string }
   | { type: 'token'; text: string }
   | { type: 'tool-call'; name: string; args: Record<string, unknown> }
-  | { type: 'tool-result'; name: string; content: string; mutated: boolean }
+  | { type: 'tool-result'; name: string; content: string; mutated: boolean; failed?: boolean }
   | { type: 'change'; change: FileChange }
   | { type: 'compact'; droppedRounds: number }
-  | { type: 'usage'; promptTokens: number; completionTokens: number }
+  | {
+      type: 'usage';
+      promptTokens: number;
+      completionTokens: number;
+      /** Prompt tokens served from the provider's cache (absent when unreported). */
+      cachedPromptTokens?: number;
+    }
+  /**
+   * Reasoning text from a thinking model, streamed on its own channel so a host
+   * can render it as a collapsed trace. Never part of the answer.
+   */
+  | { type: 'thinking'; text: string }
   | { type: 'verify'; command: string; passed: boolean }
   | { type: 'ladder'; ok: boolean; summary: string }
   | { type: 'session-graph'; reparsed: number; dirty: number }
@@ -113,6 +126,8 @@ export type AgentEvent =
   | { type: 'capsule'; summary: CapsuleSummary }
   /** Advisory line for the host transcript (e.g. vision downgrade, rules loaded). */
   | { type: 'notice'; text: string }
+  /** v4 steer: mid-turn user content joined the transcript at a step boundary. */
+  | { type: 'injected'; text: string }
   | { type: 'capsule-delta'; delta: CapsuleDelta }
   | { type: 'failure-capsule'; capsule: FailureCapsule }
   | { type: 'checkpoint'; ref: string; commit: string; seq: number; files: string[] }
@@ -188,6 +203,14 @@ export interface AgentOptions {
   images?: ImageAttachment[];
   /** Project-configured extra denylist rules for autonomous commands. */
   denyCommands?: string[];
+  /**
+   * Standing allow-always rules (`.vibgrate/code-approvals.json`). Called on
+   * every approval — not cached — so an addition ("Always allow") or a
+   * revocation (manage UI, editing the file) applies to the very next action.
+   * Rules never widen safety: the dangerous-command denylist still screens
+   * every match, and plan mode denies before rules are consulted.
+   */
+  approvalRules?: () => ApprovalRule[];
   /** The project's test/verify command, surfaced to the model. */
   testCommand?: string;
   /** Auto-verify: after the model finishes, run this command and make it fix failures. */
@@ -230,6 +253,19 @@ export interface AgentOptions {
    * roll back; use a checkpoint to undo.
    */
   signal?: { aborted: boolean };
+  /**
+   * v4 steer: drain user content injected mid-turn (null when none pending).
+   * Checked at each step boundary — the content joins the transcript as a user
+   * message before the next model call, announced by an `injected` event, so
+   * the user can redirect a running turn without cancelling it.
+   */
+  takeInjected?: () => string | null;
+  /**
+   * How hard a reasoning-capable model should think. Passed straight through to
+   * the provider, which ignores it when the backend has no such knob — so this
+   * is safe to set for every model and the caller never has to detect support.
+   */
+  reasoningEffort?: ReasoningEffort;
   /**
    * External / built-in MCP tools the model may also call (approval-bound for
    * non-read-only remote tools). Always include local `vg serve` tools via
@@ -557,10 +593,35 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
    * edit" has to mean. Snapshots only happen for changes that touch files;
    * a command approval has nothing to restore.
    */
+  /**
+   * Approval short-circuits that never widen safety (P2): a positively
+   * read-only command (`git status`) skips the card the way read-only tools
+   * always have, and a standing allow-always rule the user created skips it
+   * with a visible notice. Both still screen through the dangerous-command
+   * denylist, and plan mode denies before this is ever consulted.
+   */
+  const autoApproval = (action: MutatingAction): { note: string | null } | null => {
+    if (action.kind === 'run' && dangerousCommand(action.command, options.denyCommands)) return null;
+    if (action.kind === 'run' && readOnlyCommand(action.command)) return { note: null };
+    const rules = options.approvalRules?.();
+    if (rules?.length) {
+      const rule = findMatchingRule(action, rules);
+      if (rule) return { note: `Auto-approved by standing rule: ${ruleLabel(rule)}` };
+    }
+    return null;
+  };
+
   const approveAndCheckpoint = async (action: MutatingAction): Promise<boolean> => {
     // Plan mode is read-only, enforced here — no approval round-trip, no write.
     if (options.plan) return false;
-    const approved = await options.approve(action);
+    let approved: boolean;
+    const shortCircuit = autoApproval(action);
+    if (shortCircuit) {
+      approved = true;
+      if (shortCircuit.note) onEvent({ type: 'notice', text: shortCircuit.note });
+    } else {
+      approved = await options.approve(action);
+    }
     if (!approved || !options.checkpoint) return approved;
     const files = actionFiles(action);
     if (!files.length) return approved;
@@ -843,6 +904,18 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     currentStep = step;
     onEvent({ type: 'step', n: step });
 
+    // Steer (v4): content the user sent mid-turn joins the conversation here,
+    // before the next model call, so the running turn changes course instead
+    // of finishing the stale plan first.
+    const injected = options.takeInjected?.();
+    if (injected) {
+      onEvent({ type: 'injected', text: injected });
+      messages.push({
+        role: 'user',
+        content: `[The user sent this while you were working — factor it in before continuing:]\n${injected}`,
+      });
+    }
+
     // Keep the transcript under the budget: preserve the cache-stable prefix
     // (system + graph context + task) and the recent rounds, summarize the rest.
     const compacted = options.llmCompaction
@@ -883,6 +956,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         identifierTrie,
         draftCandidates,
         promptSegments,
+        options.reasoningEffort,
       );
       result = c.result;
       providerInfo = { id: c.provider.id, model: c.provider.model, fellBack: c.fellBack };
@@ -897,7 +971,14 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       usage.promptTokens += result.usage.promptTokens ?? 0;
       usage.completionTokens += result.usage.completionTokens ?? 0;
       trajectory.recordUsage(result.usage.promptTokens ?? 0, result.usage.completionTokens ?? 0);
-      onEvent({ type: 'usage', promptTokens: result.usage.promptTokens ?? 0, completionTokens: result.usage.completionTokens ?? 0 });
+      onEvent({
+        type: 'usage',
+        promptTokens: result.usage.promptTokens ?? 0,
+        completionTokens: result.usage.completionTokens ?? 0,
+        ...(result.usage.cachedPromptTokens !== undefined
+          ? { cachedPromptTokens: result.usage.cachedPromptTokens }
+          : {}),
+      });
     }
 
     const displayText = sanitizeAgentDisplayText(result.text ?? '');
@@ -1028,7 +1109,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       }
 
       trajectory.recordTool(call.name, step, toolResult.mutated);
-      onEvent({ type: 'tool-result', name: call.name, content, mutated: toolResult.mutated });
+      onEvent({ type: 'tool-result', name: call.name, content, mutated: toolResult.mutated, ...(toolResult.failed ? { failed: true } : {}) });
       messages.push({ role: 'tool', content, toolCallId: call.id, name: call.name });
 
       if (toolResult.finished) {
@@ -1067,9 +1148,17 @@ async function complete(
   identifierTrie?: TrieNode,
   draftCandidates?: string[],
   promptSegments?: Array<{ kind: string; text: string }>,
+  reasoningEffort?: ReasoningEffort,
 ): Promise<{ result: ProviderResult; provider: Provider; fellBack: boolean }> {
   if (providers.length === 0) throw new Error('no model provider available');
   const onToken = stream ? (t: string): void => onEvent({ type: 'token', text: t }) : undefined;
+  // Reasoning follows the same streaming posture as the answer: streamed, the
+  // trace fills the long silence before a thinking model's first answer token;
+  // unstreamed, the provider hands back the whole trace and we emit it once
+  // below. Exactly one of the two paths runs, so the trace is never doubled.
+  const onReasoningToken = stream
+    ? (t: string): void => onEvent({ type: 'thinking', text: t })
+    : undefined;
   // modelProfile remains available for future temperature / budget knobs; turn-level
   // PatchIR GBNF is never attached (full agent: tools own edit structure).
   void modelProfile;
@@ -1081,10 +1170,16 @@ async function complete(
         tools,
         stream,
         onToken,
+        onReasoningToken,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
         identifierTrie,
         draftCandidates,
         promptSegments,
       });
+      // A non-streaming backend hands the whole trace back at once; emit it as
+      // a single event so the host renders the same block either way. Streamed
+      // reasoning already arrived through `onReasoningToken` — don't double it.
+      if (!stream && result.reasoning) onEvent({ type: 'thinking', text: result.reasoning });
       return { result, provider: providers[i], fellBack: i > 0 };
     } catch (e) {
       lastErr = e;

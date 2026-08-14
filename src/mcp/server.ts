@@ -378,12 +378,6 @@ export async function serveStdio(graphPath: string, opts: ServeOptions = {}): Pr
   await server.connect(new StdioServerTransport());
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.(); // never keep the server process alive just for the budget timer
-  });
-}
 
 /**
  * Append a counts-only usage entry for a navigation call: which tool, how it

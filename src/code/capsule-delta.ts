@@ -37,7 +37,6 @@ export function buildCapsuleDelta(previous: TaskCapsule, next: TaskCapsule): Cap
   const prevPrimary = keySet(previous.primary);
   const nextPrimary = keySet(next.primary);
   const prevSupport = keySet(previous.supporting);
-  const nextSupport = keySet(next.supporting);
 
   const addedPrimary = next.primary
     .filter((p) => !prevPrimary.has(symKey(p)))

@@ -1,5 +1,4 @@
 import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
 import { findFiles, findPackageJsonFiles, readJsonFile, readTextFile, pathExists, FileCache } from '../../core-open/index.js';
 import type { PackageJson, PlatformMatrixResult } from '../../core-open/index.js';
 

@@ -117,10 +117,11 @@ export function resolveGraphPath(root: string, override?: string, env: NodeJS.Pr
  * is still written under `.vibgrate/` (in-repo mode or other in-repo writers).
  */
 const DEFAULT_GITIGNORE = [
-  '# Created once by vg — local graph artifacts stay out of git by default.',
+  '# Created by vg — local graph artifacts stay out of git by default.',
   '# Run `vg share` to commit the map for your team (it rewrites this file).',
-  '# vg never touches an existing .vibgrate/.gitignore: edit it (or leave it',
-  '# empty) to manage these ignores yourself.',
+  '# vg appends newly-introduced local artifacts to this list while this',
+  '# header line stays; remove the header (or empty the file) to manage the',
+  '# ignores yourself and vg will never touch it again.',
   '.gitignore',
   'cache/',
   'graph.json',
@@ -139,13 +140,39 @@ const DEFAULT_GITIGNORE = [
   // are intentionally left out of this list for a user to commit if they choose.
   'score-history.jsonl',
   'run-outcomes.jsonl',
+  // Standing approval rules are one developer's consent — sharing them via git
+  // would silently grant their "Always allow" decisions to every teammate's
+  // agent runs (code/approvals.ts).
+  'code-approvals.json',
+  // Isolated worktree checkouts for VG Code worktree sessions — full working
+  // copies that must never be committed into the repository that hosts them
+  // (code/worktree-session.ts).
+  'worktrees',
 ];
+
+/** Marks a .vibgrate/.gitignore as vg-authored (safe to keep current). */
+const GITIGNORE_MARKER = /^# Created (once )?by vg\b/;
 
 export function ensureVibgrateGitignore(root: string): void {
   const file = path.join(vibgrateDir(root), '.gitignore');
-  if (fs.existsSync(file)) return;
   fs.mkdirSync(vibgrateDir(root), { recursive: true });
-  fs.writeFileSync(file, `${DEFAULT_GITIGNORE.join('\n')}\n`);
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, `${DEFAULT_GITIGNORE.join('\n')}\n`);
+    return;
+  }
+  // A vg-authored .gitignore written before an entry joined DEFAULT_GITIGNORE
+  // would keep tracking the newer machine-local files (e.g.
+  // code-approvals.json — one developer's consent must not ride into the team
+  // repo), so vg keeps ITS OWN file current: entries are appended while the
+  // vg header is present. A file without the header — including an emptied
+  // one — is the user's, and is never touched (the documented opt-out).
+  const existing = fs.readFileSync(file, 'utf8');
+  if (!GITIGNORE_MARKER.test(existing.split(/\r?\n/, 1)[0] ?? '')) return;
+  const have = new Set(existing.split(/\r?\n/).map((l) => l.trim()));
+  const missing = DEFAULT_GITIGNORE.filter((entry) => !entry.startsWith('#') && !have.has(entry));
+  if (missing.length) {
+    fs.writeFileSync(file, `${existing.replace(/\n*$/, '\n')}${missing.join('\n')}\n`);
+  }
 }
 
 /**

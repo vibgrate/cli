@@ -260,11 +260,6 @@ describe('host session pool', () => {
     class LlamaGrammar {
       constructor(_a: unknown, _b: { grammar: string }) {}
     }
-    const lib = {
-      ...fakeLib('ok'),
-      LlamaGrammar,
-      getLlama: async () => ({}),
-    };
     // Rebuild fake with LlamaGrammar on the module used by acquire
     const session = await acquireHostSession(
       {

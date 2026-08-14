@@ -52,17 +52,26 @@ export interface ProbeOptions {
 }
 
 /**
- * The actionable message for a crashed backend. Names the specific cause we
- * can actually diagnose — a blocked postinstall — because "the semantic model
- * couldn't load" sends nobody anywhere.
+ * The actionable message for a crashed backend. Names the likely cause and a
+ * repair that actually converges, because "the semantic model couldn't load"
+ * sends nobody anywhere. (Not a script block: onnxruntime-node's CPU binaries
+ * ship inside its npm package — its postinstall only fetches CUDA GPU extras
+ * the embedder never loads. A crash here means the installed native files are
+ * broken — a half-extracted install, or a platform its prebuilds don't cover —
+ * so the fix is a clean reinstall; allow-scripts lets our own postinstall
+ * clear this verdict. On linux the command carries ONNXRUNTIME_NODE_INSTALL=skip
+ * so the now-allowed onnxruntime-node script doesn't pull its linux/x64-only
+ * CUDA download; the env var, never the `--onnxruntime-node-install=skip`
+ * flag, which npm 12 rejects as an unknown option. Elsewhere the script
+ * downloads nothing, and a POSIX env prefix wouldn't parse on cmd.exe anyway.)
  */
 export function crashedMessage(signal: string): string {
+  const envPrefix = process.platform === 'linux' ? 'ONNXRUNTIME_NODE_INSTALL=skip ' : '';
   return (
-    `semantic search is disabled: its native backend (onnxruntime-node, via fastembed) crashed with ${signal} — ` +
-    `using fast lexical search instead. This is almost always an install-script block: npm skips ` +
-    `onnxruntime-node's postinstall under allow-scripts/ignore-scripts, so the platform binaries were never ` +
-    `downloaded. Reinstall allowing them — ` +
-    `npm install -g --allow-scripts=@vibgrate/cli,onnxruntime-node,msgpackr-extract @vibgrate/cli — ` +
+    `semantic search is disabled: its native backend (onnxruntime-node, via the vendored fastembed path) crashed with ${signal} — ` +
+    `using fast lexical search instead. This usually means the installed native binaries are broken ` +
+    `(an interrupted install, or a platform without prebuilt CPU binaries). Reinstall to repair — ` +
+    `${envPrefix}npm install -g --allow-scripts=@vibgrate/cli,onnxruntime-node,msgpackr-extract @vibgrate/cli — ` +
     `or run with --local to stay lexical quietly.`
   );
 }
