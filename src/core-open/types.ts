@@ -870,10 +870,21 @@ export interface ScanOptions {
   /**
    * Optional post-scoring step run inside the scan's progress bar, after findings
    * (e.g. building the local code map). Receives a progress reporter
-   * `(done, total, phase)` and returns a short detail string for the step.
-   * Fail-soft: a thrown error never fails the scan.
+   * `(done, total, phase)` and the in-progress `projects` / `solutions` /
+   * `extended` so architecture can be refined against the map *before*
+   * format / write. Fail-soft: a thrown error never fails the scan.
    */
-  postScan?: (report: (done: number, total: number, phase: string) => void) => Promise<string | void>;
+  postScan?: (
+    report: (done: number, total: number, phase: string) => void,
+    ctx: PostScanContext,
+  ) => Promise<string | void>;
+}
+
+/** In-progress scan objects handed to {@link ScanOptions.postScan}. */
+export interface PostScanContext {
+  projects: ProjectScan[];
+  solutions: SolutionScan[];
+  extended: ExtendedScanResults;
 }
 
 export interface InitOptions {
@@ -1158,7 +1169,19 @@ export type ProjectArchetype =
   | 'library'
   | 'cli'
   | 'monorepo'
+  | 'spring'
+  | 'aspnet'
+  | 'django'
+  | 'fastapi'
+  | 'go-service'
   | 'unknown';
+
+/**
+ * Shape of the scanned workspace — not a project archetype.
+ * `monorepo` stays on {@link ProjectArchetype} so old artifacts validate,
+ * but new scans never emit `archetype: 'monorepo'`.
+ */
+export type WorkspaceShape = 'single' | 'monorepo' | 'polyglot-platform';
 
 /** Architectural layer classification */
 export type ArchitectureLayer =
@@ -1173,6 +1196,18 @@ export type ArchitectureLayer =
   | 'testing'
   | 'shared';
 
+/**
+ * Finer than {@link ArchitectureLayer}. Omit when unknown (absent ≠ empty).
+ * Syntax confirmation of a path/folder prior — not a second layer taxonomy.
+ */
+export type ArchitectureFileRole =
+  | 'controller'
+  | 'service'
+  | 'repository'
+  | 'entity'
+  | 'handler'
+  | 'router';
+
 /** A single file classified into a layer */
 export interface LayerClassification {
   /** Relative path from project root */
@@ -1182,6 +1217,20 @@ export interface LayerClassification {
   /** Confidence of classification (0–1) */
   confidence: number;
   /** Top signals that contributed to classification */
+  signals: string[];
+  /** Confirmed syntactic role. Omit when the AST pass did not hit. */
+  role?: ArchitectureFileRole;
+}
+
+/** A directory labelled from its classified children, or inherited from an ancestor. */
+export interface FolderClassification {
+  /** Relative directory path from the result root (`.` for the tree root) */
+  path: string;
+  layer: ArchitectureLayer;
+  /** Winning-layer share of direct classified children, or the inherited ancestor's share */
+  confidence: number;
+  /** Classified files under this directory that share `layer` */
+  fileCount: number;
   signals: string[];
 }
 
@@ -1218,6 +1267,82 @@ export interface LayerPackageRef {
   drift: 'current' | 'minor-behind' | 'major-behind' | 'unknown';
 }
 
+/** Honest architecture-engine support level (0 = discovered only, 4 = full graph). */
+export type ArchitectureSupportLevel = 0 | 1 | 2 | 3 | 4;
+
+/** Dimension a knowledge pack may vote on. Orthogonal — do not collapse into archetype. */
+export type ArchitectureEvidenceDimension =
+  | 'language'
+  | 'projectKind'
+  | 'framework'
+  | 'platform'
+  | 'buildSystem'
+  | 'artifactKind'
+  | 'structure'
+  | 'layer'
+  | 'role';
+
+/** One pack contribution. `signals` is stable-sorted. Fusion uses the uncapped set. */
+export interface ArchitectureEvidence {
+  packId: string;
+  dimension: ArchitectureEvidenceDimension;
+  value: string;
+  confidence: number;
+  signals: string[];
+}
+
+/** Cross-project link recorded on the scan artifact (not a graph-schema bump). */
+export type ArchitectureWorkspaceEdgeKind =
+  | 'implements-contract'
+  | 'generates'
+  | 'deploys'
+  | 'provisions'
+  | 'depends_on';
+
+export interface ArchitectureWorkspaceEdge {
+  kind: ArchitectureWorkspaceEdgeKind;
+  /** {@link ProjectScan.path} of the source project */
+  fromProject: string;
+  toProject: string;
+  fromFile?: string;
+  toFile?: string;
+  confidence: number;
+}
+
+/** Intra-project layer / neighbourhood finding. Omit the array when there is no graph. */
+export interface ArchitectureViolation {
+  fromFile: string;
+  toFile: string;
+  fromLayer: ArchitectureLayer;
+  toLayer: ArchitectureLayer;
+  edgeKind: string;
+  rule: string;
+  confidence: number;
+}
+
+/** Thin structure inference (primary + characteristics). Omit when not inferred. */
+export interface ArchitectureStructure {
+  primary: string;
+  characteristics: string[];
+  confidence: number;
+}
+
+/**
+ * Declared-architecture placeholder (ArchUnit, Nx boundaries, …).
+ * Schema only in this release — omitted until a later wave populates it.
+ */
+export interface ArchitectureDeclared {
+  rules?: string[];
+}
+
+/**
+ * Observed-architecture placeholder (graph-derived structure).
+ * Schema only in this release — omitted until a later wave populates it.
+ */
+export interface ArchitectureObserved {
+  structure?: string;
+}
+
 /** Full architecture detection result */
 export interface ArchitectureResult {
   /** Detected project archetype */
@@ -1230,6 +1355,65 @@ export interface ArchitectureResult {
   totalClassified: number;
   /** Files that could not be classified */
   unclassified: number;
+  /**
+   * Directories labelled from classified children or inherited from an ancestor.
+   * Sorted by path. Omit when none (absent ≠ []).
+   */
+  folders?: FolderClassification[];
+  /**
+   * Sample of still-unclassified source paths after folder inheritance.
+   * Cap 40, sorted. Omit when none (absent ≠ []).
+   */
+  unclassifiedFiles?: string[];
+  /**
+   * File-level classifications that carry a confirmed AST role.
+   * Cap 64, sorted by filePath. Omit when none (absent ≠ []).
+   */
+  classified?: LayerClassification[];
+  /**
+   * Workspace composition. Set on the workspace / solution aggregate.
+   * Omit on a single-project result when the caller did not ask for shape
+   * (absent ≠ `'single'`).
+   */
+  workspaceShape?: WorkspaceShape;
+  /** Honest support level. 0 is a real outcome (discovered only), not "missing". */
+  supportLevel?: ArchitectureSupportLevel;
+  /** Every pack that contributed evidence, localeCompare-sorted. */
+  packIds?: string[];
+  projectKind?: string;
+  artifactKind?: string;
+  /** Contracts only (openapi, protobuf, graphql, …). */
+  contractKind?: string;
+  semanticRole?: string;
+  /** Payload sample of fused evidence — capped (see evidenceCapped). */
+  evidence?: ArchitectureEvidence[];
+  /** Present only when the evidence sample dropped items. Absent ≠ false. */
+  evidenceCapped?: true;
+  /** Cross-project links. Omit when none (absent ≠ []). */
+  workspaceEdges?: ArchitectureWorkspaceEdge[];
+  /** Present only when the workspace-edge sample dropped items. Absent ≠ false. */
+  workspaceEdgesCapped?: true;
+  /**
+   * Intra-project boundary / neighbourhood findings.
+   * Omit when there is no graph (`--no-graph`, map failed, `--max-privacy`).
+   * Present (possibly `[]`) only after graph confirmation ran.
+   */
+  violations?: ArchitectureViolation[];
+  /** Present only when the violation sample dropped items. Absent ≠ false. */
+  violationsCapped?: true;
+  /** Which boundary profile was applied during graph confirmation. */
+  boundaryProfile?: string;
+  /** Thin structure inference. Omit when not inferred. */
+  structure?: ArchitectureStructure;
+  /** Present only when generated stubs/clients were detected. Absent ≠ false. */
+  generated?: true;
+  generatedBy?: string;
+  /** Repo-relative path of the source contract, when known. */
+  sourceContract?: string;
+  /** Placeholder — do not emit until declared-vs-observed lands. */
+  declared?: ArchitectureDeclared;
+  /** Placeholder — do not emit until declared-vs-observed lands. */
+  observed?: ArchitectureObserved;
 }
 
 export interface GodFile {

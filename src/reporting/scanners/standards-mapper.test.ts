@@ -46,6 +46,23 @@ describe('inferProjectPurpose', () => {
     expect(inferProjectPurpose(p).category).toBe('infra');
   });
 
+  it('classifies a Java web-api from projectKind with no Node archetype', () => {
+    const p = project({
+      type: 'java',
+      architecture: {
+        archetype: 'unknown',
+        archetypeConfidence: 0,
+        layers: [],
+        totalClassified: 0,
+        unclassified: 0,
+        projectKind: 'web-api',
+      },
+    });
+    const purpose = inferProjectPurpose(p);
+    expect(purpose.category).toBe('api');
+    expect(purpose.signals).toContain('projectKind:web-api');
+  });
+
   it('falls back to "any" with low confidence when there is no signal', () => {
     const purpose = inferProjectPurpose(project({}));
     expect(purpose.category).toBe('any');

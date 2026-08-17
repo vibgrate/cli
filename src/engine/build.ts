@@ -44,6 +44,8 @@ import {
 import type { ScipIndex } from './scip.js';
 import type { FileParse } from './types.js';
 import type { ResolveResult } from './resolve.js';
+import { fileRolesFromParses } from './ast-roles.js';
+import type { AstRoleHit } from '../core-open/scanners/architecture/ast-roles.js';
 
 export interface BuildOptions {
   /** Directory to build (default cwd). */
@@ -132,6 +134,8 @@ export interface BuildResult {
   /** SQLite index write result. */
   index?: { ok: boolean; path?: string; reason?: string };
   warnings: string[];
+  /** Architecture role hits extracted during the parse already paid for. */
+  fileRoles: AstRoleHit[];
 }
 
 export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
@@ -611,6 +615,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     scip: scipStats,
     index: indexResult,
     warnings,
+    fileRoles: fileRolesFromParses(parses),
   };
 }
 

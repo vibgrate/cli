@@ -128,6 +128,11 @@ function archetypeCategory(archetype?: string): { category: string; signal: stri
     case 'hono':
     case 'koa':
     case 'serverless':
+    case 'spring':
+    case 'aspnet':
+    case 'django':
+    case 'fastapi':
+    case 'go-service':
       return { category: 'api', signal: `archetype:${archetype}` };
     case 'library':
       return { category: 'library', signal: 'archetype:library' };
@@ -137,6 +142,33 @@ function archetypeCategory(archetype?: string): { category: string; signal: stri
       return null;
   }
 }
+
+function projectKindCategory(kind?: string): { category: string; signal: string } | null {
+  switch (kind) {
+    case 'web-app':
+      return { category: 'web-app', signal: 'projectKind:web-app' };
+    case 'web-api':
+      return { category: 'api', signal: 'projectKind:web-api' };
+    case 'library':
+      return { category: 'library', signal: 'projectKind:library' };
+    case 'cli':
+      return { category: 'cli', signal: 'projectKind:cli' };
+    case 'iac':
+      return { category: 'infra', signal: 'projectKind:iac' };
+    case 'database':
+      return { category: 'data', signal: 'projectKind:database' };
+    case 'worker':
+      return { category: 'api', signal: 'projectKind:worker' };
+    default:
+      return null;
+  }
+}
+
+const API_FRAMEWORKS = new Set([
+  'express', 'nestjs', 'fastify', 'hono', 'koa', 'spring', 'aspnet',
+  'django', 'fastapi', 'laravel', 'phoenix', 'rails',
+]);
+const WEB_FRAMEWORKS = new Set(['nextjs', 'remix', 'sveltekit', 'nuxt']);
 
 /**
  * Infer a project's coarse purpose. Combines the strongest available signals;
@@ -153,10 +185,25 @@ export function inferProjectPurpose(
     signals.push(signal);
   };
 
-  // The archetype fingerprint is a Node/TS concept — only trust it for those.
-  if (project.type === 'node' || project.type === 'typescript') {
-    const arch = archetypeCategory(project.architecture?.archetype);
-    if (arch) vote(arch.category, 3, arch.signal);
+  // projectKind / framework evidence is the source of truth across languages.
+  const pk = projectKindCategory(project.architecture?.projectKind);
+  if (pk) vote(pk.category, 3, pk.signal);
+
+  const fwHits = (project.architecture?.evidence ?? [])
+    .filter((e) => e.dimension === 'framework')
+    .map((e) => e.value.toLowerCase());
+  for (const fw of fwHits) {
+    if (WEB_FRAMEWORKS.has(fw)) vote('web-app', 2, `framework:${fw}`);
+    if (API_FRAMEWORKS.has(fw)) vote('api', 2, `framework:${fw}`);
+  }
+
+  // Archetype remains a Node/TS convenience; also honour the new non-JS values.
+  const arch = archetypeCategory(project.architecture?.archetype);
+  if (arch) {
+    const nonJsArchetype = ['spring', 'aspnet', 'django', 'fastapi', 'go-service'].includes(project.architecture?.archetype ?? '');
+    if (project.type === 'node' || project.type === 'typescript' || nonJsArchetype) {
+      vote(arch.category, 3, arch.signal);
+    }
   }
 
   const fwNames = (project.frameworks ?? []).map((f) => f.name.toLowerCase());

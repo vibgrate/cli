@@ -41,6 +41,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg impact](#vg-impact)
   - [vg install / vg uninstall](#vg-install)
   - [vg lib](#vg-lib)
+  - [vg locale](#vg-locale)
   - [vg map / vg hubs / vg areas / vg oddities](#vg-map--vg-hubs--vg-areas--vg-oddities)
   - [vg llm-host](#vg-llm-host)
   - [vg models](#vg-models)
@@ -1096,6 +1097,66 @@ vg lib refresh          # Re-ingest all local sources
 | `--language <lang>` | — | Primary language (for `publish`) |
 | `--region <region>` | `us` | Data-residency region for the hosted catalog |
 | `--ingest <url>` | — | Hosted catalog URL override (wins over `--region`) |
+
+---
+
+### vg locale
+
+**Vibgrate Localize** — managed localisation for your application. Locale projects, keys, and
+translations live in Vibgrate Cloud and sync with the locale files in your repo.
+
+`vg localize` is a backward-friendly alias; `vg locale` is the canonical form.
+
+```bash
+vg locale config --project <slug> [--target-languages fr-FR,de-DE] [--namespaces common,checkout]
+vg locale push [--dry-run] [--source-only]
+vg locale pull [--language <code>] [--dry-run] [--include-machine]
+vg locale save-missing [--dry-run]
+vg locale add <key> [value] [--namespace <ns>] [--language <code>]
+vg locale remove <keys...> [--namespace <ns>]
+vg locale get <key> [--namespace <ns>] [--language <code>]
+vg locale status
+vg locale format [--dry-run]
+```
+
+| Command | Description |
+|---------|-------------|
+| `vg locale config` | Create or update `vibgrate.locale.yaml` (no credentials are stored in it) |
+| `vg locale push` | Upload local locale files to Vibgrate Cloud (`vg locale sync` is an alias) |
+| `vg locale pull` | Write translations from Vibgrate Cloud into local files (`vg locale download` is an alias) |
+| `vg locale save-missing` | Create only the keys Cloud does not have yet — never overwrites a translation |
+| `vg locale add` | Add or update a single key |
+| `vg locale remove` | Remove one or more keys |
+| `vg locale get` | Show one key and its translations |
+| `vg locale status` | Coverage and health per language |
+| `vg locale format` | Re-format local locale files in place |
+
+**Local vs Cloud.** `config` and `format` only touch the filesystem — they work on any plan and make
+no network call. Everything else reads or writes Vibgrate Cloud and needs a **Team plan or above**.
+`vg locale push --dry-run` also works with no credentials, so you can preview what a push would send
+before you have logged in.
+
+**Configuration** lives in `vibgrate.locale.yaml`, which is safe to commit — the DSN is never written
+to it and resolves at call time from `--dsn`, `VIBGRATE_DSN`, or your stored login, exactly as
+`vg push` does.
+
+```yaml
+project: acme-web
+sourceLanguage: en-US
+targetLanguages: [fr-FR, de-DE]
+format: nested
+path: src/locales/{language}/{namespace}.json
+namespaces: [common, checkout]
+version: latest
+```
+
+**Formats.** `json`, `nested`, `flat`, `yaml`, and `yml` are supported today; the professional
+formats (`po`, `xliff`, `xliff2`, `android`, `strings`, `resx`, `csv`, `arb`, `properties`) report
+that they are not available yet rather than failing as unknown. Every codec round-trips, and writes
+are key-sorted so pulling twice never produces a spurious diff.
+
+**Machine translation is never silently accepted.** `pull` writes only translations a person has
+accepted; pass `--include-machine` to also write machine and needs-review entries.
 
 ---
 

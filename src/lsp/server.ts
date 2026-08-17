@@ -23,7 +23,7 @@ import * as fs from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import * as semver from 'semver';
 
-import { runCoreScan } from '../core-open/index.js';
+import { runCoreScan, refineArchitectureWithGraph, refineArchitectureWithAstRoles } from '../core-open/index.js';
 import type { ScanArtifact, ScanOptions, DependencyRow, ProjectScan } from '../core-open/index.js';
 
 /** Element type of `ScanArtifact.findings` — avoids a deep-path type import. */
@@ -40,6 +40,8 @@ import {
   manifestKind,
 } from './manifest-positions.js';
 import { buildGraph } from '../engine/build.js';
+import { fileRolesFromParseCache } from '../engine/ast-roles.js';
+import type { AstRoleHit } from '../core-open/scanners/architecture/ast-roles.js';
 import { loadGraph } from '../engine/load.js';
 import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
@@ -150,12 +152,47 @@ export interface ProjectRef {
  * `undefined path` (or `'__repo__'`) returns the whole-workspace aggregate;
  * a project path returns that project's own architecture detection.
  */
+export interface FolderClassificationWire {
+  path: string;
+  layer: string;
+  confidence: number;
+  fileCount: number;
+  signals: string[];
+}
+
 export interface ArchitectureResponse {
   archetype: ProjectArchetypeWire;
   archetypeConfidence: number;
   layers: LayerSummaryWire[];
   totalClassified: number;
   unclassified: number;
+  folders?: FolderClassificationWire[];
+  unclassifiedFiles?: string[];
+  classified?: Array<{
+    filePath: string;
+    layer: string;
+    confidence: number;
+    signals: string[];
+    role?: 'controller' | 'service' | 'repository' | 'entity' | 'handler' | 'router';
+  }>;
+  workspaceShape?: 'single' | 'monorepo' | 'polyglot-platform';
+  supportLevel?: 0 | 1 | 2 | 3 | 4;
+  packIds?: string[];
+  projectKind?: string;
+  artifactKind?: string;
+  contractKind?: string;
+  semanticRole?: string;
+  evidence?: ArchitectureEvidenceWire[];
+  evidenceCapped?: true;
+  workspaceEdges?: ArchitectureWorkspaceEdgeWire[];
+  workspaceEdgesCapped?: true;
+  violations?: ArchitectureViolationWire[];
+  violationsCapped?: true;
+  boundaryProfile?: string;
+  structure?: ArchitectureStructureWire;
+  generated?: true;
+  generatedBy?: string;
+  sourceContract?: string;
   /** Workspace-relative manifest path — absent at whole-workspace scope. */
   manifestPath?: string;
   /** Workspace-relative lockfile path — absent at whole-workspace scope or when none was resolved. */
@@ -163,6 +200,104 @@ export interface ArchitectureResponse {
 }
 
 type ProjectArchetypeWire = string;
+
+interface ArchitectureEvidenceWire {
+  packId: string;
+  dimension: string;
+  value: string;
+  confidence: number;
+  signals: string[];
+}
+
+interface ArchitectureWorkspaceEdgeWire {
+  kind: 'implements-contract' | 'generates' | 'deploys' | 'provisions' | 'depends_on';
+  fromProject: string;
+  toProject: string;
+  fromFile?: string;
+  toFile?: string;
+  confidence: number;
+}
+
+interface ArchitectureViolationWire {
+  fromFile: string;
+  toFile: string;
+  fromLayer: string;
+  toLayer: string;
+  edgeKind: string;
+  rule: string;
+  confidence: number;
+}
+
+interface ArchitectureStructureWire {
+  primary: string;
+  characteristics: string[];
+  confidence: number;
+}
+
+function architectureWire(arch: {
+  archetype: string;
+  archetypeConfidence: number;
+  layers: LayerSummaryWire[];
+  totalClassified: number;
+  unclassified: number;
+  folders?: FolderClassificationWire[];
+  unclassifiedFiles?: string[];
+  classified?: Array<{
+    filePath: string;
+    layer: string;
+    confidence: number;
+    signals: string[];
+    role?: 'controller' | 'service' | 'repository' | 'entity' | 'handler' | 'router';
+  }>;
+  workspaceShape?: 'single' | 'monorepo' | 'polyglot-platform';
+  supportLevel?: 0 | 1 | 2 | 3 | 4;
+  packIds?: string[];
+  projectKind?: string;
+  artifactKind?: string;
+  contractKind?: string;
+  semanticRole?: string;
+  evidence?: ArchitectureEvidenceWire[];
+  evidenceCapped?: true;
+  workspaceEdges?: ArchitectureWorkspaceEdgeWire[];
+  workspaceEdgesCapped?: true;
+  violations?: ArchitectureViolationWire[];
+  violationsCapped?: true;
+  boundaryProfile?: string;
+  structure?: ArchitectureStructureWire;
+  generated?: true;
+  generatedBy?: string;
+  sourceContract?: string;
+}): ArchitectureResponse {
+  const out: ArchitectureResponse = {
+    archetype: arch.archetype,
+    archetypeConfidence: arch.archetypeConfidence,
+    layers: arch.layers,
+    totalClassified: arch.totalClassified,
+    unclassified: arch.unclassified,
+  };
+  if (arch.folders) out.folders = arch.folders;
+  if (arch.unclassifiedFiles) out.unclassifiedFiles = arch.unclassifiedFiles;
+  if (arch.classified) out.classified = arch.classified;
+  if (arch.workspaceShape) out.workspaceShape = arch.workspaceShape;
+  if (arch.supportLevel !== undefined) out.supportLevel = arch.supportLevel;
+  if (arch.packIds) out.packIds = arch.packIds;
+  if (arch.projectKind) out.projectKind = arch.projectKind;
+  if (arch.artifactKind) out.artifactKind = arch.artifactKind;
+  if (arch.contractKind) out.contractKind = arch.contractKind;
+  if (arch.semanticRole) out.semanticRole = arch.semanticRole;
+  if (arch.evidence) out.evidence = arch.evidence;
+  if (arch.evidenceCapped) out.evidenceCapped = true;
+  if (arch.workspaceEdges) out.workspaceEdges = arch.workspaceEdges;
+  if (arch.workspaceEdgesCapped) out.workspaceEdgesCapped = true;
+  if (arch.violations) out.violations = arch.violations;
+  if (arch.violationsCapped) out.violationsCapped = true;
+  if (arch.boundaryProfile) out.boundaryProfile = arch.boundaryProfile;
+  if (arch.structure) out.structure = arch.structure;
+  if (arch.generated) out.generated = true;
+  if (arch.generatedBy) out.generatedBy = arch.generatedBy;
+  if (arch.sourceContract) out.sourceContract = arch.sourceContract;
+  return out;
+}
 
 /** Per-layer summary, wire shape mirrors `LayerSummary` in core-open/types.ts. */
 export interface LayerSummaryWire {
@@ -344,6 +479,8 @@ export class VibgrateLanguageServer {
   private debounce: NodeJS.Timeout | null = null;
   private shuttingDown = false;
   private graph: VgGraph | null = null;
+  /** Role hits from the last graph build or recovered from the parse cache. */
+  private fileRoles: AstRoleHit[] = [];
   private graphBuilding = false;
   /**
    * Keeps the freshness probe / incremental rebuild OFF the query path. The
@@ -515,6 +652,7 @@ export class VibgrateLanguageServer {
         // Drop projects under pruned trees (e.g. `.claude/worktrees`) even when
         // replaying a cache written before those dirs were excluded.
         this.artifact = pruneArtifactProjects(cached.artifact);
+        if (this.graph) refineArtifactWithGraph(this.artifact, this.graph, this.fileRoles);
         fromCache = true;
       } else {
         const scanOpts: ScanOptions = {
@@ -537,10 +675,14 @@ export class VibgrateLanguageServer {
         // on `vibgrate/scanArtifact` for Output ▸ Vibgrate Scan instead.
         const advanced = await loadAdvancedScanHook();
         this.artifact = pruneArtifactProjects(
-          await runCoreScanSilently(this.opts.root, scanOpts, advanced),
+          await runCoreScanSilently(this.opts.root, scanOpts, advanced, this.graph, this.fileRoles),
         );
         writeScanCache(this.opts.root, cacheKey, this.artifact);
       }
+
+      // Graph build can finish while the scan is in flight. Re-refine so
+      // roles recovered (or extracted) after we started still land.
+      if (this.graph) refineArtifactWithGraph(this.artifact, this.graph, this.fileRoles);
 
       this.publishScore();
       this.publishScanArtifact(fromCache);
@@ -820,6 +962,8 @@ export class VibgrateLanguageServer {
       const existing = loadGraph(this.opts.root);
       if (existing) {
         this.graph = existing;
+        this.fileRoles = fileRolesFromParseCache(this.opts.root);
+        this.refineAndPublishArchitecture();
         this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
         return;
       }
@@ -831,6 +975,8 @@ export class VibgrateLanguageServer {
       writeArtifacts(result.graph, { root: this.opts.root, html: false, report: false });
       writeSnapshot(this.opts.root, result.graph.provenance.corpusHash, result.fileStats, {});
       this.graph = result.graph;
+      this.fileRoles = result.fileRoles;
+      this.refineAndPublishArchitecture();
       this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -864,7 +1010,23 @@ export class VibgrateLanguageServer {
     if (outcome?.status !== 'refreshed' || !outcome.wrote) return;
     const graphPath = resolveGraphPath(this.opts.root);
     const reloaded = loadGraphPreferIndex(this.opts.root, graphPath)?.graph ?? loadGraph(this.opts.root);
-    if (reloaded) this.graph = reloaded;
+    if (reloaded) {
+      this.graph = reloaded;
+      this.fileRoles = fileRolesFromParseCache(this.opts.root);
+      this.refineAndPublishArchitecture();
+    }
+  }
+
+  /**
+   * Graph / AST-role refine can land after the first `publishScore()`. The
+   * Architecture panel only re-pulls on a score or scope change, so a silent
+   * in-memory refine would leave the first session on the path-only snapshot.
+   * Re-push `vibgrate/score` (no-op when the artifact is not ready yet).
+   */
+  private refineAndPublishArchitecture(): void {
+    if (!this.artifact || !this.graph) return;
+    refineArtifactWithGraph(this.artifact, this.graph, this.fileRoles);
+    this.publishScore();
   }
 
   private async onGraphQuery(params: unknown): Promise<GraphQueryResult> {
@@ -1035,21 +1197,13 @@ export class VibgrateLanguageServer {
       const arch = a.extended?.architecture;
       if (!arch) return null;
       return {
-        archetype: arch.archetype,
-        archetypeConfidence: arch.archetypeConfidence,
-        layers: arch.layers,
-        totalClassified: arch.totalClassified,
-        unclassified: arch.unclassified,
+        ...architectureWire(arch),
       };
     }
     const project = projectByPath(a, p.path);
     if (!project?.architecture) return null;
     return {
-      archetype: project.architecture.archetype,
-      archetypeConfidence: project.architecture.archetypeConfidence,
-      layers: project.architecture.layers,
-      totalClassified: project.architecture.totalClassified,
-      unclassified: project.architecture.unclassified,
+      ...architectureWire(project.architecture),
       manifestPath: manifestRelativePath(project),
       lockfilePath: lockfileRelativePath(this.opts.root, project),
     };
@@ -1081,6 +1235,8 @@ async function runCoreScanSilently(
   root: string,
   opts: ScanOptions,
   advanced: Awaited<ReturnType<typeof loadAdvancedScanHook>>,
+  graph?: VgGraph | null,
+  fileRoles?: AstRoleHit[],
 ): Promise<ScanArtifact> {
   const realLog = console.log.bind(console);
   console.log = (...args: unknown[]) => {
@@ -1090,9 +1246,40 @@ async function runCoreScanSilently(
     realLog(...args);
   };
   try {
-    return await runCoreScan(root, opts, advanced);
+    const artifact = await runCoreScan(root, opts, advanced);
+    if (graph) refineArtifactWithGraph(artifact, graph, fileRoles);
+    return artifact;
   } finally {
     console.log = realLog;
+  }
+}
+
+function architectureGraphView(graph: VgGraph) {
+  return {
+    nodes: graph.nodes.map((n) => ({ id: n.id, file: n.file, kind: n.kind })),
+    edges: graph.edges.map((e) => ({
+      src: e.src,
+      dst: e.dst,
+      kind: e.kind,
+      confidence: e.confidence,
+      resolution: e.resolution,
+    })),
+  };
+}
+
+function refineArtifactWithGraph(
+  artifact: ScanArtifact,
+  graph: VgGraph,
+  fileRoles?: import('../core-open/scanners/architecture/ast-roles.js').AstRoleHit[],
+): void {
+  const hasArch = Boolean(artifact.extended?.architecture)
+    || artifact.projects.some((p) => p.architecture);
+  if (!hasArch) return;
+  const already = artifact.extended?.architecture?.violations !== undefined
+    || artifact.projects.some((p) => p.architecture?.violations !== undefined);
+  if (!already) refineArchitectureWithGraph(artifact, architectureGraphView(graph));
+  if (fileRoles && fileRoles.length > 0) {
+    refineArchitectureWithAstRoles(artifact, fileRoles);
   }
 }
 

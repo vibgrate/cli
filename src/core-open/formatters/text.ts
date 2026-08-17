@@ -643,12 +643,48 @@ function formatArchitectureDiagram(arch: ArchitectureResult): string[] {
   lines.push(...titleBox('Architecture Layers'));
   lines.push('');
   lines.push(chalk.bold('  Archetype: ') + `${arch.archetype}` + chalk.dim(` (${Math.round(arch.archetypeConfidence * 100)}% confidence)`));
+  if (arch.projectKind) {
+    lines.push(chalk.bold('  Project kind: ') + arch.projectKind + (arch.supportLevel !== undefined ? chalk.dim(` (support ${arch.supportLevel})`) : ''));
+  }
   lines.push(`  Files classified: ${arch.totalClassified}` + (arch.unclassified > 0 ? chalk.dim(` (${arch.unclassified} unclassified)`) : ''));
+  if (arch.folders && arch.folders.length > 0) {
+    lines.push(`  Folders classified: ${arch.folders.length}`);
+    for (const folder of arch.folders.slice(0, 12)) {
+      lines.push(`    ${folder.path}  ${folder.layer}  ${Math.round(folder.confidence * 100)}%  ${folder.fileCount} file${folder.fileCount !== 1 ? 's' : ''}`);
+    }
+    if (arch.folders.length > 12) {
+      lines.push(chalk.dim(`    + ${arch.folders.length - 12} more`));
+    }
+  }
+  if (arch.unclassifiedFiles && arch.unclassifiedFiles.length > 0) {
+    const extra = arch.unclassified > arch.unclassifiedFiles.length ? ` of ${arch.unclassified}` : '';
+    lines.push(`  Unclassified source (sample): ${arch.unclassifiedFiles.length}${extra}`);
+  }
+  if (arch.classified && arch.classified.length > 0) {
+    lines.push(`  Confirmed roles: ${arch.classified.length}`);
+    for (const file of arch.classified.slice(0, 8)) {
+      lines.push(`    ${file.filePath}  ${file.role}  ${file.layer}`);
+    }
+    if (arch.classified.length > 8) {
+      lines.push(chalk.dim(`    + ${arch.classified.length - 8} more`));
+    }
+  }
   lines.push('');
   if (arch.layers.length > 0) {
     for (const layer of arch.layers) {
       const risk = layer.riskLevel === 'none' ? chalk.dim('none') : layer.riskLevel === 'low' ? chalk.green('low') : layer.riskLevel === 'moderate' ? chalk.yellow('moderate') : chalk.red('high');
       lines.push(`    ${chalk.bold(layer.layer)}  ${layer.fileCount} file${layer.fileCount !== 1 ? 's' : ''}  drift ${scoreBar(layer.driftScore)}  risk ${risk}`);
+    }
+    lines.push('');
+  }
+  if (arch.violations && arch.violations.length > 0) {
+    const extra = arch.violationsCapped ? '+' : '';
+    lines.push(`  Boundary violations (${arch.violations.length}${extra})`);
+    for (const v of arch.violations.slice(0, 8)) {
+      lines.push(`    ${v.fromFile} → ${v.toFile}  ${v.rule}`);
+    }
+    if (arch.violations.length > 8) {
+      lines.push(chalk.dim(`    + ${arch.violations.length - 8} more`));
     }
     lines.push('');
   }

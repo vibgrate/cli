@@ -25,6 +25,10 @@ const DOCUMENTED_WITH = new Map([
   ['hubs', 'map'],
   ['areas', 'map'],
   ['oddities', 'map'],
+  // `vg locale` is canonical and `vg localize` is a backward-friendly alias, so
+  // the docs describe `vg locale` and mention the alias once. Documenting both
+  // in full would suggest there are two commands to choose between.
+  ['localize', 'locale'],
 ]);
 
 const documentedName = (cmd: string): string => DOCUMENTED_WITH.get(cmd) ?? cmd;

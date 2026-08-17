@@ -54,6 +54,7 @@ import { dsnCommand } from './reporting/commands/dsn.js';
 import { loginCommand } from './reporting/commands/login.js';
 import { logoutCommand } from './reporting/commands/logout.js';
 import { pushCommand } from './reporting/commands/push.js';
+import { registerLocale } from './reporting/commands/locale/index.js';
 import { updateCommand } from './reporting/commands/update.js';
 import { sbomCommand } from './reporting/commands/sbom.js';
 import { evidenceCommand } from './reporting/commands/evidence/index.js';
@@ -112,6 +113,8 @@ export const KNOWN_COMMANDS = new Set([
   'update',
   'sbom',
   'evidence',
+  'locale',
+  'localize',
 ]);
 
 export function buildProgram(): Command {
@@ -193,6 +196,7 @@ export function buildProgram(): Command {
   program.addCommand(updateCommand);
   program.addCommand(sbomCommand);
   program.addCommand(evidenceCommand);
+  registerLocale(program);
 
   return program;
 }

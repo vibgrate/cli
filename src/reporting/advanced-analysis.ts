@@ -5,7 +5,12 @@ import type {
   ProjectScan,
   ArchitectureResult,
 } from '../core-open/index.js';
-import { compactUiPurpose } from '../core-open/index.js';
+import {
+  compactUiPurpose,
+  scanArchitectureBundle,
+  mermaidFromArchitecture,
+  aggregateSolutionArchitecture,
+} from '../core-open/index.js';
 
 import { scanPlatformMatrix } from './scanners/platform-matrix.js';
 import { scanDependencyRisk } from './scanners/dependency-risk.js';
@@ -17,12 +22,6 @@ import { scanBreakingChangeExposure } from './scanners/breaking-change.js';
 import { scanFileHotspots } from './scanners/file-hotspots.js';
 import { scanSecurityPosture } from './scanners/security-posture.js';
 import { scanServiceDependencies } from './scanners/service-dependencies.js';
-import {
-  scanArchitecture,
-  buildProjectArchitectureMermaid,
-  scanProjectArchitecture,
-  aggregateSolutionArchitecture,
-} from './scanners/architecture.js';
 import { scanCodeQuality } from './scanners/code-quality.js';
 import { scanDatabaseSchema } from './scanners/database-schema.js';
 import { scanUiPurpose } from './scanners/ui-purpose.js';
@@ -288,25 +287,23 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
 
   if (scannerPolicy.architecture && scanners?.architecture?.enabled !== false) {
     progress.startStep('architecture');
-    extended.architecture = await scanArchitecture(
+    const { workspace, projectResults } = await scanArchitectureBundle(
       rootDir,
       allProjects,
       extended.toolingInventory,
       extended.serviceDependencies,
       fileCache,
     );
+    extended.architecture = workspace;
     const arch = extended.architecture;
     const layerCount = arch.layers.filter((l) => l.fileCount > 0).length;
 
-    await Promise.all(allProjects.map(async (project) => {
-      project.architectureMermaid = await buildProjectArchitectureMermaid(
-        rootDir,
-        project,
-        arch.archetype,
-        fileCache,
-      );
-      project.architecture = await scanProjectArchitecture(rootDir, project, fileCache);
-    }));
+    for (let i = 0; i < allProjects.length; i++) {
+      const project = allProjects[i]!;
+      const projectArch = projectResults[i]!;
+      project.architecture = projectArch;
+      project.architectureMermaid = mermaidFromArchitecture(projectArch);
+    }
 
     for (const solution of solutions) {
       const memberProjects = solution.projectPaths
@@ -316,7 +313,7 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
         .map((p) => p.architecture)
         .filter((a): a is ArchitectureResult => Boolean(a));
       if (memberArchResults.length > 0) {
-        solution.architecture = aggregateSolutionArchitecture(memberArchResults);
+        solution.architecture = aggregateSolutionArchitecture(memberArchResults, memberProjects);
       }
     }
 

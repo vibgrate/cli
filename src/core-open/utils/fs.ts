@@ -385,6 +385,44 @@ export class FileCache {
     return promise;
   }
 
+  /**
+   * Entries under `absDir`, reusing an already-cached ancestor walk when one
+   * exists. Per-project scanners must call this instead of `walkDir(projectDir)`
+   * so a large monorepo is not re-walked once per package.
+   *
+   * `relPath` is rebased to `absDir` so callers see the same shape as a
+   * fresh `walkDir` of that directory.
+   */
+  async walkDirUnder(absDir: string): Promise<DirEntry[]> {
+    const resolved = path.resolve(absDir);
+
+    let exact: Promise<DirEntry[]> | undefined;
+    let bestAncestor: { root: string; promise: Promise<DirEntry[]> } | undefined;
+    for (const [key, promise] of this.walkCache) {
+      const cachedRoot = path.resolve(key);
+      if (cachedRoot === resolved) {
+        exact = promise;
+        break;
+      }
+      const rel = path.relative(cachedRoot, resolved);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+      if (!bestAncestor || cachedRoot.length > path.resolve(bestAncestor.root).length) {
+        bestAncestor = { root: key, promise };
+      }
+    }
+    if (exact) return exact;
+
+    if (bestAncestor) {
+      const entries = await bestAncestor.promise;
+      const prefix = resolved.endsWith(path.sep) ? resolved : resolved + path.sep;
+      return entries
+        .filter((e) => e.absPath === resolved || e.absPath.startsWith(prefix))
+        .map((e) => ({ ...e, relPath: path.relative(resolved, e.absPath) }));
+    }
+
+    return this.walkDir(resolved);
+  }
+
   /** Return tree summary from the cached walk, if available. */
   getWalkSummary(rootDir: string): TreeCount | undefined {
     return this.walkSummary.get(rootDir);

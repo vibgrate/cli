@@ -574,6 +574,11 @@ export type ProjectArchetype =
   | 'library'
   | 'cli'
   | 'monorepo'
+  | 'spring'
+  | 'aspnet'
+  | 'django'
+  | 'fastapi'
+  | 'go-service'
   | 'unknown';
 
 /** Architectural layer classification */
@@ -589,6 +594,14 @@ export type ArchitectureLayer =
   | 'testing'
   | 'shared';
 
+export type ArchitectureFileRole =
+  | 'controller'
+  | 'service'
+  | 'repository'
+  | 'entity'
+  | 'handler'
+  | 'router';
+
 /** A single file classified into a layer */
 export interface LayerClassification {
   /** Relative path from project root */
@@ -598,6 +611,17 @@ export interface LayerClassification {
   /** Confidence of classification (0–1) */
   confidence: number;
   /** Top signals that contributed to classification */
+  signals: string[];
+  /** Confirmed syntactic role. Omit when the AST pass did not hit. */
+  role?: ArchitectureFileRole;
+}
+
+/** A directory labelled from its classified children, or inherited from an ancestor. */
+export interface FolderClassification {
+  path: string;
+  layer: ArchitectureLayer;
+  confidence: number;
+  fileCount: number;
   signals: string[];
 }
 
@@ -628,6 +652,9 @@ export interface LayerPackageRef {
   drift: 'current' | 'minor-behind' | 'major-behind' | 'unknown';
 }
 
+/** Workspace composition — not a project archetype. */
+export type WorkspaceShape = 'single' | 'monorepo' | 'polyglot-platform';
+
 /** Full architecture detection result */
 export interface ArchitectureResult {
   /** Detected project archetype */
@@ -640,6 +667,56 @@ export interface ArchitectureResult {
   totalClassified: number;
   /** Files that could not be classified */
   unclassified: number;
+  /** Directories labelled from classified children. Omit when none (absent ≠ []). */
+  folders?: FolderClassification[];
+  /** Sample of still-unclassified source paths, cap 40. Omit when none (absent ≠ []). */
+  unclassifiedFiles?: string[];
+  /** File-level classifications that carry a confirmed AST role. Cap 64. Omit when none. */
+  classified?: LayerClassification[];
+  /** Workspace composition. Omit on a per-project result. */
+  workspaceShape?: WorkspaceShape;
+  supportLevel?: 0 | 1 | 2 | 3 | 4;
+  packIds?: string[];
+  projectKind?: string;
+  artifactKind?: string;
+  contractKind?: string;
+  semanticRole?: string;
+  evidence?: Array<{
+    packId: string;
+    dimension: string;
+    value: string;
+    confidence: number;
+    signals: string[];
+  }>;
+  evidenceCapped?: true;
+  workspaceEdges?: Array<{
+    kind: 'implements-contract' | 'generates' | 'deploys' | 'provisions' | 'depends_on';
+    fromProject: string;
+    toProject: string;
+    fromFile?: string;
+    toFile?: string;
+    confidence: number;
+  }>;
+  workspaceEdgesCapped?: true;
+  violations?: Array<{
+    fromFile: string;
+    toFile: string;
+    fromLayer: ArchitectureLayer;
+    toLayer: ArchitectureLayer;
+    edgeKind: string;
+    rule: string;
+    confidence: number;
+  }>;
+  violationsCapped?: true;
+  boundaryProfile?: string;
+  structure?: {
+    primary: string;
+    characteristics: string[];
+    confidence: number;
+  };
+  generated?: true;
+  generatedBy?: string;
+  sourceContract?: string;
 }
 
 export interface GodFile {

@@ -82,6 +82,32 @@ export {
   type ProjectClassificationInput,
 } from './scanners/project-classification.js';
 
+export {
+  scanArchitecture,
+  scanArchitectureBundle,
+  mermaidFromArchitecture,
+  buildProjectArchitectureMermaid,
+  scanProjectArchitecture,
+  aggregateSolutionArchitecture,
+  refineArchitectureWithGraph,
+  refineArchitectureResult,
+  applyAstRoles,
+  refineArchitectureWithAstRoles,
+  matchAstRolesFromSource,
+  pickBestHits,
+  queriesForLanguage,
+  AST_ROLE_CATALOG,
+  CLASSIFIED_ROLE_CAP,
+  AST_ROLE_SIGNAL_PREFIX,
+  AST_CONFIRM_SIGNAL_PREFIX,
+  AST_CONFLICT_SIGNAL_PREFIX,
+  type ArchitectureScanBundle,
+  type ArchitectureGraphView,
+  type ArchitectureGraphNode,
+  type ArchitectureGraphEdge,
+  type AstRoleHit,
+} from './scanners/architecture.js';
+
 // ── Vulnerability detection (open: OSV / air-gap manifest) ───────────────────
 export {
   scanVulnerabilities,
@@ -117,7 +143,10 @@ export {
 } from './scoring/vuln-attribution.js';
 
 // ── Registry caches ────────────────────────────────────────────────────────
-export { NpmCache, checkRegistryAccess } from './scanners/npm-cache.js';
+export { NpmCache, checkRegistryAccess, parseNpmMetaPayload } from './scanners/npm-cache.js';
+export type { NpmCacheOptions } from './scanners/npm-cache.js';
+export { vibgrateUserCacheDir, npmMetaCacheDir, registryMetaCacheDir, NPM_META_TTL_MS, REGISTRY_META_TTL_MS } from './utils/user-cache.js';
+export type { RegistryCacheOptions } from './utils/registry-disk-cache.js';
 export { NuGetCache } from './scanners/nuget-cache.js';
 export { PyPICache } from './scanners/pypi-cache.js';
 export { MavenCache } from './scanners/maven-cache.js';

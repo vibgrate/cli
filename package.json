@@ -1,6 +1,6 @@
 {
   "name": "@vibgrate/cli",
-  "version": "2026.817.1",
+  "version": "2026.817.2",
   "description": "vg — local codebase intelligence CLI + MCP server for AI coding agents: deterministic code graph, drift reporting, and version-correct library docs (Apache-2.0)",
   "//mcpName": "Official MCP registry ownership proof: the registry fetches the published npm package and requires this field to match the com.vibgrate/ai-context server entry (see docs/marketing/mcp-registry/README.md). Must ship in the published @vibgrate/cli package.json.",
   "mcpName": "com.vibgrate/ai-context",
@@ -88,7 +88,7 @@
     "ignore": "^7.0.6",
     "msgpackr": "^2.0.4",
     "semver": "^7.8.5",
-    "smol-toml": "^1.7.1",
+    "smol-toml": "^1.8.0",
     "tinypool": "^2.1.0",
     "tree-sitter-wasms": "^0.1.13",
     "typescript": "^6.0.0",
@@ -102,14 +102,14 @@
   },
   "devDependencies": {
     "@tree-sitter-grammars/tree-sitter-hcl": "1.2.0",
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.2.0",
     "@types/semver": "^7.8.0",
-    "@typescript-eslint/eslint-plugin": "^8.64.0",
-    "@typescript-eslint/parser": "^8.66.0",
-    "eslint": "^10.8.0",
+    "@typescript-eslint/eslint-plugin": "^8.67.0",
+    "@typescript-eslint/parser": "^8.67.0",
+    "eslint": "^10.8.1",
     "graphology-types": "^0.24.8",
     "tsup": "^8.0.0",
-    "tsx": "^4.23.10",
+    "tsx": "^4.23.12",
     "vitest": "^4.1.10"
   },
   "engines": {
