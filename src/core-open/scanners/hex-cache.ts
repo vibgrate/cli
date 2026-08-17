@@ -4,10 +4,16 @@
 import { Semaphore } from '../utils/semaphore.js';
 import { SemVer, gt } from 'semver';
 import { getManifestEntry, type PackageVersionManifest } from '../package-version-manifest.js';
+import { RegistryDiskCache, REGISTRY_FETCH_TIMEOUT_MS, REGISTRY_USER_AGENT } from '../utils/registry-disk-cache.js';
 
 const HEX_API_BASE = 'https://hex.pm/api';
-const REQUEST_TIMEOUT = 10000;
 const CONCURRENT_REQUESTS = 10;
+
+interface HexMeta {
+  latest: string | null;
+}
+
+const hexDisk = new RegistryDiskCache<HexMeta>('hex');
 
 /**
  * Fetch the latest stable version of an Elixir package from hex.pm.
@@ -18,45 +24,37 @@ export async function fetchHexLatestVersion(
   semaphore?: Semaphore,
   offline = false,
 ): Promise<string | null> {
-  // Check manifest first
   const manifestEntry = getManifestEntry(manifest, 'hex', packageName);
   if (manifestEntry?.latest) {
     return manifestEntry.latest;
   }
 
-  if (offline) {
-    return null;
-  }
+  const cached = await hexDisk.read(packageName);
+  if (cached) return cached.latest;
+  if (offline) return null;
 
-  const task = async () => {
+  const task = async (): Promise<{ latest: string | null; persist: boolean }> => {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
-
-      const url = `${HEX_API_BASE}/packages/${packageName}`;
+      const url = `${HEX_API_BASE}/packages/${encodeURIComponent(packageName)}`;
       const response = await fetch(url, {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'vibgrate-cli' },
+        signal: AbortSignal.timeout(REGISTRY_FETCH_TIMEOUT_MS),
+        headers: { 'User-Agent': REGISTRY_USER_AGENT },
       });
 
-      clearTimeout(timeout);
+      if (response.status === 404) return { latest: null, persist: true };
+      if (!response.ok) return { latest: null, persist: false };
 
-      if (!response.ok) {
-        return null;
-      }
-
-      const data = await response.json() as any;
-      const releases = data.releases as Array<{ version: string; retired?: any }>;
+      const data = await response.json() as { releases?: Array<{ version: string; retired?: unknown }> };
+      const releases = data.releases;
 
       if (!releases || releases.length === 0) {
-        return null;
+        return { latest: null, persist: true };
       }
 
-      // Filter out retired versions and pre-releases
       const stableVersions = releases
-        .filter(r => !r.retired)
-        .map(r => r.version)
-        .filter(v => {
+        .filter((r) => !r.retired)
+        .map((r) => r.version)
+        .filter((v) => {
           try {
             const semver = new SemVer(v);
             return semver.prerelease.length === 0;
@@ -66,10 +64,9 @@ export async function fetchHexLatestVersion(
         });
 
       if (stableVersions.length === 0) {
-        return null;
+        return { latest: null, persist: true };
       }
 
-      // Sort and return the latest
       stableVersions.sort((a, b) => {
         try {
           return gt(a, b) ? -1 : 1;
@@ -78,20 +75,15 @@ export async function fetchHexLatestVersion(
         }
       });
 
-      return stableVersions[0];
-    } catch (error: any) {
-      if (error?.name === 'AbortError') {
-        return null;
-      }
-      return null;
+      return { latest: stableVersions[0] ?? null, persist: true };
+    } catch {
+      return { latest: null, persist: false };
     }
   };
 
-  if (semaphore) {
-    return semaphore.run(task);
-  }
-
-  return task();
+  const fetched = semaphore ? await semaphore.run(task) : await task();
+  if (fetched.persist) await hexDisk.write(packageName, { latest: fetched.latest });
+  return fetched.latest;
 }
 
 /**

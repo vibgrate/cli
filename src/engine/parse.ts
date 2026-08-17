@@ -5,6 +5,7 @@ import { queriesFor, type DefRule } from './queries.js';
 import { extractEmbeddedScript } from './sfc.js';
 import { hashString } from './hash.js';
 import { redactSecrets } from '../core-open/utils/redact.js';
+import { extractAstRolesFromTree } from './ast-roles.js';
 import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport, RawTypeRef } from './types.js';
 
 /**
@@ -364,6 +365,9 @@ export async function parseSource(
     }
   }
   result.guards = guards.sort((a, b) => a.line - b.line || a.expr.localeCompare(b.expr));
+
+  const roles = extractAstRolesFromTree(rel, effLangId, language, root, text);
+  if (roles) result.roles = roles;
 
   tree.delete();
   return result;

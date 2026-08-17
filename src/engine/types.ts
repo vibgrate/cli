@@ -65,6 +65,17 @@ export interface FileParse {
    * Empty/absent for languages with no namespace query.
    */
   namespaces?: string[];
+  /**
+   * Architecture role hits extracted from the same tree as defs/calls.
+   * Omit when none (absent ≠ []).
+   */
+  roles?: Array<{
+    role: 'controller' | 'service' | 'repository' | 'entity' | 'handler' | 'router';
+    layer: 'routing' | 'middleware' | 'services' | 'domain' | 'data-access' | 'infrastructure' | 'presentation' | 'config' | 'testing' | 'shared';
+    confidence: number;
+    signal: string;
+    packId: string;
+  }>;
   /** Non-fatal issues (e.g. a query that failed to compile for this grammar). */
   warnings?: string[];
 }

@@ -237,6 +237,33 @@ describe('formatText', () => {
     expect(txt).not.toContain('Project Relationship Diagram');
     expect(txt).not.toContain('flowchart LR');
   });
+
+  it('lists Boundary violations (N) when the architecture result has them', () => {
+    const text = formatText(makeArtifact({
+      extended: {
+        architecture: {
+          archetype: 'aspnet',
+          archetypeConfidence: 0.9,
+          totalClassified: 4,
+          unclassified: 0,
+          layers: [],
+          violations: [
+            {
+              fromFile: 'src/Domain/Order.cs',
+              toFile: 'src/Infrastructure/Bus.cs',
+              fromLayer: 'domain',
+              toLayer: 'infrastructure',
+              edgeKind: 'import',
+              rule: 'clean:domain→infrastructure',
+              confidence: 0.85,
+            },
+          ],
+        },
+      },
+    }));
+    expect(text).toContain('Boundary violations (1)');
+    expect(text).toContain('src/Domain/Order.cs → src/Infrastructure/Bus.cs  clean:domain→infrastructure');
+  });
   it('includes report header', () => {
     const text = formatText(makeArtifact());
     expect(text).toContain('Vibgrate Drift Report');

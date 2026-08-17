@@ -39,6 +39,8 @@ export interface ScanStep {
   subTotal?: number;
   /** Current item label (e.g. file path being processed) */
   subLabel?: string;
+  /** Wall-clock duration once the step is done */
+  durationMs?: number;
 }
 
 export interface LiveStats {
@@ -179,20 +181,21 @@ export class ScanProgress {
     this.render();
   }
 
-  /** Mark a step as completed */
-  completeStep(id: string, detail?: string, count?: number): void {
+  /** Mark a step as completed. Pass `durationMs` when the work started before `startStep`. */
+  completeStep(id: string, detail?: string, count?: number, durationMs?: number): void {
+    const started = this.stepStartTimes.get(id);
+    const elapsed = durationMs ?? (started !== undefined ? Date.now() - started : undefined);
     const step = this.steps.find((s) => s.id === id);
     if (step) {
       step.status = 'done';
       step.detail = detail;
       step.count = count;
+      if (elapsed !== undefined) step.durationMs = elapsed;
     }
-    // Record timing
-    const started = this.stepStartTimes.get(id);
-    if (started) {
-      this.stepTimings.push({ id, durationMs: Date.now() - started });
+    if (elapsed !== undefined) {
+      this.stepTimings.push({ id, durationMs: elapsed });
     }
-    this.trace?.record('completeStep', { id, detail, count });
+    this.trace?.record('completeStep', { id, detail, count, durationMs: elapsed });
     this.render();
   }
 
@@ -497,6 +500,9 @@ export class ScanProgress {
     if (step.count !== undefined && step.count > 0) {
       detail += chalk.cyan(` (${step.count})`);
     }
+    if (step.status === 'done') {
+      detail += this.formatStepDuration(step.durationMs);
+    }
 
     return `  ${icon} ${label}${detail}`;
   }
@@ -531,7 +537,7 @@ export class ScanProgress {
   private renderCI(): void {
     for (const step of this.steps) {
       const stateKey = step.status === 'done'
-        ? [step.status, step.detail ?? '', step.count?.toString() ?? ''].join('|')
+        ? [step.status, step.detail ?? '', step.count?.toString() ?? '', step.durationMs?.toString() ?? ''].join('|')
         : step.status;
       if (this.lastLoggedStates.get(step.id) === stateKey) {
         continue;
@@ -565,8 +571,16 @@ export class ScanProgress {
     if (step.count !== undefined && step.count > 0) {
       detail += ` (${step.count})`;
     }
+    detail += this.formatStepDuration(step.durationMs, { chalk: false });
 
     return detail;
+  }
+
+  /** Hide sub-100ms noise (config load, empty ecosystems). */
+  private formatStepDuration(ms: number | undefined, opts: { chalk?: boolean } = {}): string {
+    if (ms === undefined || ms < 100) return '';
+    const text = ` · ${this.formatElapsed(ms)}`;
+    return opts.chalk === false ? text : chalk.dim(text);
   }
 
   // ── Time formatting helpers ──

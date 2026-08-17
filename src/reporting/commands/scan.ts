@@ -3,6 +3,8 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import {
   runCoreScan,
+  refineArchitectureWithGraph,
+  refineArchitectureWithAstRoles,
   pathExists,
   parseDsn,
   prepareCompressedUpload,
@@ -55,6 +57,19 @@ export function shouldBuildCodeMap(opts: {
   noLocalArtifacts?: boolean;
 }): boolean {
   return opts.graph !== false && !opts.maxPrivacy && !opts.noLocalArtifacts;
+}
+
+function architectureGraphView(graph: VgGraph) {
+  return {
+    nodes: graph.nodes.map((n) => ({ id: n.id, file: n.file, kind: n.kind })),
+    edges: graph.edges.map((e) => ({
+      src: e.src,
+      dst: e.dst,
+      kind: e.kind,
+      confidence: e.confidence,
+      resolution: e.resolution,
+    })),
+  };
 }
 
 /**
@@ -285,7 +300,7 @@ export const scanCommand = new Command('scan')
     collectExcludes,
     [],
   )
-  .option('--concurrency <n>', 'Max concurrent npm calls', '8')
+  .option('--concurrency <n>', 'Max concurrent registry lookups', '8')
   .option('--push', 'Auto-push results to Vibgrate API after scan')
   .option('--dsn <dsn>', 'DSN token for push (or use VIBGRATE_DSN env)')
   .option('--region <region>', 'Override data residency region for push (us, eu)')
@@ -524,7 +539,7 @@ export const scanCommand = new Command('scan')
     // against the freshly built map without a second (memory-heavy) build.
     let builtGraph: VgGraph | null = null;
     if (wantGraph) {
-      scanOpts.postScan = async (report) => {
+      scanOpts.postScan = async (report, ctx) => {
         const result = await buildGraph({
           root: rootDir,
           exclude: opts.exclude,
@@ -537,6 +552,16 @@ export const scanCommand = new Command('scan')
         writeSnapshot(rootDir, result.graph.provenance.corpusHash, result.fileStats, {
           exclude: opts.exclude,
         });
+        // Refine before format/write — architecture is already on these objects.
+        // --no-graph / map failed / --max-privacy never reach here.
+        refineArchitectureWithGraph(
+          { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
+          architectureGraphView(result.graph),
+        );
+        refineArchitectureWithAstRoles(
+          { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
+          result.fileRoles,
+        );
         const { counts } = result.graph.meta;
         return `${counts.nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} edges`;
       };

@@ -4,11 +4,16 @@
 import * as semver from 'semver';
 import { Semaphore } from '../utils/semaphore.js';
 import { getManifestEntry, type PackageVersionManifest } from '../package-version-manifest.js';
+import { RegistryDiskCache, REGISTRY_FETCH_TIMEOUT_MS, REGISTRY_USER_AGENT, type RegistryCacheOptions } from '../utils/registry-disk-cache.js';
 
 export interface RubyGemsMeta {
   latest: string | null;
   stableVersions: string[];
   latestStableOverall: string | null;
+}
+
+function emptyMeta(): RubyGemsMeta {
+  return { latest: null, stableVersions: [], latestStableOverall: null };
 }
 
 /**
@@ -40,86 +45,90 @@ function rubyVersionToSemver(ver: string): string | null {
  */
 export class RubyGemsCache {
   private meta = new Map<string, Promise<RubyGemsMeta>>();
+  private readonly disk: RegistryDiskCache<RubyGemsMeta>;
+  private readonly fetchImpl: typeof fetch;
 
   constructor(
     private sem: Semaphore,
     private manifest?: PackageVersionManifest,
     private offline = false,
-  ) {}
+    options: RegistryCacheOptions = {},
+  ) {
+    this.disk = new RegistryDiskCache<RubyGemsMeta>('rubygems', options);
+    this.fetchImpl = options.fetchImpl ?? fetch;
+  }
 
   get(gem: string): Promise<RubyGemsMeta> {
     const existing = this.meta.get(gem);
     if (existing) return existing;
 
-    const p = this.sem.run(async () => {
-      // Check manifest first (for offline mode)
-      const manifestEntry = getManifestEntry(this.manifest, 'rubygems', gem);
-      if (manifestEntry) {
-        const stableVersions: string[] = [];
-        for (const ver of manifestEntry.versions ?? []) {
-          const sv = rubyVersionToSemver(ver);
-          if (sv) stableVersions.push(sv);
-        }
-        const sorted = [...stableVersions].sort(semver.rcompare);
-        const latestStableOverall = sorted[0] ?? null;
-        return {
-          latest: manifestEntry.latest ? rubyVersionToSemver(manifestEntry.latest) ?? latestStableOverall : latestStableOverall,
-          stableVersions,
-          latestStableOverall,
-        };
-      }
-
-      if (this.offline) {
-        return { latest: null, stableVersions: [], latestStableOverall: null };
-      }
-
-      try {
-        // RubyGems.org API: https://rubygems.org/api/v1/versions/{gem}.json
-        const url = `https://rubygems.org/api/v1/versions/${encodeURIComponent(gem)}.json`;
-        const response = await fetch(url, {
-          signal: AbortSignal.timeout(10_000),
-          headers: { 'Accept': 'application/json' },
-        });
-
-        if (!response.ok) {
-          return { latest: null, stableVersions: [], latestStableOverall: null };
-        }
-
-        const data = await response.json() as Array<{
-          number?: string;
-          prerelease?: boolean;
-        }>;
-
-        if (!Array.isArray(data)) {
-          return { latest: null, stableVersions: [], latestStableOverall: null };
-        }
-
-        // Convert Ruby versions to semver and filter to stable
-        const stableVersions: string[] = [];
-        for (const entry of data) {
-          if (entry.prerelease) continue;
-          const ver = entry.number;
-          if (!ver) continue;
-          const sv = rubyVersionToSemver(ver);
-          if (sv) stableVersions.push(sv);
-        }
-
-        // Sort descending to find latest
-        const sorted = [...stableVersions].sort(semver.rcompare);
-        const latestStableOverall = sorted[0] ?? null;
-
-        return {
-          latest: latestStableOverall,
-          stableVersions,
-          latestStableOverall,
-        };
-      } catch {
-        return { latest: null, stableVersions: [], latestStableOverall: null };
-      }
-    });
-
+    const p = this.resolve(gem);
     this.meta.set(gem, p);
     return p;
+  }
+
+  private async resolve(gem: string): Promise<RubyGemsMeta> {
+    const manifestEntry = getManifestEntry(this.manifest, 'rubygems', gem);
+    if (manifestEntry) {
+      const stableVersions: string[] = [];
+      for (const ver of manifestEntry.versions ?? []) {
+        const sv = rubyVersionToSemver(ver);
+        if (sv) stableVersions.push(sv);
+      }
+      const sorted = [...stableVersions].sort(semver.rcompare);
+      const latestStableOverall = sorted[0] ?? null;
+      return {
+        latest: manifestEntry.latest ? rubyVersionToSemver(manifestEntry.latest) ?? latestStableOverall : latestStableOverall,
+        stableVersions,
+        latestStableOverall,
+      };
+    }
+
+    const fromDisk = await this.disk.read(gem);
+    if (fromDisk) return fromDisk;
+    if (this.offline) return emptyMeta();
+
+    const fetched = await this.sem.run(() => this.fetchRemote(gem));
+    if (fetched.persist) await this.disk.write(gem, fetched.meta);
+    return fetched.meta;
+  }
+
+  private async fetchRemote(gem: string): Promise<{ meta: RubyGemsMeta; persist: boolean }> {
+    try {
+      const url = `https://rubygems.org/api/v1/versions/${encodeURIComponent(gem)}.json`;
+      const response = await this.fetchImpl(url, {
+        signal: AbortSignal.timeout(REGISTRY_FETCH_TIMEOUT_MS),
+        headers: { Accept: 'application/json', 'User-Agent': REGISTRY_USER_AGENT },
+      });
+
+      if (response.status === 404) return { meta: emptyMeta(), persist: true };
+      if (!response.ok) return { meta: emptyMeta(), persist: false };
+
+      const data = await response.json() as Array<{
+        number?: string;
+        prerelease?: boolean;
+      }>;
+
+      if (!Array.isArray(data)) return { meta: emptyMeta(), persist: true };
+
+      const stableVersions: string[] = [];
+      for (const entry of data) {
+        if (entry.prerelease) continue;
+        const ver = entry.number;
+        if (!ver) continue;
+        const sv = rubyVersionToSemver(ver);
+        if (sv) stableVersions.push(sv);
+      }
+      const sorted = [...stableVersions].sort(semver.rcompare);
+      const latestStableOverall = sorted[0] ?? null;
+
+      return {
+        meta: { latest: latestStableOverall, stableVersions, latestStableOverall },
+        persist: true,
+      };
+    } catch {
+      return { meta: emptyMeta(), persist: false };
+    }
   }
 }
 
@@ -131,7 +140,7 @@ export async function checkRubyGemsAccess(): Promise<boolean> {
   try {
     const response = await fetch('https://rubygems.org/api/v1/gems/rails.json', {
       signal: AbortSignal.timeout(5_000),
-      headers: { 'Accept': 'application/json' },
+      headers: { Accept: 'application/json', 'User-Agent': REGISTRY_USER_AGENT },
     });
     return response.ok;
   } catch {

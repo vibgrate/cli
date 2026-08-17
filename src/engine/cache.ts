@@ -18,7 +18,7 @@ import type { FileParse } from './types.js';
  */
 
 // Bumped to /4: optional mtime+size fingerprint for stat-skip fast path.
-const CACHE_VERSION = 'vg-parse-cache/4';
+const CACHE_VERSION = 'vg-parse-cache/5';
 
 interface CacheEntry {
   hash: string;
@@ -41,6 +41,8 @@ export interface ParseCache {
   set(rel: string, parse: FileParse, stat?: { mtimeMs: number; size: number }): void;
   /** Drop entries for files no longer present. */
   prune(currentRels: Set<string>): void;
+  /** Every cached parse, sorted by rel — used to recover architecture roles. */
+  allParses(): FileParse[];
   save(): void;
 }
 
@@ -106,6 +108,11 @@ export function loadCache(
       for (const rel of Object.keys(data.entries)) {
         if (!currentRels.has(rel)) delete data.entries[rel];
       }
+    },
+    allParses() {
+      return Object.keys(data.entries)
+        .sort((a, b) => a.localeCompare(b))
+        .map((rel) => data.entries[rel]!.parse);
     },
     save() {
       fs.mkdirSync(cacheDir(root), { recursive: true });

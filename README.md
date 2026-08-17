@@ -534,6 +534,7 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | `vg impact <file>` | What breaks if you change it — and the tests to run |
 | `vg install` / `vg uninstall` | Wire (or remove) **Vibgrate AI Context** + skill in your AI assistant (`--detect`, `--all`, `--list`) |
 | `vg lib <package>` | Version-correct, drift-annotated library docs |
+| `vg locale` | Manage your app's translations — locale projects, keys, and translations in Vibgrate Cloud (`push` / `pull` / `status`; `vg localize` is an alias) |
 | `vg map` / `vg hubs` / `vg areas` / `vg oddities` | Map insights: overview, most-depended-on code, natural groupings, cross-area smells |
 | `vg models` | Code Modes (Spark / Flow / Forge) + local fleet (Ollama / LM Studio / gguf); `install` / `pull` by default (`--dry-run` to preview) |
 | `vg module` | Manage optional local modules (`relevance`, `hcs`): `status`, `install`, `remove` |
