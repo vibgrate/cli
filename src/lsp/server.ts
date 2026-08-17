@@ -25,6 +25,9 @@ import * as semver from 'semver';
 
 import { runCoreScan } from '../core-open/index.js';
 import type { ScanArtifact, ScanOptions, DependencyRow, ProjectScan } from '../core-open/index.js';
+
+/** Element type of `ScanArtifact.findings` — avoids a deep-path type import. */
+type Finding = NonNullable<ScanArtifact['findings']>[number];
 import { perDependencyDrift } from '../core-open/scoring/dependency-drift-v3.js';
 import { loadAdvancedScanHook } from '../reporting/advanced-hook.js';
 import { VERSION } from '../version.js';
@@ -46,6 +49,8 @@ import { RefreshScheduler } from '../engine/refresh-scheduler.js';
 import { manifestHash, loadScanCache, writeScanCache, isDependencyFile } from './scan-cache.js';
 import { SKIP_DIRS } from '../engine/discover.js';
 import { recordScore, lastEntry, deltaFrom, recentHistory, type ScoreHistoryEntry } from './score-history.js';
+import { readIgnores, type IgnoreEntry } from './ignores.js';
+import { readInventory, recordInventory, newlyDrifted, inventoryKey } from './inventory-history.js';
 import { runGraphQuery, type GraphQueryParams, type GraphQueryResult } from './graph-query.js';
 import {
   enrichVulns,
@@ -233,6 +238,10 @@ export interface InlineItem {
   text: string;
   band: Band;
   package: string;
+  /** Actively ignored via `.vibgrate/ignore.json` — calmed, never hidden. */
+  ignored?: boolean;
+  /** Drifted now but not in the previous recorded scan (same methodology). */
+  newSincePrev?: boolean;
 }
 
 export interface InlineNotification {
@@ -320,6 +329,10 @@ export class VibgrateLanguageServer {
   private readonly conn: Connection;
   private readonly docs = new Map<string, string>(); // uri → text
   private artifact: ScanArtifact | null = null;
+  /** Active `.vibgrate/ignore.json` entries, refreshed once per scan. */
+  private ignores = new Map<string, IgnoreEntry>();
+  /** `project.path::package` drifted now but not in the previous snapshot. */
+  private newDrift = new Set<string>();
   private scanning = false;
   private queued = false;
   /**
@@ -606,6 +619,21 @@ export class VibgrateLanguageServer {
     const delta = deltaFrom(lastEntry(this.opts.root), historyEntry);
     recordScore(this.opts.root, historyEntry);
 
+    // Per-dependency state for the inline/hover surfaces — all O(deps), once
+    // per scan, never in a hover or decoration hot path (coverage plan §5).
+    this.ignores = readIgnores(this.opts.root);
+    const driftedKeys: string[] = [];
+    for (const proj of a.projects ?? []) {
+      for (const dep of proj.dependencies ?? []) {
+        if (dep.drift === 'major-behind' || dep.drift === 'minor-behind') {
+          driftedKeys.push(inventoryKey(proj.path, dep.package));
+        }
+      }
+    }
+    const snapshot = { ts: a.timestamp, methodology: historyEntry.methodology, drifted: driftedKeys };
+    this.newDrift = newlyDrifted(readInventory(this.opts.root), snapshot);
+    recordInventory(this.opts.root, snapshot);
+
     const payload: ScoreNotification = {
       score: a.drift.score,
       band,
@@ -648,12 +676,19 @@ export class VibgrateLanguageServer {
       if (dep.drift === 'current' || dep.drift === 'unknown') continue;
       const line = findPackageLine(text, dep.package, kind);
       if (line === -1) continue;
+      const ignored = this.ignores.get(dep.package.toLowerCase());
+      const isNew = project ? this.newDrift.has(inventoryKey(project.path, dep.package)) : false;
       items.push({
         line,
         endCol: endOfLine(text, line),
-        text: inlineLabel(dep),
-        band: bandForDependency(dep),
+        text: inlineLabel(dep, { ignored: !!ignored, isNew }),
+        // An acknowledged ignore stops shouting: the engine calms the band to
+        // low (presentation only — the score is untouched). The client still
+        // never derives a band; it renders this one.
+        band: ignored ? 'low' : bandForDependency(dep),
         package: dep.package,
+        ...(ignored ? { ignored: true } : {}),
+        ...(isNew ? { newSincePrev: true } : {}),
       });
     }
     this.conn.notify('vibgrate/inline', { uri, items } satisfies InlineNotification);
@@ -667,6 +702,12 @@ export class VibgrateLanguageServer {
     const diagnostics = (a.findings ?? [])
       .filter((f) => DIAGNOSTIC_RULES.has(f.ruleId))
       .filter((f) => project && sameProject(f.location, project.path))
+      // A per-package finding for an actively ignored dependency stays out of
+      // the shared Problems panel; the calmed inline label still marks it.
+      .filter((f) => {
+        const pkg = f.details?.['package'];
+        return !(typeof pkg === 'string' && this.ignores.has(pkg.toLowerCase()));
+      })
       .map((f) => {
         const line = Math.max(0, findRuntimeLine(text, kind));
         return {
@@ -704,11 +745,22 @@ export class VibgrateLanguageServer {
     const dep = (project?.dependencies ?? []).find(
       (d) => findPackageLine(text, d.package, kind) === line,
     );
-    if (!dep) return null;
+    if (!dep) {
+      // Not a dependency line — the runtime line answers with the EOL card
+      // (coverage plan §6 P1-5): real endoflife.date-sourced dates, no field
+      // competitor hovers here at all.
+      if (project && line === Math.max(0, findRuntimeLine(text, kind))) {
+        const value = runtimeHoverMarkdown(project, a.findings ?? []);
+        return value ? { contents: { kind: 'markdown', value } } : null;
+      }
+      return null;
+    }
 
     const contribution = a.drift.dependencyDrift?.top.find((t) => t.package === dep.package)?.drift ?? null;
+    const ignored = this.ignores.get(dep.package.toLowerCase());
+    const isNew = project ? this.newDrift.has(inventoryKey(project.path, dep.package)) : false;
     return {
-      contents: { kind: 'markdown', value: hoverMarkdown(dep, contribution) },
+      contents: { kind: 'markdown', value: hoverMarkdown(dep, contribution, { ignored, isNew }) },
     };
   }
 
@@ -1603,8 +1655,13 @@ function inRangeStep(dep: DependencyRow): { version: string; size: 'minor' | 'pa
 }
 
 /** The end-of-line decoration text. Terse: it sits in the user's code. */
-function inlineLabel(dep: DependencyRow): string {
+function inlineLabel(dep: DependencyRow, state?: { ignored?: boolean; isNew?: boolean }): string {
   const bits: string[] = [];
+  if (state?.ignored) bits.push('ignored');
+  // Maintenance floors are score-defining facts — they belong on the line,
+  // not only in the hover (coverage plan §6 P1-4, state vocabulary).
+  if (dep.unsupported) bits.push('unsupported');
+  else if (dep.abandoned) bits.push('abandoned');
   if (dep.drift === 'major-behind') {
     // A range anchored below the latest major can still have room inside it:
     // name the in-range target first (what an install alone can reach), then
@@ -1623,7 +1680,54 @@ function inlineLabel(dep: DependencyRow): string {
   if (dep.ageDays != null && dep.ageDays >= 1) {
     bits.push(`${Math.round(dep.ageDays).toLocaleString('en-US')}d stale`);
   }
+  if (state?.isNew) bits.push('new');
   return bits.join(' · ');
+}
+
+/**
+ * Hover for the runtime declaration line (engines/tool-versions/FROM…): the
+ * EOL card. Only real facts: `ProjectScan.runtimeEolDate` (Runtime Catalog /
+ * endoflife.date — never estimated) plus this project's runtime findings.
+ * Returns null when there is nothing real to say.
+ */
+function runtimeHoverMarkdown(project: ProjectScan, findings: Finding[], now = Date.now()): string | null {
+  const lines: string[] = [];
+  const label = runtimeHorizonLabel(project);
+
+  if (project.runtimeEolDate) {
+    const t = Date.parse(project.runtimeEolDate);
+    if (Number.isFinite(t)) {
+      const days = Math.round((t - now) / (24 * 60 * 60 * 1000));
+      const when =
+        days < 0
+          ? `**EOL ${project.runtimeEolDate}** — ${Math.abs(days).toLocaleString('en-US')} days ago`
+          : `EOL ${project.runtimeEolDate} — in ${days.toLocaleString('en-US')} days`;
+      lines.push(`**${label}**`);
+      lines.push('');
+      lines.push(days < 0 ? `$(warning) ${when}` : when);
+    }
+  }
+
+  const runtimeFindings = findings
+    .filter(
+      (f) =>
+        DIAGNOSTIC_RULES.has(f.ruleId) &&
+        (f.ruleId.startsWith('vibgrate/runtime') || f.ruleId === 'vibgrate/eol'),
+    )
+    .filter((f) => sameProject(f.location, project.path));
+  if (runtimeFindings.length) {
+    if (!lines.length) {
+      lines.push(`**${label}**`);
+    }
+    lines.push('');
+    for (const f of runtimeFindings.slice(0, 4)) lines.push(`- ${f.message}`);
+  }
+
+  if (!lines.length) return null;
+  lines.push('');
+  lines.push('---');
+  lines.push('$(shield) EOL dates from the Runtime Catalog (endoflife.date). Resolved locally.');
+  return lines.join('\n');
 }
 
 /** `command:` URI for a `MarkdownString` link — one JSON-encoded arg object, matching `executeCommand`. */
@@ -1681,12 +1785,27 @@ function versionJourney(yours: string, latest: string): string | null {
  * drift" focuses the Dependencies panel and expands this package's row,
  * which already carries the full explanation (guards, floors, age).
  */
-function hoverMarkdown(dep: DependencyRow, contribution: number | null): string {
+function hoverMarkdown(
+  dep: DependencyRow,
+  contribution: number | null,
+  state?: { ignored?: IgnoreEntry; isNew?: boolean },
+): string {
   const lines: string[] = [];
   const badge = driftBadge(dep);
   const contributionText = contribution != null ? ` · contributes +${Math.round(contribution)} to drift` : '';
   lines.push(badge ? `**${dep.package}**  \`${badge}\`${contributionText}` : `**${dep.package}**`);
   lines.push('');
+  if (state?.ignored) {
+    const ig = state.ignored;
+    const why = ig.reason ? ` — ${ig.reason}` : '';
+    const until = ig.until ? ` (until ${ig.until})` : '';
+    lines.push(`$(eye-closed) **Ignored**${why}${until} · \`.vibgrate/ignore.json\``);
+    lines.push('');
+  }
+  if (state?.isNew) {
+    lines.push('_New drift — this dependency was not behind in the previous recorded scan._');
+    lines.push('');
+  }
 
   const yours = dep.resolvedVersion ?? dep.currentSpec;
   const drifted = dep.drift === 'major-behind' || dep.drift === 'minor-behind';

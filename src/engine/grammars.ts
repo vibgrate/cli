@@ -63,7 +63,7 @@ export function grammarSetVersion(): string {
  * fallback so dev/test runs without a prior `pnpm build` never load a
  * known-bad prebuilt, but they are never a complete grammar set.
  */
-function grammarDirs(): string[] {
+export function grammarDirs(): string[] {
   const dirs: string[] = [];
   // the `--grammars <dir>` override (offline / air-gapped), if set
   if (grammarsOverride) dirs.push(grammarsOverride);
@@ -122,7 +122,7 @@ export function resolvedGrammarFiles(): { fileName: string; absPath: string }[] 
   }));
 }
 
-async function ensureParserInit(): Promise<void> {
+export async function ensureParserInit(): Promise<void> {
   if (!parserInit) parserInit = Parser.init();
   await parserInit;
 }

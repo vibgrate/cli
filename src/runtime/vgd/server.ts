@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
 import { VGD_PROTOCOL_VERSION, parseRequest, type VgdResponse } from './protocol.js';
+import { VERSION } from '../../version.js';
 import { WorkspaceRegistry } from './registry.js';
 import { vgdPidPath, vgdSocketPath } from './paths.js';
 import { queryGraph } from '../../engine/query.js';
@@ -33,9 +34,9 @@ export interface VgdServerOptions {
   log?: (message: string) => void;
   /**
    * Invoked (shortly after the reply is written) when a client sends the
-   * `shutdown` op. Only a standalone `vg daemon start` passes this — an
-   * in-process vgd (e.g. inside `vg code`) leaves it unset, and the op is
-   * refused so another process can never take down the owning session.
+   * `shutdown` op. Only a standalone `vg daemon start` passes this — a
+   * listener started without the hook refuses the op so another process
+   * cannot take down the owning process.
    */
   onShutdownRequest?: () => void;
 }
@@ -169,13 +170,14 @@ async function handleLine(
         graphSlots: ctx.registry.graphs.size(),
         version: VGD_PROTOCOL_VERSION,
         socketPath: ctx.socketPath,
+        cliVersion: VERSION,
       };
     case 'shutdown': {
       if (!ctx.onShutdownRequest) {
         return {
           ok: false,
           error:
-            'this vgd is embedded in another process (e.g. vg code) and cannot be stopped remotely — stop the owning process instead',
+            'this vgd cannot be stopped remotely — it is running inside another process; stop that process instead',
           code: 'shutdown_unsupported',
         };
       }

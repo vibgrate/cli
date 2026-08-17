@@ -3,7 +3,7 @@ import { buildGraph } from '../src/engine/build.js';
 import { exportGraph, formatForExt } from '../src/engine/export.js';
 import { redactGraph, buildEnvelope } from '../src/engine/push.js';
 import { makeProject, cleanup, SAMPLE_FILES } from './helpers.js';
-import type { VgGraph } from '../src/schema.js';
+import { SCHEMA_VERSION, type VgGraph } from '../src/schema.js';
 
 let graph: VgGraph;
 let dir: string;
@@ -64,7 +64,9 @@ describe('push envelope + redaction', () => {
   it('builds a decoupled envelope (no upload)', () => {
     const env = buildEnvelope(dir, graph);
     expect(env.artifactType).toBe('graph');
-    expect(env.schemaVersion).toBe('vg-graph/1.0');
+    // The envelope tracks the graph schema rather than pinning a literal, so a
+    // schema bump cannot leave the upload envelope claiming the old version.
+    expect(env.schemaVersion).toBe(SCHEMA_VERSION);
     expect(env.graph.nodes.length).toBe(graph.nodes.length);
   });
 });

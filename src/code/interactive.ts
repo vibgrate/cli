@@ -262,8 +262,8 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
     mcp ? mcpExternalTools(mcp, agentApprove(opts, prompter)) : undefined,
   );
 
-  // Fusion Runtime: attach to (or own) a local vgd session instead of spawning
-  // `vg serve` as GraphProcess. Failure degrades to in-process graph only.
+  // Fusion Runtime: attach to the standalone vgd (ensure if needed) instead of
+  // spawning `vg serve` as GraphProcess. Failure degrades to the in-process graph.
   const runtime = await startCodeRuntimeSession({ root });
   // Multi-branch ActiveGraph: warm maps per gitRef; ensureCurrent on each turn
   // so `git checkout` mid-session switches the tool-visible graph (plan §4.1.1).

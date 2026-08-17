@@ -11,6 +11,8 @@ export type StageName =
   | 'tsc'
   | 'scip'
   | 'tests'
+  /** Structural extraction over the infrastructure/CI corpus (engine/toolchain/). */
+  | 'toolchain'
   | 'analyze'
   | 'facts'
   | 'ground'

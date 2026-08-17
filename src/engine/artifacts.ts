@@ -139,6 +139,10 @@ const DEFAULT_GITIGNORE = [
   // Neither is a snapshot artifact like scan_result.json/baseline.json, which
   // are intentionally left out of this list for a user to commit if they choose.
   'score-history.jsonl',
+  // Per-machine drifted-dependency snapshot behind the inline "new" marker
+  // (lsp/inventory-history.ts). ignore.json is deliberately NOT here — an
+  // ignore with a reason is a team decision that belongs in review.
+  'inline-inventory.json',
   'run-outcomes.jsonl',
   // Standing approval rules are one developer's consent — sharing them via git
   // would silently grant their "Always allow" decisions to every teammate's

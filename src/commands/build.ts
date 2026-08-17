@@ -18,6 +18,7 @@ import { renderHtml } from '../engine/html.js';
 import { UsageError } from '../engine/discover.js';
 import { ResourceLimitError } from '../engine/limits.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
+import { resolveSelfJsEntry } from '../util/cli-invocation.js';
 import { c, info, out, json } from '../util/output.js';
 import { printLogo } from '../util/logo.js';
 import { ProgressBar } from '../util/progress.js';
@@ -360,7 +361,7 @@ async function verifyGraph(root: string, opts: BuildCmdOpts, global: GlobalOpts)
 function maybeWarmEmbeddings(root: string, graph: VgGraph, global: GlobalOpts, warm: boolean): void {
   if (!warm || global.json || global.quiet || global.local) return;
   if (!process.stdout.isTTY && !process.stderr.isTTY) return;
-  const cli = process.argv[1];
+  const cli = resolveSelfJsEntry() ?? process.argv[1];
   if (!cli) return;
   const modelId = resolveEmbedModel();
   const ready = isModelReady(modelId);

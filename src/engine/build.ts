@@ -24,6 +24,8 @@ import { hashString, hashBytes, canonicalize, shortId } from './hash.js';
 import { grammarSetVersion } from './grammars.js';
 import { classifyEpistemic } from './epistemic.js';
 import { discoverDocs, documentNodesFromDocs } from './docs-ingest.js';
+import { extractToolchain } from './toolchain/index.js';
+import { toolchainGrammarSetVersion } from './toolchain/grammars.js';
 import { shardTsProjects } from './ts-projects.js';
 import { writeGraphIndex } from './index-db.js';
 import { StageTimer, type StageTimings } from './timing.js';
@@ -158,7 +160,10 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   }
   checkMemoryBudget('discovery', limits.memoryBudgetMb);
 
-  const grammars = grammarSetVersion();
+  // The toolchain grammar set is a determinism input too: an HCL grammar change
+  // can change the Terraform structure extracted, so it belongs in the
+  // reproducibility fingerprint alongside the source grammars.
+  const grammars = `${grammarSetVersion()}+${toolchainGrammarSetVersion()}`;
   const cache = loadCache(root, {
     toolVersion: VERSION,
     grammars,
@@ -472,16 +477,41 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const docNodes = documentNodesFromDocs(docs);
   if (docNodes.length) nodes = [...nodes, ...docNodes];
 
+  // Structural extraction over the same discovered set (engine/toolchain/).
+  // The `document` nodes above stay — they remain the semantic-ask surface —
+  // and this adds the *structure*: resources, workloads, jobs, images, charts.
+  //
+  // NB: this reads `docs`, not the source corpus. Registering `.tf`/`.yaml` as
+  // source languages would change file counts that feed billing tiers, so the
+  // toolchain corpus is deliberately kept separate.
+  timer.start('toolchain');
+  const fileNodesByPath = new Map<string, string>();
+  for (const node of nodes) {
+    if (node.kind === 'file') fileNodesByPath.set(node.file.replace(/\\/g, '/'), node.id);
+  }
+  const toolchainResult = await extractToolchain(docs, { fileNodes: fileNodesByPath });
+  if (toolchainResult.nodes.length) nodes = [...nodes, ...toolchainResult.nodes];
+  timer.end('toolchain');
+
   // Analyse → centrality/areas/surprise (test/coverage edges excluded from these).
   timer.start('analyze');
-  const analysis = analyze(nodes, linked.edges, {
+  const graphEdges = toolchainResult.edges.length
+    ? [...linked.edges, ...toolchainResult.edges]
+    : linked.edges;
+  const analysis = analyze(nodes, graphEdges, {
     cluster: options.cluster,
     tier: options.analysisTier,
   });
   timer.end('analyze');
   checkMemoryBudget('analysis', limits.memoryBudgetMb);
 
-  const languages = [...new Set([...parses.map((p) => p.lang), ...docNodes.map((n) => n.lang)])].sort();
+  const languages = [
+    ...new Set([
+      ...parses.map((p) => p.lang),
+      ...docNodes.map((n) => n.lang),
+      ...toolchainResult.nodes.map((n) => n.lang),
+    ]),
+  ].sort();
   const edgeKinds = [...new Set(analysis.edges.map((e) => e.kind))].sort() as EdgeKind[];
   const corpusHash = computeCorpusHash(parses, hashes);
 

@@ -2,9 +2,10 @@
  * The VG Code ⇄ Vibgrate Graph process boundary (VG-CLI-CODE §11).
  *
  * @deprecated Prefer {@link startCodeRuntimeSession} (`src/code/runtime-session.ts`).
- * Interactive `vg code` no longer spawns `vg serve`; it attaches to (or owns)
- * a local `vgd` session. This class remains for tests and any external callers
- * that still need a managed `vg serve` child.
+ * Interactive `vg code` no longer spawns `vg serve`; it attaches to the
+ * standalone `vgd` (starting it with `vg daemon ensure` if needed). This class
+ * remains for tests and any external callers that still need a managed
+ * `vg serve` child.
  *
  * When VG Code enters coding mode it historically spawned Vibgrate Graph
  * (`vg serve`) as a **separate child process** and killed it when the session

@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { redactSecrets, redactUrlCredentials } from '../core-open/utils/redact.js';
-import type { VgGraph } from '../schema.js';
+import { SCHEMA_VERSION, type VgGraph } from '../schema.js';
 
 /**
  * The deferred, decoupled push envelope (VG-PACKAGE-AND-SCHEMA §7). In the open
@@ -11,7 +11,8 @@ import type { VgGraph } from '../schema.js';
  */
 
 export interface GraphUploadEnvelope {
-  schemaVersion: 'vg-graph/1.0';
+  /** Mirrors the graph's own schema version — never pinned to a literal here. */
+  schemaVersion: typeof SCHEMA_VERSION;
   artifactType: 'graph';
   scanIngestId?: string;
   vcs: { sha: string; shortSha: string; branch: string };
@@ -25,7 +26,7 @@ export function buildEnvelope(root: string, graph: VgGraph, scanIngestId?: strin
   const branch = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']) ?? 'HEAD';
   const remoteUrl = git(root, ['config', '--get', 'remote.origin.url']) ?? undefined;
   return {
-    schemaVersion: 'vg-graph/1.0',
+    schemaVersion: SCHEMA_VERSION,
     artifactType: 'graph',
     scanIngestId,
     vcs: { sha, shortSha: sha.slice(0, 12), branch },

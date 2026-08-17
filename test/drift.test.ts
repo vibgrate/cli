@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import * as path from 'node:path';
 import { inventory } from '../src/engine/drift.js';
 import { makeProject, cleanup } from './helpers.js';
 
@@ -58,5 +59,14 @@ describe('drift inventory — nested monorepo manifests', () => {
     });
     const inv = inventory(root);
     expect(inv.records.find((r) => r.name === 'leftpad')?.installed).toBe('1.3.0');
+  });
+
+  it('does not treat a node_modules above the scan root as installed', () => {
+    const outer = project({
+      'node_modules/outsider/package.json': JSON.stringify({ name: 'outsider', version: '9.9.9' }),
+      'app/package.json': JSON.stringify({ dependencies: { outsider: '^1.0.0' } }),
+    });
+    const inv = inventory(path.join(outer, 'app'));
+    expect(inv.records.find((r) => r.name === 'outsider')?.installed).toBeUndefined();
   });
 });
