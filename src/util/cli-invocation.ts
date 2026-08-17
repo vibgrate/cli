@@ -1,5 +1,9 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
+
+/** JS entry we can hand to `node` when re-spawning this CLI. */
+const JS_ENTRY = /\.(c|m)?js$/i;
 
 /**
  * How the user should re-invoke this CLI in a "next step" hint.
@@ -123,4 +127,42 @@ export function resolveCliInvocation(which?: (cmd: string) => string | null): st
 /** Reset the memoized invocation. Test-only. */
 export function resetCliInvocationCache(): void {
   cached = undefined;
+}
+
+/**
+ * Absolute path of the JS file this process is running, when there is one.
+ *
+ * npm / pnpm / yarn / bun global bins are symlinks named `vg` (no `.js`
+ * suffix). Callers that re-spawn as `node ${argv[1]} …` must realpath those,
+ * otherwise `argv[1]` looks like a packaged binary and they exec
+ * `node daemon …` — Node then exits 1 looking for a module named `daemon`.
+ *
+ * Returns null for a packaged binary, where `argv[1]` is the first user
+ * argument (`daemon`, `scan`, …) rather than a script path.
+ */
+export function resolveSelfJsEntry(argv1: string = process.argv[1] ?? ''): string | null {
+  if (!argv1) return null;
+  const candidates = [argv1];
+  try {
+    const real = fs.realpathSync(argv1);
+    if (real !== argv1) candidates.push(real);
+  } catch {
+    /* argv[1] is not a path (packaged binary: first CLI arg) */
+  }
+  for (const p of candidates) {
+    if (!JS_ENTRY.test(p)) continue;
+    return path.isAbsolute(p) ? p : path.resolve(p);
+  }
+  return null;
+}
+
+/**
+ * Command + argv to re-invoke this CLI (detached daemon start, background
+ * embed warm, …). Prefers `node <js-entry> <args>` so a global `vg` symlink
+ * is not mistaken for a packaged binary.
+ */
+export function reinvokeCli(args: string[]): { command: string; argv: string[] } {
+  const js = resolveSelfJsEntry();
+  if (js) return { command: process.execPath, argv: [js, ...args] };
+  return { command: process.argv[0] || 'vg', argv: args };
 }

@@ -329,7 +329,7 @@ async function releaseWindowsFileLocks(cwd: string, keepVersion: string): Promis
     } else if (result === 'refused') {
       console.log(
         chalk.dim(
-          'A vgd embedded in another process (e.g. vg code) is running — close that session if the update reports a locked file.',
+          'A vgd that cannot be stopped remotely is running — close the process holding the socket if the update reports a locked file.',
         ),
       );
     }
@@ -573,7 +573,7 @@ async function restartVgdAndReport(): Promise<void> {
     console.log(chalk.dim('Restarted the vgd daemon on the new version.'));
   } else if (result === 'refused') {
     console.log(
-      chalk.dim('A vgd embedded in another process (e.g. vg code) is running — restart that session to pick up the update.'),
+      chalk.dim('A vgd that cannot be stopped remotely is running — restart the process holding the socket to pick up the update.'),
     );
   } else {
     console.log(

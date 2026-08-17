@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   resolveCliInvocation,
+  resolveSelfJsEntry,
   resetCliInvocationCache,
   isEphemeralNpxBinary,
   NPX_INVOCATION,
@@ -75,6 +76,24 @@ describe('resolveCliInvocation', () => {
     expect(isEphemeralNpxBinary(ownBin)).toBe(false);
     // Windows-style separators in the cache segment are recognised too.
     expect(isEphemeralNpxBinary('C:\\Users\\me\\AppData\\npm-cache\\_npx\\h\\vg.cmd')).toBe(true);
+  });
+
+  it('resolves a global `vg` symlink to the real cli.js (npm bin)', () => {
+    // Regression: `vg daemon restart` treated argv[1] `/usr/local/bin/vg` as a
+    // packaged binary because it has no .js suffix, then spawned
+    // `node daemon start` and the child exited 1 (MODULE_NOT_FOUND).
+    const cliJs = path.join(dir, 'cli.js');
+    const bin = path.join(dir, 'vg');
+    fs.writeFileSync(cliJs, '#!/usr/bin/env node\n');
+    fs.symlinkSync(cliJs, bin);
+    expect(resolveSelfJsEntry(bin)).toBe(fs.realpathSync(cliJs));
+    expect(resolveSelfJsEntry(cliJs)).toBe(path.resolve(cliJs));
+  });
+
+  it('returns null when argv[1] is a CLI argument, not a script path', () => {
+    expect(resolveSelfJsEntry('')).toBeNull();
+    expect(resolveSelfJsEntry('daemon')).toBeNull();
+    expect(resolveSelfJsEntry('scan')).toBeNull();
   });
 
   it('memoizes the default lookup but re-evaluates when a which is injected', () => {

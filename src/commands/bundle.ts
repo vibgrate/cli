@@ -2,6 +2,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Command } from 'commander';
 import { resolvedGrammarFiles, grammarSetVersion } from '../engine/grammars.js';
+import {
+  TOOLCHAIN_GRAMMARS,
+  resolveToolchainGrammar,
+} from '../engine/toolchain/grammars.js';
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { catalogPath, libDir } from '../engine/lib.js';
 import { serializeGraph, stableStringify } from '../engine/serialize.js';
@@ -42,6 +46,16 @@ export function registerBundle(program: Command): void {
       let grammarCount = 0;
       for (const { fileName, absPath } of grammarFiles) {
         fs.copyFileSync(absPath, path.join(outDir, 'grammars', fileName));
+        grammarCount++;
+      }
+      // Toolchain grammars (infrastructure/CI corpus) resolve through their own
+      // registry — without them an air-gapped bundle would silently lose
+      // structural IaC extraction. A missing one is not fatal: extraction for
+      // that format degrades, exactly as it does outside a bundle.
+      for (const id of Object.keys(TOOLCHAIN_GRAMMARS).sort()) {
+        const absPath = resolveToolchainGrammar(id);
+        if (!absPath) continue;
+        fs.copyFileSync(absPath, path.join(outDir, 'grammars', path.basename(absPath)));
         grammarCount++;
       }
 

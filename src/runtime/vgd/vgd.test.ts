@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseRequest, VGD_PROTOCOL_VERSION } from './protocol.js';
+import { VERSION } from '../../version.js';
 import { WorkspaceRegistry } from './registry.js';
 import { startVgdServer } from './server.js';
 import { defaultVgdTimeoutMs, vgdIsRunning, vgdRequest } from './client.js';
@@ -109,8 +110,7 @@ describe('vgd server + client', () => {
   }, 10_000);
 
   it('refuses shutdown without a hook (embedded daemon) and honours it with one', async () => {
-    // Embedded (no hook — e.g. the in-process vgd inside `vg code`): refuse,
-    // so another process can never take down the owning session.
+    // No shutdown hook: refuse, so another process cannot take down the owner.
     const dir = tmp();
     const embedded = await startVgdServer({
       socketPath: path.join(dir, 'vgd.sock'),
@@ -213,6 +213,7 @@ describe('vgd server + client', () => {
         expect(status.pid).toBe(4242);
         expect(status.workspaces).toBe(1);
         expect(status.socketPath).toBe(socketPath);
+        expect(status.cliVersion).toBe(VERSION);
       }
 
       expect(fs.readFileSync(pidPath, 'utf8').trim()).toBe('4242');

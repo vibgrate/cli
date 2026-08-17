@@ -1,13 +1,34 @@
 /**
- * The `vg-graph/1.0` on-disk schema.
+ * The `vg-graph/1.1` on-disk schema.
  *
  * This is vg's own open schema (VG-PACKAGE-AND-SCHEMA.md §4) — informed by good
  * ideas (content-hashed ids, epistemic typing of facts) but standalone and
  * self-contained. Every collection is deterministically serialized
  * (sorted keys, stable element order). These TypeScript shapes are normative.
+ *
+ * ## Version history
+ *
+ * - `vg-graph/1.0` — code-only vocabulary.
+ * - `vg-graph/1.1` — **additive**: toolchain node kinds (`resource`, `workload`,
+ *   `job`, `step`, `image`, `chart`) and toolchain edge kinds (`depends_on`,
+ *   `provisions`, `deploys`, `triggers`, `exposes`, `mounts`, `builds_from`),
+ *   produced by `engine/toolchain/`. Nothing was removed or renamed, so a 1.0
+ *   reader that tolerates unknown kinds reads a 1.1 graph correctly; readers
+ *   that hard-match the version string need widening (see
+ *   `SUPPORTED_SCHEMA_VERSIONS`).
  */
 
-export const SCHEMA_VERSION = 'vg-graph/1.0' as const;
+export const SCHEMA_VERSION = 'vg-graph/1.1' as const;
+
+/**
+ * Schema versions a reader should accept. The toolchain vocabulary added in 1.1
+ * is purely additive, so a 1.0 artifact still loads — only the newer kinds are
+ * absent from it. Readers must prefer this over an equality check on
+ * {@link SCHEMA_VERSION}, which rejects perfectly readable older graphs.
+ */
+export const SUPPORTED_SCHEMA_VERSIONS = ['vg-graph/1.0', 'vg-graph/1.1'] as const;
+
+export type SupportedSchemaVersion = (typeof SUPPORTED_SCHEMA_VERSIONS)[number];
 
 export type ResolverKind = 'scip' | 'stackgraph' | 'tsc' | 'heuristic';
 
@@ -74,7 +95,24 @@ export type NodeKind =
   | 'component'
   /** Documentation / config text ingested for semantic ask (markdown, txt, env examples). */
   | 'document'
-  | 'external';
+  | 'external'
+  // ── Toolchain kinds (engine/toolchain/) ──────────────────────────────────
+  // Structural extraction of the infrastructure/CI corpus. These sit alongside
+  // the code kinds above and never replace the `document` node for the same
+  // file: the document node stays the semantic-ask surface, these carry the
+  // structure. Additive — consumers must tolerate unknown kinds.
+  /** A declared infrastructure object: Terraform resource/data, K8s object, Compose service. */
+  | 'resource'
+  /** A deployable unit that runs containers (Deployment, StatefulSet, DaemonSet, Job, CronJob). */
+  | 'workload'
+  /** A CI job (GitHub Actions job, GitLab CI job). */
+  | 'job'
+  /** A single step within a CI job. */
+  | 'step'
+  /** A container image reference (`ghcr.io/acme/web:1.2.3`) or a Dockerfile build stage. */
+  | 'image'
+  /** A Helm chart (from `Chart.yaml`). */
+  | 'chart';
 
 export interface Span {
   start: number; // 1-based start line
@@ -116,7 +154,26 @@ export type EdgeKind =
   | 'implements'
   | 'references'
   | 'test'
-  | 'coverage';
+  | 'coverage'
+  // ── Toolchain edge kinds (engine/toolchain/) ─────────────────────────────
+  // Every edge below is produced by structural extraction or by the
+  // cross-domain linker. Linker-produced edges are always
+  // `resolution: 'heuristic'` with a calibrated confidence — an inferred
+  // `deploys` is not a declared `import` and must never claim to be.
+  /** Declared ordering/reference dependency (Terraform `depends_on` + interpolation, Compose `depends_on`, CI `needs`). */
+  | 'depends_on'
+  /** An IaC declaration creates infrastructure (Terraform module → resource, chart → workload). */
+  | 'provisions'
+  /** A CI job or IaC declaration puts a workload/image into an environment. */
+  | 'deploys'
+  /** An event or upstream job causes a workflow/job to run. */
+  | 'triggers'
+  /** A workload/service publishes a port or endpoint. */
+  | 'exposes'
+  /** A workload/service consumes a volume, config map, or secret *by reference*. */
+  | 'mounts'
+  /** A build stage or workload is derived from a container image. */
+  | 'builds_from';
 
 export interface GraphEdge {
   id: string; // blake3(canonical(kind, src, dst))
@@ -195,7 +252,13 @@ export interface GraphSummaries {
 }
 
 export interface VgGraph {
-  schemaVersion: typeof SCHEMA_VERSION;
+  /**
+   * The schema this artifact was written against. A freshly built graph always
+   * carries {@link SCHEMA_VERSION}; a graph *loaded* from disk may carry any
+   * member of {@link SUPPORTED_SCHEMA_VERSIONS}, since older artifacts stay
+   * readable (the 1.1 additions are additive).
+   */
+  schemaVersion: SupportedSchemaVersion;
   generatedAt: string; // ISO; the ONLY nondeterministic field (pinned by --generated-at)
   provenance: Provenance;
   meta: GraphMeta;

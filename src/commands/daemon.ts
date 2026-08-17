@@ -6,13 +6,14 @@ import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { startVgdServer, vgdIsRunning, vgdPidPath, vgdRequest, vgdSocketPath, VGD_PROTOCOL_VERSION } from '../runtime/vgd/index.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode } from '../util/exit.js';
+import { reinvokeCli } from '../util/cli-invocation.js';
 import { c, info, json } from '../util/output.js';
 
 /**
  * `vg daemon` — lightweight local Fusion Runtime daemon (`vgd`) prototype.
  *
  * Phase 2 slice: local socket + workspace registry. Interactive `vg code`
- * attaches via `startCodeRuntimeSession` (or owns an in-process vgd).
+ * attaches via `startCodeRuntimeSession` (ensures this standalone daemon).
  * No overlays yet. Safe to start/stop; does not mutate repos.
  */
 export function registerDaemon(program: Command): void {
@@ -47,8 +48,9 @@ export function registerDaemon(program: Command): void {
       if (global.json) json({ running: true, ...res, semantic: semanticPayload });
       else if ('pid' in res) {
         const slots = typeof res.graphSlots === 'number' ? ` · ${res.graphSlots} graph slot(s)` : '';
+        const cli = res.cliVersion ? ` · cli ${res.cliVersion}` : '';
         info(
-          `vgd · running pid ${res.pid} · ${res.workspaces} workspace(s)${slots} · ${res.uptimeMs}ms up · ${c.dim(res.socketPath)}`,
+          `vgd · running pid ${res.pid}${cli} · ${res.workspaces} workspace(s)${slots} · ${res.uptimeMs}ms up · ${c.dim(res.socketPath)}`,
         );
         if (semanticPayload) {
           const ready = semanticPayload.slots.filter((sl) => sl.state === 'ready');
@@ -116,30 +118,25 @@ export function registerDaemon(program: Command): void {
     .action(async function (this: Command) {
       const global = readGlobal(this);
       const socketPath = socketOf(this);
-      if (await vgdIsRunning({ socketPath })) {
-        const res = await vgdRequest({ op: 'status' }, { socketPath });
-        if (global.json) {
-          json({ running: true, ensured: false, ...(res.ok ? res : { socketPath }) });
-        } else if (!global.quiet) {
-          const pid = res.ok && 'pid' in res ? res.pid : '?';
-          info(`vgd · already running pid ${pid} · ${c.dim(socketPath)}`);
-        }
-        return;
-      }
-
-      const child = await startDetachedVgd(socketPath);
+      const ensured = await ensureVgd(socketPath);
       const res = await vgdRequest({ op: 'status' }, { socketPath });
       if (!res.ok) {
         throw new CliError(
-          `vgd started (pid ${child ?? '?'}) but status failed: ${res.error} (${socketPath})`,
+          ensured.started
+            ? `vgd started (pid ${ensured.pid ?? '?'}) but status failed: ${res.error} (${socketPath})`
+            : `vgd is running but status failed: ${res.error} (${socketPath})`,
           ExitCode.ERROR,
         );
       }
       if (global.json) {
-        json({ running: true, ensured: true, ...res });
+        json({ running: true, ensured: ensured.started, ...res });
       } else if (!global.quiet) {
-        const pid = 'pid' in res ? res.pid : child;
-        info(`vgd · started in background pid ${pid} · ${c.dim(socketPath)}`);
+        const pid = 'pid' in res ? res.pid : ensured.pid;
+        info(
+          ensured.started
+            ? `vgd · started in background pid ${pid} · ${c.dim(socketPath)}`
+            : `vgd · already running pid ${pid} · ${c.dim(socketPath)}`,
+        );
       }
     });
   applyGlobalOptions(ensure);
@@ -159,7 +156,7 @@ export function registerDaemon(program: Command): void {
       }
       if (result === 'refused') {
         throw new CliError(
-          'this vgd is embedded in another process (e.g. vg code) — stop that process instead',
+          'this vgd cannot be stopped remotely — it is running inside another process; stop that process instead',
           ExitCode.ERROR,
         );
       }
@@ -181,7 +178,7 @@ export function registerDaemon(program: Command): void {
       const stopResult = await stopVgd(socketPath);
       if (stopResult === 'refused') {
         throw new CliError(
-          'this vgd is embedded in another process (e.g. vg code) — stop that process instead',
+          'this vgd cannot be stopped remotely — it is running inside another process; stop that process instead',
           ExitCode.ERROR,
         );
       }
@@ -460,7 +457,9 @@ function socketOf(cmd: Command): string {
 
 /**
  * Re-invoke this CLI as a detached background `daemon start`.
- * Handles both `node dist/cli.js …` and a packaged `vg` binary.
+ * Handles `node dist/cli.js …`, a global `vg` symlink (npm bin), and a
+ * packaged `vg` binary. The symlink case must realpath to cli.js — see
+ * {@link reinvokeCli}.
  */
 function spawnDetachedDaemonStart(socketPath: string): ReturnType<typeof spawn> {
   // windowsHide: on Windows a detached console can flash and (with some AV /
@@ -471,12 +470,8 @@ function spawnDetachedDaemonStart(socketPath: string): ReturnType<typeof spawn> 
     env: process.env,
     windowsHide: true,
   };
-  const entry = process.argv[1];
-  if (entry && (entry.endsWith('.js') || entry.endsWith('.mjs') || entry.endsWith('.cjs'))) {
-    return spawn(process.execPath, [entry, 'daemon', 'start', '--socket', socketPath], opts);
-  }
-  // Packaged binary: argv[0] is the executable.
-  return spawn(process.argv[0] || 'vg', ['daemon', 'start', '--socket', socketPath], opts);
+  const { command, argv } = reinvokeCli(['daemon', 'start', '--socket', socketPath]);
+  return spawn(command, argv, opts);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -501,10 +496,13 @@ async function startDetachedVgd(socketPath: string): Promise<number | undefined>
     await sleep(150);
     if (await vgdIsRunning({ socketPath })) return child.pid;
     // If the child already exited without ever answering, fail fast rather
-    // than waiting out the full budget for a dead process.
+    // than waiting out the full budget for a dead process. Another client
+    // (the VS Code extension's `daemon ensure`) may have bound in this
+    // tick — treat that as ready rather than reporting a false failure.
     if (child.exitCode != null && child.exitCode !== 0) {
+      if (await vgdIsRunning({ socketPath })) return child.pid;
       throw new CliError(
-        `vgd child exited ${child.exitCode} before becoming ready at ${socketPath}`,
+        `vgd child exited ${child.exitCode} before becoming ready at ${socketPath} — run "vg daemon start" in the foreground to see the error`,
         ExitCode.ERROR,
       );
     }
@@ -516,11 +514,21 @@ async function startDetachedVgd(socketPath: string): Promise<number | undefined>
 }
 
 /**
+ * Idempotent start used by `vg daemon ensure` and `vg code`: if vgd is already
+ * listening, do nothing; otherwise spawn a detached standalone `daemon start`.
+ */
+export async function ensureVgd(socketPath: string = vgdSocketPath()): Promise<{ started: boolean; pid?: number }> {
+  if (await vgdIsRunning({ socketPath })) return { started: false };
+  const pid = await startDetachedVgd(socketPath);
+  return { started: true, pid };
+}
+
+/**
  * Stop a running vgd: polite `shutdown` op first, SIGTERM via the pid file for
  * daemons that predate the op, then wait (≤5s) for the socket to go quiet.
  *
- * `refused` means the daemon is embedded in another process (`vg code`) that
- * declined remote shutdown — never escalate that to a pid-file kill, because
+ * `refused` means the daemon declined remote shutdown (a listener started
+ * without a shutdown hook) — never escalate that to a pid-file kill, because
  * the pid file belongs to the owning process.
  */
 export async function stopVgd(socketPath: string): Promise<'stopped' | 'not-running' | 'refused' | 'failed'> {

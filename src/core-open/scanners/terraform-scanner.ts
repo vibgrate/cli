@@ -7,6 +7,7 @@ import type { ProjectScan, DependencyRow } from '../types.js';
 import { readTextFile, pathExists, FileCache } from '../utils/fs.js';
 import type { PackageVersionManifest } from '../package-version-manifest.js';
 import * as path from 'node:path';
+import { parseHclBlocks, parseHclAttributes, hclStringAttribute } from './hcl-blocks.js';
 
 interface TerraformProvider {
   source: string; // e.g., "hashicorp/aws"
@@ -26,105 +27,89 @@ async function parseTerraformFile(filePath: string, cache?: FileCache): Promise<
   providers: TerraformProvider[];
   modules: TerraformModule[];
 }> {
-  const content = cache 
+  const content = cache
     ? await cache.readTextFile(filePath)
     : await readTextFile(filePath);
-  
+
+  return extractTerraformRequirements(content);
+}
+
+/**
+ * Extract Terraform version, provider and module requirements from HCL source.
+ *
+ * Structural, via {@link parseHclBlocks} — not regex. The previous
+ * implementation matched blocks with `\{([^}]+)\}`, which stops at the first
+ * closing brace and therefore saw only the first entry of a nested
+ * `required_providers` block. Multi-provider repositories silently reported a
+ * single provider, under-reporting drift on exactly the estates that need it.
+ * Brace nesting is not a regular language; this walks it properly.
+ *
+ * Exported for tests — the nesting case is a regression fixture.
+ */
+export function extractTerraformRequirements(content: string): {
+  terraformVersion?: string;
+  providers: TerraformProvider[];
+  modules: TerraformModule[];
+} {
   const providers: TerraformProvider[] = [];
   const modules: TerraformModule[] = [];
   let terraformVersion: string | undefined;
 
-  // Extract required_version from terraform block
-  const tfVersionMatch = content.match(/terraform\s*\{[^}]*required_version\s*=\s*"([^"]+)"/s);
-  if (tfVersionMatch) {
-    terraformVersion = tfVersionMatch[1];
-  }
+  for (const block of parseHclBlocks(content)) {
+    if (block.type === 'terraform') {
+      terraformVersion ??= hclStringAttribute(block.body, 'required_version');
 
-  // Extract required_providers from terraform block
-  // terraform {
-  //   required_providers {
-  //     aws = {
-  //       source  = "hashicorp/aws"
-  //       version = "~> 4.0"
-  //     }
-  //   }
-  // }
-  const requiredProvidersMatch = content.match(/required_providers\s*\{([^}]+)\}/s);
-  if (requiredProvidersMatch) {
-    const providersBlock = requiredProvidersMatch[1];
-    
-    // Match each provider block
-    const providerRegex = /(\w+)\s*=\s*\{([^}]+)\}/g;
-    let match: RegExpExecArray | null;
+      // terraform { required_providers { aws = { source = "…" version = "…" } } }
+      for (const inner of parseHclBlocks(block.body)) {
+        if (inner.type !== 'required_providers') continue;
+        for (const entry of parseHclAttributes(inner.body)) {
+          const objectBody = /^\{([\s\S]*)\}$/.exec(entry.value);
+          if (objectBody) {
+            // Modern form: `<localName> = { source = "…", version = "…" }`.
+            const source = hclStringAttribute(objectBody[1], 'source');
+            if (!source) continue;
+            providers.push({ source, version: hclStringAttribute(objectBody[1], 'version') });
+            continue;
+          }
 
-    while ((match = providerRegex.exec(providersBlock)) !== null) {
-      const providerBlock = match[2];
-      
-      // Extract source
-      const sourceMatch = providerBlock.match(/source\s*=\s*"([^"]+)"/);
-      if (!sourceMatch) continue;
-      
-      const source = sourceMatch[1];
-      
-      // Extract version
-      const versionMatch = providerBlock.match(/version\s*=\s*"([^"]+)"/);
-      const version = versionMatch ? versionMatch[1] : undefined;
-      
-      providers.push({ source, version });
-    }
-  }
-
-  // Also look for provider blocks (older style)
-  // provider "aws" {
-  //   version = "~> 3.0"
-  // }
-  const providerBlockRegex = /provider\s+"(\w+)"\s*\{([^}]+)\}/g;
-  let providerMatch: RegExpExecArray | null;
-
-  while ((providerMatch = providerBlockRegex.exec(content)) !== null) {
-    const providerName = providerMatch[1];
-    const block = providerMatch[2];
-    
-    const versionMatch = block.match(/version\s*=\s*"([^"]+)"/);
-    if (versionMatch) {
-      // Assume hashicorp namespace if not already added
-      const existingProvider = providers.find(p => p.source.endsWith(`/${providerName}`));
-      if (!existingProvider) {
-        providers.push({
-          source: `hashicorp/${providerName}`,
-          version: versionMatch[1],
-        });
+          // Legacy version-only shorthand: `<localName> = "~> 2.0"`.
+          //
+          // Still valid, and common in pre-0.13 estates — which are exactly the
+          // repositories a drift scanner exists to find. Both the old regex and
+          // the first version of this rewrite required braces, so these
+          // providers were dropped entirely and reported *no* drift rather than
+          // stale drift. The source is implicit: an unqualified local name
+          // resolves to the `hashicorp` namespace.
+          const version = /^"((?:[^"\\]|\\.)*)"$/.exec(entry.value)?.[1];
+          if (!version) continue;
+          const source = `hashicorp/${entry.name}`;
+          if (providers.some((p) => p.source === source)) continue;
+          providers.push({ source, version });
+        }
       }
-    }
-  }
-
-  // Extract modules
-  // module "vpc" {
-  //   source  = "terraform-aws-modules/vpc/aws"
-  //   version = "3.0.0"
-  // }
-  const moduleRegex = /module\s+"[^"]+"\s*\{([^}]+)\}/g;
-  let moduleMatch: RegExpExecArray | null;
-
-  while ((moduleMatch = moduleRegex.exec(content)) !== null) {
-    const block = moduleMatch[1];
-    
-    // Extract source
-    const sourceMatch = block.match(/source\s*=\s*"([^"]+)"/);
-    if (!sourceMatch) continue;
-    
-    const source = sourceMatch[1];
-    
-    // Skip local modules and git sources
-    if (source.startsWith('./') || source.startsWith('../') || source.startsWith('git::')) {
       continue;
     }
-    
-    // Extract version
-    const versionMatch = block.match(/version\s*=\s*"([^"]+)"/);
-    const version = versionMatch ? versionMatch[1] : undefined;
-    
-    modules.push({ source, version });
+
+    // Legacy standalone provider block: provider "aws" { version = "~> 3.0" }
+    if (block.type === 'provider') {
+      const name = block.labels[0];
+      if (!name) continue;
+      const version = hclStringAttribute(block.body, 'version');
+      if (!version) continue;
+      if (providers.some((p) => p.source.endsWith(`/${name}`))) continue;
+      providers.push({ source: `hashicorp/${name}`, version });
+      continue;
+    }
+
+    if (block.type === 'module') {
+      const source = hclStringAttribute(block.body, 'source');
+      if (!source) continue;
+      // Local and git sources have no registry version to compare against.
+      if (source.startsWith('./') || source.startsWith('../') || source.startsWith('git::')) {
+        continue;
+      }
+      modules.push({ source, version: hclStringAttribute(block.body, 'version') });
+    }
   }
 
   return { terraformVersion, providers, modules };

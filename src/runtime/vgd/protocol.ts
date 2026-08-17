@@ -136,6 +136,8 @@ export type VgdResponse =
       graphSlots?: number;
       version: typeof VGD_PROTOCOL_VERSION;
       socketPath: string;
+      /** Calendar version of the CLI process serving this socket. */
+      cliVersion?: string;
     }
   | { ok: true; workspaces: WorkspaceRecord[] }
   | { ok: true; workspace: WorkspaceRecord }

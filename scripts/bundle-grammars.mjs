@@ -41,6 +41,17 @@ const GRAMMARS = [
   'tree-sitter-solidity',
 ];
 
+// Toolchain grammars used by src/engine/toolchain/ for the infrastructure/CI
+// corpus. These do NOT live in tree-sitter-wasms, and their npm packages carry
+// a native `install` script (node-gyp-build) we must never run on an end user's
+// machine — so each is a *devDependency* whose prebuilt .wasm is copied into
+// ./grammars at build time and shipped inside the published tarball. Users get
+// the grammar file; they never install the grammar package.
+// Keep in sync with src/engine/toolchain/grammars.ts.
+const TOOLCHAIN_GRAMMARS = [
+  { wasm: 'tree-sitter-hcl', from: '@tree-sitter-grammars/tree-sitter-hcl' },
+];
+
 const outDir = path.dirname(require.resolve('tree-sitter-wasms/package.json')) + '/out';
 const vendorDir = path.join(pkgRoot, 'vendor');
 const dest = path.join(pkgRoot, 'grammars');
@@ -57,6 +68,27 @@ for (const g of GRAMMARS) {
     continue;
   }
   fs.copyFileSync(src, path.join(dest, `${g}.wasm`));
+  copied++;
+  if (src === vendorSrc) vendored++;
+}
+
+// Toolchain grammars: a vendor/ override still wins (same rule as above), then
+// the devDependency's own prebuilt .wasm.
+for (const { wasm, from } of TOOLCHAIN_GRAMMARS) {
+  const vendorSrc = path.join(vendorDir, `${wasm}.wasm`);
+  let src = fs.existsSync(vendorSrc) ? vendorSrc : null;
+  if (!src) {
+    try {
+      src = path.join(path.dirname(require.resolve(`${from}/package.json`)), `${wasm}.wasm`);
+    } catch {
+      src = null;
+    }
+  }
+  if (!src || !fs.existsSync(src)) {
+    missing.push(`${wasm} (from ${from})`);
+    continue;
+  }
+  fs.copyFileSync(src, path.join(dest, `${wasm}.wasm`));
   copied++;
   if (src === vendorSrc) vendored++;
 }

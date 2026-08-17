@@ -4,7 +4,6 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startCodeRuntimeSession } from './runtime-session.js';
 import type { VgdResponse } from '../runtime/vgd/protocol.js';
-import type { VgdServer } from '../runtime/vgd/server.js';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -45,7 +44,7 @@ describe('startCodeRuntimeSession', () => {
       socketPath: '/tmp/vgd.sock',
       isRunning: async () => true,
       request: request as never,
-      startServer: async () => {
+      ensureDaemon: async () => {
         throw new Error('should not start');
       },
     });
@@ -59,45 +58,57 @@ describe('startCodeRuntimeSession', () => {
     await session.dispose(); // idempotent
   });
 
-  it('starts an owned in-process vgd when none is running', async () => {
+  it('ensures the standalone daemon when none is running, then attaches', async () => {
     const root = path.join(tmp(), 'app');
     fs.mkdirSync(root);
-    let closed = false;
-    const server: VgdServer = {
-      socketPath: path.join(tmp(), 'owned.sock'),
-      registry: { size: () => 0 } as never,
-      startedAt: Date.now(),
-      async close() {
-        closed = true;
-      },
-    };
-    const request = vi.fn(async (req: { op: string }): Promise<VgdResponse> => {
+    const socketPath = path.join(tmp(), 'vgd.sock');
+    let ensured = false;
+    const request = vi.fn(async (req: { op: string; root?: string }): Promise<VgdResponse> => {
       if (req.op === 'register') {
         return {
           ok: true,
           workspace: {
-            id: 'owned',
+            id: 'ensured',
             root,
             graphPath: '/g',
             registeredAt: '2026-01-01T00:00:00.000Z',
           },
         };
       }
+      if (req.op === 'status') {
+        return { ok: true, pid: 77, uptimeMs: 5, workspaces: 1, version: 'vgd/0', socketPath };
+      }
+      if (req.op === 'unregister') return { ok: true, removed: true };
       return { ok: false, error: 'n/a' };
     });
 
     const session = await startCodeRuntimeSession({
       root,
+      socketPath,
       isRunning: async () => false,
-      startServer: async () => server,
+      ensureDaemon: async () => {
+        ensured = true;
+      },
       request: request as never,
     });
 
-    expect(session.kind).toBe('owned');
-    expect(session.label).toContain('session');
-    expect(session.workspace?.id).toBe('owned');
+    expect(ensured).toBe(true);
+    expect(session.kind).toBe('attached');
+    expect(session.pid).toBe(77);
+    expect(session.workspace?.id).toBe('ensured');
     await session.dispose();
-    expect(closed).toBe(true);
+    expect(request).toHaveBeenCalledWith({ op: 'unregister', root }, expect.anything());
+  });
+
+  it('returns a none session when ensuring the standalone daemon fails', async () => {
+    const session = await startCodeRuntimeSession({
+      root: '/repo',
+      isRunning: async () => false,
+      ensureDaemon: async () => {
+        throw new Error('ensure failed');
+      },
+    });
+    expect(session.kind).toBe('none');
   });
 
   it('returns a none session when attach and start both fail', async () => {

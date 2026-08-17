@@ -32,7 +32,7 @@ export interface DriftInventory {
 export function inventory(root: string): DriftInventory {
   const manifests = findManifests(root);
   const records: DepRecord[] = [];
-  records.push(...npmDeps(manifests.npm));
+  records.push(...npmDeps(manifests.npm, root));
   records.push(...pypiDeps(manifests.pypi));
   records.push(...goDeps(manifests.go));
   records.push(...cargoDeps(manifests.rust));
@@ -115,7 +115,7 @@ function findManifests(root: string): ManifestSet {
   return set;
 }
 
-function npmDeps(files: string[]): DepRecord[] {
+function npmDeps(files: string[], root: string): DepRecord[] {
   const out: DepRecord[] = [];
   for (const file of files) {
     let pkg: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
@@ -127,15 +127,20 @@ function npmDeps(files: string[]): DepRecord[] {
     const dir = path.dirname(file);
     const all = { ...pkg.dependencies, ...pkg.devDependencies };
     for (const [name, declared] of Object.entries(all)) {
-      out.push({ name, ecosystem: 'npm', declared, installed: installedNpmVersion(dir, name) });
+      out.push({ name, ecosystem: 'npm', declared, installed: installedNpmVersion(dir, name, root) });
     }
   }
   return out;
 }
 
-/** Resolve an installed version from the nearest node_modules at or above `dir`. */
-function installedNpmVersion(dir: string, name: string): string | undefined {
-  let cur = dir;
+/**
+ * Resolve an installed version from the nearest node_modules at or above `dir`,
+ * but never above `root`. Climbing out of the scan root would pick up a parent
+ * repo or a home-directory `node_modules` and treat fixture manifests as installed.
+ */
+function installedNpmVersion(dir: string, name: string, root: string): string | undefined {
+  const rootResolved = path.resolve(root);
+  let cur = path.resolve(dir);
   for (let i = 0; i < 12; i++) {
     const p = path.join(cur, 'node_modules', name, 'package.json');
     try {
@@ -143,6 +148,7 @@ function installedNpmVersion(dir: string, name: string): string | undefined {
     } catch {
       /* keep climbing */
     }
+    if (cur === rootResolved) break;
     const parent = path.dirname(cur);
     if (parent === cur) break;
     cur = parent;
