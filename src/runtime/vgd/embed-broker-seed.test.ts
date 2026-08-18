@@ -149,6 +149,34 @@ describe('EmbedBroker — reuse of the on-disk index', () => {
     expect(again.vectors.size).toBe(3);
   });
 
+  it('waits for the on-disk writer when a blocking caller asks', async () => {
+    const g = graph(3);
+    const { embeddingsPath } = await import('../../engine/embeddings.js');
+    const lock = `${embeddingsPath(root)}.lock`;
+    fs.mkdirSync(path.dirname(lock), { recursive: true });
+    fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now() }));
+
+    const { worker, child } = fakeChild();
+    const logs: string[] = [];
+    const broker = new EmbedBroker({
+      spawnWorker: () => child,
+      log: (m) => logs.push(m),
+      requestTimeoutMs: 500,
+      sleep: async () => {
+        fs.rmSync(lock, { force: true });
+        await getNodeEmbeddings(g, fakeEmbedder, root);
+      },
+    });
+    broker.setRootProvider(() => root);
+
+    const idx = await broker.ensureIndex('repoA', 'main', g, { waitForWriter: true });
+
+    expect(idx.state).toBe('ready');
+    expect(idx.vectors.size).toBe(3);
+    expect(worker.calls).toBe(0);
+    expect(logs.some((l) => l.includes('waiting for another process'))).toBe(true);
+  });
+
   it('builds from scratch when the daemon has no root for the repository', async () => {
     const { worker, child } = fakeChild();
     const broker = new EmbedBroker({ spawnWorker: () => child, requestTimeoutMs: 500 });

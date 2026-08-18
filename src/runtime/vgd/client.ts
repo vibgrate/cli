@@ -29,6 +29,12 @@ export function defaultVgdTimeoutMs(op: VgdRequest['op']): number {
       return 120_000; // large payload / disk load / model load
     case 'host-generate':
       return 300_000; // local model generation
+    case 'embed-index':
+    case 'embed-rank':
+      // First ask on a large repo may have to wait for the slot index (or for
+      // a `vg embed` child that already holds the cache lock). 10s made
+      // `vg ask` give up and re-embed tens of thousands of nodes in-process.
+      return 600_000;
     default:
       return 10_000; // registry + graph queries — may queue behind a put-graph
   }

@@ -29,9 +29,16 @@ describe('LSP architecture refresh after graph refine', () => {
     expect(ensure).toContain('this.refineAndPublishArchitecture()');
     expect(ensure).not.toMatch(/if \(this\.artifact\) refineArtifactWithGraph/);
 
+    // A settled refresh reloads through `reloadGraphFromDisk`, which the
+    // daemon's `slot-changed` push shares — the re-publish must live there so
+    // both routes to a new map re-push the score, not just the local one.
     const refresh = methodBody('private onRefreshSettled(');
-    expect(refresh).toContain('this.refineAndPublishArchitecture()');
+    expect(refresh).toContain('this.reloadGraphFromDisk();');
     expect(refresh).not.toMatch(/if \(this\.artifact\) refineArtifactWithGraph/);
+
+    const reload = methodBody('private reloadGraphFromDisk()');
+    expect(reload).toContain('this.refineAndPublishArchitecture()');
+    expect(reload).not.toMatch(/if \(this\.artifact\) refineArtifactWithGraph/);
   });
 });
 

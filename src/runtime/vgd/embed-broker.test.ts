@@ -24,15 +24,23 @@ class FakeWorker extends EventEmitter {
         queueMicrotask(() => this.reply({ id: req.id, ok: false, error: 'backend unavailable' }));
       } else if (this.mode === 'crash') {
         queueMicrotask(() => this.die('SIGTRAP'));
+      } else if (this.mode === 'hold') {
+        this.held.push(line);
       }
       return true;
     },
   };
-  mode: 'answer' | 'error' | 'crash' | 'silent' = 'answer';
+  mode: 'answer' | 'error' | 'crash' | 'silent' | 'hold' = 'answer';
   killed = false;
+  held: string[] = [];
 
   reply(res: unknown): void {
     this.stdout.emit('data', JSON.stringify(res) + '\n');
+  }
+  flush(): void {
+    const lines = this.held.splice(0);
+    this.mode = 'answer';
+    for (const line of lines) this.stdin.write(line);
   }
   die(signal: NodeJS.Signals | null, code: number | null = null): void {
     this.emit('exit', code, signal);
@@ -105,10 +113,29 @@ describe('EmbedBroker — index building', () => {
     await broker.ensureIndex('repoA', 'main', graph(2));
     expect(worker.written.length).toBe(writes);
   });
+
+  it('joins an in-flight build instead of returning an empty index', async () => {
+    const { worker, child } = fakeChild();
+    worker.mode = 'hold';
+    const broker = brokerWith(() => child);
+
+    const first = broker.ensureIndex('repoA', 'main', graph(3));
+    const second = broker.ensureIndex('repoA', 'main', graph(3));
+    expect(broker.slot('repoA', 'main')?.state).toBe('building');
+    expect(broker.slot('repoA', 'main')?.vectors.size).toBe(0);
+
+    expect(worker.held.length).toBe(1);
+    worker.flush();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(a).toBe(b);
+    expect(a.state).toBe('ready');
+    expect(a.vectors.size).toBe(3);
+  });
 });
 
 describe('EmbedBroker — the index follows the graph slot', () => {
-  it('invalidates on republish: new graph, no stale vectors', async () => {
+  it('invalidates on republish but keeps the previous vectors rankable', async () => {
     const { child } = fakeChild();
     const logs: string[] = [];
     const broker = brokerWith(() => child, logs);
@@ -119,8 +146,9 @@ describe('EmbedBroker — the index follows the graph slot', () => {
     broker.onGraphPut('repoA', 'main', graph(4));
     const after = broker.slot('repoA', 'main');
     expect(after?.state).toBe('stale');
-    expect(after?.vectors.size).toBe(0);
+    expect(after?.vectors.size).toBe(3);
     expect(logs.some((l) => l.includes('graph republished'))).toBe(true);
+    expect(logs.some((l) => l.includes('kept until rebuild'))).toBe(true);
   });
 
   it('drops the index when the graph slot is evicted', async () => {

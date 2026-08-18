@@ -71,6 +71,9 @@ describe('defaultVgdTimeoutMs', () => {
     expect(defaultVgdTimeoutMs('load-graph')).toBeGreaterThanOrEqual(60_000);
     expect(defaultVgdTimeoutMs('host-load')).toBeGreaterThanOrEqual(60_000);
     expect(defaultVgdTimeoutMs('host-generate')).toBeGreaterThanOrEqual(60_000);
+    // First ask on a large repo may wait for the slot index (or an on-disk writer).
+    expect(defaultVgdTimeoutMs('embed-rank')).toBeGreaterThanOrEqual(60_000);
+    expect(defaultVgdTimeoutMs('embed-index')).toBeGreaterThanOrEqual(60_000);
     // Everything else can queue behind a put-graph on the daemon's event loop.
     expect(defaultVgdTimeoutMs('register')).toBeGreaterThan(2000);
     expect(defaultVgdTimeoutMs('query-graph')).toBeGreaterThan(2000);

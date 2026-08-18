@@ -89,6 +89,22 @@ export interface EmbedBrokerOptions {
   /** Documents per embed request (default 256). */
   batchSize?: number;
   now?: () => number;
+  /** Injected delay (tests). Used while waiting for another process's cache lock. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Options for a blocking {@link EmbedBroker.ensureIndex} (embed-rank / embed-index). */
+export interface EnsureIndexOptions {
+  /**
+   * Wait for another process that holds the on-disk cache lock (the `vg embed`
+   * warm-up child) instead of standing down with an empty index. Background
+   * warms leave this off so they do not race that writer; a caller that is
+   * about to answer a question turns it on so `vg ask` does not re-embed the
+   * whole map in-process.
+   */
+  waitForWriter?: boolean;
+  /** How long to wait for the writer (default 5 minutes). */
+  waitForWriterMs?: number;
 }
 
 interface Pending {
@@ -108,8 +124,10 @@ export class EmbedBroker {
   private buffer = '';
   private readonly pending = new Map<number, Pending>();
   private readonly indexes = new Map<string, SlotIndex>();
-  /** Slot keys with a build in flight, so warms are not duplicated. */
-  private readonly building = new Set<string>();
+  /** In-flight builds, so a second caller waits for the same work instead of seeing an empty slot. */
+  private readonly inflight = new Map<string, Promise<SlotIndex>>();
+  /** One deferred retry per slot after standing down for an on-disk writer. */
+  private readonly rewarmTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** The slot most recently made current — logged on change. */
   private currentKey: string | undefined;
   private graphProvider?: (repositoryId: string, gitRef: string) => VgGraph | undefined;
@@ -121,6 +139,7 @@ export class EmbedBroker {
   private readonly requestTimeoutMs: number;
   private readonly batchSize: number;
   private readonly now: () => number;
+  private readonly sleepImpl: (ms: number) => Promise<void>;
 
   constructor(options: EmbedBrokerOptions = {}) {
     this.log = options.log ?? ((): void => {});
@@ -129,6 +148,7 @@ export class EmbedBroker {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 120_000;
     this.batchSize = options.batchSize ?? 256;
     this.now = options.now ?? ((): number => Date.now());
+    this.sleepImpl = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   status(): EmbedBrokerStatus {
@@ -180,14 +200,19 @@ export class EmbedBroker {
     const key = activeGraphSlotKey(repositoryId, gitRef);
     const existing = this.indexes.get(key);
     const nodeCount = graph.nodes?.length ?? 0;
-    if (existing && existing.state === 'ready') {
-      this.log(`semantic: ${repositoryId}@${gitRef} graph republished — index stale (${existing.vectors.size} vectors dropped)`);
+    // Keep the previous vectors rankable until the rebuild finishes. Dropping
+    // them made every ask during a republish fall back to embedding the whole
+    // map in-process — the spec already says a stale index is safe (unknown
+    // ids are ignored).
+    const kept = existing?.vectors.size ? new Map(existing.vectors) : new Map<string, number[]>();
+    if (existing && existing.vectors.size > 0) {
+      this.log(`semantic: ${repositoryId}@${gitRef} graph republished — index stale (${existing.vectors.size} vectors kept until rebuild)`);
     }
     this.indexes.set(key, {
       repositoryId,
       gitRef,
       state: 'stale',
-      vectors: new Map(),
+      vectors: kept,
       nodeCount,
     });
   }
@@ -226,7 +251,7 @@ export class EmbedBroker {
     }
     if (this.gaveUp) return;
     const idx = this.indexes.get(key);
-    if (idx?.state === 'ready' || this.building.has(key)) return;
+    if (idx?.state === 'ready' || this.inflight.has(key)) return;
     const graph = this.graphProvider?.(repositoryId, gitRef);
     if (!graph) return;
     // Fire and forget: warming must never block the op that triggered it.
@@ -239,20 +264,33 @@ export class EmbedBroker {
     const idx = this.indexes.get(key);
     if (!idx) return;
     this.indexes.delete(key);
+    this.clearRewarm(key);
     this.log(`semantic: ${repositoryId}@${gitRef} index evicted with its graph slot (${idx.vectors.size} vectors freed)`);
   }
 
   /** Drop everything (daemon shutdown / registry clear). */
   clear(): void {
     this.indexes.clear();
-    this.building.clear();
+    this.inflight.clear();
+    for (const timer of this.rewarmTimers.values()) clearTimeout(timer);
+    this.rewarmTimers.clear();
   }
 
   /**
    * Ensure the slot has vectors, building them if needed. Resolves when the
    * index is ready or has definitively failed; never throws.
+   *
+   * A second caller for the same slot waits for the in-flight build instead of
+   * returning the empty placeholder — that empty return is what made `vg ask`
+   * re-embed tens of thousands of nodes in-process while vgd was already doing
+   * the same work.
    */
-  async ensureIndex(repositoryId: string, gitRef: string, graph: VgGraph): Promise<SlotIndex> {
+  async ensureIndex(
+    repositoryId: string,
+    gitRef: string,
+    graph: VgGraph,
+    options?: EnsureIndexOptions,
+  ): Promise<SlotIndex> {
     const key = activeGraphSlotKey(repositoryId, gitRef);
     let idx = this.indexes.get(key);
     if (!idx) {
@@ -265,9 +303,24 @@ export class EmbedBroker {
       idx.error = this.reason ?? 'embedding worker unavailable';
       return idx;
     }
-    if (this.building.has(key)) return idx;
+    const pending = this.inflight.get(key);
+    if (pending) return pending;
 
-    this.building.add(key);
+    const work = this.buildIndex(key, idx, repositoryId, gitRef, graph, options).finally(() => {
+      if (this.inflight.get(key) === work) this.inflight.delete(key);
+    });
+    this.inflight.set(key, work);
+    return work;
+  }
+
+  private async buildIndex(
+    key: string,
+    idx: SlotIndex,
+    repositoryId: string,
+    gitRef: string,
+    graph: VgGraph,
+    options?: EnsureIndexOptions,
+  ): Promise<SlotIndex> {
     idx.state = 'building';
     const started = this.now();
 
@@ -276,7 +329,12 @@ export class EmbedBroker {
     // targets and the same embed-text, so re-deriving them here would be pure
     // duplicated work — usually the *whole* index. A repo that is already
     // warm on disk therefore goes `ready` in milliseconds, with no worker.
-    const seeded = this.seedFromDisk(repositoryId, graph);
+    let seeded = this.seedFromDisk(repositoryId, graph);
+    if (seeded?.writerBusy && seeded.pending.length && options?.waitForWriter) {
+      this.log(`semantic: ${repositoryId}@${gitRef} waiting for another process to finish the on-disk index…`);
+      await this.waitWhileWriterBusy(repositoryId, graph, options.waitForWriterMs ?? 300_000);
+      seeded = this.seedFromDisk(repositoryId, graph);
+    }
     const targets = seeded?.pending ?? embedTargets(graph);
     const vectors = seeded ? seeded.vectors : new Map<string, number[]>();
     const nodeCount = seeded ? seeded.vectors.size + seeded.pending.length : targets.length;
@@ -289,17 +347,18 @@ export class EmbedBroker {
     }
 
     // Another process is mid-write on this repo's cache (the `vg build`
-    // warm-up child). Take what is there and stand down rather than embedding
-    // the same nodes a second time; `vg embed` calls `embed-index` when it
-    // finishes, which brings the slot the rest of the way.
+    // warm-up child). Background warms take what is there and stand down
+    // rather than embedding the same nodes a second time. A blocking caller
+    // already waited above; if the writer is still going we still stand down
+    // and retry shortly, so the slot cannot stay empty forever.
     if (seeded?.writerBusy && targets.length) {
       idx.vectors = vectors;
       idx.pending = targets.length;
       idx.state = vectors.size ? 'stale' : 'absent';
-      this.building.delete(key);
       this.log(
         `semantic: ${repositoryId}@${gitRef} left at ${targets.length} pending — another process is writing the on-disk index; re-warming when it reports in`,
       );
+      this.scheduleRewarm(repositoryId, gitRef);
       return idx;
     }
 
@@ -313,11 +372,21 @@ export class EmbedBroker {
           const v = out[j];
           if (v) vectors.set(t.id, v);
         });
+        // Publish counts as we go so `embed-status` (and the ask spinner) stay
+        // current. Only share the growing map when we have nothing rankable yet
+        // — a republish keeps its previous vectors until this build finishes.
+        if (idx.vectors.size === 0 || idx.vectors === vectors) idx.vectors = vectors;
+        idx.pending = Math.max(0, nodeCount - vectors.size);
         // A slot evicted or republished mid-build must not be resurrected with
         // vectors describing the graph it no longer has.
         const live = this.indexes.get(key);
         if (!live || live !== idx) {
           this.log(`semantic: index build for ${repositoryId}@${gitRef} abandoned — slot changed underneath it`);
+          this.inflight.delete(key);
+          if (live && live !== idx) {
+            const nextGraph = this.graphProvider?.(repositoryId, gitRef) ?? graph;
+            return this.ensureIndex(repositoryId, gitRef, nextGraph, options);
+          }
           return idx;
         }
       }
@@ -327,6 +396,7 @@ export class EmbedBroker {
       idx.builtAt = this.now();
       idx.buildMs = idx.builtAt - started;
       idx.error = undefined;
+      this.clearRewarm(key);
       this.log(`semantic: index ready for ${repositoryId}@${gitRef} — ${vectors.size} vectors in ${idx.buildMs}ms`);
     } catch (err) {
       // Vectors seeded from disk stay usable even when the worker never ran:
@@ -336,10 +406,41 @@ export class EmbedBroker {
       idx.state = 'failed';
       idx.error = err instanceof Error ? err.message : String(err);
       this.log(`semantic: index build failed for ${repositoryId}@${gitRef} — ${idx.error}; callers fall back to lexical`);
-    } finally {
-      this.building.delete(key);
     }
     return idx;
+  }
+
+  /** Poll the on-disk lock until the writer is gone or `timeoutMs` elapses. */
+  private async waitWhileWriterBusy(repositoryId: string, graph: VgGraph, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const read = this.seedFromDisk(repositoryId, graph);
+      if (!read?.writerBusy) return;
+      await this.sleepImpl(250);
+    }
+  }
+
+  /** Retry a slot that stood down for an on-disk writer, once the writer should have moved. */
+  private scheduleRewarm(repositoryId: string, gitRef: string): void {
+    const key = activeGraphSlotKey(repositoryId, gitRef);
+    if (this.rewarmTimers.has(key)) return;
+    const timer = setTimeout(() => {
+      this.rewarmTimers.delete(key);
+      const idx = this.indexes.get(key);
+      if (!idx || idx.state === 'ready' || this.inflight.has(key)) return;
+      const graph = this.graphProvider?.(repositoryId, gitRef);
+      if (!graph) return;
+      void this.ensureIndex(repositoryId, gitRef, graph);
+    }, 2_000);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.rewarmTimers.set(key, timer);
+  }
+
+  private clearRewarm(key: string): void {
+    const timer = this.rewarmTimers.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.rewarmTimers.delete(key);
   }
 
   /**
@@ -412,6 +513,8 @@ export class EmbedBroker {
 
   /** Stop the worker (daemon shutdown). Safe to call when already stopped. */
   stop(): void {
+    for (const timer of this.rewarmTimers.values()) clearTimeout(timer);
+    this.rewarmTimers.clear();
     const child = this.child;
     this.child = null;
     this.starting = false;

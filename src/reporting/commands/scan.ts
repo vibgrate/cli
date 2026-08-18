@@ -277,6 +277,48 @@ function reportStandards(rootDir: string): void {
   }
 }
 
+/**
+ * What vgd is doing for this repo right now — printed after a scan (or a
+ * skipped one) so re-running `vg` is never a blank "unchanged" line while
+ * the semantic index is still warming.
+ */
+async function printRuntimeSnapshot(
+  rootDir: string,
+  opts: { daemon?: boolean },
+  already?: { repositoryId?: string; socketPath?: string },
+): Promise<void> {
+  try {
+    const { attachVgd } = await import('../../runtime/vgd/attach.js');
+    const { vgdRequest } = await import('../../runtime/vgd/client.js');
+    const { formatSemanticProgress } = await import('../../runtime/vgd/semantic-status.js');
+    let repositoryId = already?.repositoryId;
+    let socketPath = already?.socketPath;
+    if (!repositoryId || !socketPath) {
+      const attached = await attachVgd(rootDir, {
+        disabled: opts.daemon === false,
+        autoStart: false,
+        publish: false,
+      });
+      if (attached.status !== 'attached' || !attached.repositoryId || !attached.socketPath) return;
+      repositoryId = attached.repositoryId;
+      socketPath = attached.socketPath;
+    }
+    const semantic = await vgdRequest({ op: 'embed-status', repositoryId }, { socketPath });
+    if (!semantic.ok || !('semantic' in semantic)) return;
+    const slot =
+      semantic.semantic.slots.find((s) => s.repositoryId === repositoryId) ?? semantic.semantic.slots[0];
+    if (!slot) {
+      if (semantic.semantic.worker === 'unavailable' && semantic.semantic.reason) {
+        console.error(chalk.dim(`  · semantic · ${semantic.semantic.reason}`));
+      }
+      return;
+    }
+    console.error(chalk.dim(`  · ${formatSemanticProgress(slot)}`));
+  } catch {
+    /* no daemon, or it went away — the scan itself already succeeded */
+  }
+}
+
 function parseNonNegativeNumber(value: string | undefined, label: string): number | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);
@@ -474,6 +516,10 @@ export const scanCommand = new Command('scan')
                 console.error(chalk.red('Repository unchanged but no previous ingest id available.'));
                 process.exit(1);
               }
+              // A skipped scan still has a daemon and a semantic index — say
+              // what they are doing. Re-running `vg` after clearing the
+              // terminal used to print only "unchanged" and look idle.
+              await printRuntimeSnapshot(rootDir, opts);
               return;
             }
           }
@@ -586,7 +632,7 @@ export const scanCommand = new Command('scan')
       const { attachVgd } = await import('../../runtime/vgd/attach.js');
       const { ActivityLog } = await import('../../runtime/vgd/activity.js');
       const activity = new ActivityLog();
-      await activity.time(
+      const attached = await activity.time(
         'attach',
         () => attachVgd(rootDir, { disabled: opts.daemon === false }),
         (a) => {
@@ -595,7 +641,7 @@ export const scanCommand = new Command('scan')
           if (a.published?.status === 'published') {
             return {
               outcome: 'ok' as const,
-              detail: `${started} · map published ${a.published.gitRef} · ${a.published.nodeCount} nodes · semantic index warming`,
+              detail: `${started} · map published ${a.published.gitRef} · ${a.published.nodeCount} nodes`,
             };
           }
           return { outcome: 'ok' as const, detail: started };
@@ -603,6 +649,12 @@ export const scanCommand = new Command('scan')
       );
       if (!opts.quiet && opts.format !== 'json') {
         for (const line of activity.render()) console.error(line);
+        if (attached.status === 'attached') {
+          await printRuntimeSnapshot(rootDir, opts, {
+            repositoryId: attached.repositoryId,
+            socketPath: attached.socketPath,
+          });
+        }
       }
     }
 

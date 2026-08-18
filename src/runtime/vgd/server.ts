@@ -294,7 +294,20 @@ async function handleLine(
       if (!slot) {
         return { ok: false, error: `no graph slot for ${req.repositoryId}@${gitRef} — publish the map first`, code: 'no_slot' };
       }
-      const idx = await ctx.embedBroker.ensureIndex(req.repositoryId, gitRef, slot.graph);
+      if (req.wait === false) {
+        void ctx.embedBroker.ensureIndex(req.repositoryId, gitRef, slot.graph, { waitForWriter: true });
+        const kicked = ctx.embedBroker.slot(req.repositoryId, gitRef);
+        return {
+          ok: true,
+          indexed: true,
+          repositoryId: req.repositoryId,
+          gitRef,
+          state: kicked?.state ?? 'building',
+          vectors: kicked?.vectors.size ?? 0,
+          buildMs: kicked?.buildMs,
+        };
+      }
+      const idx = await ctx.embedBroker.ensureIndex(req.repositoryId, gitRef, slot.graph, { waitForWriter: true });
       return {
         ok: true,
         indexed: true,
@@ -312,10 +325,28 @@ async function handleLine(
       if (!slot) {
         return { ok: false, error: `no graph slot for ${req.repositoryId}@${gitRef} — publish the map first`, code: 'no_slot' };
       }
-      // Warm on demand: an ask arriving before the background warm finished
-      // should wait for the index it is about to use, not silently rank against
-      // an empty one. Already-ready slots return immediately.
-      await ctx.embedBroker.ensureIndex(req.repositoryId, gitRef, slot.graph);
+      // Rank immediately when any vectors are resident (including a stale copy
+      // kept across republish). If the slot is empty, kick a background build
+      // and tell the caller it is warming — blocking here is what made
+      // `vg ask` sit silent for tens of seconds.
+      const existing = ctx.embedBroker.slot(req.repositoryId, gitRef);
+      if (existing && existing.vectors.size > 0) {
+        if (existing.state !== 'ready') {
+          void ctx.embedBroker.ensureIndex(req.repositoryId, gitRef, slot.graph);
+        }
+      } else {
+        void ctx.embedBroker.ensureIndex(req.repositoryId, gitRef, slot.graph, { waitForWriter: true });
+        const warming = ctx.embedBroker.slot(req.repositoryId, gitRef);
+        return {
+          ok: false,
+          error: 'semantic index is warming — retry shortly',
+          code: 'semantic_warming',
+          state: warming?.state ?? 'building',
+          vectors: warming?.vectors.size ?? 0,
+          pending: warming?.pending,
+          nodeCount: warming?.nodeCount,
+        };
+      }
       const started = Date.now();
       const result = await ctx.embedBroker.rank(req.repositoryId, gitRef, req.text, req.limit);
       if (!result) {

@@ -70,7 +70,7 @@ export type VgdRequest =
   /** Embed one string in the daemon's warm worker; the caller ranks locally. */
   | { op: 'embed-query'; text: string }
   /** Ensure the slot's vector index exists, building it if needed. */
-  | { op: 'embed-index'; repositoryId: string; gitRef?: string }
+  | { op: 'embed-index'; repositoryId: string; gitRef?: string; wait?: boolean }
   | { op: 'embed-rank'; repositoryId: string; gitRef?: string; text: string; limit?: number }
   | { op: 'dep-context'; repositoryId: string }
   /**
@@ -262,7 +262,16 @@ export type VgdResponse =
       latencyMs?: number;
       unknownIdentifiers?: string[];
     }
-  | { ok: false; error: string; code?: string };
+  | {
+      ok: false;
+      error: string;
+      code?: string;
+      /** Present when `code` is `semantic_warming` so the client can show progress. */
+      state?: string;
+      vectors?: number;
+      pending?: number;
+      nodeCount?: number;
+    };
 
 export function parseRequest(line: string): VgdRequest | { error: string } {
   let raw: unknown;
@@ -331,6 +340,7 @@ export function parseRequest(line: string): VgdRequest | { error: string } {
       op: 'embed-index',
       repositoryId: repositoryId.trim(),
       gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
+      wait: (raw as { wait?: unknown }).wait === false ? false : undefined,
     };
   }
   if (op === 'embed-rank') {
