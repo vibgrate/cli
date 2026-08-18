@@ -238,6 +238,26 @@ describe('formatText', () => {
     expect(txt).not.toContain('flowchart LR');
   });
 
+  it('omits architecture layers that have no files', () => {
+    const text = formatText(makeArtifact({
+      extended: {
+        architecture: {
+          archetype: 'nextjs',
+          archetypeConfidence: 0.8,
+          totalClassified: 2,
+          unclassified: 0,
+          layers: [
+            { layer: 'presentation', fileCount: 2, driftScore: 0, riskLevel: 'none', techStack: [], services: [], packages: [] },
+            { layer: 'domain', fileCount: 0, driftScore: 100, riskLevel: 'high', techStack: [], services: [], packages: [] },
+          ],
+        },
+      },
+    }));
+    expect(text).toContain('presentation');
+    expect(text).not.toMatch(/domain\s+0 files/);
+    expect(text).not.toContain('risk high');
+  });
+
   it('lists Boundary violations (N) when the architecture result has them', () => {
     const text = formatText(makeArtifact({
       extended: {
@@ -263,6 +283,35 @@ describe('formatText', () => {
     }));
     expect(text).toContain('Boundary violations (1)');
     expect(text).toContain('src/Domain/Order.cs → src/Infrastructure/Bus.cs  clean:domain→infrastructure');
+    expect(text).not.toContain('Layer conflicts');
+  });
+
+  it('lists Layer conflicts separately from boundary violations', () => {
+    const text = formatText(makeArtifact({
+      extended: {
+        architecture: {
+          archetype: 'aspnet',
+          archetypeConfidence: 0.9,
+          totalClassified: 4,
+          unclassified: 0,
+          layers: [],
+          violations: [
+            {
+              fromFile: 'src/domain/order.ts',
+              toFile: 'src/infra/bus.ts',
+              fromLayer: 'domain',
+              toLayer: 'infrastructure',
+              edgeKind: 'import',
+              rule: 'graph-conflict:infrastructure',
+              confidence: 1,
+            },
+          ],
+        },
+      },
+    }));
+    expect(text).toContain('Layer conflicts (1)');
+    expect(text).toContain('src/domain/order.ts → src/infra/bus.ts  graph-conflict:infrastructure');
+    expect(text).not.toContain('Boundary violations');
   });
   it('includes report header', () => {
     const text = formatText(makeArtifact());

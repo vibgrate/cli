@@ -29,7 +29,11 @@ import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
 import { activeGraphSlotKey } from '../git-ref.js';
-import type { VgGraph, GraphNode } from '../../schema.js';
+// Pure helpers only: `embeddings.ts` loads the native backend lazily, inside
+// `loadEmbedder`, so importing the target/cache side of it here does not pull
+// the addon into the daemon. The worker remains the only thing that loads it.
+import { cosine, embedTargets, readCachedVectors, type EmbedTarget } from '../../engine/embeddings.js';
+import type { VgGraph } from '../../schema.js';
 
 /** How a slot's index is doing — surfaced by `embed-status` and the daemon log. */
 export type SlotIndexState = 'absent' | 'building' | 'ready' | 'stale' | 'failed';
@@ -41,6 +45,8 @@ export interface SlotIndex {
   /** nodeId → vector. Empty until the first build completes. */
   vectors: Map<string, number[]>;
   nodeCount: number;
+  /** Targets still missing a vector — non-zero on a slot that stopped short. */
+  pending?: number;
   builtAt?: number;
   buildMs?: number;
   error?: string;
@@ -52,6 +58,7 @@ export interface SlotIndexSummary {
   state: SlotIndexState;
   vectors: number;
   nodeCount: number;
+  pending?: number;
   builtAt?: number;
   buildMs?: number;
   error?: string;
@@ -90,13 +97,6 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>;
 }
 
-/** The text an embedding represents for a node — mirrors the in-process indexer. */
-function nodeText(node: GraphNode): string {
-  const parts = [node.qualifiedName || node.name, node.kind, node.file, node.doc]
-    .filter((p): p is string => typeof p === 'string' && p.length > 0);
-  return parts.join(' · ').slice(0, 512);
-}
-
 export class EmbedBroker {
   private child: ChildProcess | null = null;
   private starting = false;
@@ -113,6 +113,7 @@ export class EmbedBroker {
   /** The slot most recently made current — logged on change. */
   private currentKey: string | undefined;
   private graphProvider?: (repositoryId: string, gitRef: string) => VgGraph | undefined;
+  private rootProvider?: (repositoryId: string) => string | undefined;
 
   private readonly log: EmbedBrokerLog;
   private readonly spawnWorker: () => ChildProcess;
@@ -151,6 +152,7 @@ export class EmbedBroker {
         state: idx.state,
         vectors: idx.vectors.size,
         nodeCount: idx.nodeCount,
+        pending: idx.pending,
         builtAt: idx.builtAt,
         buildMs: idx.buildMs,
         error: idx.error,
@@ -196,6 +198,16 @@ export class EmbedBroker {
    */
   setGraphProvider(provider: (repositoryId: string, gitRef: string) => VgGraph | undefined): void {
     this.graphProvider = provider;
+  }
+
+  /**
+   * Supplies the absolute repository root for a slot, so the broker can read
+   * that repo's on-disk vector cache. It cannot come from the graph:
+   * `meta.root` is deliberately relative (`.`) so snapshots stay portable
+   * across machines. The registry holds the real path.
+   */
+  setRootProvider(provider: (repositoryId: string) => string | undefined): void {
+    this.rootProvider = provider;
   }
 
   /**
@@ -257,18 +269,49 @@ export class EmbedBroker {
 
     this.building.add(key);
     idx.state = 'building';
-    const nodes = (graph.nodes ?? []).filter((n) => !!n?.id);
     const started = this.now();
-    this.log(`semantic: building index for ${repositoryId}@${gitRef} (${nodes.length} nodes)…`);
+
+    // Seed from the on-disk vector cache first. `vg embed` (and the `vg build`
+    // warm-up child) already wrote vectors for this repo, over the same
+    // targets and the same embed-text, so re-deriving them here would be pure
+    // duplicated work — usually the *whole* index. A repo that is already
+    // warm on disk therefore goes `ready` in milliseconds, with no worker.
+    const seeded = this.seedFromDisk(repositoryId, graph);
+    const targets = seeded?.pending ?? embedTargets(graph);
+    const vectors = seeded ? seeded.vectors : new Map<string, number[]>();
+    const nodeCount = seeded ? seeded.vectors.size + seeded.pending.length : targets.length;
+    idx.nodeCount = nodeCount;
+
+    if (seeded && seeded.vectors.size) {
+      this.log(
+        `semantic: seeded ${repositoryId}@${gitRef} from the on-disk index — ${seeded.vectors.size} vectors, ${seeded.pending.length} pending`,
+      );
+    }
+
+    // Another process is mid-write on this repo's cache (the `vg build`
+    // warm-up child). Take what is there and stand down rather than embedding
+    // the same nodes a second time; `vg embed` calls `embed-index` when it
+    // finishes, which brings the slot the rest of the way.
+    if (seeded?.writerBusy && targets.length) {
+      idx.vectors = vectors;
+      idx.pending = targets.length;
+      idx.state = vectors.size ? 'stale' : 'absent';
+      this.building.delete(key);
+      this.log(
+        `semantic: ${repositoryId}@${gitRef} left at ${targets.length} pending — another process is writing the on-disk index; re-warming when it reports in`,
+      );
+      return idx;
+    }
+
+    this.log(`semantic: building index for ${repositoryId}@${gitRef} (${targets.length} of ${nodeCount} nodes)…`);
 
     try {
-      const vectors = new Map<string, number[]>();
-      for (let i = 0; i < nodes.length; i += this.batchSize) {
-        const batch = nodes.slice(i, i + this.batchSize);
-        const out = await this.embed(batch.map((n) => nodeText(n)));
-        batch.forEach((n, j) => {
+      for (let i = 0; i < targets.length; i += this.batchSize) {
+        const batch = targets.slice(i, i + this.batchSize);
+        const out = await this.embed(batch.map((t: EmbedTarget) => t.text));
+        batch.forEach((t: EmbedTarget, j: number) => {
           const v = out[j];
-          if (v) vectors.set(n.id, v);
+          if (v) vectors.set(t.id, v);
         });
         // A slot evicted or republished mid-build must not be resurrected with
         // vectors describing the graph it no longer has.
@@ -279,13 +322,17 @@ export class EmbedBroker {
         }
       }
       idx.vectors = vectors;
-      idx.nodeCount = nodes.length;
+      idx.pending = undefined;
       idx.state = 'ready';
       idx.builtAt = this.now();
       idx.buildMs = idx.builtAt - started;
       idx.error = undefined;
       this.log(`semantic: index ready for ${repositoryId}@${gitRef} — ${vectors.size} vectors in ${idx.buildMs}ms`);
     } catch (err) {
+      // Vectors seeded from disk stay usable even when the worker never ran:
+      // a partial index still ranks better than nothing.
+      idx.vectors = vectors;
+      idx.pending = targets.length;
       idx.state = 'failed';
       idx.error = err instanceof Error ? err.message : String(err);
       this.log(`semantic: index build failed for ${repositoryId}@${gitRef} — ${idx.error}; callers fall back to lexical`);
@@ -293,6 +340,62 @@ export class EmbedBroker {
       this.building.delete(key);
     }
     return idx;
+  }
+
+  /**
+   * Read this slot's vectors out of the repo's on-disk cache. Needs the repo
+   * root from the registry; a repository the daemon has no root for (a
+   * synthetic publish in a test) simply builds from scratch.
+   */
+  private seedFromDisk(
+    repositoryId: string,
+    graph: VgGraph,
+  ): { vectors: Map<string, number[]>; pending: EmbedTarget[]; writerBusy: boolean } | null {
+    const root = this.rootProvider?.(repositoryId);
+    if (!root) return null;
+    try {
+      const read = readCachedVectors(graph, root);
+      if (!this.model) this.model = read.model;
+      return { vectors: read.vectors, pending: read.pending, writerBusy: read.writerBusy };
+    } catch (err) {
+      this.log(`semantic: could not read the on-disk index — ${err instanceof Error ? err.message : String(err)}; embedding from scratch`);
+      return null;
+    }
+  }
+
+  /**
+   * Rank a slot's nodes against one question, inside the daemon.
+   *
+   * This is the op that makes the resident index worth holding. The
+   * alternative — shipping the vectors to the caller so it can rank locally —
+   * moves tens of megabytes over a socket per ask; ranking here moves one
+   * question in and a few hundred (id, score) pairs out.
+   *
+   * Only the *order* of this list reaches the caller's rank fusion, so
+   * truncating at `limit` is not an approximation of the answer: a candidate
+   * ranked past a few hundred cannot reach a 12-row result under RRF.
+   *
+   * Returns null whenever semantic is unavailable — a caller that gets null
+   * runs its own in-process pass, exactly as it does with no daemon at all.
+   */
+  async rank(
+    repositoryId: string,
+    gitRef: string,
+    text: string,
+    limit = 200,
+  ): Promise<{ ranked: Array<{ id: string; score: number }>; state: SlotIndexState; vectors: number } | null> {
+    const idx = this.slot(repositoryId, gitRef);
+    if (!idx || idx.vectors.size === 0) return null;
+    const queryVec = await this.embedQuery(text);
+    if (!queryVec) return null;
+    const scored: Array<{ id: string; score: number }> = [];
+    for (const [id, vec] of idx.vectors) {
+      const score = cosine(queryVec, vec);
+      if (score > 0) scored.push({ id, score });
+    }
+    // Deterministic: ties break on node id, never on Map insertion order.
+    scored.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    return { ranked: scored.slice(0, limit), state: idx.state, vectors: idx.vectors.size };
   }
 
   /** Embed one query string. Returns null when semantic is not available. */

@@ -34,3 +34,17 @@ describe('LSP architecture refresh after graph refine', () => {
     expect(refresh).not.toMatch(/if \(this\.artifact\) refineArtifactWithGraph/);
   });
 });
+
+describe('LSP overlay for a skipped nested manifest', () => {
+  const src = fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src/lsp/server.ts'),
+    'utf8',
+  );
+
+  it('scores an open excluded package instead of inheriting the parent overlay', () => {
+    expect(src).toContain('private async scanOpenManifest(');
+    expect(src).toContain('this.scanOpenManifest(uri, filePath)');
+    expect(src).toContain('this package is not in the workspace scan');
+  });
+});
+

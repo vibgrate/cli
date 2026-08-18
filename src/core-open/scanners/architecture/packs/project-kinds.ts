@@ -127,7 +127,12 @@ export const projectKindPacks: ArchitectureKnowledgePack[] = [
       const named = /(^|\/)(worker|workers|jobs)(\/|$)/.test(ctx.projectPath.replace(/\\/g, '/'));
       const layout = filePathHas(ctx, /(^|\/)(workers|jobs)\//) && !filePathHas(ctx, /(^|\/)(controllers|pages|app\/)\//);
       if (!dep && !named && !layout) return [];
-      if (filePathHas(ctx, /(^|\/)(pages|app\/.*page\.)/)) return [];
+      // A host app that also runs jobs (Rails+Sidekiq, Django+Celery) is
+      // not a worker. The job queue is a characteristic, not the kind.
+      if (filePathHas(ctx, /(^|\/)(pages|app\/.*page\.|app\/views\/|app\/controllers\/)/)) return [];
+      if (hasPackage(ctx, 'rails', 'django', 'laravel', 'next', '@next/core', '@nestjs/core', 'fastapi', 'phoenix')) {
+        return [];
+      }
       return [evidenceOf('project-kind/worker', 'projectKind', 'worker', dep || named ? 0.8 : 0.62, named ? ['worker-path'] : ['worker-signal'])];
     },
   },

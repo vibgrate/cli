@@ -71,6 +71,7 @@ export { PACKED_PROJECT_TYPES, isProjectTypeCovered } from './architecture/regis
 export {
   refineArchitectureWithGraph,
   refineArchitectureResult,
+  evaluateLayerBoundary,
   type ArchitectureGraphView,
   type ArchitectureGraphNode,
   type ArchitectureGraphEdge,
@@ -199,6 +200,9 @@ const FRAMEWORK_TO_ARCHETYPE: Record<string, ProjectArchetype> = {
   aspnet: 'aspnet',
   django: 'django',
   fastapi: 'fastapi',
+  rails: 'rails',
+  laravel: 'laravel',
+  phoenix: 'phoenix',
 };
 
 const FRAMEWORK_TO_PROJECT_KIND: Record<string, string> = {
@@ -334,6 +338,18 @@ function inferWorkspaceShape(projects: ProjectScan[]): WorkspaceShape {
   if (apps.length < 2) return 'single';
   const types = new Set(apps.map((p) => p.type));
   return types.size >= 2 ? 'polyglot-platform' : 'monorepo';
+}
+
+/** Synthetic owner for source that no discovered project path covers. */
+function residualProject(seed: ProjectScan | undefined): ProjectScan {
+  return {
+    type: seed?.type ?? 'node',
+    path: '.',
+    name: '',
+    frameworks: [],
+    dependencies: [],
+    dependencyAgeBuckets: { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 },
+  };
 }
 
 function compareRelPath(a: string, b: string): number {
@@ -1192,6 +1208,21 @@ export async function scanArchitectureBundle(
 
   const projectResults = projects.map((p) => resultByPath.get(normalizeRelPath(p.path))!);
   const uniqueResults = [...resultByPath.values()];
+
+  // Source that sits outside every discovered project path (e.g. eShop's
+  // root-level Basket.API/ while csproj discovery pointed at empty src/…).
+  // Fold it into the workspace aggregate only — do not invent a project.
+  const ownerPaths = owners.map((o) => normalizeRelPath(o.path));
+  if (!ownerPaths.includes('.')) {
+    const residual = await classifyTree(rootDir, [residualProject(owners[0])], tooling, services, cache, {
+      projectPath: '.',
+      workspacePaths: [...ownerPaths, '.'],
+    });
+    if (residual.totalClassified > 0 || residual.unclassified > 0) {
+      uniqueResults.push(residual);
+    }
+  }
+
   const workspace = finalizeWorkspace(uniqueResults, projects, tooling, services);
   const siblingEdges = detectWorkspaceEdges(projects, projectResults);
   const mergedEdges = [
@@ -1262,7 +1293,7 @@ async function classifyTree(
   for (const file of sourceFiles) {
     if (!isLayerCandidate(file) || skipAllLayers) continue;
     const storedPath = scope ? toRepoRelative(scope.projectPath, file) : file;
-    const classification = classifyFile(file, archetype);
+    const classification = classifyFile(file, archetype, { repoRelative: storedPath });
     if (classification) {
       seedClassified.push({ ...classification, filePath: storedPath });
     } else {

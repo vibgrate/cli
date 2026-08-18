@@ -26,6 +26,12 @@ export interface GlobalOpts {
    * identity (sanitized before it's recorded). Absent for human-run commands.
    */
   client?: string;
+  /**
+   * --no-daemon (commander exposes this as `daemon: false`) — never auto-start
+   * or use the local runtime; run everything in this process, as vg did before
+   * vgd existed. Also settable once via `VG_NO_DAEMON=1`.
+   */
+  daemon?: boolean;
 }
 
 /**
@@ -44,6 +50,7 @@ export function applyGlobalOptions(cmd: Command): Command {
     .option('--local', 'never touch the network (lexical-only semantic)')
     .option('--quiet', 'suppress progress output')
     .option('--client <name>', 'identify the AI client (e.g. claude) so navigation calls are counted in vg savings')
+    .option('--no-daemon', 'never auto-start or use the local runtime (vgd) — run everything in this process')
     .option('--no-color', 'disable colored output');
 }
 
@@ -63,5 +70,6 @@ export function readGlobal(cmd: Command): GlobalOpts {
     local: o.local as boolean | undefined,
     quiet: o.quiet as boolean | undefined,
     client: o.client as string | undefined,
+    daemon: o.daemon as boolean | undefined,
   };
 }

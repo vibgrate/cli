@@ -7,6 +7,8 @@ import { verifyDeterminism } from '../engine/verify.js';
 import { epistemicBreakdown } from '../engine/epistemic.js';
 import { signGraphAttestation, verifyGraphAttestation, type SignSummary } from './attest-actions.js';
 import { isModelReady, countPending, resolveEmbedModel } from '../engine/embeddings.js';
+import { attachVgd } from '../runtime/vgd/attach.js';
+import { ActivityLog } from '../runtime/vgd/activity.js';
 import type { VgGraph } from '../schema.js';
 import { writeArtifacts } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
@@ -174,6 +176,28 @@ export async function runBuild(
     });
   }
 
+  // The map is on disk now — start the local runtime if it is not up, and hand
+  // it the map. `vg build` used to leave the daemon at `0 graph slot(s)` no
+  // matter how many times it ran. Done here rather than with the summary below
+  // so a `--json` build (which returns early) warms the daemon too; the notice
+  // is printed in order later.
+  const activity = new ActivityLog();
+  await activity.time(
+    'attach',
+    () => attachVgd(root, { graphPath: global.graph, disabled: global.daemon === false }),
+    (a) => {
+      if (a.status !== 'attached') return { outcome: 'skip' as const, detail: `${a.reason} — the map stays on disk only` };
+      const started = a.started ? 'started vgd' : 'attached to vgd';
+      if (a.published?.status === 'published') {
+        return { outcome: 'ok' as const, detail: `${started} · map published ${a.published.gitRef} · ${a.published.nodeCount} nodes · semantic index warming` };
+      }
+      if (a.published?.status === 'failed') {
+        return { outcome: 'warn' as const, detail: `${started} · map not published (${a.published.error})` };
+      }
+      return { outcome: 'ok' as const, detail: started };
+    },
+  );
+
   if (opts.export) writeExport(result.graph, opts.export);
 
   // Bring previously-installed assistant instructions (skill/nudge files from
@@ -232,6 +256,7 @@ export async function runBuild(
       attestation,
       timingMs: result.timing.totalMs,
       warnings: result.warnings,
+      activity: activity.toJSON(),
     });
     return;
   }
@@ -288,6 +313,8 @@ export async function runBuild(
       ),
     );
   }
+
+  for (const line of activity.render()) info(line);
 
   maybeWarmEmbeddings(root, result.graph, global, opts.warm !== false);
 }

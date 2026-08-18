@@ -121,6 +121,8 @@ function archetypeCategory(archetype?: string): { category: string; signal: stri
     case 'remix':
     case 'sveltekit':
     case 'nuxt':
+    case 'rails':
+    case 'phoenix':
       return { category: 'web-app', signal: `archetype:${archetype}` };
     case 'nestjs':
     case 'express':
@@ -132,6 +134,7 @@ function archetypeCategory(archetype?: string): { category: string; signal: stri
     case 'aspnet':
     case 'django':
     case 'fastapi':
+    case 'laravel':
     case 'go-service':
       return { category: 'api', signal: `archetype:${archetype}` };
     case 'library':

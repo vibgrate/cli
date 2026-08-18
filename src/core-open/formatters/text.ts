@@ -672,6 +672,7 @@ function formatArchitectureDiagram(arch: ArchitectureResult): string[] {
   lines.push('');
   if (arch.layers.length > 0) {
     for (const layer of arch.layers) {
+      if (layer.fileCount === 0) continue;
       const risk = layer.riskLevel === 'none' ? chalk.dim('none') : layer.riskLevel === 'low' ? chalk.green('low') : layer.riskLevel === 'moderate' ? chalk.yellow('moderate') : chalk.red('high');
       lines.push(`    ${chalk.bold(layer.layer)}  ${layer.fileCount} file${layer.fileCount !== 1 ? 's' : ''}  drift ${scoreBar(layer.driftScore)}  risk ${risk}`);
     }
@@ -679,12 +680,27 @@ function formatArchitectureDiagram(arch: ArchitectureResult): string[] {
   }
   if (arch.violations && arch.violations.length > 0) {
     const extra = arch.violationsCapped ? '+' : '';
-    lines.push(`  Boundary violations (${arch.violations.length}${extra})`);
-    for (const v of arch.violations.slice(0, 8)) {
-      lines.push(`    ${v.fromFile} → ${v.toFile}  ${v.rule}`);
+    const boundary = arch.violations.filter((v) => !v.rule.startsWith('graph-conflict:'));
+    const conflicts = arch.violations.filter((v) => v.rule.startsWith('graph-conflict:'));
+    if (boundary.length > 0) {
+      const cap = extra && conflicts.length === 0 ? extra : '';
+      lines.push(`  Boundary violations (${boundary.length}${cap})`);
+      for (const v of boundary.slice(0, 8)) {
+        lines.push(`    ${v.fromFile} → ${v.toFile}  ${v.rule}`);
+      }
+      if (boundary.length > 8) {
+        lines.push(chalk.dim(`    + ${boundary.length - 8} more`));
+      }
     }
-    if (arch.violations.length > 8) {
-      lines.push(chalk.dim(`    + ${arch.violations.length - 8} more`));
+    if (conflicts.length > 0) {
+      const cap = extra ? extra : '';
+      lines.push(`  Layer conflicts (${conflicts.length}${cap})`);
+      for (const v of conflicts.slice(0, 8)) {
+        lines.push(`    ${v.fromFile} → ${v.toFile}  ${v.rule}`);
+      }
+      if (conflicts.length > 8) {
+        lines.push(chalk.dim(`    + ${conflicts.length - 8} more`));
+      }
     }
     lines.push('');
   }

@@ -10,6 +10,7 @@ import {
   localApiSurface,
   libId,
 } from '../engine/lib.js';
+import { inventory } from '../engine/drift.js';
 import type { DriftNote } from '../engine/lib.js';
 import { selectForBudget, symbolsFromApi } from '../engine/select.js';
 import { assessDocQuality } from '../engine/quality.js';
@@ -81,8 +82,12 @@ function listCatalog(root: string, asJson?: boolean): void {
     return;
   }
   info(`${c.cyan('vg lib')} · ${libs.length} library(ies) in the catalog`);
+  // One inventory for the whole listing: it walks the manifest tree and probes
+  // node_modules per declared dependency, so rebuilding it per catalog entry
+  // multiplied that cost by the size of the catalog.
+  const inv = inventory(root);
   for (const l of libs) {
-    const d = driftFor(root, l);
+    const d = driftFor(root, l, inv);
     const tag = d.drift === 'behind' ? c.yellow(' (docs behind your version)') : d.drift === 'ahead' ? c.dim(' (docs ahead)') : '';
     info(`  ${c.bold(l.name)} ${c.dim(`@${l.version}`)} ${c.dim(`[${l.source.type}]`)}${tag}`);
   }

@@ -124,3 +124,69 @@ describe('runGraphQuery ask', () => {
     expect(lines.some((l) => l.includes('how are passwords verified'))).toBe(false);
   });
 });
+
+describe('runGraphQuery — ask via the local runtime', () => {
+  const session = (rank: () => Promise<unknown>) => ({ attached: true, rank }) as never;
+
+  it('ranks through the daemon, without loading a model in this process', async () => {
+    let ranked = 0;
+    // The suite shares one hoisted mock; clear it so "was never called" means
+    // "was never called by THIS request".
+    loadEmbedder.mockClear();
+    loadEmbedder.mockImplementation(() => {
+      throw new Error('the language server must not load the embedder when vgd ranked');
+    });
+    const target = graph.nodes.find((n) => n.name === 'verifyPassword')!;
+
+    const result = await runGraphQuery(
+      graph,
+      { mode: 'ask', question: 'how are passwords verified', semantic: true },
+      {
+        root,
+        offline: false,
+        semantic: true,
+        semanticSession: session(async () => {
+          ranked++;
+          return { ranked: [{ id: target.id, score: 0.9 }], vectors: 3, model: 'bge-small-en-v1.5' };
+        }),
+      },
+    );
+
+    expect(ranked).toBe(1);
+    expect(result.ok).toBe(true);
+    const data = (result as { data: Record<string, unknown> }).data;
+    expect(String(data.mode)).toContain('vgd');
+    expect(loadEmbedder).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the in-process path when the daemon has no ranking', async () => {
+    loadEmbedder.mockClear();
+    loadEmbedder.mockResolvedValue(null);
+
+    const result = await runGraphQuery(
+      graph,
+      { mode: 'ask', question: 'how are passwords verified', semantic: true },
+      { root, offline: false, semantic: true, semanticSession: session(async () => null) },
+    );
+
+    expectLexicalAnswer(result);
+    expect(loadEmbedder).toHaveBeenCalled();
+  });
+
+  it('never lets a daemon failure surface to the editor', async () => {
+    loadEmbedder.mockResolvedValue(null);
+
+    const result = await runGraphQuery(
+      graph,
+      { mode: 'ask', question: 'how are passwords verified', semantic: true },
+      {
+        root,
+        offline: false,
+        semantic: true,
+        semanticSession: session(() => Promise.reject(new Error('socket gone'))),
+      },
+    );
+
+    expectLexicalAnswer(result);
+  });
+});

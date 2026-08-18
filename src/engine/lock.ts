@@ -31,6 +31,16 @@ function lockIsStale(file: string, staleMs: number): boolean {
   }
 }
 
+/**
+ * True when a live process is holding this lock right now. Read-only: it never
+ * reclaims, so a caller can politely stand down (the vgd semantic warm does
+ * this rather than embedding a repo a `vg embed` child is already embedding).
+ */
+export function lockHeld(file: string, staleMs = DEFAULT_LOCK_STALE_MS): boolean {
+  if (!fs.existsSync(file)) return false;
+  return !lockIsStale(file, staleMs);
+}
+
 /** Take the lock (O_EXCL), reclaiming a stale/dead one. Returns success. */
 export function acquireLock(file: string, staleMs = DEFAULT_LOCK_STALE_MS): boolean {
   const write = (): boolean => {

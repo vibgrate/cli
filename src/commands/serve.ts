@@ -88,6 +88,7 @@ export function registerServe(program: Command): void {
         dedup: opts.dedup === true,
         refresh,
         watch: opts.watch !== false,
+        daemon: global.daemon,
         root,
         stats,
         // Listing surface: flags win over env; unknown values fall back to the

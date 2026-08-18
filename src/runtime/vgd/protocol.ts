@@ -60,7 +60,7 @@ export type VgdRequest =
    */
   | { op: 'load-graph'; root: string; gitRef?: string; graphPath?: string }
   /** Lexical/structural query against the ActiveGraph for a repository. */
-  | { op: 'query-graph'; repositoryId: string; query: string; limit?: number; gitRef?: string }
+  | { op: 'query-graph'; repositoryId: string; query: string; limit?: number; gitRef?: string; semantic?: boolean }
   /** Blast-radius impact for a symbol id or qualified name. */
   | { op: 'impact-of'; repositoryId: string; symbol: string; depth?: number; gitRef?: string }
   /** Compact graph meta for the current (or named) slot — not the full graph. */
@@ -71,6 +71,13 @@ export type VgdRequest =
   | { op: 'embed-query'; text: string }
   /** Ensure the slot's vector index exists, building it if needed. */
   | { op: 'embed-index'; repositoryId: string; gitRef?: string }
+  | { op: 'embed-rank'; repositoryId: string; gitRef?: string; text: string; limit?: number }
+  | { op: 'dep-context'; repositoryId: string }
+  /**
+   * Hold this connection open and stream slot changes on it. The only op that
+   * does not answer once and stop — everything else is request/response.
+   */
+  | { op: 'watch-slots'; repositoryId?: string }
   /** Approach B host broker: warm model status inside vgd. */
   | { op: 'host-status' }
   | { op: 'host-load'; modelPath: string }
@@ -98,6 +105,8 @@ export interface EmbedStatusPayload {
     state: string;
     vectors: number;
     nodeCount: number;
+    /** Targets still missing a vector on a slot that is not ready. */
+    pending?: number;
     builtAt?: number;
     buildMs?: number;
     error?: string;
@@ -138,6 +147,16 @@ export type VgdResponse =
       socketPath: string;
       /** Calendar version of the CLI process serving this socket. */
       cliVersion?: string;
+      /** What the daemon is watching, and what it is mid-rebuild on. */
+      freshness?: Array<{
+        repositoryId: string;
+        root: string;
+        gitRef: string;
+        watching: boolean;
+        pending: number;
+        building: boolean;
+        lastRebuildAt?: number;
+      }>;
     }
   | { ok: true; workspaces: WorkspaceRecord[] }
   | { ok: true; workspace: WorkspaceRecord }
@@ -145,8 +164,39 @@ export type VgdResponse =
   | { ok: true; removed: boolean }
   | { ok: true; stopping: true }
   | { ok: true; slots: GraphSlotSummary[] }
+  | { ok: true; watching: true; repositoryId?: string }
+  /**
+   * An unsolicited frame on a `watch-slots` connection: this repo's map
+   * changed and the subscriber should reload it. Carries the corpus hash so a
+   * subscriber that already has that map can ignore the event.
+   */
+  | { ok: true; event: 'slot-changed'; repositoryId: string; gitRef: string; nodeCount: number; corpusHash: string | null }
   | { ok: true; semantic: EmbedStatusPayload }
+  | {
+      ok: true;
+      repositoryId: string;
+      /** Digest of every manifest and lockfile in the tree. */
+      manifestHash: string;
+      /** Declared/installed dependency records, as `engine/drift.ts` builds them. */
+      dependencies: Array<{
+        name: string;
+        ecosystem: string;
+        declared: string;
+        installed?: string;
+      }>;
+      builtAt: number;
+    }
   | { ok: true; vector: number[]; model?: string }
+  | {
+      ok: true;
+      ranked: Array<{ id: string; score: number }>;
+      repositoryId: string;
+      gitRef: string;
+      state: string;
+      vectors: number;
+      model?: string;
+      rankMs: number;
+    }
   | {
       ok: true;
       indexed: true;
@@ -163,6 +213,8 @@ export type VgdResponse =
       query: string;
       repositoryId: string;
       gitRef: string;
+      /** How the ranking was produced — `lexical` when semantic was not available. */
+      mode?: string;
       matches: VgdQueryMatch[];
       tokensEstimate: number;
     }
@@ -281,6 +333,37 @@ export function parseRequest(line: string): VgdRequest | { error: string } {
       gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
     };
   }
+  if (op === 'embed-rank') {
+    const repositoryId = (raw as { repositoryId?: unknown }).repositoryId;
+    const gitRef = (raw as { gitRef?: unknown }).gitRef;
+    const text = (raw as { text?: unknown }).text;
+    const limit = (raw as { limit?: unknown }).limit;
+    if (typeof repositoryId !== 'string' || !repositoryId.trim()) return { error: 'embed-rank requires repositoryId' };
+    if (typeof text !== 'string' || !text.trim()) return { error: 'embed-rank requires text' };
+    return {
+      op: 'embed-rank',
+      repositoryId: repositoryId.trim(),
+      gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
+      // Same bound as embed-query: untrusted socket input, one worker.
+      text: text.trim().slice(0, 8_000),
+      // Only the ORDER of this list reaches the caller's rank fusion, and a
+      // candidate past a few hundred can never surface in a 12-row answer —
+      // so a generous cap costs nothing and a huge one buys nothing.
+      limit: typeof limit === 'number' && limit > 0 ? Math.min(Math.floor(limit), 1000) : undefined,
+    };
+  }
+  if (op === 'watch-slots') {
+    const repositoryId = (raw as { repositoryId?: unknown }).repositoryId;
+    return {
+      op: 'watch-slots',
+      repositoryId: typeof repositoryId === 'string' && repositoryId.trim() ? repositoryId.trim() : undefined,
+    };
+  }
+  if (op === 'dep-context') {
+    const repositoryId = (raw as { repositoryId?: unknown }).repositoryId;
+    if (typeof repositoryId !== 'string' || !repositoryId.trim()) return { error: 'dep-context requires repositoryId' };
+    return { op: 'dep-context', repositoryId: repositoryId.trim() };
+  }
   if (op === 'query-graph') {
     const repositoryId = (raw as { repositoryId?: unknown }).repositoryId;
     const query = (raw as { query?: unknown }).query;
@@ -294,6 +377,12 @@ export function parseRequest(line: string): VgdRequest | { error: string } {
       query: query.trim(),
       limit: typeof limit === 'number' && limit > 0 ? Math.min(Math.floor(limit), 50) : undefined,
       gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
+      // Opt-in, and left off the parsed request entirely when not asked: a
+      // client that asks for semantic gets the fused ranking when the slot's
+      // index is ready, and the lexical answer when it is not. Ranking and
+      // fusion both happen here, so the caller needs neither the graph nor the
+      // embedder — which is the whole reason a panel can afford to ask.
+      semantic: (raw as { semantic?: unknown }).semantic === true ? true : undefined,
     };
   }
   if (op === 'impact-of') {

@@ -204,7 +204,6 @@ interface GraphIndex {
   nodeFile: Map<string, string>;
   fileNodes: Map<string, string[]>;
   outboundImport: Map<string, ArchitectureGraphEdge[]>;
-  inboundCall: Map<string, ArchitectureGraphEdge[]>;
 }
 
 function pushEdge(map: Map<string, ArchitectureGraphEdge[]>, key: string, edge: ArchitectureGraphEdge): void {
@@ -226,17 +225,15 @@ function indexGraph(graph: ArchitectureGraphView): GraphIndex {
   }
 
   const outboundImport = new Map<string, ArchitectureGraphEdge[]>();
-  const inboundCall = new Map<string, ArchitectureGraphEdge[]>();
   for (const edge of graph.edges) {
     if (IGNORE_EDGE_KINDS.has(edge.kind)) continue;
-    if (edge.kind !== 'import' && edge.kind !== 'call') continue;
+    if (edge.kind !== 'import') continue;
     const srcFile = nodeFile.get(edge.src);
     const dstFile = nodeFile.get(edge.dst);
     if (!srcFile || !dstFile || srcFile === dstFile) continue;
-    if (edge.kind === 'import') pushEdge(outboundImport, srcFile, edge);
-    else pushEdge(inboundCall, dstFile, edge);
+    pushEdge(outboundImport, srcFile, edge);
   }
-  return { nodeFile, fileNodes, outboundImport, inboundCall };
+  return { nodeFile, fileNodes, outboundImport };
 }
 
 interface NeighbourVote {
@@ -244,6 +241,21 @@ interface NeighbourVote {
   file: string;
   kind: string;
   resolution: string;
+}
+
+/**
+ * Neighbour layers that contradict a trusted path label.
+ * Downward stack imports (routing → domain) and exempt layers (shared /
+ * config / testing) are the expected shape of a CLI or layered app — they
+ * must not vote that the source file *is* the destination layer.
+ * Domain → data-access / infrastructure is the clean-architecture smell
+ * §16.2 is meant to catch even when a layered profile would allow the edge.
+ */
+function countsTowardDisagreement(from: ArchitectureLayer, to: ArchitectureLayer): boolean {
+  if (EXEMPT_LAYERS.has(from) || EXEMPT_LAYERS.has(to)) return false;
+  // Path says domain; the graph is wired like persistence. Other stack
+  // crossings are boundary-profile questions, not a layer-identity vote.
+  return from === 'domain' && (to === 'data-access' || to === 'infrastructure');
 }
 
 function neighbourhoodVotes(
@@ -254,12 +266,16 @@ function neighbourhoodVotes(
   const votes: NeighbourVote[] = [];
   const seen = new Set<string>();
 
-  const consider = (neighbour: string | undefined, edge: ArchitectureGraphEdge): void => {
-    if (!neighbour || neighbour === filePath) return;
+  // Identity votes are outbound imports only. Inbound calls ("used by
+  // routing") are the legal direction for a helper and must not re-label it.
+  for (const edge of index.outboundImport.get(filePath) ?? []) {
+    const neighbour = index.nodeFile.get(edge.dst);
+    if (!neighbour || neighbour === filePath) continue;
     const neighbourState = stateOf(neighbour);
-    if (!neighbourState.layer) return;
+    if (!neighbourState.layer) continue;
+    if (EXEMPT_LAYERS.has(neighbourState.layer)) continue;
     const key = `${edge.kind}|${neighbour}|${neighbourState.layer}`;
-    if (seen.has(key)) return;
+    if (seen.has(key)) continue;
     seen.add(key);
     votes.push({
       layer: neighbourState.layer,
@@ -267,13 +283,6 @@ function neighbourhoodVotes(
       kind: edge.kind,
       resolution: edge.resolution ?? 'unknown',
     });
-  };
-
-  for (const edge of index.outboundImport.get(filePath) ?? []) {
-    consider(index.nodeFile.get(edge.dst), edge);
-  }
-  for (const edge of index.inboundCall.get(filePath) ?? []) {
-    consider(index.nodeFile.get(edge.src), edge);
   }
   return votes;
 }
@@ -426,16 +435,20 @@ function isSliceInternal(filePath: string): boolean {
   return !/^(index|public|api|mod)\.[^./]+$/i.test(base);
 }
 
+/** Profile-aware layer-boundary check. Exported so rule tables stay under test. */
+export function evaluateLayerBoundary(
+  profile: string,
+  from: ArchitectureLayer,
+  to: ArchitectureLayer,
+  fromFile: string,
+  toFile: string,
+): { illegal: boolean; rule: string } {
+  return isIllegalEdge(profile, from, to, fromFile, toFile);
+}
+
 function isIllegalEdge(profile: string, from: ArchitectureLayer, to: ArchitectureLayer, fromFile: string, toFile: string): { illegal: boolean; rule: string } {
-  if (from === to) return { illegal: false, rule: '' };
-
-  if (CLEAN_PROFILES.has(profile)) {
-    if (from === 'domain' && (to === 'data-access' || to === 'infrastructure')) {
-      return { illegal: true, rule: `${profile}:domain→${to}` };
-    }
-    return { illegal: false, rule: '' };
-  }
-
+  // Vertical-slice constraints are about slice identity, not layer rank —
+  // two `services` files in different features is the usual illegal case.
   if (profile === 'vertical-slice') {
     const fromSlice = sliceOf(fromFile);
     const toSlice = sliceOf(toFile);
@@ -445,8 +458,24 @@ function isIllegalEdge(profile: string, from: ArchitectureLayer, to: Architectur
     return { illegal: false, rule: '' };
   }
 
+  if (from === to) return { illegal: false, rule: '' };
+
+  if (CLEAN_PROFILES.has(profile)) {
+    if (from === 'domain' && (to === 'data-access' || to === 'infrastructure')) {
+      return { illegal: true, rule: `${profile}:domain→${to}` };
+    }
+    return { illegal: false, rule: '' };
+  }
+
   if (profile === 'layered' || profile === 'mvc' || profile === 'mvvm') {
     if (EXEMPT_LAYERS.has(from) || EXEMPT_LAYERS.has(to)) return { illegal: false, rule: '' };
+    // Domain is the dependency sink on this stack (Clean-shaped), not a
+    // tier sitting *above* data-access. Repositories and adapters import
+    // entities; the reverse is the leak.
+    if (to === 'domain') return { illegal: false, rule: '' };
+    if (from === 'domain' && (to === 'data-access' || to === 'infrastructure')) {
+      return { illegal: true, rule: `${profile}:domain→${to}` };
+    }
     const a = LAYERED_RANK.get(from);
     const b = LAYERED_RANK.get(to);
     if (a === undefined || b === undefined) return { illegal: false, rule: '' };
@@ -455,6 +484,45 @@ function isIllegalEdge(profile: string, from: ArchitectureLayer, to: Architectur
   }
 
   return { illegal: false, rule: '' };
+}
+
+/**
+ * The rules `isIllegalEdge` actually enforces for a profile, in prose.
+ *
+ * Kept beside `isIllegalEdge` on purpose: a client that renders "what is
+ * enforced here" must read it from the engine rather than re-describe the
+ * rules itself and drift out of sync with them. Only profiles the checker
+ * recognises return rules — an unknown profile yields `[]`, which honestly
+ * says "nothing is enforced" instead of implying a check that never runs.
+ */
+export function boundaryProfileRules(profile: string | undefined): string[] {
+  if (!profile) return [];
+
+  if (CLEAN_PROFILES.has(profile)) {
+    return [
+      'domain must not depend on data-access',
+      'domain must not depend on infrastructure',
+    ];
+  }
+
+  if (profile === 'vertical-slice') {
+    return [
+      'a slice must not import another slice\'s internals',
+      'cross-slice imports must go through an entry point (index, public, api, mod)',
+    ];
+  }
+
+  if (profile === 'layered' || profile === 'mvc' || profile === 'mvvm') {
+    return [
+      `outer layers flow one way: ${LAYERED_STACK.filter((l) => l !== 'domain').join(' → ')}`,
+      'data-access and infrastructure may depend on domain (entities / ports)',
+      'domain must not depend on data-access or infrastructure',
+      'no upward dependency toward presentation / routing',
+      `exempt from the check: ${[...EXEMPT_LAYERS].join(', ')}`,
+    ];
+  }
+
+  return [];
 }
 
 function sameOwningProject(
@@ -549,6 +617,10 @@ function applyConfirmation(
       addFolderSignal(result, file, GRAPH_OVERRIDE_SIGNAL);
       continue;
     }
+
+    // Trusted path label. Only a wiring that contradicts the label is a
+    // graph-conflict — not "this command imports shared helpers."
+    if (!countsTowardDisagreement(state.layer, majority.layer)) continue;
 
     const conflictSignal = `${GRAPH_CONFLICT_SIGNAL_PREFIX}${majority.layer}`;
     state.signals = sortedSignals([...state.signals, conflictSignal, ...extra]);

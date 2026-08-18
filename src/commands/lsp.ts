@@ -42,6 +42,7 @@ export function registerLsp(program: Command): void {
         diagnostics: opts.diagnostics === true,
         graph: opts.graph !== false,
         semantic: opts.semantic !== false,
+        daemon: global.daemon,
       });
 
       // The server owns the process from here: it lives on stdin/stdout until

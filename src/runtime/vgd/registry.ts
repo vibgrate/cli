@@ -28,6 +28,8 @@ export class WorkspaceRegistry {
    * index can never describe a ref its graph no longer holds.
    */
   private slotListener?: GraphSlotListener;
+  /** Told after a graph is stored, so the daemon can push to subscribers. */
+  private publishListener?: (repositoryId: string, gitRef: string, graph: VgGraph) => void;
   /** Multi-branch in-memory graphs (shared across registered workspaces). */
   readonly graphs = new ActiveGraphCache({
     onEvict: (slot) => this.slotListener?.onGraphEvict(slot.repositoryId, slot.gitRef),
@@ -36,6 +38,16 @@ export class WorkspaceRegistry {
   /** Attach the semantic index (or any slot-scoped resource) to graph lifecycle. */
   setSlotListener(listener: GraphSlotListener | undefined): void {
     this.slotListener = listener;
+  }
+
+  /**
+   * Attach the push channel. Separate from {@link GraphSlotListener} on
+   * purpose: that one keeps *slot-scoped resources* in step and must run
+   * before anyone can query, while this one notifies *other processes* and
+   * must run after the store is complete.
+   */
+  setPublishListener(listener: (repositoryId: string, gitRef: string, graph: VgGraph) => void): void {
+    this.publishListener = listener;
   }
 
   register(
@@ -58,7 +70,13 @@ export class WorkspaceRegistry {
       gitRef: git.ref || undefined,
     };
     this.byId.set(id, record);
-    if (git.ref) this.graphs.select(id, git.ref);
+    // Through `selectGitRef`, not `graphs.select`: every select must reach the
+    // slot listener, or a re-registration after a branch change would move the
+    // current slot without the semantic index following it. This was the one
+    // path that escaped the funnel the whole design rests on. Registering a
+    // repo with no warm slot is still a no-op for the listener — the broker
+    // finds no graph and returns.
+    if (git.ref) this.selectGitRef(id, git.ref);
     return record;
   }
 
@@ -72,6 +90,9 @@ export class WorkspaceRegistry {
     // Invalidate before anyone can query: the old vectors describe the old graph.
     this.slotListener?.onGraphPut(repositoryId, gitRef, graph);
     this.slotListener?.onGraphSelect(repositoryId, gitRef);
+    // After the store and the invalidation: a subscriber that reacts by
+    // reloading must never observe a slot mid-swap.
+    this.publishListener?.(repositoryId, gitRef, graph);
   }
 
   /** Switch the current branch slot for a repository (no load). */

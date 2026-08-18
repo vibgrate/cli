@@ -2,7 +2,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
+import * as semver from 'semver';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
+import { VERSION } from '../version.js';
 import { startVgdServer, vgdIsRunning, vgdPidPath, vgdRequest, vgdSocketPath, VGD_PROTOCOL_VERSION } from '../runtime/vgd/index.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode } from '../util/exit.js';
@@ -45,25 +47,65 @@ export function registerDaemon(program: Command): void {
       // slots rather than left to be inferred.
       const semantic = await vgdRequest({ op: 'embed-status' }, { socketPath }).catch(() => null);
       const semanticPayload = semantic && semantic.ok && 'semantic' in semantic ? semantic.semantic : undefined;
-      if (global.json) json({ running: true, ...res, semantic: semanticPayload });
+      const skew = await vgdVersionSkew(socketPath);
+      if (global.json) json({ running: true, ...res, semantic: semanticPayload, skew });
       else if ('pid' in res) {
         const slots = typeof res.graphSlots === 'number' ? ` · ${res.graphSlots} graph slot(s)` : '';
-        const cli = res.cliVersion ? ` · cli ${res.cliVersion}` : '';
+        // Always print the build, even when the daemon is too old to report one
+        // — a blank where the version should be is what made this skew
+        // invisible in the first place.
+        const cli = ` · cli ${describeVersion(res.cliVersion ?? null)}`;
         info(
           `vgd · running pid ${res.pid}${cli} · ${res.workspaces} workspace(s)${slots} · ${res.uptimeMs}ms up · ${c.dim(res.socketPath)}`,
         );
+        if (skew.running && skew.state !== 'match') {
+          const verb = skew.state === 'older' ? 'older than' : 'newer than';
+          info(
+            c.dim(
+              `  ⚠ this daemon is ${verb} the CLI you just ran (${VERSION})` +
+                (skew.state === 'older' ? ' — run "vg daemon restart --force" to bring it up to date' : ''),
+            ),
+          );
+        }
+        const fresh = 'freshness' in res && Array.isArray(res.freshness) ? res.freshness : [];
+        if (fresh.length) {
+          const watching = fresh.filter((f) => f.watching).length;
+          const building = fresh.filter((f) => f.building);
+          const pending = fresh.reduce((n, f) => n + f.pending, 0);
+          const detail = [
+            `${watching}/${fresh.length} watched`,
+            building.length ? `${building.length} rebuilding` : '',
+            pending ? `${pending} change(s) pending` : '',
+          ]
+            .filter(Boolean)
+            .join(' · ');
+          info(`  freshness · ${detail}`);
+          for (const f of fresh) {
+            if (f.watching && !f.building && !f.pending) continue;
+            const state = f.building ? 'rebuilding' : f.watching ? `${f.pending} pending` : 'not watched (no recursive fs.watch here)';
+            info(c.dim(`    ${f.repositoryId}@${f.gitRef} · ${state}`));
+          }
+        }
         if (semanticPayload) {
           const ready = semanticPayload.slots.filter((sl) => sl.state === 'ready');
           const vectors = ready.reduce((n, sl) => n + sl.vectors, 0);
+          // "worker stopped · 0/0 index(es)" reads like a broken daemon when
+          // it usually means nobody has published a map yet — the index is
+          // slot-scoped, so no graph slot means there is nothing to index.
           const detail =
             semanticPayload.worker === 'unavailable'
               ? c.dim(semanticPayload.reason ?? 'semantic off — lexical only')
-              : `${ready.length}/${semanticPayload.slots.length} index(es) ready · ${vectors} vector(s)` +
-                (semanticPayload.model ? ` · ${semanticPayload.model}` : '');
+              : semanticPayload.slots.length === 0
+                ? c.dim('no map published yet — run `vg build` in a repo (the index follows the graph slot)')
+                : `${ready.length}/${semanticPayload.slots.length} index(es) ready · ${vectors} vector(s)` +
+                  (semanticPayload.model ? ` · ${semanticPayload.model}` : '');
           info(`  semantic · worker ${semanticPayload.worker} · ${detail}`);
           for (const sl of semanticPayload.slots) {
             if (sl.state === 'ready') continue;
-            info(c.dim(`    ${sl.repositoryId}@${sl.gitRef} · ${sl.state}${sl.error ? ` — ${sl.error}` : ''}`));
+            const pending = typeof sl.pending === 'number' && sl.pending > 0 ? ` · ${sl.pending} pending` : '';
+            info(
+              c.dim(`    ${sl.repositoryId}@${sl.gitRef} · ${sl.state}${pending}${sl.error ? ` — ${sl.error}` : ''}`),
+            );
           }
         }
       }
@@ -114,11 +156,13 @@ export function registerDaemon(program: Command): void {
    */
   const ensure = cmd
     .command('ensure')
-    .description('ensure vgd is running (start in background if needed)')
+    .description('ensure vgd is running on this build (start or replace in background if needed)')
+    .option('--allow-version-mismatch', 'attach to an older running vgd instead of replacing it')
     .action(async function (this: Command) {
       const global = readGlobal(this);
       const socketPath = socketOf(this);
-      const ensured = await ensureVgd(socketPath);
+      const opts = this.opts() as { allowVersionMismatch?: boolean };
+      const ensured = await ensureVgd(socketPath, { allowVersionMismatch: opts.allowVersionMismatch });
       const res = await vgdRequest({ op: 'status' }, { socketPath });
       if (!res.ok) {
         throw new CliError(
@@ -129,14 +173,20 @@ export function registerDaemon(program: Command): void {
         );
       }
       if (global.json) {
-        json({ running: true, ensured: ensured.started, ...res });
+        json({ running: true, ensured: ensured.started, replaced: ensured.replaced ?? null, ...res });
       } else if (!global.quiet) {
         const pid = 'pid' in res ? res.pid : ensured.pid;
-        info(
-          ensured.started
-            ? `vgd · started in background pid ${pid} · ${c.dim(socketPath)}`
-            : `vgd · already running pid ${pid} · ${c.dim(socketPath)}`,
-        );
+        if (ensured.replaced) {
+          info(
+            `vgd · replaced ${describeVersion(ensured.replaced.version)} daemon with ${VERSION} · pid ${pid} · ${c.dim(socketPath)}`,
+          );
+        } else {
+          info(
+            ensured.started
+              ? `vgd · started in background pid ${pid} · ${c.dim(socketPath)}`
+              : `vgd · already running pid ${pid} · ${c.dim(socketPath)}`,
+          );
+        }
       }
     });
   applyGlobalOptions(ensure);
@@ -144,10 +194,12 @@ export function registerDaemon(program: Command): void {
   const stop = cmd
     .command('stop')
     .description('stop the running vgd (idempotent — succeeds if none is running)')
+    .option('--force', 'escalate to SIGTERM/SIGKILL if it will not stop politely')
     .action(async function (this: Command) {
       const global = readGlobal(this);
       const socketPath = socketOf(this);
-      const result = await stopVgd(socketPath);
+      const force = Boolean((this.opts() as { force?: boolean }).force);
+      const result = await stopVgd(socketPath, { force });
       if (global.json) {
         json({ stopped: result === 'stopped', result, socketPath });
       } else if (!global.quiet) {
@@ -162,7 +214,7 @@ export function registerDaemon(program: Command): void {
       }
       if (result === 'failed') {
         throw new CliError(
-          `vgd did not stop within 5s (${socketPath}) — check \`vg daemon status\` and stop the process manually`,
+          `vgd did not stop within 5s (${socketPath}) — retry with \`vg daemon stop --force\` to escalate to a signal`,
           ExitCode.ERROR,
         );
       }
@@ -172,10 +224,12 @@ export function registerDaemon(program: Command): void {
   const restart = cmd
     .command('restart')
     .description('restart vgd (stop if running, then start in the background)')
+    .option('--force', 'escalate to SIGTERM/SIGKILL if it will not stop politely')
     .action(async function (this: Command) {
       const global = readGlobal(this);
       const socketPath = socketOf(this);
-      const stopResult = await stopVgd(socketPath);
+      const force = Boolean((this.opts() as { force?: boolean }).force);
+      const stopResult = await stopVgd(socketPath, { force });
       if (stopResult === 'refused') {
         throw new CliError(
           'this vgd cannot be stopped remotely — it is running inside another process; stop that process instead',
@@ -184,7 +238,7 @@ export function registerDaemon(program: Command): void {
       }
       if (stopResult === 'failed') {
         throw new CliError(
-          `vgd did not stop within 5s (${socketPath}) — check \`vg daemon status\` and stop the process manually`,
+          `vgd did not stop within 5s (${socketPath}) — retry with \`vg daemon restart --force\` to escalate to a signal`,
           ExitCode.ERROR,
         );
       }
@@ -479,6 +533,38 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Start vgd in the background without making the caller wait for it.
+ *
+ * `ensureVgd` waits up to 30s and throws — right for `vg daemon ensure` and for
+ * `vg code`, which cannot proceed without a runtime, and wrong for every
+ * ordinary command. An auto-start must never put a cold-start on the front of
+ * `vg ask`: we spawn, give the socket a short window in case it binds quickly,
+ * and otherwise leave the child coming up on its own. The command runs its
+ * in-process path this time and finds a warm daemon the next.
+ *
+ * Never throws — the caller has a working fallback by construction.
+ */
+export async function ensureVgdSoft(
+  socketPath: string = vgdSocketPath(),
+  readyBudgetMs = 1500,
+): Promise<{ running: boolean; started: boolean }> {
+  try {
+    if (await vgdIsRunning({ socketPath })) return { running: true, started: false };
+    const child = spawnDetachedDaemonStart(socketPath);
+    child.unref();
+    const deadline = Date.now() + Math.max(0, readyBudgetMs);
+    while (Date.now() < deadline) {
+      await sleep(100);
+      if (await vgdIsRunning({ socketPath })) return { running: true, started: true };
+      if (child.exitCode != null && child.exitCode !== 0) break;
+    }
+    return { running: false, started: true };
+  } catch {
+    return { running: false, started: false };
+  }
+}
+
+/**
  * Spawn a detached background `daemon start` and wait for it to answer ping.
  * Returns the child pid; throws when the socket never becomes ready.
  *
@@ -514,49 +600,191 @@ async function startDetachedVgd(socketPath: string): Promise<number | undefined>
 }
 
 /**
- * Idempotent start used by `vg daemon ensure` and `vg code`: if vgd is already
- * listening, do nothing; otherwise spawn a detached standalone `daemon start`.
+ * The build version of the daemon currently on the socket, or `null` when it
+ * does not report one.
+ *
+ * `null` is not "unknown, leave it alone": `cliVersion` landed in the status
+ * response in 2026.817.x, so its absence dates the process to a build older
+ * than that just as surely as a version string would.
  */
-export async function ensureVgd(socketPath: string = vgdSocketPath()): Promise<{ started: boolean; pid?: number }> {
-  if (await vgdIsRunning({ socketPath })) return { started: false };
-  const pid = await startDetachedVgd(socketPath);
-  return { started: true, pid };
+export async function vgdCliVersion(socketPath: string = vgdSocketPath()): Promise<string | null> {
+  try {
+    const res = await vgdRequest({ op: 'status' }, { socketPath });
+    if (!res.ok || !('cliVersion' in res)) return null;
+    return typeof res.cliVersion === 'string' && res.cliVersion ? res.cliVersion : null;
+  } catch {
+    return null;
+  }
+}
+
+export type VgdSkew =
+  | { running: false }
+  | { running: true; version: string | null; state: 'match' | 'older' | 'newer' };
+
+/**
+ * Compare the daemon holding the socket against this build.
+ *
+ * vgd owns one machine-wide socket, so whichever process binds it first serves
+ * every client — the CLI, `vg serve`, and a VS Code extension running its own
+ * bundled engine. Version skew is therefore the normal case, not an edge case,
+ * and it is invisible: an old daemon answers every request happily, just with
+ * old code.
+ */
+export async function vgdVersionSkew(socketPath: string = vgdSocketPath(), self: string = VERSION): Promise<VgdSkew> {
+  if (!(await vgdIsRunning({ socketPath }))) return { running: false };
+  const version = await vgdCliVersion(socketPath);
+  return { running: true, version, state: compareDaemonVersion(version, self) };
 }
 
 /**
- * Stop a running vgd: polite `shutdown` op first, SIGTERM via the pid file for
+ * Resolution is deliberately monotonic — only a strictly newer daemon survives
+ * a mismatch. Two clients on different builds both ensuring the socket would
+ * otherwise restart each other forever; with "newest wins" they converge on the
+ * highest version present and stay there.
+ */
+export function compareDaemonVersion(version: string | null, self: string): 'match' | 'older' | 'newer' {
+  if (version === self) return 'match';
+  // We cannot judge from an unparseable version of our own — never pick a fight
+  // we have no way to win.
+  if (!semver.valid(self)) return 'match';
+  if (version === null || !semver.valid(version)) return 'older';
+  return semver.gt(version, self) ? 'newer' : 'older';
+}
+
+/** Human label for a daemon build, including the pre-2026.817 "no version" case. */
+function describeVersion(version: string | null): string {
+  return version ?? 'unknown (pre-2026.817)';
+}
+
+export interface EnsureVgdResult {
+  started: boolean;
+  pid?: number;
+  /** Set when an older daemon was retired to make room for this build. */
+  replaced?: { version: string | null };
+}
+
+export interface EnsureVgdOptions {
+  /** Attach to whatever is on the socket, even on an older build. */
+  allowVersionMismatch?: boolean;
+}
+
+/**
+ * Idempotent start used by `vg daemon ensure` and `vg code`: if vgd is already
+ * listening on this build, do nothing; otherwise spawn a detached standalone
+ * `daemon start`.
+ *
+ * An older daemon is replaced rather than attached to. Attaching is the quiet
+ * failure this exists to prevent: the client reports success, then serves stale
+ * answers from a process nobody remembers starting.
+ */
+export async function ensureVgd(
+  socketPath: string = vgdSocketPath(),
+  opts: EnsureVgdOptions = {},
+): Promise<EnsureVgdResult> {
+  const skew = await vgdVersionSkew(socketPath);
+  if (!skew.running) return { started: true, pid: await startDetachedVgd(socketPath) };
+  if (opts.allowVersionMismatch || skew.state !== 'older') return { started: false };
+  await stopVgd(socketPath, { force: true });
+  return { started: true, pid: await startDetachedVgd(socketPath), replaced: { version: skew.version } };
+}
+
+export interface StopVgdOptions {
+  /**
+   * Escalate past a daemon that will not leave politely: SIGTERM, then SIGKILL.
+   *
+   * Used wherever a surviving daemon is worse than a killed one — `vg update`
+   * above all, where every client on the socket would otherwise keep being
+   * served by the build that was just replaced. Safe to escalate because
+   * `daemon start` is the only thing that ever hosts a vgd listener, so the pid
+   * belongs to a daemon process and not to somebody's editor.
+   */
+  force?: boolean;
+}
+
+/**
+ * Stop a running vgd: polite `shutdown` op first, SIGTERM via the pid for
  * daemons that predate the op, then wait (≤5s) for the socket to go quiet.
  *
  * `refused` means the daemon declined remote shutdown (a listener started
- * without a shutdown hook) — never escalate that to a pid-file kill, because
- * the pid file belongs to the owning process.
+ * without a shutdown hook). Without `force` that is where it ends — the pid
+ * file belongs to the owning process and is not ours to kill.
  */
-export async function stopVgd(socketPath: string): Promise<'stopped' | 'not-running' | 'refused' | 'failed'> {
+export async function stopVgd(
+  socketPath: string,
+  opts: StopVgdOptions = {},
+): Promise<'stopped' | 'not-running' | 'refused' | 'failed'> {
   if (!(await vgdIsRunning({ socketPath }))) return 'not-running';
+  // Ask who is on the socket before shutting it down. The pid the daemon
+  // reports is authoritative; the pid file can be left over from an earlier
+  // process, and signalling that would kill a stranger.
+  const livePid = opts.force ? await vgdReportedPid(socketPath) : null;
   let acknowledged = false;
   try {
     const res = await vgdRequest({ op: 'shutdown' }, { socketPath });
     if (res.ok) acknowledged = true;
-    else if (res.code === 'shutdown_unsupported') return 'refused';
+    else if (res.code === 'shutdown_unsupported' && !opts.force) return 'refused';
     // Any other refusal (an older daemon answers `unknown op`) → pid fallback.
   } catch {
     /* connection dropped mid-shutdown or slow daemon — fall through to pid */
   }
   if (!acknowledged) {
-    const pid = readVgdPid();
+    const pid = signalTarget(livePid);
     if (pid == null) return 'failed';
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch {
-      return 'failed';
-    }
+    if (!signalPid(pid, 'SIGTERM')) return 'failed';
   }
-  const deadline = Date.now() + 5_000;
+  if (await waitForVgdStop(socketPath, 5_000)) return 'stopped';
+  if (!opts.force) return 'failed';
+
+  // Wedged: it acknowledged, or took SIGTERM, and is still holding the socket.
+  const pid = signalTarget(livePid);
+  if (pid == null) return 'failed';
+  if (!signalPid(pid, 'SIGKILL')) return 'failed';
+  // A SIGKILLed daemon cannot unlink its own socket, but the next `daemon
+  // start` clears a stale path before binding, so nothing is left to clean up.
+  return (await waitForVgdStop(socketPath, 3_000)) ? 'stopped' : 'failed';
+}
+
+/**
+ * The pid to signal, or null when there is nothing safe to signal.
+ *
+ * Never our own: a daemon hosted in *this* process (an in-process test server,
+ * a future embedded listener) would otherwise be "stopped" by killing the
+ * caller. Such a daemon has to be shut down through its own handle, so report
+ * failure and let the caller say so.
+ */
+function signalTarget(livePid: number | null): number | null {
+  const pid = livePid ?? readVgdPid();
+  if (pid == null || pid === process.pid) return null;
+  return pid;
+}
+
+function signalPid(pid: number, signal: NodeJS.Signals): boolean {
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForVgdStop(socketPath: string, budgetMs: number): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
   while (Date.now() < deadline) {
     await sleep(100);
-    if (!(await vgdIsRunning({ socketPath }))) return 'stopped';
+    if (!(await vgdIsRunning({ socketPath }))) return true;
   }
-  return 'failed';
+  return false;
+}
+
+/** The pid the live daemon reports for itself — trusted over the pid file. */
+async function vgdReportedPid(socketPath: string): Promise<number | null> {
+  try {
+    const res = await vgdRequest({ op: 'status' }, { socketPath });
+    if (!res.ok || !('pid' in res)) return null;
+    return Number.isInteger(res.pid) && res.pid > 0 ? res.pid : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -566,9 +794,10 @@ export async function stopVgd(socketPath: string): Promise<'stopped' | 'not-runn
  */
 export async function restartVgdIfRunning(
   socketPath: string = vgdSocketPath(),
+  opts: StopVgdOptions = {},
 ): Promise<'restarted' | 'not-running' | 'refused' | 'failed'> {
   try {
-    const stopResult = await stopVgd(socketPath);
+    const stopResult = await stopVgd(socketPath, opts);
     if (stopResult === 'not-running') return 'not-running';
     if (stopResult === 'refused') return 'refused';
     if (stopResult === 'failed') return 'failed';

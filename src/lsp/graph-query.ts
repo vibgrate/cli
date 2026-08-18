@@ -13,6 +13,7 @@
  */
 
 import { queryGraph, queryGraphSemantic, type QueryResult } from '../engine/query.js';
+import type { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import {
   loadEmbedder,
   getNodeEmbeddings,
@@ -51,6 +52,13 @@ export interface GraphQueryContext {
   semantic?: boolean;
   /** Progress trace for the client's output channel. Never carries user text. */
   log?: (message: string) => void;
+  /**
+   * The local runtime's semantic index, when reachable. The language server is
+   * the surface that most wants this: loading the embedding backend in-process
+   * is what could kill it outright (see the SIGTRAP note below), and a daemon
+   * ranking never loads the addon here at all.
+   */
+  semanticSession?: DaemonSemanticSession;
 }
 
 /**
@@ -126,7 +134,26 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
   let mode = 'lexical';
   let note: string | undefined;
 
-  if (wantSemantic) {
+  // The daemon first — and for this process especially, because ranking there
+  // means the native backend is never loaded into the language server at all.
+  if (wantSemantic && ctx.semanticSession) {
+    try {
+      const ranked = await withTimeout(
+        ctx.semanticSession.rank(question, graph.provenance?.corpusHash),
+        semanticBudgetMs(),
+        'daemon ranking over budget',
+      );
+      if (ranked) {
+        log(`ask: ranked by vgd against ${ranked.vectors} vector(s) — no local model load`);
+        result = await queryGraphSemantic(graph, question, { budget, semanticRanked: ranked.ranked });
+        mode = `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})`;
+      }
+    } catch {
+      log('ask: vgd ranking unavailable — trying the in-process semantic path');
+    }
+  }
+
+  if (wantSemantic && !result) {
     const budgetMs = semanticBudgetMs();
     log(`ask: trying the semantic path (budget ${Math.round(budgetMs / 1000)}s)`);
     let reason: EmbedUnavailable | undefined;
