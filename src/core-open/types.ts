@@ -1173,6 +1173,9 @@ export type ProjectArchetype =
   | 'aspnet'
   | 'django'
   | 'fastapi'
+  | 'rails'
+  | 'laravel'
+  | 'phoenix'
   | 'go-service'
   | 'unknown';
 

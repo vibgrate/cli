@@ -376,7 +376,43 @@ export function applyAstRoles(
       continue;
     }
 
-    // Path is the prior. Keep the layer and its confidence; still emit the role.
+    // Path is the prior — except when a structural annotation contradicts a
+    // filename suffix (`ApiGatewayController.java` that is a JPA @Entity).
+    const astOverridesSuffix = hit.role === 'entity'
+      && (state.layer === 'routing' || state.layer === 'presentation');
+    if (astOverridesSuffix) {
+      const previous = state.layer;
+      const fromSummary = result.layers.find((l) => l.layer === previous);
+      if (fromSummary) {
+        const n = normalizeRelPath(hit.filePath);
+        const next = fromSummary.files.filter((f) => normalizeRelPath(f) !== n);
+        if (next.length !== fromSummary.files.length && fromSummary.fileCount > 0) {
+          fromSummary.fileCount -= 1;
+        }
+        fromSummary.files = next;
+      }
+      state.layer = hit.layer;
+      state.confidence = hit.confidence;
+      const signals = sortedSignals([
+        ...state.signals,
+        ...(already?.signals ?? []),
+        `${AST_ROLE_SIGNAL_PREFIX}${hit.role}`,
+        'ast-overrides-suffix',
+        hit.signal,
+      ]);
+      classified.set(hit.filePath, {
+        filePath: hit.filePath,
+        layer: hit.layer,
+        confidence: hit.confidence,
+        signals,
+        role: hit.role,
+      });
+      addFileToLayer(ensureLayer(result, hit.layer), hit.filePath);
+      addFolderSignal(result, hit.filePath, `${AST_ROLE_SIGNAL_PREFIX}${hit.role}`);
+      applied = true;
+      continue;
+    }
+
     const keepConfidence = state.confidence;
     const signals = sortedSignals([
       ...state.signals,

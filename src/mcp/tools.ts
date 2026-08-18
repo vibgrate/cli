@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { queryGraph, queryGraphSemantic } from '../engine/query.js';
+import type { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import { analyzeQuestion } from '../engine/relevance-provider.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
 import { loadEmbedder, getNodeEmbeddings, isModelReady, withTimeout, type Embedder } from '../engine/embeddings.js';
@@ -51,6 +52,12 @@ export interface ToolContext {
   seen?: Set<string>;
   /** Path the served graph was loaded from (locates its tags sidecar). */
   graphPath?: string;
+  /**
+   * The local runtime's semantic index, when one is reachable. Held for the
+   * life of the server: attaching once and sending only the question per call
+   * is what removes this process's own model load and vector scan.
+   */
+  semanticSession?: DaemonSemanticSession;
 }
 
 export interface VgTool {
@@ -127,6 +134,29 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
   // no meaningful latency to the navigation path.
   const relevance = await analyzeQuestion(question);
   const topicTags = relevance ? await loadTopicTags(graph, ctx.root, ctx.graphPath) : null;
+  // The daemon first: it already holds vectors for this slot, so it answers the
+  // semantic half without this process loading the model at all. `null` means
+  // "rank it yourself" — the same path taken when no daemon is running.
+  if (ctx.semanticSession && !ctx.local) {
+    try {
+      const ranked = await withTimeout(
+        ctx.semanticSession.rank(question, graph.provenance?.corpusHash),
+        SEMANTIC_BUDGET_MS,
+        'daemon ranking over budget',
+      );
+      if (ranked) {
+        const q = await queryGraphSemantic(graph, question, {
+          budget,
+          semanticRanked: ranked.ranked,
+          relevance,
+          topicTags,
+        });
+        return { q, mode: `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})` };
+      }
+    } catch {
+      // Over budget or the socket died — fall through to the local path.
+    }
+  }
   try {
     const q = await withTimeout(
       (async () => {

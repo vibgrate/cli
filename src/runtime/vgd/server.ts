@@ -5,12 +5,14 @@ import { VGD_PROTOCOL_VERSION, parseRequest, type VgdResponse } from './protocol
 import { VERSION } from '../../version.js';
 import { WorkspaceRegistry } from './registry.js';
 import { vgdPidPath, vgdSocketPath } from './paths.js';
-import { queryGraph } from '../../engine/query.js';
+import { queryGraph, queryGraphSemantic } from '../../engine/query.js';
 import { loadGraph } from '../../engine/load.js';
 import { impactOf } from '../../engine/impact.js';
 import { resolveOne } from '../../engine/lookup.js';
 import { getVgdHostBroker, type VgdHostBroker } from './host-broker.js';
 import { EmbedBroker } from './embed-broker.js';
+import { FreshnessSupervisor } from './freshness.js';
+import { DepContextCache } from './dep-cache.js';
 import type { VgGraph } from '../../schema.js';
 
 export interface VgdServerOptions {
@@ -26,6 +28,12 @@ export interface VgdServerOptions {
   hostBroker?: VgdHostBroker;
   /** Inject the semantic broker (tests); default owns a worker child. */
   embedBroker?: EmbedBroker;
+  /** Inject the freshness supervisor (tests); default watches every registered root. */
+  freshness?: FreshnessSupervisor;
+  /** Inject the shared dependency-context cache (tests). */
+  depCache?: DepContextCache;
+  /** Watch registered workspaces and rebuild on drift (default true). */
+  watch?: boolean;
   /**
    * Diagnostic sink. `vg daemon start` points this at stdout so the daemon's
    * work — graph publishes, branch switches, index builds — is visible while
@@ -63,6 +71,30 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
   // the registry's lifecycle rather than being managed alongside it by hand.
   const embedBroker = options.embedBroker ?? new EmbedBroker({ log });
   embedBroker.setGraphProvider((repositoryId, gitRef) => registry.graphs.get(repositoryId, gitRef)?.graph);
+  // Freshness belongs where the graphs are. Reloading is the daemon's own
+  // cheap disk read; the expensive rebuild happens in a child (see freshness.ts).
+  const freshness =
+    options.freshness ??
+    new FreshnessSupervisor({
+      log,
+      reload: (repositoryId, root, gitRef) => {
+        const graph = loadGraph(root);
+        if (!graph) return Promise.resolve(null);
+        registry.putGraph(repositoryId, gitRef, graph);
+        return Promise.resolve(graph.nodes?.length ?? 0);
+      },
+      select: (repositoryId, gitRef) => registry.selectGitRef(repositoryId, gitRef),
+    });
+  const watchEnabled = options.watch !== false;
+  // Shared dependency context: one manifest walk per daemon instead of one per
+  // process, per call. Invalidated by the freshness watcher below, which is
+  // already the component that notices a manifest write.
+  const depCache = options.depCache ?? new DepContextCache({ log });
+  freshness.setManifestListener((repositoryId) => depCache.invalidate(repositoryId));
+  // The repo root lives in the registry, never on the graph (`meta.root` is
+  // relative so snapshots stay portable) — the broker needs it to reuse the
+  // on-disk vectors `vg embed` already wrote instead of re-deriving them.
+  embedBroker.setRootProvider((repositoryId) => registry.getById(repositoryId)?.root);
   registry.setSlotListener(embedBroker);
   const onShutdownRequest = options.onShutdownRequest;
   const now = options.now ?? (() => new Date());
@@ -81,9 +113,41 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
     fs.mkdirSync(path.dirname(pidPath), { recursive: true });
   }
 
+  /**
+   * Sockets holding an open `watch-slots` subscription, with the repository
+   * they care about (undefined = every repository). This is the one place the
+   * daemon speaks unprompted: it exists so a long-lived client can retire its
+   * own filesystem watcher instead of duplicating the daemon's.
+   */
+  const subscribers = new Map<net.Socket, { repositoryId?: string }>();
+
+  const broadcastSlot = (repositoryId: string, gitRef: string, graph: VgGraph): void => {
+    if (!subscribers.size) return;
+    const frame =
+      JSON.stringify({
+        ok: true,
+        event: 'slot-changed',
+        repositoryId,
+        gitRef,
+        nodeCount: graph.nodes?.length ?? 0,
+        corpusHash: graph.provenance?.corpusHash ?? null,
+      }) + '\n';
+    for (const [socket, filter] of subscribers) {
+      if (filter.repositoryId && filter.repositoryId !== repositoryId) continue;
+      try {
+        socket.write(frame);
+      } catch {
+        subscribers.delete(socket);
+      }
+    }
+  };
+  registry.setPublishListener(broadcastSlot);
+
   const server = net.createServer((socket) => {
     let buffer = '';
     socket.setEncoding('utf8');
+    socket.on('close', () => subscribers.delete(socket));
+    socket.on('error', () => subscribers.delete(socket));
     socket.on('data', (chunk: string) => {
       buffer += chunk;
       let nl: number;
@@ -92,7 +156,23 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
         buffer = buffer.slice(nl + 1);
         if (!line) continue;
         void Promise.resolve(
-          handleLine(line, { registry, hostBroker, embedBroker, now, pid, startedAt, socketPath, onShutdownRequest, log }),
+          handleLine(line, {
+            registry,
+            hostBroker,
+            embedBroker,
+            freshness: watchEnabled ? freshness : undefined,
+            depCache,
+            subscribe: (repositoryId) => {
+              subscribers.set(socket, { repositoryId });
+              log(`watch-slots: subscriber attached${repositoryId ? ` for ${repositoryId}` : ' (all repositories)'}`);
+            },
+            now,
+            pid,
+            startedAt,
+            socketPath,
+            onShutdownRequest,
+            log,
+          }),
         ).then(
           (response) => {
             socket.write(JSON.stringify(response) + '\n');
@@ -124,6 +204,9 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
     async close() {
       // The worker is a child of this process — never leave it orphaned.
       embedBroker.stop();
+      freshness.stopAll();
+      depCache.clear();
+      subscribers.clear();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       try {
         fs.unlinkSync(pidPath);
@@ -147,6 +230,10 @@ async function handleLine(
     registry: WorkspaceRegistry;
     hostBroker: VgdHostBroker;
     embedBroker: EmbedBroker;
+    freshness?: FreshnessSupervisor;
+    depCache: DepContextCache;
+    /** Hold this connection open as a slot subscriber. */
+    subscribe?: (repositoryId?: string) => void;
     log: (message: string) => void;
     now: () => Date;
     pid: number;
@@ -171,6 +258,7 @@ async function handleLine(
         version: VGD_PROTOCOL_VERSION,
         socketPath: ctx.socketPath,
         cliVersion: VERSION,
+        freshness: ctx.freshness?.list() ?? [],
       };
     case 'shutdown': {
       if (!ctx.onShutdownRequest) {
@@ -215,6 +303,62 @@ async function handleLine(
         state: idx.state,
         vectors: idx.vectors.size,
         buildMs: idx.buildMs,
+      };
+    }
+    case 'embed-rank': {
+      const gitRef = req.gitRef ?? ctx.registry.graphs.selectedRef(req.repositoryId);
+      if (!gitRef) return { ok: false, error: 'no current gitRef for this repository', code: 'no_slot' };
+      const slot = ctx.registry.graphs.get(req.repositoryId, gitRef);
+      if (!slot) {
+        return { ok: false, error: `no graph slot for ${req.repositoryId}@${gitRef} — publish the map first`, code: 'no_slot' };
+      }
+      // Warm on demand: an ask arriving before the background warm finished
+      // should wait for the index it is about to use, not silently rank against
+      // an empty one. Already-ready slots return immediately.
+      await ctx.embedBroker.ensureIndex(req.repositoryId, gitRef, slot.graph);
+      const started = Date.now();
+      const result = await ctx.embedBroker.rank(req.repositoryId, gitRef, req.text, req.limit);
+      if (!result) {
+        return { ok: false, error: 'semantic unavailable — rank lexically', code: 'semantic_unavailable' };
+      }
+      return {
+        ok: true,
+        ranked: result.ranked,
+        repositoryId: req.repositoryId,
+        gitRef,
+        state: result.state,
+        vectors: result.vectors,
+        model: ctx.embedBroker.status().model,
+        rankMs: Date.now() - started,
+      };
+    }
+    case 'watch-slots': {
+      if (!ctx.subscribe) {
+        return { ok: false, error: 'this listener does not support subscriptions', code: 'unsupported' };
+      }
+      ctx.subscribe(req.repositoryId);
+      return { ok: true, watching: true, repositoryId: req.repositoryId };
+    }
+    case 'dep-context': {
+      const record = ctx.registry.getById(req.repositoryId);
+      if (!record) {
+        return { ok: false, error: `unknown repository ${req.repositoryId} — register it first`, code: 'not_found' };
+      }
+      const context = ctx.depCache.get(req.repositoryId, record.root);
+      if (!context) {
+        return { ok: false, error: 'could not read this repository’s manifests', code: 'no_deps' };
+      }
+      return {
+        ok: true,
+        repositoryId: req.repositoryId,
+        manifestHash: context.manifestHash,
+        dependencies: context.inventory.records.map((r) => ({
+          name: r.name,
+          ecosystem: r.ecosystem,
+          declared: r.declared,
+          installed: r.installed,
+        })),
+        builtAt: context.builtAt,
       };
     }
     case 'host-status':
@@ -267,8 +411,11 @@ async function handleLine(
       }
       return { ok: true, workspace };
     }
-    case 'unregister':
+    case 'unregister': {
+      const record = ctx.registry.get(req.root);
+      if (record) ctx.freshness?.stop(record.id);
       return { ok: true, removed: ctx.registry.unregister(req.root) };
+    }
     case 'register-federation': {
       const workspaces = ctx.registry.registerFederation(req.members, ctx.now);
       return { ok: true, workspaces, federation: true };
@@ -293,6 +440,7 @@ async function handleLine(
         const graph = req.graph as VgGraph;
         ctx.log(`put-graph: ${req.repositoryId}@${req.gitRef} · ${graph.nodes?.length ?? 0} nodes`);
         ctx.registry.putGraph(req.repositoryId, req.gitRef, graph);
+        startWatching(ctx, req.repositoryId, req.gitRef);
         return {
           ok: true,
           stored: true,
@@ -321,6 +469,7 @@ async function handleLine(
         };
       }
       ctx.registry.putGraph(record.id, gitRef, graph);
+      startWatching(ctx, record.id, gitRef);
       return {
         ok: true,
         stored: true,
@@ -334,13 +483,30 @@ async function handleLine(
       if (!resolved) {
         return { ok: false, error: 'no ActiveGraph loaded for repository — put-graph first', code: 'no_graph' };
       }
-      const result = queryGraph(resolved.graph, req.query, { limit: req.limit ?? 12, budget: 2000 });
+      const limit = req.limit ?? 12;
+      let mode = 'lexical';
+      let result = queryGraph(resolved.graph, req.query, { limit, budget: 2000 });
+      if (req.semantic) {
+        // Rank and fuse here: the caller asked for semantic precisely because
+        // it holds neither the graph nor the embedder. A slot whose index is
+        // not ready answers lexically rather than making the caller wait.
+        const ranking = await ctx.embedBroker.rank(req.repositoryId, resolved.gitRef, req.query);
+        if (ranking && ranking.ranked.length) {
+          result = await queryGraphSemantic(resolved.graph, req.query, {
+            limit,
+            budget: 2000,
+            semanticRanked: ranking.ranked,
+          });
+          mode = `semantic (vgd${ctx.embedBroker.status().model ? `, ${ctx.embedBroker.status().model}` : ''})`;
+        }
+      }
       return {
         ok: true,
         query: req.query,
         repositoryId: req.repositoryId,
         gitRef: resolved.gitRef,
-        matches: result.matches.slice(0, req.limit ?? 12).map((m) => ({
+        mode,
+        matches: result.matches.slice(0, limit).map((m) => ({
           id: m.node.id,
           qualifiedName: m.node.qualifiedName,
           kind: m.node.kind,
@@ -402,6 +568,20 @@ async function handleLine(
       };
     }
   }
+}
+
+/**
+ * Begin watching a repository the moment the daemon actually holds its map.
+ * Registration alone is not enough: a root with no slot has nothing to keep
+ * fresh, and the VS Code extension registers roots it never publishes.
+ */
+function startWatching(
+  ctx: { registry: WorkspaceRegistry; freshness?: FreshnessSupervisor },
+  repositoryId: string,
+  gitRef: string,
+): void {
+  const record = ctx.registry.getById(repositoryId);
+  if (record) ctx.freshness?.start(repositoryId, record.root, gitRef);
 }
 
 function resolveSymbol(graph: VgGraph, symbol: string): { id: string } | null {

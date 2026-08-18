@@ -11,12 +11,12 @@ import type { DepRecord } from './drift.js';
  * isn't present or parseable we return `undefined` and the caller falls back to the
  * installed tree, then the declared range — we never fabricate a version.
  *
- * First slice: npm (`package-lock.json` v1/v2/v3, `yarn.lock`). Other ecosystems
- * (`poetry.lock`, `go.sum`, `Cargo.lock`, …) follow the same shape and return
- * `undefined` until their parser lands — honest degradation, no false mismatch.
+ * npm covers `package-lock.json` (v1/v2/v3), `pnpm-lock.yaml` (v6/v9) and
+ * `yarn.lock`. Other ecosystems follow the same shape and return `undefined`
+ * until their parser lands — honest degradation, no false mismatch.
  */
 export function lockfileVersion(root: string, ecosystem: DepRecord['ecosystem'], name: string): string | undefined {
-  if (ecosystem === 'npm') return packageLockVersion(root, name) ?? yarnLockVersion(root, name);
+  if (ecosystem === 'npm') return packageLockVersion(root, name) ?? pnpmLockVersion(root, name) ?? yarnLockVersion(root, name);
   if (ecosystem === 'pypi') return pypiLockVersion(root, name);
   if (ecosystem === 'rust') return tomlPackageLock(root, 'Cargo.lock', name, rustName);
   if (ecosystem === 'ruby') return gemfileLock(root, name);
@@ -214,6 +214,51 @@ function packageLockVersion(root: string, name: string): string | undefined {
   // v1: flat dependencies map.
   const v1 = data.dependencies?.[name]?.version;
   return typeof v1 === 'string' ? v1 : undefined;
+}
+
+/**
+ * `pnpm-lock.yaml` (v6 and v9) — the direct dependency's resolved version.
+ *
+ * pnpm is not a niche case: this repository is itself pnpm-only, so until this
+ * existed every `resolveVersion` here reported no lockfile pin and fell through
+ * to the installed tree — precisely the fallback this module exists to avoid,
+ * because `node_modules` is empty in CI and on a fresh clone.
+ *
+ * Read from `importers`, not `packages`: the importer block records what this
+ * project actually depends on, while `packages` lists the whole transitive
+ * graph and can hold several versions of one name. Parsed by hand, like every
+ * other reader here — a lockfile is megabytes and only one line is wanted.
+ */
+function pnpmLockVersion(root: string, name: string): string | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(root, 'pnpm-lock.yaml'), 'utf8');
+  } catch {
+    return undefined;
+  }
+  const importers = sectionOf(text, 'importers');
+  if (!importers) return undefined;
+  // Entries look like:
+  //     commander:
+  //       specifier: ^15.0.0
+  //       version: 15.0.0(peer@1.2.3)
+  // The name may be quoted when scoped ('@scope/pkg':).
+  const key = escapeRegExp(name);
+  const re = new RegExp(`^\\s+'?${key}'?:\\s*$\\n\\s+specifier:.*$\\n\\s+version:\\s*(\\S+)\\s*$`, 'm');
+  const m = re.exec(importers);
+  if (!m?.[1]) return undefined;
+  // Strip pnpm's peer-suffix — `15.0.0(zod@4.4.3)` is still version 15.0.0.
+  const version = m[1].replace(/\(.*$/, '').trim();
+  return version || undefined;
+}
+
+/** The body of a top-level YAML block, up to the next column-0 key. */
+function sectionOf(text: string, key: string): string | undefined {
+  const start = new RegExp(`^${key}:\\s*$`, 'm').exec(text);
+  if (!start) return undefined;
+  const from = start.index + start[0].length;
+  const next = /^\S[^\n]*:\s*$/m.exec(text.slice(from));
+  return next ? text.slice(from, from + next.index) : text.slice(from);
 }
 
 /**

@@ -10,7 +10,7 @@ import { clearEmbedderHealth } from '../../engine/embed-health.js';
 import { fetchLatestVersion } from '../utils/update-check.js';
 import { pathExists } from '../utils/fs.js';
 import { liveStatsDir, reapOtherVersionServers, type ReapedServer } from '../../mcp/live-stats.js';
-import { restartVgdIfRunning, stopVgd } from '../../commands/daemon.js';
+import { restartVgdIfRunning, stopVgd, vgdVersionSkew } from '../../commands/daemon.js';
 import { isFileLockError, scheduleDeferredUpdate } from './update-windows.js';
 
 export type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'bun';
@@ -416,6 +416,13 @@ export const updateCommand = new Command('update')
         // the client respawns them on this version — the exact "stale spawned
         // server" case that makes fixes look absent until an editor restart.
         if (opts.reap !== false) reapAndReport(process.cwd(), VERSION);
+        // The binary on disk being current says nothing about the process on
+        // the socket. A vgd started by an older build — commonly the VS Code
+        // extension's bundled engine, which never consults PATH — keeps serving
+        // every client from that build until something replaces it, and reports
+        // no error while doing so. Reconcile it here or "you are on the latest
+        // version" is a half-truth.
+        if (opts.reap !== false) await reconcileVgdAndReport(process.cwd());
         return;
       }
 
@@ -513,8 +520,10 @@ export const updateCommand = new Command('update')
       if (opts.reap !== false) reapAndReport(cwd, latest);
 
       // Same story for the Fusion Runtime daemon: a vgd started before the
-      // update keeps running the old build until something restarts it.
-      if (opts.reap !== false) await restartVgdAndReport();
+      // update keeps running the old build until something restarts it. Forced,
+      // because a daemon that outlives the build it was started from is exactly
+      // the state this update exists to end — killing it is the lesser harm.
+      if (opts.reap !== false) await restartVgdAndReport({ force: true });
 
       // An update is a chance for a broken native embedding backend to have
       // been fixed, so never let a stale "crashed" verdict outlive it. The
@@ -546,7 +555,9 @@ async function rewarmVgdAndReport(cwd: string): Promise<void> {
     const { vgdIsRunning, vgdRequest } = await import('../../runtime/vgd/index.js');
     if (!(await vgdIsRunning())) return;
     const loaded = await vgdRequest({ op: 'load-graph', root: cwd });
-    if (!loaded.ok || !('repositoryId' in loaded)) return; // no map built yet — nothing to warm
+    // `stored`, not `repositoryId`: several response shapes carry an id, and
+    // only the load-graph success shape means a map is now resident.
+    if (!loaded.ok || !('stored' in loaded)) return; // no map built yet — nothing to warm
     console.log(chalk.dim('Re-published the code map into the restarted daemon.'));
     const indexed = await vgdRequest({ op: 'embed-index', repositoryId: loaded.repositoryId });
     if (indexed.ok && 'vectors' in indexed && indexed.state === 'ready') {
@@ -558,13 +569,45 @@ async function rewarmVgdAndReport(cwd: string): Promise<void> {
 }
 
 /**
+ * Bring the daemon on the socket up to the build this CLI is running.
+ *
+ * Used on the "already on the latest version" path, where there is no install
+ * to trigger a restart but the daemon can still be stale — it outlives every
+ * update, and the process that started it may not even be this CLI. Only an
+ * *older* daemon is replaced: a newer one is somebody else's upgrade in
+ * progress, and restarting it here would start a fight over the socket that
+ * neither side can win.
+ */
+async function reconcileVgdAndReport(cwd: string): Promise<void> {
+  let skew: Awaited<ReturnType<typeof vgdVersionSkew>>;
+  try {
+    skew = await vgdVersionSkew();
+  } catch {
+    return; // best-effort: a daemon problem must not fail an update check
+  }
+  if (!skew.running || skew.state === 'match') return;
+  if (skew.state === 'newer') {
+    console.log(chalk.dim(`A newer vgd (${skew.version}) is running — left alone.`));
+    return;
+  }
+  console.log(
+    chalk.yellow('Stale daemon: ') +
+      chalk.dim(
+        `vgd is running ${skew.version ?? 'a build older than 2026.817'}, not ${VERSION} — restarting it on this build.`,
+      ),
+  );
+  await restartVgdAndReport({ force: true });
+  await rewarmVgdAndReport(cwd);
+}
+
+/**
  * Restart a running vgd so it picks up the just-installed build. Best-effort
  * and never throws — a daemon problem must not fail a successful update.
  */
-async function restartVgdAndReport(): Promise<void> {
+async function restartVgdAndReport(opts: { force?: boolean } = {}): Promise<void> {
   let result: Awaited<ReturnType<typeof restartVgdIfRunning>>;
   try {
-    result = await restartVgdIfRunning();
+    result = await restartVgdIfRunning(undefined, opts);
   } catch {
     return;
   }

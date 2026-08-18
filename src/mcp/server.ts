@@ -11,6 +11,7 @@ import type { RefreshOutcome, refreshIfStale } from '../engine/refresh.js';
 import { RefreshScheduler, REFRESH_BUDGET_MS as SCHEDULER_BUDGET_MS } from '../engine/refresh-scheduler.js';
 import { TOOLS, budgetSuffix, listedToolNames, warmEmbedderInBackground, type ToolSurface } from './tools.js';
 import { isRelevantChange } from '../engine/watch-filter.js';
+import { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import { renderToolResult } from './response.js';
 import { recordSaving, sanitizeClient, PER_FILE_TOKENS, SAVINGS_TOOLS, type Outcome } from '../engine/savings.js';
 import type { SessionStats } from './serve-stats.js';
@@ -84,6 +85,8 @@ export interface ServeOptions {
   dedup?: boolean;
   /** Auto-refresh the map when the working tree drifts (default true). */
   refresh?: boolean;
+  /** `--no-daemon`: never auto-start or use the local runtime. */
+  daemon?: boolean;
   /**
    * Event-driven refresh: recursive fs.watch on the workspace so a save
    * rebuilds in ~400 ms instead of waiting out the freshness poll (default
@@ -112,6 +115,12 @@ export interface ServeOptions {
 
 export class GraphSource {
   private cachedMtimeMs = -1;
+  /**
+   * True while the daemon owns freshness for this workspace. Set only after
+   * the daemon confirms a subscription, cleared the instant it drops — so the
+   * failure mode is "this process watches again", never "nobody watches".
+   */
+  private daemonOwnsFreshness = false;
   private cached: VgGraph | null = null;
   /** Project root used for freshness probes and rebuilds. */
   readonly root: string;
@@ -147,9 +156,30 @@ export class GraphSource {
     });
   }
 
+  /**
+   * Hand freshness to the daemon: stop probing on every call and stop watching.
+   * The daemon pushes `slot-changed` and we reload from disk then.
+   */
+  deferFreshnessToDaemon(): void {
+    this.daemonOwnsFreshness = true;
+    this.stopWatching();
+  }
+
+  /** The daemon went away — resume owning freshness locally. */
+  resumeLocalFreshness(): void {
+    this.daemonOwnsFreshness = false;
+    this.startWatching();
+  }
+
+  /** The daemon says the map moved; drop the cache so the next get() re-reads. */
+  reloadFromDisk(): void {
+    this.cachedMtimeMs = -1;
+    this.pendingChanges.clear();
+  }
+
   /** Current graph: auto-refreshed if the tree drifted, reloaded if the file changed. */
   async get(): Promise<VgGraph> {
-    if (this.refresh) await this.maybeRefresh();
+    if (this.refresh && !this.daemonOwnsFreshness) await this.maybeRefresh();
     // JSON when present, else the standalone snapshot (global-store mode);
     // throws if neither exists → surfaced as tool error.
     const stat = mapFileStat(this.graphPath);
@@ -248,6 +278,40 @@ export class GraphSource {
   }
 }
 
+/**
+ * Prefer the daemon's watcher to our own.
+ *
+ * Both notice the same edits and both drive the same incremental rebuild, so
+ * running them together means two inotify registrations over one tree and two
+ * rebuilds racing for one lock. The daemon wins when it is there: it is the
+ * process that already holds the map and, unlike this one, is shared by every
+ * other client on the machine.
+ *
+ * Standing down is conditional on the daemon *confirming* the subscription,
+ * and reversed the instant that connection drops — a dead daemon degrades this
+ * server to watching for itself, never to nothing watching at all.
+ */
+async function watchViaDaemonOrLocally(source: GraphSource, opts: ServeOptions): Promise<void> {
+  if (opts.daemon === false) {
+    source.startWatching();
+    return;
+  }
+  try {
+    const { subscribeToSlots } = await import('../runtime/vgd/slot-subscription.js');
+    const subscription = await subscribeToSlots({
+      onChange: () => source.reloadFromDisk(),
+      onDetach: () => source.resumeLocalFreshness(),
+    });
+    if (subscription.active) {
+      source.deferFreshnessToDaemon();
+      return;
+    }
+  } catch {
+    /* no daemon, or it cannot push — watch locally */
+  }
+  source.startWatching();
+}
+
 export function createServer(source: GraphSource, opts: ServeOptions = {}): Server {
   const { savings = false, shareStats = false, local = false, dedup = false, stats } = opts;
   // Recording feeds both the local `vg savings` report and the opt-in upload, so
@@ -255,6 +319,12 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
   const record = savings || shareStats;
   // Prefer GraphSource's explicit root (set by serve from the project cwd).
   const root = opts.root ?? source.root;
+  // One runtime session for the life of the server: attach once, then send only
+  // the question per navigation call. Absent a daemon it stays null-returning
+  // and every tool answers exactly as it does today.
+  const semanticSession = local
+    ? undefined
+    : new DaemonSemanticSession(root, { disabled: opts.daemon === false });
   // Per-session memory of node ids whose full detail was already returned — the
   // basis for opt-in cross-call dedup (`--dedup`). Scoped to this server
   // instance so it never leaks across sessions. Node ids are content-addressed
@@ -330,7 +400,14 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
     const startedAt = Date.now();
     try {
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-      const result = await tool.handler(graph, args, { root, local, dedup, seen, graphPath: source.graphPath });
+      const result = await tool.handler(graph, args, {
+        root,
+        local,
+        dedup,
+        seen,
+        graphPath: source.graphPath,
+        semanticSession,
+      });
       const ms = Date.now() - startedAt;
       // Live, in-memory session stats for the serve status display — always on
       // when a serve process passed them (nothing leaves the process).
@@ -369,7 +446,8 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
 
 export async function serveStdio(graphPath: string, opts: ServeOptions = {}): Promise<void> {
   const source = new GraphSource(graphPath, opts.refresh !== false, { root: opts.root });
-  if (opts.refresh !== false && opts.watch !== false) source.startWatching();
+  const wantWatch = opts.refresh !== false && opts.watch !== false;
+  if (wantWatch) await watchViaDaemonOrLocally(source, opts);
   const server = createServer(source, opts);
   // Start the semantic-model warm-up as soon as the server boots, so the first
   // orient/query_graph doesn't pay a cold download. Non-blocking: navigation

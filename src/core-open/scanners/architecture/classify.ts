@@ -80,7 +80,7 @@ const PATH_RULES: PathRule[] = [
   { pattern: /\.pipe\.[jt]sx?$/, layer: 'middleware', confidence: 0.85, signal: 'NestJS pipe', archetypes: ['nestjs'] },
   { pattern: /\.middleware\.[jt]sx?$/, layer: 'middleware', confidence: 0.9, signal: 'NestJS middleware', archetypes: ['nestjs'] },
   { pattern: /\.entity\.[jt]sx?$/, layer: 'domain', confidence: 0.9, signal: 'NestJS entity', archetypes: ['nestjs'] },
-  { pattern: /\.dto\.[jt]sx?$/, layer: 'domain', confidence: 0.85, signal: 'NestJS DTO', archetypes: ['nestjs'] },
+  { pattern: /\.dto\.[jt]sx?$/, layer: 'services', confidence: 0.85, signal: 'NestJS DTO', archetypes: ['nestjs'] },
   { pattern: /\.repository\.[jt]sx?$/, layer: 'data-access', confidence: 0.9, signal: 'NestJS repository', archetypes: ['nestjs'] },
 
   // ── Generic routing patterns ──
@@ -94,7 +94,7 @@ const PATH_RULES: PathRule[] = [
   // ── Middleware ──
   { pattern: /\/middleware\//, layer: 'middleware', confidence: 0.85, signal: 'middleware/ directory' },
   { pattern: /\/middlewares\//, layer: 'middleware', confidence: 0.85, signal: 'middlewares/ directory' },
-  { pattern: /\/hooks\//, layer: 'middleware', confidence: 0.6, signal: 'hooks/ directory' },
+  { pattern: /\/hooks\//, layer: 'presentation', confidence: 0.75, signal: 'hooks/ directory (UI)' },
   { pattern: /\/plugins\//, layer: 'middleware', confidence: 0.6, signal: 'plugins/ directory' },
   { pattern: /\/guards\//, layer: 'middleware', confidence: 0.85, signal: 'guards/ directory' },
   { pattern: /\/interceptors\//, layer: 'middleware', confidence: 0.85, signal: 'interceptors/ directory' },
@@ -192,7 +192,7 @@ const PATH_RULES: PathRule[] = [
   { pattern: /\/resource\//, layer: 'routing', confidence: 0.7, signal: 'resource/ package (JAX-RS)' },
   { pattern: /\/model\//, layer: 'domain', confidence: 0.75, signal: 'model/ package' },
   { pattern: /\/entity\//, layer: 'domain', confidence: 0.85, signal: 'entity/ package' },
-  { pattern: /\/dto\//, layer: 'domain', confidence: 0.85, signal: 'dto/ package' },
+  { pattern: /\/dto\//, layer: 'services', confidence: 0.85, signal: 'dto/ package' },
   { pattern: /\/mappers?\//, layer: 'data-access', confidence: 0.75, signal: 'mapper/ package' },
 
   // ── Python (Django/Flask/FastAPI module conventions) ──
@@ -244,7 +244,9 @@ const SUFFIX_RULES: Array<{ suffix: string; layer: ArchitectureLayer; confidence
   { suffix: '.usecase', layer: 'services', confidence: 0.85, signal: 'usecase suffix' },
   { suffix: '.model', layer: 'domain', confidence: 0.8, signal: 'model suffix' },
   { suffix: '.entity', layer: 'domain', confidence: 0.85, signal: 'entity suffix' },
-  { suffix: '.dto', layer: 'domain', confidence: 0.8, signal: 'DTO suffix' },
+  { suffix: '.dto', layer: 'services', confidence: 0.85, signal: 'DTO suffix' },
+  { suffix: '.request', layer: 'services', confidence: 0.85, signal: 'request DTO suffix' },
+  { suffix: '.response', layer: 'services', confidence: 0.85, signal: 'response DTO suffix' },
   { suffix: '.schema', layer: 'domain', confidence: 0.75, signal: 'schema suffix' },
   { suffix: '.validator', layer: 'domain', confidence: 0.75, signal: 'validator suffix' },
   { suffix: '.repository', layer: 'data-access', confidence: 0.9, signal: 'repository suffix' },
@@ -278,7 +280,12 @@ const PASCAL_SUFFIX_RULES: Array<{ suffix: string; layer: ArchitectureLayer; con
   { suffix: 'Handler', layer: 'services', confidence: 0.75, signal: 'Handler class' },
   { suffix: 'UseCase', layer: 'services', confidence: 0.85, signal: 'UseCase class' },
   { suffix: 'Entity', layer: 'domain', confidence: 0.85, signal: 'Entity class' },
-  { suffix: 'Dto', layer: 'domain', confidence: 0.8, signal: 'DTO class' },
+  { suffix: 'Dto', layer: 'services', confidence: 0.85, signal: 'DTO class' },
+  { suffix: 'DTO', layer: 'services', confidence: 0.85, signal: 'DTO class' },
+  { suffix: 'Request', layer: 'services', confidence: 0.85, signal: 'request DTO class' },
+  { suffix: 'Response', layer: 'services', confidence: 0.85, signal: 'response DTO class' },
+  { suffix: 'Command', layer: 'services', confidence: 0.8, signal: 'Command class' },
+  { suffix: 'Query', layer: 'services', confidence: 0.8, signal: 'Query class' },
   { suffix: 'Validator', layer: 'domain', confidence: 0.75, signal: 'Validator class' },
   { suffix: 'ViewModel', layer: 'presentation', confidence: 0.85, signal: 'ViewModel class' },
   { suffix: 'Repository', layer: 'data-access', confidence: 0.9, signal: 'Repository class' },
@@ -307,10 +314,18 @@ const PASCAL_SUFFIX_RULES: Array<{ suffix: string; layer: ArchitectureLayer; con
 
 // ── File classifier ──
 
-export function classifyFile(
+const UI_SOURCE_EXTENSIONS = new Set(['.tsx', '.jsx', '.vue', '.svelte']);
+
+/** Domain port: `IOrderRepository` living under Domain/ or Interfaces/. */
+function isDomainRepositoryPort(baseName: string, loweredPath: string): boolean {
+  if (!/^I[A-Z]\w*(Repository|Repo)$/.test(baseName)) return false;
+  return /\/(domain|interfaces)\//.test(loweredPath);
+}
+
+function classifyOne(
   filePath: string,
   archetype: ProjectArchetype,
-): LayerClassification | null {
+): { layer: ArchitectureLayer; confidence: number; signal: string } | null {
   // Leading `/` so `/dir/` patterns also match a top-level directory
   // (`tests/Foo.Tests/Bar.cs`); lowercased so PascalCase conventions
   // (.NET `Controllers/`, `Views/`…) hit the same rules as JS lowercase dirs.
@@ -357,14 +372,84 @@ export function classifyFile(
     }
   }
 
-  if (bestMatch) {
-    return {
-      filePath,
-      layer: bestMatch.layer,
-      confidence: bestMatch.confidence,
-      signals: [bestMatch.signal],
-    };
+  if (isDomainRepositoryPort(cleanBase, lowered)) {
+    const port = { layer: 'domain' as const, confidence: 0.93, signal: 'domain repository port' };
+    if (!bestMatch || port.confidence >= bestMatch.confidence || bestMatch.layer === 'data-access') {
+      bestMatch = port;
+    }
   }
 
-  return null;
+  // Filename suffixes like Controller / Request / Dto lose to a domain folder
+  // (`model/ApiGatewayController.java` is an entity, not a route).
+  if (
+    bestMatch
+    && (bestMatch.layer === 'routing' || bestMatch.layer === 'services')
+    && /\/(model|entity|entities)\//.test(lowered)
+    && /(Controller|Request|Response|Dto|DTO)$/.test(cleanBase)
+  ) {
+    bestMatch = { layer: 'domain', confidence: 0.88, signal: 'entity folder beats type suffix' };
+  }
+
+  if (!bestMatch) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (UI_SOURCE_EXTENSIONS.has(ext)) {
+      bestMatch = { layer: 'presentation', confidence: 0.62, signal: 'ui source extension' };
+    }
+  }
+
+  return bestMatch;
+}
+
+export interface ClassifyFileOptions {
+  /**
+   * Repo-relative path. When the walk is project-scoped the local path
+   * drops the project folder (`src/Application/…` → `Products/Commands/…`).
+   * That folder often *is* the layer signal — use it as a hint, not a
+   * blanket stamp: a stronger local match still wins.
+   */
+  repoRelative?: string;
+}
+
+/**
+ * Only these path segments, when stripped by project scoping, are safe
+ * layer hints. `api` / `ui` / `web` are product names, not layers — the
+ * scan must not stamp every file in `packages/api` as routing.
+ */
+const LAYER_HINT_SEGMENT = /(?:^|\/)(application|domain|infrastructure|persistence|entities)(?:\/|$)/i;
+
+function prefixHasLayerHint(repoRelative: string, localPath: string): boolean {
+  const repo = repoRelative.replace(/\\/g, '/').replace(/^\/+/, '');
+  const local = localPath.replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!repo.endsWith(local)) return false;
+  const prefix = repo.slice(0, repo.length - local.length).replace(/\/+$/, '');
+  return prefix.length > 0 && LAYER_HINT_SEGMENT.test(`/${prefix}/`);
+}
+
+export function classifyFile(
+  filePath: string,
+  archetype: ProjectArchetype,
+  opts?: ClassifyFileOptions,
+): LayerClassification | null {
+  const local = classifyOne(filePath, archetype);
+  const repoPath = opts?.repoRelative?.replace(/\\/g, '/');
+  const repo = repoPath
+    && repoPath !== filePath.replace(/\\/g, '/')
+    && prefixHasLayerHint(repoPath, filePath)
+    ? classifyOne(repoPath, archetype)
+    : null;
+
+  let best = local;
+  let usedHint = false;
+  if (repo && (!local || repo.confidence > local.confidence)) {
+    best = repo;
+    usedHint = true;
+  }
+
+  if (!best) return null;
+  return {
+    filePath,
+    layer: best.layer,
+    confidence: best.confidence,
+    signals: usedHint ? [best.signal, 'project-path-hint'] : [best.signal],
+  };
 }

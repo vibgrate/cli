@@ -11,6 +11,9 @@ import {
   type EmbedUnavailable,
 } from '../engine/embeddings.js';
 import { refreshIfStale } from '../engine/refresh.js';
+import { attachVgd, type AttachResult } from '../runtime/vgd/attach.js';
+import { ActivityLog, type ActivityOutcome } from '../runtime/vgd/activity.js';
+import { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import { driftCount } from '../engine/freshness.js';
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
@@ -60,6 +63,23 @@ export function registerAsk(program: Command): void {
         }
       }
       const { graph } = requireGraph(global);
+      // Join the local runtime (starting it if needed) and hand it this map, so
+      // the semantic pass below can run against its resident index instead of
+      // loading a model into this short-lived process.
+      const activity = new ActivityLog();
+      const attached = await activity.time(
+        'attach',
+        () =>
+          attachVgd(root, {
+            graphPath: global.graph,
+            disabled: global.daemon === false,
+            // Skip the republish when the daemon already holds this exact map:
+            // a publish drops the slot's vectors, so doing it on every ask
+            // churned the index for nothing.
+            corpusHash: graph.provenance?.corpusHash,
+          }),
+        (a) => describeAttach(a),
+      );
       const budget = Number(opts.budget) || 2000;
       const q = question.join(' ');
       // Semantic is the default; --no-semantic or --local opt out.
@@ -74,35 +94,63 @@ export function registerAsk(program: Command): void {
       const topicTags = relevance ? await loadTopicTags(graph, root, resolveGraphPath(root, global.graph)) : null;
 
       if (wantSemantic) {
-        // A genuine first run for this repo (no cached vectors yet) → show a
-        // one-time note + live progress bar for the embedding pass. Otherwise stay quiet.
-        const firstRun = !embeddingsCached(root, resolveEmbedModel());
-        if (!global.json && firstRun) {
-          info(c.dim('  preparing semantic search (first use embeds the map; cached, resumable & offline after)…'));
-        }
-        let reason: EmbedUnavailable | undefined;
-        let detail: string | undefined;
-        const embedder = await loadEmbedder({
-          local: global.local,
-          onUnavailable: (r, d) => {
-            reason = r;
-            detail = d;
-          },
-        });
-        if (embedder) {
-          const bar = !global.json && firstRun ? new ProgressBar(c.dim('embedding')) : undefined;
-          const vectors = await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
-          bar?.done();
-          result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors, relevance, topicTags });
-          mode = `semantic (${embedder.id})`;
+        // Daemon first: it already holds vectors for this slot, so it answers
+        // the semantic half without this process loading the model at all.
+        const ranked = attached.status === 'attached' && attached.repositoryId
+          ? await activity.time(
+              'semantic',
+              // The attach above already resolved (and, if needed, published)
+              // the slot — this session only sends the question.
+              () => new DaemonSemanticSession(root, { socketPath: attached.socketPath, publish: false }).rank(q),
+              (r) =>
+                r
+                  ? { outcome: 'ok' as const, detail: `ranked in the daemon · ${r.ranked.length} of ${r.vectors} vector(s)${r.model ? ` · ${r.model}` : ''}` }
+                  : { outcome: 'skip' as const, detail: 'daemon has no usable index — embedding in this process' },
+            )
+          : null;
+        if (ranked) {
+          result = await queryGraphSemantic(graph, q, {
+            budget,
+            semanticRanked: ranked.ranked,
+            relevance,
+            topicTags,
+          });
+          mode = `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})`;
+          activity.add('answer', 'ok', 'answered from the daemon index — no local model load');
         } else {
-          result = queryGraph(graph, q, { budget, relevance, topicTags });
-          note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
-          if (detail) note += ` (${detail})`;
+          // A genuine first run for this repo (no cached vectors yet) → show a
+          // one-time note + live progress bar for the embedding pass. Otherwise stay quiet.
+          const firstRun = !embeddingsCached(root, resolveEmbedModel());
+          if (!global.json && firstRun) {
+            info(c.dim('  preparing semantic search (first use embeds the map; cached, resumable & offline after)…'));
+          }
+          let reason: EmbedUnavailable | undefined;
+          let detail: string | undefined;
+          const embedder = await loadEmbedder({
+            local: global.local,
+            onUnavailable: (r, d) => {
+              reason = r;
+              detail = d;
+            },
+          });
+          if (embedder) {
+            const bar = !global.json && firstRun ? new ProgressBar(c.dim('embedding')) : undefined;
+            const vectors = await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
+            bar?.done();
+            result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors, relevance, topicTags });
+            mode = `semantic (${embedder.id})`;
+            activity.add('answer', 'ok', `answered in this process · ${embedder.id} · ${vectors.size} vector(s)`);
+          } else {
+            result = queryGraph(graph, q, { budget, relevance, topicTags });
+            note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
+            if (detail) note += ` (${detail})`;
+            activity.add('answer', 'warn', `lexical only — ${note}`);
+          }
         }
       } else {
         result = queryGraph(graph, q, { budget, relevance, topicTags });
         if (global.local) note = 'semantic skipped under --local; used lexical';
+        activity.add('answer', 'skip', global.local ? 'lexical only (--local)' : 'lexical only (--no-semantic)');
       }
 
       // Count this call in the local ledger when an AI host identified itself
@@ -129,6 +177,7 @@ export function registerAsk(program: Command): void {
           question: result.question,
           mode,
           note: note || undefined,
+          activity: activity.toJSON(),
           tokensEstimate: result.tokensEstimate,
           matches: result.matches.map((m) => ({
             name: m.node.qualifiedName,
@@ -147,6 +196,24 @@ export function registerAsk(program: Command): void {
       info('');
       info(c.dim(`vg · ${result.matches.length} match(es) · ~${result.tokensEstimate} tokens (budget ${budget}) · ${mode}`));
       if (note) info(c.yellow(`  ${note}`));
+      for (const line of activity.render()) info(line);
     });
   applyGlobalOptions(cmd);
+}
+
+/** One line describing what attaching to the runtime achieved. */
+function describeAttach(a: AttachResult): { outcome: ActivityOutcome; detail: string } {
+  if (a.status === 'disabled') return { outcome: 'skip', detail: `${a.reason} — running in this process` };
+  if (a.status === 'unavailable') return { outcome: 'skip', detail: `${a.reason} — running in this process` };
+  const started = a.started ? 'started vgd' : 'attached to vgd';
+  if (a.published?.status === 'current') {
+    return { outcome: 'ok', detail: `${started} · already holds this map (${a.published.gitRef})` };
+  }
+  if (a.published?.status === 'published') {
+    return { outcome: 'ok', detail: `${started} · map published ${a.published.gitRef} · ${a.published.nodeCount} nodes` };
+  }
+  if (a.published?.status === 'failed') {
+    return { outcome: 'warn', detail: `${started} · map not published (${a.published.error})` };
+  }
+  return { outcome: 'ok', detail: started };
 }

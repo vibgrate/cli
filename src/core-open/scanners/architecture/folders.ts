@@ -27,6 +27,40 @@ export function folderInheritSignal(layer: ArchitectureLayer): string {
   return `folder-inherit:${layer}`;
 }
 
+/** Tooling `*.config.*` at a package root is not an architectural config layer. */
+export function isToolingConfigFile(filePath: string): boolean {
+  const base = normalizeRelPath(filePath).split('/').pop()?.toLowerCase() ?? '';
+  return /\.config\.[cm]?[jt]sx?$/.test(base);
+}
+
+/** File-level test/spec/fixture path — not a production sibling in the same folder. */
+export function isTestFilePath(filePath: string): boolean {
+  const n = `/${normalizeRelPath(filePath).toLowerCase()}`;
+  return /\/(__tests__|__mocks__|tests?|spec|fixtures)\//.test(n)
+    || /\.(tests?|spec)\.[^./]+$/.test(n)
+    || /_(test|spec)\.[^./]+$/.test(n)
+    || /\/(conftest|test_[^/]*)\.py$/.test(n);
+}
+
+export function folderLooksLikeTests(dir: string): boolean {
+  const n = `/${normalizeRelPath(dir).toLowerCase()}/`;
+  return /\/(__tests__|__mocks__|tests?|spec|fixtures)\//.test(n);
+}
+
+export function folderLooksLikeConfig(dir: string): boolean {
+  const n = `/${normalizeRelPath(dir).toLowerCase()}/`;
+  return /\/(config|properties)\//.test(n);
+}
+
+function folderLayerAppliesToFile(layer: ArchitectureLayer, filePath: string): boolean {
+  if (layer === 'testing') return isTestFilePath(filePath);
+  if (layer === 'config') {
+    const parent = parentDir(filePath);
+    return folderLooksLikeConfig(parent) || /\/(config|env|bootstrap|setup)\.[^./]+$/i.test(`/${normalizeRelPath(filePath)}`);
+  }
+  return true;
+}
+
 function normalizeRelPath(p: string): string {
   return (p || '.').replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/\/+$/, '') || '.';
 }
@@ -116,6 +150,7 @@ export function applyFolderInheritance(input: {
 
   const classifiedByParent = new Map<string, LayerClassification[]>();
   for (const c of classified) {
+    if (isToolingConfigFile(c.filePath)) continue;
     const parent = parentDir(c.filePath);
     const list = classifiedByParent.get(parent);
     if (list) list.push(c);
@@ -148,6 +183,9 @@ export function applyFolderInheritance(input: {
     if (!winner) continue;
     const share = winnerCount / children.length;
     if (share < FOLDER_LAYER_MIN_SHARE || winnerCount < FOLDER_LAYER_MIN_COUNT) continue;
+    // Colocated tests and package-root config files must not stamp src/.
+    if (winner === 'testing' && !folderLooksLikeTests(dir)) continue;
+    if (winner === 'config' && !folderLooksLikeConfig(dir)) continue;
     votes.set(dir, {
       path: dir,
       layer: winner,
@@ -169,6 +207,8 @@ export function applyFolderInheritance(input: {
       if (ancestor === dir || ancestor === '.') continue;
       const parent = votes.get(ancestor);
       if (!parent) continue;
+      if (parent.layer === 'testing' && !folderLooksLikeTests(dir)) continue;
+      if (parent.layer === 'config' && !folderLooksLikeConfig(dir)) continue;
       votes.set(dir, {
         path: dir,
         layer: parent.layer,
@@ -191,7 +231,7 @@ export function applyFolderInheritance(input: {
   const stillUnclassified: string[] = [];
   for (const file of unclassified) {
     const folder = nearestFolder(file);
-    if (folder && folder.confidence >= FOLDER_INHERIT_MIN_CONFIDENCE) {
+    if (folder && folder.confidence >= FOLDER_INHERIT_MIN_CONFIDENCE && folderLayerAppliesToFile(folder.layer, file)) {
       classified.push({
         filePath: file,
         layer: folder.layer,

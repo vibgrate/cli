@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { stableStringify } from './serialize.js';
 import { hashString } from './hash.js';
-import { inventory, installedTreeVersion } from './drift.js';
+import { inventory, installedTreeVersion, type DriftInventory } from './drift.js';
 import { lockfileVersion } from './lockfile.js';
 
 /**
@@ -79,9 +79,16 @@ export function resolveLib(catalog: LibCatalog, name: string): LibEntry | undefi
   );
 }
 
-/** The lockfile/manifest version of a dependency, for drift annotation. */
-export function installedVersion(root: string, name: string): string | undefined {
-  const rec = inventory(root).records.find((r) => r.name === name);
+/**
+ * The lockfile/manifest version of a dependency, for drift annotation.
+ *
+ * `inv` lets a caller that resolves many names hand in one inventory instead of
+ * rebuilding it per name. Building it walks the manifest tree and probes
+ * `node_modules` for every declared dependency, so `vg lib`'s catalog listing —
+ * a `driftFor` per entry — was paying that whole cost once per library.
+ */
+export function installedVersion(root: string, name: string, inv?: DriftInventory): string | undefined {
+  const rec = (inv ?? inventory(root)).records.find((r) => r.name === name);
   return rec?.installed ?? rec?.declared;
 }
 
@@ -139,8 +146,8 @@ export interface DriftNote {
   drift: 'current' | 'behind' | 'ahead' | 'unknown';
 }
 
-export function driftFor(root: string, entry: LibEntry): DriftNote {
-  const installed = installedVersion(root, entry.name);
+export function driftFor(root: string, entry: LibEntry, inv?: DriftInventory): DriftNote {
+  const installed = installedVersion(root, entry.name, inv);
   if (!installed || entry.version === '*') return { cataloged: entry.version, installed, drift: 'unknown' };
   const norm = (v: string) => v.replace(/^[v^~>=<\s]+/, '');
   const a = norm(entry.version);

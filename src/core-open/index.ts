@@ -91,6 +91,7 @@ export {
   aggregateSolutionArchitecture,
   refineArchitectureWithGraph,
   refineArchitectureResult,
+  evaluateLayerBoundary,
   applyAstRoles,
   refineArchitectureWithAstRoles,
   matchAstRolesFromSource,

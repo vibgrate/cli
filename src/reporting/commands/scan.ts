@@ -318,6 +318,7 @@ export const scanCommand = new Command('scan')
   .option('--repository-name <name>', 'Override the repository name recorded for this scan (defaults to the directory or package.json name)')
   .option('--force', 'Always create a fresh scan ingest, even if the repository is unchanged since the last scan (skips the unchanged/reuse optimization). Used by scheduled and dashboard-triggered scans.')
   .option('--no-graph', 'Skip building the local code map (the AI/docs index) that scan produces after scoring drift')
+  .option('--no-daemon', 'Never auto-start or use the local runtime (vgd) — run everything in this process')
   .option('--quiet', 'Suppress promotional output (the free-plan tracking panel and the AI Context install prompt); scan results are unaffected')
   .action(async (targetPath: string, opts: {
     out?: string;
@@ -347,6 +348,8 @@ export const scanCommand = new Command('scan')
     repositoryName?: string;
     force?: boolean;
     graph?: boolean;
+    /** `--no-daemon` arrives from commander as `daemon === false`. */
+    daemon?: boolean;
     quiet?: boolean;
   }) => {
     const rootDir = path.resolve(targetPath);
@@ -554,13 +557,15 @@ export const scanCommand = new Command('scan')
         });
         // Refine before format/write — architecture is already on these objects.
         // --no-graph / map failed / --max-privacy never reach here.
-        refineArchitectureWithGraph(
-          { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
-          architectureGraphView(result.graph),
-        );
+        // AST roles first so @Entity / @Controller confirm (or override a
+        // filename suffix) before boundary violations are collected.
         refineArchitectureWithAstRoles(
           { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
           result.fileRoles,
+        );
+        refineArchitectureWithGraph(
+          { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
+          architectureGraphView(result.graph),
         );
         const { counts } = result.graph.meta;
         return `${counts.nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} edges`;
@@ -571,6 +576,35 @@ export const scanCommand = new Command('scan')
     // open build, so the scan runs entirely on the open base engine.
     const advanced = await loadAdvancedScanHook();
     const artifact = await runCoreScan(rootDir, scanOpts, advanced);
+
+    // The scan just built a code map (its `postScan` step). Start the local
+    // runtime if it is not up and hand it that map, so the very first `vg` in a
+    // repo leaves behind a warm graph slot and a warming semantic index rather
+    // than a daemon that has never heard of this repository. Best-effort and
+    // silent: `attachVgd` never throws, and no daemon is a supported setup.
+    if (wantGraph && builtGraph) {
+      const { attachVgd } = await import('../../runtime/vgd/attach.js');
+      const { ActivityLog } = await import('../../runtime/vgd/activity.js');
+      const activity = new ActivityLog();
+      await activity.time(
+        'attach',
+        () => attachVgd(rootDir, { disabled: opts.daemon === false }),
+        (a) => {
+          if (a.status !== 'attached') return { outcome: 'skip' as const, detail: `${a.reason} — the map stays on disk only` };
+          const started = a.started ? 'started vgd' : 'attached to vgd';
+          if (a.published?.status === 'published') {
+            return {
+              outcome: 'ok' as const,
+              detail: `${started} · map published ${a.published.gitRef} · ${a.published.nodeCount} nodes · semantic index warming`,
+            };
+          }
+          return { outcome: 'ok' as const, detail: started };
+        },
+      );
+      if (!opts.quiet && opts.format !== 'json') {
+        for (const line of activity.render()) console.error(line);
+      }
+    }
 
     // Machine-readable drift score for the remediation agent's before/after gate
     // (no-op unless VIBGRATE_EMIT_MARKERS=1). Emitted from the freshly computed

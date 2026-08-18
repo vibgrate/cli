@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { hashString } from './hash.js';
 import { cacheDir } from './cache.js';
 import { resolveGraphPath } from './artifacts.js';
-import { acquireLock, releaseLock } from './lock.js';
+import { acquireLock, lockHeld, releaseLock } from './lock.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
 /**
@@ -475,6 +475,36 @@ function legacyVectorCachePath(root: string, modelId: string): string {
   return path.join(cacheDir(root), `embeddings-${safe(modelId)}.json`);
 }
 
+/** One node's contribution to the semantic index: what is embedded, and its hash. */
+export interface EmbedTarget {
+  id: string;
+  text: string;
+  hash: string;
+}
+
+/**
+ * The nodes the semantic index covers, and the exact text embedded for each.
+ *
+ * This is the single definition of "what is in the index", shared by the
+ * on-disk cache (`vg embed`, `vg ask`) and vgd's in-memory slot index. They
+ * used to compute it separately — vgd embedded *every* node with a shorter
+ * text — so the two indexes described different things and vgd re-embedded
+ * work the disk cache had already done. Keep them on this one function.
+ */
+export function embedTargets(graph: VgGraph): EmbedTarget[] {
+  // Tolerant of a partial graph: vgd indexes whatever a client publishes, and
+  // an `areas`-less map is a valid (if unlabelled) one.
+  const areaLabel = new Map((graph.areas ?? []).map((a) => [a.id, a.label] as const));
+  const targets: EmbedTarget[] = [];
+  for (const n of graph.nodes ?? []) {
+    // file/external stay out of the index; document (docs/env examples) are in.
+    if (n.kind === 'file' || n.kind === 'external') continue;
+    const text = nodeEmbedText(n, areaLabel.get(n.area));
+    targets.push({ id: n.id, text, hash: hashString(text) });
+  }
+  return targets;
+}
+
 /**
  * How many searchable nodes still need embedding for `modelId` — cheap (hashes
  * the embed-text, reads only the cache; never loads the model). Lets the embed
@@ -482,16 +512,47 @@ function legacyVectorCachePath(root: string, modelId: string): string {
  */
 export function countPending(graph: VgGraph, root: string, modelId: string): number {
   const entries = loadCache(root, modelId).entries;
-  const areaLabel = new Map(graph.areas.map((a) => [a.id, a.label] as const));
   let pending = 0;
-  for (const n of graph.nodes) {
-    // file/external stay out of the index; document (docs/env examples) are in.
-    if (n.kind === 'file' || n.kind === 'external') continue;
-    const h = hashString(nodeEmbedText(n, areaLabel.get(n.area)));
-    const cached = entries[n.id];
-    if (!cached || cached.hash !== h) pending++;
+  for (const t of embedTargets(graph)) {
+    const cached = entries[t.id];
+    if (!cached || cached.hash !== t.hash) pending++;
   }
   return pending;
+}
+
+/** What a reader (vgd) finds in this repo's on-disk vector cache. */
+export interface CachedVectorRead {
+  model: string;
+  /** nodeId → vector, for every node whose cached hash still matches. */
+  vectors: Map<string, number[]>;
+  /** Targets the cache does not cover yet. */
+  pending: EmbedTarget[];
+  /** True while another process holds the cache's single-writer lock. */
+  writerBusy: boolean;
+}
+
+/**
+ * Read this repo's vector cache without loading the embedding backend.
+ *
+ * vgd warms its slot index from here first: on a repo `vg embed` has already
+ * warmed, a slot goes `ready` in milliseconds with no worker and no duplicated
+ * embedding. `writerBusy` reports the single-writer lock so vgd can stand down
+ * while the `vg build` warm-up child is mid-run instead of racing it.
+ */
+export function readCachedVectors(
+  graph: VgGraph,
+  root: string,
+  modelId = resolveEmbedModel(),
+): CachedVectorRead {
+  const entries = loadCache(root, modelId).entries;
+  const vectors = new Map<string, number[]>();
+  const pending: EmbedTarget[] = [];
+  for (const t of embedTargets(graph)) {
+    const cached = entries[t.id];
+    if (cached && cached.hash === t.hash && cached.vec.length > 0) vectors.set(t.id, cached.vec);
+    else pending.push(t);
+  }
+  return { model: modelId, vectors, pending, writerBusy: lockHeld(`${vectorCachePath(root)}.lock`) };
 }
 
 function loadCache(root: string, modelId: string): EmbedCache {
@@ -732,17 +793,14 @@ export async function getNodeEmbeddings(
   const file = vectorCachePath(root);
   const cache = loadCache(root, embedder.id);
 
-  const areaLabel = new Map(graph.areas.map((a) => [a.id, a.label] as const));
-  // Include document nodes (markdown/txt/env examples) so ask can retrieve docs.
-  const targets = graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external');
-  const toEmbed: { id: string; text: string; hash: string }[] = [];
+  // Includes document nodes (markdown/txt/env examples) so ask can retrieve docs.
+  const targets = embedTargets(graph);
+  const toEmbed: EmbedTarget[] = [];
   const vectors = new Map<string, number[]>();
-  for (const n of targets) {
-    const text = nodeEmbedText(n, areaLabel.get(n.area));
-    const h = hashString(text);
-    const cached = cache.entries[n.id];
-    if (cached && cached.hash === h) vectors.set(n.id, cached.vec);
-    else toEmbed.push({ id: n.id, text, hash: h });
+  for (const t of targets) {
+    const cached = cache.entries[t.id];
+    if (cached && cached.hash === t.hash) vectors.set(t.id, cached.vec);
+    else toEmbed.push(t);
   }
 
   // Atomic write (temp + rename) so a reader never sees a half-written cache.
@@ -780,7 +838,7 @@ export async function getNodeEmbeddings(
         }
       }
       // prune entries for nodes no longer present, then a final authoritative write
-      const live = new Set(targets.map((n) => n.id));
+      const live = new Set(targets.map((t) => t.id));
       for (const id of Object.keys(cache.entries)) if (!live.has(id)) delete cache.entries[id];
       persist();
     } finally {

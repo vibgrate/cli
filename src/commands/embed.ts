@@ -14,6 +14,7 @@ import {
 import { embedderHealth, clearEmbedderHealth } from '../engine/embed-health.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
+import { publishGraphToVgd } from '../runtime/vgd/publish.js';
 import { c, info, json } from '../util/output.js';
 import { ProgressBar } from '../util/progress.js';
 
@@ -65,6 +66,7 @@ export function registerEmbed(program: Command): void {
         return;
       }
       if (countPending(graph, root, modelId) === 0) {
+        await warmDaemonIndex(root, global.graph);
         if (global.json) json({ embedded: 0, pending: 0, upToDate: true, model: modelId, semantic: true });
         else if (speak) info(`${c.cyan('vg embed')} · semantic index already up to date`);
         return;
@@ -112,10 +114,24 @@ export function registerEmbed(program: Command): void {
       const bar = speak ? new ProgressBar(c.dim('embedding')) : undefined;
       await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
       bar?.done();
+      // The on-disk vectors are complete now. A running vgd seeds its slot
+      // index straight from them, so this is what turns `vg daemon status`
+      // from "0/1 index(es) ready" into a warm daemon — without either side
+      // embedding the same repo twice.
+      await warmDaemonIndex(root, global.graph);
       if (global.json) json({ embedded: pending, model: modelId, semantic: true });
       else if (speak) info(`${c.green('✔')} vg embed · semantic index ready (~${pending} node(s) · model ${modelId})`);
     });
   applyGlobalOptions(cmd);
+}
+
+/**
+ * Tell a running vgd that this repo's vectors are on disk, so it can warm the
+ * matching graph slot's index from them. Best-effort: no daemon is a supported
+ * configuration, and `vg embed` must not fail because of one.
+ */
+async function warmDaemonIndex(root: string, graphPath?: string): Promise<void> {
+  await publishGraphToVgd(root, { graphPath, warmSemantic: true });
 }
 
 function showWhere(root: string, modelId: string, asJson?: boolean): void {

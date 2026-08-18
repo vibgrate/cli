@@ -39,15 +39,18 @@ import {
   isManifest,
   manifestKind,
 } from './manifest-positions.js';
+import { projectForFile as matchProjectForFile } from './project-for-file.js';
 import { buildGraph } from '../engine/build.js';
 import { fileRolesFromParseCache } from '../engine/ast-roles.js';
 import type { AstRoleHit } from '../core-open/scanners/architecture/ast-roles.js';
+import { boundaryProfileRules } from '../core-open/scanners/architecture/graph-refine.js';
 import { loadGraph } from '../engine/load.js';
 import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
 import { loadGraphPreferIndex } from '../engine/index-db.js';
 import type { RefreshOutcome } from '../engine/refresh.js';
 import { RefreshScheduler } from '../engine/refresh-scheduler.js';
+import { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import { manifestHash, loadScanCache, writeScanCache, isDependencyFile } from './scan-cache.js';
 import { SKIP_DIRS } from '../engine/discover.js';
 import { recordScore, lastEntry, deltaFrom, recentHistory, type ScoreHistoryEntry } from './score-history.js';
@@ -189,6 +192,12 @@ export interface ArchitectureResponse {
   violations?: ArchitectureViolationWire[];
   violationsCapped?: true;
   boundaryProfile?: string;
+  /**
+   * What `boundaryProfile` actually enforces, in prose, straight from the
+   * checker. Present only when a profile is in force. Clients render this —
+   * they must never author their own description of the rules.
+   */
+  boundaryRules?: string[];
   structure?: ArchitectureStructureWire;
   generated?: true;
   generatedBy?: string;
@@ -291,12 +300,38 @@ function architectureWire(arch: {
   if (arch.workspaceEdgesCapped) out.workspaceEdgesCapped = true;
   if (arch.violations) out.violations = arch.violations;
   if (arch.violationsCapped) out.violationsCapped = true;
-  if (arch.boundaryProfile) out.boundaryProfile = arch.boundaryProfile;
+  if (arch.boundaryProfile) {
+    out.boundaryProfile = arch.boundaryProfile;
+    const rules = boundaryProfileRules(arch.boundaryProfile);
+    if (rules.length > 0) out.boundaryRules = rules;
+  }
   if (arch.structure) out.structure = arch.structure;
   if (arch.generated) out.generated = true;
   if (arch.generatedBy) out.generatedBy = arch.generatedBy;
   if (arch.sourceContract) out.sourceContract = arch.sourceContract;
   return out;
+}
+
+/**
+ * One row of the workspace-scope Projects view — the per-project architecture
+ * facts a client needs to list every project side by side without issuing an
+ * `vibgrate/architecture` request per project. Pure projection of data the
+ * scan already produced; nothing here is computed for the client.
+ */
+export interface ArchitectureProjectSummary {
+  path: string;
+  name: string;
+  projectKind?: string;
+  artifactKind?: string;
+  /** `structure.primary` — the detected shape (clean, layered, …). */
+  structure?: string;
+  supportLevel?: 0 | 1 | 2 | 3 | 4;
+  /** Number of boundary violations. `null` when this project was never checked. */
+  violations: number | null;
+  packIds?: string[];
+  /** Layers carrying at least one file. */
+  layerCount: number;
+  fileCount: number;
 }
 
 /** Per-layer summary, wire shape mirrors `LayerSummary` in core-open/types.ts. */
@@ -458,6 +493,8 @@ interface ServerOptions {
   graph: boolean;
   /** Semantic search over the graph. `false` (`--no-semantic`) forces lexical and never downloads the embedding model. */
   semantic: boolean;
+  /** `--no-daemon`: never auto-start or use the local runtime (vgd). */
+  daemon?: boolean;
 }
 
 export class VibgrateLanguageServer {
@@ -489,12 +526,24 @@ export class VibgrateLanguageServer {
    * single Ask block for over a minute. See engine/refresh-scheduler.ts.
    */
   private readonly refresher: RefreshScheduler;
+  /**
+   * The local runtime's semantic index, held for the life of the server.
+   * Ranking there means the native embedding backend is never loaded into this
+   * process — the failure this server has the least tolerance for, since a
+   * SIGTRAP from the addon kills it outright mid-request.
+   */
+  private readonly semanticSession: DaemonSemanticSession;
+  /** In-flight on-demand scans of open manifests the workspace scan skipped. */
+  private readonly openManifestScans = new Set<string>();
+  /** Failed on-demand scans — retry only after the next workspace scan. */
+  private readonly openManifestFailed = new Set<string>();
 
   constructor(
     private readonly opts: ServerOptions,
     output: NodeJS.WritableStream = process.stdout,
   ) {
     this.conn = new Connection(process.stdin, output);
+    this.semanticSession = new DaemonSemanticSession(opts.root, { disabled: opts.daemon === false });
     this.refresher = new RefreshScheduler({
       root: opts.root,
       graphPath: () => resolveGraphPath(opts.root),
@@ -585,6 +634,7 @@ export class VibgrateLanguageServer {
     this.conn.onRequest('vibgrate/score/forFile', (_m, params) => this.onScoreForFile(params));
     this.conn.onRequest('vibgrate/score/forProject', (_m, params) => this.onScoreForProject(params));
     this.conn.onRequest('vibgrate/architecture', (_m, params) => this.onArchitecture(params));
+    this.conn.onRequest('vibgrate/architecture/projects', () => this.onArchitectureProjects());
     // Trend data for the panel sparkline (plan §5.6). Entries carry their
     // methodology so the client can break the line across a change — the one
     // trend rule v3 imposes. Empty history is an empty array, not an error.
@@ -635,6 +685,7 @@ export class VibgrateLanguageServer {
     this.scanning = true;
     const force = this.forceNextScan;
     this.forceNextScan = false;
+    this.openManifestFailed.clear();
 
     try {
       // The expensive part of a scan is the per-package registry lookups, not
@@ -644,7 +695,15 @@ export class VibgrateLanguageServer {
       // `toolVersion`/`offline` are part of the key too: an engine upgrade or a
       // flip of `vibgrate.offline` must not replay a scan from before it.
       // Explicit Rescan Workspace sets `forceNextScan` and always re-runs.
-      const cacheKey = { manifestHash: manifestHash(this.opts.root), toolVersion: VERSION, offline: this.opts.offline };
+      // Prefer the daemon's digest: it walks the manifest tree and hashes
+      // every manifest (~13ms here) and would otherwise do so once per process
+      // that wants it. The daemon computes it once and drops it when its own
+      // watcher sees a manifest write, so the key is no staler than ours was.
+      const cacheKey = {
+        manifestHash: (await this.sharedManifestHash()) ?? manifestHash(this.opts.root),
+        toolVersion: VERSION,
+        offline: this.opts.offline,
+      };
       const cached = force ? null : loadScanCache(this.opts.root, cacheKey);
 
       let fromCache = false;
@@ -811,6 +870,13 @@ export class VibgrateLanguageServer {
     const filePath = uriToPath(uri);
     const kind = manifestKind(filePath);
     const project = projectForFile(this.opts.root, a, filePath);
+    // A nested package.json the workspace scan skipped (auto-exclude / timeout)
+    // used to inherit the parent project's deps. Those names are not in this
+    // file, so the overlay stayed empty while Explorer still showed the
+    // parent's DriftScore. Scan just this package so the dots land here.
+    if (!project && isManifest(filePath)) {
+      void this.scanOpenManifest(uri, filePath);
+    }
 
     // ── inline decorations ──
     const items: InlineItem[] = [];
@@ -867,6 +933,59 @@ export class VibgrateLanguageServer {
     this.conn.notify('textDocument/publishDiagnostics', { uri, diagnostics });
   }
 
+  /**
+   * Workspace scan skipped this package (auto-exclude / timeout). Score it
+   * alone so the open editor can show overlays; do not write the result into
+   * the workspace scan cache (billing / repo score stay on the official scan).
+   */
+  private async scanOpenManifest(uri: string, filePath: string): Promise<void> {
+    const relDir = path.relative(this.opts.root, path.dirname(path.resolve(filePath)));
+    const key = relDir === '' ? '.' : relDir;
+    if (this.openManifestScans.has(key) || this.openManifestFailed.has(key)) return;
+    if (key === '.' || key.startsWith('..')) return;
+    this.openManifestScans.add(key);
+    try {
+      this.conn.notify('window/logMessage', {
+        type: 3,
+        message: `Vibgrate: scoring open package ${key} (not in the workspace scan) so editor overlays can render.`,
+      });
+      const advanced = await loadAdvancedScanHook();
+      const scanOpts: ScanOptions = {
+        format: 'json',
+        concurrency: 8,
+        offline: this.opts.offline,
+        noLocalArtifacts: true,
+        noGraph: true,
+        quiet: true,
+        vibgrateVersion: VERSION,
+      } as ScanOptions;
+      const sub = await runCoreScanSilently(path.dirname(filePath), scanOpts, advanced);
+      const proj = (sub.projects ?? []).find((p) => p.path === '.' || p.path === '') ?? sub.projects?.[0];
+      if (!proj || !this.artifact) {
+        this.openManifestFailed.add(key);
+        return;
+      }
+      proj.path = key;
+      this.artifact.projects = [...(this.artifact.projects ?? []).filter((p) => p.path !== key), proj];
+      for (const f of sub.findings ?? []) {
+        if (f.location === '.' || f.location === '' || f.location === key) {
+          this.artifact.findings = [...(this.artifact.findings ?? []).filter((x) => !(x.ruleId === f.ruleId && x.location === key)), { ...f, location: key }];
+        }
+      }
+      this.publishScore();
+      this.publishForDoc(uri);
+    } catch (err) {
+      this.openManifestFailed.add(key);
+      const message = err instanceof Error ? err.message : String(err);
+      this.conn.notify('window/logMessage', {
+        type: 3,
+        message: `Vibgrate: could not score open package ${key}: ${message}`,
+      });
+    } finally {
+      this.openManifestScans.delete(key);
+    }
+  }
+
   // ── Requests ─────────────────────────────────────────────────────────────
 
   private onHover(params: unknown): unknown {
@@ -915,23 +1034,36 @@ export class VibgrateLanguageServer {
     // ONE lens, at the top of the file. A per-dependency lens would double the
     // height of package.json — and a CodeLens cannot carry colour anyway, which
     // is why the per-dependency detail is an inline decoration (plan §5.2).
-    const behind = (a.projects ?? []).reduce(
-      (n, proj) =>
-        n +
-        (proj.dependencies ?? []).filter(
-          (d) => d.drift === 'major-behind' || d.drift === 'minor-behind',
-        ).length,
-      0,
-    );
+    const filePath = uriToPath(uri);
+    const project = projectForFile(this.opts.root, a, filePath);
+    if (!project) {
+      return [
+        {
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+          command: {
+            title: 'Vibgrate · this package is not in the workspace scan',
+            command: 'vibgrate.openPanel',
+            arguments: [],
+          },
+        },
+      ];
+    }
+    const behind = (project.dependencies ?? []).filter(
+      (d) => d.drift === 'major-behind' || d.drift === 'minor-behind',
+    ).length;
     const eol = (a.findings ?? []).filter(
-      (f) => f.ruleId === 'vibgrate/runtime-eol' || f.ruleId === 'vibgrate/eol',
+      (f) =>
+        sameProject(f.location, project.path) &&
+        (f.ruleId === 'vibgrate/runtime-eol' || f.ruleId === 'vibgrate/eol'),
     ).length;
 
-    const estimated = (a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated')) === 'estimated';
+    const estimated =
+      (project.drift?.mode ?? a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated')) ===
+      'estimated';
     const mode = estimated ? '~' : '';
-    const title =
-      `Vibgrate · drift ${mode}${a.drift.score} (${a.drift.riskLevel}) · ` +
-      `${behind} behind · ${eol} EOL`;
+    const score = project.drift?.score ?? a.drift.score;
+    const band = project.drift?.riskLevel ?? a.drift.riskLevel;
+    const title = `Vibgrate · drift ${mode}${score} (${band}) · ${behind} behind · ${eol} EOL`;
 
     return [
       {
@@ -1055,8 +1187,23 @@ export class VibgrateLanguageServer {
       root: this.opts.root,
       offline: this.opts.offline,
       semantic: this.opts.semantic,
+      semanticSession: this.semanticSession,
       log: trace,
     });
+  }
+
+  /**
+   * The daemon's manifest digest for this workspace, or null when there is no
+   * daemon (or it has not been told about this repo yet) — in which case the
+   * caller computes it locally, exactly as before.
+   */
+  private async sharedManifestHash(): Promise<string | null> {
+    try {
+      const deps = await this.semanticSession.depContext();
+      return deps?.manifestHash ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1207,6 +1354,38 @@ export class VibgrateLanguageServer {
       manifestPath: manifestRelativePath(project),
       lockfilePath: lockfileRelativePath(this.opts.root, project),
     };
+  }
+
+  /**
+   * `vibgrate/architecture/projects` — the workspace-scope Projects view.
+   * One row per scanned project that produced architecture data, so a client
+   * can render the whole portfolio without N round trips. Projects the
+   * scanner never classified are omitted rather than shown as empty rows.
+   */
+  private onArchitectureProjects(): ArchitectureProjectSummary[] | null {
+    const a = this.artifact;
+    if (!a) return null;
+    const rows: ArchitectureProjectSummary[] = [];
+    for (const project of a.projects ?? []) {
+      const arch = project.architecture;
+      if (!arch) continue;
+      const row: ArchitectureProjectSummary = {
+        path: project.path,
+        name: project.name,
+        // `violations` absent means "no graph was available to check against",
+        // which is not the same as "checked and clean" — keep them distinct.
+        violations: arch.violations ? arch.violations.length : null,
+        layerCount: arch.layers.filter((l) => l.fileCount > 0).length,
+        fileCount: arch.totalClassified,
+      };
+      if (arch.projectKind) row.projectKind = arch.projectKind;
+      if (arch.artifactKind) row.artifactKind = arch.artifactKind;
+      if (arch.structure) row.structure = arch.structure.primary;
+      if (arch.supportLevel !== undefined) row.supportLevel = arch.supportLevel;
+      if (arch.packIds && arch.packIds.length > 0) row.packIds = arch.packIds;
+      rows.push(row);
+    }
+    return rows;
   }
 }
 
@@ -1392,30 +1571,8 @@ function buildProjectRefs(rootDir: string, projects: ProjectScan[]): ProjectRef[
   return refs.length > 0 ? refs : undefined;
 }
 
-/**
- * Which scanned project owns this manifest file?
- *
- * Resolve against the *server's* root, not `artifact.rootPath`. The artifact
- * deliberately carries a relative, portable root (it is uploaded and compared
- * across machines), so resolving against it lands on the process cwd — which is
- * wherever the editor happened to spawn us from, and is not the workspace.
- * That mismatch silently produces zero decorations and zero diagnostics: the
- * score renders fine and every in-editor surface is empty.
- */
 function projectForFile(root: string, a: ScanArtifact, filePath: string): ProjectScan | undefined {
-  const dir = path.dirname(path.resolve(filePath));
-  let best: ProjectScan | undefined;
-  let bestLen = -1;
-  for (const proj of a.projects ?? []) {
-    const projDir = path.resolve(root, proj.path);
-    // Longest matching prefix wins — correct in a monorepo, where the root
-    // package.json and packages/foo/package.json both "contain" the file.
-    if ((dir === projDir || dir.startsWith(projDir + path.sep)) && projDir.length > bestLen) {
-      best = proj;
-      bestLen = projDir.length;
-    }
-  }
-  return best;
+  return matchProjectForFile(root, a.projects ?? [], filePath);
 }
 
 function sameProject(location: string, projectPath: string): boolean {

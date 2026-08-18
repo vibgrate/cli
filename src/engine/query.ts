@@ -213,9 +213,21 @@ export function queryGraph(graph: VgGraph, question: string, options: QueryOptio
 }
 
 export interface SemanticQueryOptions extends QueryOptions {
-  embedder: Embedder;
+  /** Local embedder. Optional only when {@link semanticRanked} supplies the pass. */
+  embedder?: Embedder;
   /** Precomputed node vectors (from getNodeEmbeddings); falls back to lexical for nodes without one. */
-  nodeVectors: Map<string, number[]>;
+  nodeVectors?: Map<string, number[]>;
+  /**
+   * A semantic pass someone else already ran — vgd ranking the question
+   * against its resident slot index. Supplied instead of `embedder` +
+   * `nodeVectors` so the caller pays neither a model load nor a vector scan,
+   * and no vectors cross the socket.
+   *
+   * Only the ORDER of this list is consumed (RRF fuses rankings, not scores),
+   * so a truncated top-K is not an approximation: a candidate ranked past a
+   * few hundred cannot reach a 12-row answer.
+   */
+  semanticRanked?: Array<{ id: string; score: number }>;
 }
 
 /**
@@ -258,8 +270,11 @@ export async function queryGraphSemantic(
   const weightOf = termWeights(graph, terms);
   const index = indexFor(graph);
   // Embed the residual ask (without URL/quote noise) so semantic neighbours
-  // aren't dragged toward package names that share host path segments.
-  const queryVec = await options.embedder.embedQuery(forTokens || question);
+  // aren't dragged toward package names that share host path segments. Skipped
+  // entirely when the ranking arrives pre-computed (vgd already embedded it).
+  const queryVec = options.semanticRanked
+    ? null
+    : await options.embedder?.embedQuery(forTokens || question);
 
   // Raw lexical scores (pre-importance) — RRF consumes only their ORDER.
   // Weak-only asks get no lexical evidence (same suppression as queryGraph);
@@ -285,9 +300,17 @@ export async function queryGraphSemantic(
     for (const node of graph.nodes) {
       if (node.kind === 'file' || node.kind === 'external') continue;
       nodeById.set(node.id, node);
-      const vec = options.nodeVectors.get(node.id);
+      if (options.semanticRanked || !queryVec) continue;
+      const vec = options.nodeVectors?.get(node.id);
       const sem = vec && terms.length > 0 ? Math.max(0, cosine(queryVec, vec)) : 0;
       if (sem > 0) semRaw.set(node.id, sem);
+    }
+    if (options.semanticRanked && terms.length > 0) {
+      // Ignore ids the ranking knows about but this graph no longer has: the
+      // daemon's index can be one publish behind a locally refreshed map.
+      for (const { id, score } of options.semanticRanked) {
+        if (score > 0 && nodeById.has(id)) semRaw.set(id, score);
+      }
     }
     const nameOf = (id: string) => nodeById.get(id)?.qualifiedName ?? id;
     const lexRanks = ranksOf(lexRaw, nameOf);
