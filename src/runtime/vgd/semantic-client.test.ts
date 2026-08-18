@@ -79,6 +79,65 @@ describe('DaemonSemanticSession', () => {
     expect(await session.rank('q')).toBeNull();
   });
 
+  it('asks the daemon to finish the index and ranks again before giving up', async () => {
+    const seen: string[] = [];
+    let ready = false;
+    const session = new DaemonSemanticSession('/repo', {
+      attach: () => Promise.resolve(attached),
+      request: (req) => {
+        seen.push(req.op);
+        if (req.op === 'embed-index') {
+          ready = true;
+          return Promise.resolve({
+            ok: true,
+            indexed: true,
+            repositoryId: 'repo1',
+            gitRef: 'main',
+            state: 'ready',
+            vectors: 100,
+          });
+        }
+        if (req.op === 'embed-status') {
+          return Promise.resolve({
+            ok: true,
+            semantic: {
+              worker: 'ready' as const,
+              crashes: 0,
+              model: 'bge-small-en-v1.5',
+              slots: [
+                {
+                  repositoryId: 'repo1',
+                  gitRef: 'main',
+                  state: ready ? 'ready' : 'building',
+                  vectors: ready ? 100 : 0,
+                  nodeCount: 10,
+                },
+              ],
+            },
+          });
+        }
+        // Empty ranked[] means "rank locally" (covered above). A warming
+        // slot is the signal to kick embed-index and poll until ready.
+        if (!ready) {
+          return Promise.resolve({
+            ok: false,
+            error: 'semantic index is warming — retry shortly',
+            code: 'semantic_warming',
+            state: 'building',
+            vectors: 0,
+          });
+        }
+        return Promise.resolve(ranked(2));
+      },
+    });
+
+    const r = await session.rank('q');
+
+    expect(seen).toEqual(['embed-rank', 'embed-index', 'embed-status', 'embed-rank']);
+    expect(r?.ranked).toHaveLength(2);
+    expect(r?.vectors).toBe(100);
+  });
+
   it('does not retry a down daemon on every request', async () => {
     let attaches = 0;
     let clock = 0;

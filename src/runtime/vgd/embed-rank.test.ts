@@ -104,6 +104,21 @@ describe('EmbedBroker.rank', () => {
     expect(['n3', 'n7']).toContain(result!.ranked[0]?.id);
   });
 
+  it('still ranks a stale slot that kept its vectors after republish', async () => {
+    const { child } = fakeChild();
+    const broker = new EmbedBroker({ spawnWorker: () => child, requestTimeoutMs: 500 });
+    await broker.ensureIndex('repoA', 'main', graph(4));
+
+    broker.onGraphPut('repoA', 'main', graph(4));
+    expect(broker.slot('repoA', 'main')?.state).toBe('stale');
+
+    const result = await broker.rank('repoA', 'main', 'axis 2');
+
+    expect(result).not.toBeNull();
+    expect(result!.ranked[0]?.id).toBe('n2');
+    expect(result!.state).toBe('stale');
+  });
+
   it('returns null for a slot with no index, so the caller ranks locally', async () => {
     const { worker, child } = fakeChild();
     const broker = new EmbedBroker({ spawnWorker: () => child, requestTimeoutMs: 500 });

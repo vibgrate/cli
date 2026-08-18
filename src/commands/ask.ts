@@ -20,7 +20,7 @@ import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
 import { c, info, json, out } from '../util/output.js';
-import { ProgressBar } from '../util/progress.js';
+import { LiveStatus, ProgressBar } from '../util/progress.js';
 
 /**
  * `vg ask "<question>"` (VG-CLI-SPEC §3.2). Hybrid lexical+structural+semantic
@@ -67,6 +67,8 @@ export function registerAsk(program: Command): void {
       // the semantic pass below can run against its resident index instead of
       // loading a model into this short-lived process.
       const activity = new ActivityLog();
+      const live = !global.json ? new LiveStatus() : null;
+      live?.start('attaching to vgd…');
       const attached = await activity.time(
         'attach',
         () =>
@@ -93,22 +95,28 @@ export function registerAsk(program: Command): void {
       const relevance = await analyzeQuestion(q);
       const topicTags = relevance ? await loadTopicTags(graph, root, resolveGraphPath(root, global.graph)) : null;
 
+      try {
       if (wantSemantic) {
         // Daemon first: it already holds vectors for this slot, so it answers
         // the semantic half without this process loading the model at all.
+        live?.set('asking the daemon…');
         const ranked = attached.status === 'attached' && attached.repositoryId
           ? await activity.time(
               'semantic',
               // The attach above already resolved (and, if needed, published)
               // the slot — this session only sends the question.
-              () => new DaemonSemanticSession(root, { socketPath: attached.socketPath, publish: false }).rank(q),
+              () =>
+                new DaemonSemanticSession(root, { socketPath: attached.socketPath, publish: false }).rank(q, undefined, {
+                  onProgress: (p) => live?.set(p.detail),
+                }),
               (r) =>
                 r
                   ? { outcome: 'ok' as const, detail: `ranked in the daemon · ${r.ranked.length} of ${r.vectors} vector(s)${r.model ? ` · ${r.model}` : ''}` }
-                  : { outcome: 'skip' as const, detail: 'daemon has no usable index — embedding in this process' },
+                  : { outcome: 'skip' as const, detail: 'daemon index unavailable — embedding in this process' },
             )
           : null;
         if (ranked) {
+          live?.set('answering from the daemon index…');
           result = await queryGraphSemantic(graph, q, {
             budget,
             semanticRanked: ranked.ranked,
@@ -118,12 +126,15 @@ export function registerAsk(program: Command): void {
           mode = `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})`;
           activity.add('answer', 'ok', 'answered from the daemon index — no local model load');
         } else {
-          // A genuine first run for this repo (no cached vectors yet) → show a
-          // one-time note + live progress bar for the embedding pass. Otherwise stay quiet.
+          // Always show progress for the in-process pass: loading the model
+          // and embedding tens of thousands of nodes is the slow path, and
+          // staying quiet there is what made ask look hung.
           const firstRun = !embeddingsCached(root, resolveEmbedModel());
-          if (!global.json && firstRun) {
-            info(c.dim('  preparing semantic search (first use embeds the map; cached, resumable & offline after)…'));
-          }
+          live?.set(
+            firstRun
+              ? 'loading the embedding model (first use; then cached and offline)…'
+              : 'embedding the map in this process…',
+          );
           let reason: EmbedUnavailable | undefined;
           let detail: string | undefined;
           const embedder = await loadEmbedder({
@@ -134,7 +145,8 @@ export function registerAsk(program: Command): void {
             },
           });
           if (embedder) {
-            const bar = !global.json && firstRun ? new ProgressBar(c.dim('embedding')) : undefined;
+            live?.stop();
+            const bar = !global.json ? new ProgressBar(c.dim('embedding')) : undefined;
             const vectors = await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
             bar?.done();
             result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors, relevance, topicTags });
@@ -151,6 +163,9 @@ export function registerAsk(program: Command): void {
         result = queryGraph(graph, q, { budget, relevance, topicTags });
         if (global.local) note = 'semantic skipped under --local; used lexical';
         activity.add('answer', 'skip', global.local ? 'lexical only (--local)' : 'lexical only (--no-semantic)');
+      }
+      } finally {
+        live?.stop();
       }
 
       // Count this call in the local ledger when an AI host identified itself

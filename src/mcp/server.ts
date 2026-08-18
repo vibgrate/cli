@@ -290,6 +290,14 @@ export class GraphSource {
  * Standing down is conditional on the daemon *confirming* the subscription,
  * and reversed the instant that connection drops — a dead daemon degrades this
  * server to watching for itself, never to nothing watching at all.
+ *
+ * The confirmation has to be about *this* repository. The daemon only watches
+ * a repo once it holds that repo's slot, so a subscription it acknowledges for
+ * a workspace it has no map for would push nothing, forever — and this server
+ * would have retired its own watcher to listen to silence. Publishing first is
+ * what makes the acknowledgement mean something: it hands the daemon the map,
+ * which is what starts its watcher, and answers with the repository id to
+ * scope the subscription to.
  */
 async function watchViaDaemonOrLocally(source: GraphSource, opts: ServeOptions): Promise<void> {
   if (opts.daemon === false) {
@@ -297,14 +305,22 @@ async function watchViaDaemonOrLocally(source: GraphSource, opts: ServeOptions):
     return;
   }
   try {
-    const { subscribeToSlots } = await import('../runtime/vgd/slot-subscription.js');
-    const subscription = await subscribeToSlots({
-      onChange: () => source.reloadFromDisk(),
-      onDetach: () => source.resumeLocalFreshness(),
-    });
-    if (subscription.active) {
-      source.deferFreshnessToDaemon();
-      return;
+    const [{ publishGraphToVgd }, { subscribeToSlots }] = await Promise.all([
+      import('../runtime/vgd/publish.js'),
+      import('../runtime/vgd/slot-subscription.js'),
+    ]);
+    // Never starts a daemon; "not-running" simply means we watch locally.
+    const published = await publishGraphToVgd(opts.root ?? source.root);
+    if (published.status === 'published' || published.status === 'current') {
+      const subscription = await subscribeToSlots({
+        repositoryId: published.repositoryId,
+        onChange: () => source.reloadFromDisk(),
+        onDetach: () => source.resumeLocalFreshness(),
+      });
+      if (subscription.active) {
+        source.deferFreshnessToDaemon();
+        return;
+      }
     }
   } catch {
     /* no daemon, or it cannot push — watch locally */

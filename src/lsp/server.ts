@@ -527,6 +527,21 @@ export class VibgrateLanguageServer {
    */
   private readonly refresher: RefreshScheduler;
   /**
+   * Open while the daemon is pushing map changes for this workspace. Closing
+   * it (or losing it) puts this server back in charge of its own freshness.
+   */
+  private slotSubscription: { close(): void } | null = null;
+  /**
+   * True only while the daemon is confirmed to hold *this* map and to be
+   * pushing changes for it. While set, `graphForQuery` stops probing: the
+   * daemon already watches the tree and rebuilds, and two processes doing it
+   * means two stat-walks over one corpus and two rebuilds racing for one lock.
+   *
+   * Never assumed — see `deferFreshnessToDaemon`. A daemon that dies degrades
+   * this server to watching for itself, never to nothing watching.
+   */
+  private daemonOwnsFreshness = false;
+  /**
    * The local runtime's semantic index, held for the life of the server.
    * Ranking there means the native embedding backend is never loaded into this
    * process — the failure this server has the least tolerance for, since a
@@ -661,6 +676,9 @@ export class VibgrateLanguageServer {
     this.conn.onRequest('shutdown', () => {
       this.shuttingDown = true;
       if (this.debounce) clearTimeout(this.debounce);
+      this.slotSubscription?.close();
+      this.slotSubscription = null;
+      this.daemonOwnsFreshness = false;
       return null;
     });
 
@@ -1097,6 +1115,7 @@ export class VibgrateLanguageServer {
         this.fileRoles = fileRolesFromParseCache(this.opts.root);
         this.refineAndPublishArchitecture();
         this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
+        void this.deferFreshnessToDaemon();
         return;
       }
 
@@ -1110,12 +1129,69 @@ export class VibgrateLanguageServer {
       this.fileRoles = result.fileRoles;
       this.refineAndPublishArchitecture();
       this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
+      void this.deferFreshnessToDaemon();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.conn.notify('window/logMessage', { type: 3, message: `Vibgrate graph build failed: ${message}` });
       this.conn.notify('vibgrate/graph/status', { state: 'error', message } satisfies GraphStatusNotification);
     } finally {
       this.graphBuilding = false;
+    }
+  }
+
+  /**
+   * Hand freshness to the daemon, but only once it is actually holding this
+   * map and pushing changes for it.
+   *
+   * The daemon watches a repository the moment it holds its slot — and not
+   * before. Registration is not enough; this server has historically been one
+   * of the roots vgd knew about but never had a map for. So the order matters:
+   * publish the map we just loaded or built, take the repository id the daemon
+   * answers with, and subscribe to *that* repository. Only a confirmed
+   * subscription retires the local probe.
+   *
+   * Every failure mode lands on "keep watching for ourselves": no daemon, a
+   * daemon that will not take the map, a subscription it does not confirm, or
+   * a connection that later drops. None of them are errors — a machine with no
+   * vgd is a supported configuration.
+   */
+  private async deferFreshnessToDaemon(): Promise<void> {
+    if (this.opts.daemon === false || !this.opts.graph) return;
+    if (this.daemonOwnsFreshness || this.slotSubscription || this.shuttingDown) return;
+    try {
+      const [{ publishGraphToVgd }, { subscribeToSlots }] = await Promise.all([
+        import('../runtime/vgd/publish.js'),
+        import('../runtime/vgd/slot-subscription.js'),
+      ]);
+      // Never starts a daemon — if none is running this returns and we keep
+      // probing locally, exactly as before.
+      const published = await publishGraphToVgd(this.opts.root);
+      if (published.status !== 'published' && published.status !== 'current') return;
+      const { repositoryId } = published;
+
+      const subscription = await subscribeToSlots({
+        repositoryId,
+        onChange: () => this.reloadGraphFromDisk(),
+        onDetach: () => {
+          this.daemonOwnsFreshness = false;
+          this.slotSubscription = null;
+        },
+      });
+      if (!subscription.active) return;
+      // `shutdown` can land while the socket was connecting; leaving the
+      // subscription open would hold the process past exit.
+      if (this.shuttingDown) {
+        subscription.close();
+        return;
+      }
+      this.slotSubscription = subscription;
+      this.daemonOwnsFreshness = true;
+      this.conn.notify('window/logMessage', {
+        type: 3,
+        message: `Vibgrate graph: freshness deferred to the local runtime (${repositoryId}).`,
+      });
+    } catch {
+      /* No daemon, or it cannot push — this server keeps watching for itself. */
     }
   }
 
@@ -1129,7 +1205,7 @@ export class VibgrateLanguageServer {
   private async graphForQuery(): Promise<VgGraph | null> {
     await this.ensureGraph();
     if (!this.graph) return null;
-    await this.refresher.maybeRefresh();
+    if (!this.daemonOwnsFreshness) await this.refresher.maybeRefresh();
     return this.graph;
   }
 
@@ -1140,13 +1216,21 @@ export class VibgrateLanguageServer {
    */
   private onRefreshSettled(outcome: RefreshOutcome | null): void {
     if (outcome?.status !== 'refreshed' || !outcome.wrote) return;
+    this.reloadGraphFromDisk();
+  }
+
+  /**
+   * Re-read the map we already have on disk. Shared by the local refresher and
+   * by the daemon's `slot-changed` push, which are the only two things that
+   * ever rewrite it — and never both at once.
+   */
+  private reloadGraphFromDisk(): void {
     const graphPath = resolveGraphPath(this.opts.root);
     const reloaded = loadGraphPreferIndex(this.opts.root, graphPath)?.graph ?? loadGraph(this.opts.root);
-    if (reloaded) {
-      this.graph = reloaded;
-      this.fileRoles = fileRolesFromParseCache(this.opts.root);
-      this.refineAndPublishArchitecture();
-    }
+    if (!reloaded) return;
+    this.graph = reloaded;
+    this.fileRoles = fileRolesFromParseCache(this.opts.root);
+    this.refineAndPublishArchitecture();
   }
 
   /**
