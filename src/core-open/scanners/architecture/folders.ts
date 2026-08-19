@@ -39,7 +39,19 @@ export function isTestFilePath(filePath: string): boolean {
   return /\/(__tests__|__mocks__|tests?|spec|fixtures)\//.test(n)
     || /\.(tests?|spec)\.[^./]+$/.test(n)
     || /_(test|spec)\.[^./]+$/.test(n)
-    || /\/(conftest|test_[^/]*)\.py$/.test(n);
+    || /\/(conftest|test_[^/]*)\.py$/.test(n)
+    || isTestProjectDir(n);
+}
+
+/**
+ * Test-project directory segment: dotted .NET/JVM naming (`Foo.Tests/`,
+ * `Foo.Api.IntegrationTests/`) or compound names (`FooE2ETests/`,
+ * `unittests/`). The compound list is closed so plain-word segments like
+ * `latest/` or `contest/` never match.
+ */
+function isTestProjectDir(loweredPath: string): boolean {
+  return /\/[^/]*\.tests?\//.test(loweredPath)
+    || /\/[^/]*(?:e2e|unit|integration|functional|acceptance|smoke|component)tests?\//.test(loweredPath);
 }
 
 export function folderLooksLikeTests(dir: string): boolean {

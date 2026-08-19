@@ -6,6 +6,7 @@ import { startVgdServer, type VgdServer } from '../runtime/vgd/index.js';
 import { vgdIsRunning } from '../runtime/vgd/client.js';
 import {
   compareDaemonVersion,
+  retireWedgedVgd,
   startDetachedVgd,
   stopVgd,
   vgdCliVersion,
@@ -141,6 +142,106 @@ describe('startDetachedVgd — the listener is not necessarily our child', () =>
       }),
     ).rejects.toThrow(/older vgd keeps re-binding/);
     expect(stops).toBe(3);
+  });
+});
+
+describe('retireWedgedVgd — freeing a socket held by a daemon that no longer answers', () => {
+  // The VS Code loop this guards against: a stale daemon holds the pipe but
+  // its event loop is stuck, so ping times out ("not running") while every
+  // fresh `daemon start` dies on EADDRINUSE — forever, until the holder goes.
+  it('retires the holder with SIGTERM when that frees the address', async () => {
+    const signals: string[] = [];
+    let held = true;
+    const res = await retireWedgedVgd('sock', {
+      isRunning: async () => false,
+      readPid: () => 4242,
+      signal: (pid, sig) => {
+        signals.push(`${sig}:${pid}`);
+        held = false; // polite termination releases the socket
+        return true;
+      },
+      held: async () => held,
+      waitBudgetMs: 200,
+      selfPid: 1,
+    });
+    expect(res).toEqual({ ok: true, pid: 4242 });
+    expect(signals).toEqual(['SIGTERM:4242']);
+  });
+
+  it('escalates to SIGKILL when SIGTERM does not free the address', async () => {
+    const signals: string[] = [];
+    let held = true;
+    const res = await retireWedgedVgd('sock', {
+      isRunning: async () => false,
+      readPid: () => 4242,
+      signal: (pid, sig) => {
+        signals.push(`${sig}:${pid}`);
+        if (sig === 'SIGKILL') held = false;
+        return true;
+      },
+      held: async () => held,
+      waitBudgetMs: 200,
+      selfPid: 1,
+    });
+    expect(res).toEqual({ ok: true, pid: 4242 });
+    expect(signals).toEqual(['SIGTERM:4242', 'SIGKILL:4242']);
+  });
+
+  it('never touches a live daemon — a lost start race is not a wedge', async () => {
+    const signals: string[] = [];
+    const res = await retireWedgedVgd('sock', {
+      isRunning: async () => true,
+      readPid: () => 4242,
+      signal: (pid, sig) => {
+        signals.push(`${sig}:${pid}`);
+        return true;
+      },
+      held: async () => true,
+      waitBudgetMs: 200,
+      selfPid: 1,
+    });
+    expect(res).toEqual({ ok: false, live: true });
+    expect(signals).toEqual([]);
+  });
+
+  it('refuses without a pid file — no guessing at who to kill', async () => {
+    const res = await retireWedgedVgd('sock', {
+      isRunning: async () => false,
+      readPid: () => null,
+      signal: () => {
+        throw new Error('must not signal without a pid');
+      },
+      held: async () => true,
+      waitBudgetMs: 200,
+      selfPid: 1,
+    });
+    expect(res).toMatchObject({ ok: false, reason: expect.stringMatching(/pid file/) });
+  });
+
+  it('never signals its own process', async () => {
+    const res = await retireWedgedVgd('sock', {
+      isRunning: async () => false,
+      readPid: () => 77,
+      signal: () => {
+        throw new Error('must not signal self');
+      },
+      held: async () => true,
+      waitBudgetMs: 200,
+      selfPid: 77,
+    });
+    expect(res).toMatchObject({ ok: false, reason: expect.stringMatching(/this process/) });
+  });
+
+  it('reports failure when the address stays held after SIGKILL', async () => {
+    const res = await retireWedgedVgd('sock', {
+      isRunning: async () => false,
+      readPid: () => 4242,
+      signal: () => true,
+      held: async () => true,
+      waitBudgetMs: 200,
+      selfPid: 1,
+    });
+    expect(res).toMatchObject({ ok: false, reason: expect.stringMatching(/still held/) });
   });
 });
 
