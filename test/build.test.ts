@@ -43,6 +43,18 @@ describe('buildGraph', () => {
     expect(files).not.toContain('skip/secret.ts');
   });
 
+  it('honors exclude from vibgrate.config.json', async () => {
+    const root = project({
+      'keep.ts': 'export function a(){}',
+      'vibgrate.config.json': JSON.stringify({ exclude: ['skip/**'] }),
+      'skip/secret.ts': 'export const SECRET = 1;',
+    });
+    const { graph } = await buildGraph({ root, generatedAt: PIN, inline: true });
+    const files = graph.nodes.filter((n) => n.kind === 'file').map((n) => n.file);
+    expect(files).toContain('keep.ts');
+    expect(files).not.toContain('skip/secret.ts');
+  });
+
   it('--only restricts languages', async () => {
     const root = project(SAMPLE_FILES);
     const { graph } = await buildGraph({ root, generatedAt: PIN, inline: true, only: ['py'] });

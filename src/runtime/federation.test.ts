@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   federationFromWorkspaceRoots,
+  isNestedAgentWorktree,
   loadFederation,
   loadOrDiscoverFederation,
   parseFederationFile,
@@ -112,5 +113,22 @@ describe('federation', () => {
     const fed = loadOrDiscoverFederation(primary);
     expect(fed.members.length).toBeGreaterThanOrEqual(3); // primary + a + b
     expect(fed.bridges?.some((b) => b.packageName === '@m/b' && b.confidence >= 0.9)).toBe(true);
+  });
+
+  it('drops agent worktrees nested under a hidden folder of the primary', () => {
+    const primary = tmp();
+    const worktree = path.join(primary, '.claude', 'worktrees', 'agent');
+    fs.mkdirSync(worktree, { recursive: true });
+    expect(isNestedAgentWorktree(worktree, primary)).toBe(true);
+    const fed = federationFromWorkspaceRoots([primary, worktree], { preferredPrimary: primary });
+    expect(fed.members.map((m) => m.root)).toEqual([path.resolve(primary)]);
+    const loaded = parseFederationFile(primary, {
+      members: [
+        { root: '.', role: 'primary', label: 'app' },
+        { root: '.claude/worktrees/agent', label: 'claude-wt' },
+        { root: '.cursor/worktrees/agent', label: 'cursor-wt' },
+      ],
+    });
+    expect(loaded?.members.map((m) => m.label)).toEqual(['app']);
   });
 });

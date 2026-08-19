@@ -168,6 +168,7 @@ export {
   ensureDir,
   FileCache,
   isSkippedDirName,
+  SCANNED_HIDDEN_DIRS,
   quickTreeCount,
   findFiles,
   findPackageJsonFiles,

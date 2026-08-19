@@ -17,9 +17,10 @@ import { versionMarker } from './content.js';
  *    was removed is user-owned — never rewritten, never deleted (the same
  *    opt-out contract as every other installed instruction file).
  *
- * Generation is gated on the assistant family being installed at all (its
- * `<skills>/vg/SKILL.md` exists): repos that never ran `vg install` get
- * nothing written.
+ * Generation is off by default. A repo opts in with `"areaSkills": true` in
+ * `vibgrate.config.json`, and only then if the assistant family is installed
+ * (its `<skills>/vg/SKILL.md` exists). Repos that never ran `vg install` get
+ * nothing written either way.
  */
 
 export const AREA_SKILL_PREFIX = 'vg-area-';
@@ -134,14 +135,33 @@ export interface AreaSkillChanges {
 }
 
 /**
+ * Generated `vg-area-*` skills are off unless `vibgrate.config.json` sets
+ * `"areaSkills": true`. Missing or malformed config keeps the default (off).
+ */
+export function areaSkillsEnabled(root: string): boolean {
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(path.join(root, 'vibgrate.config.json'), 'utf8'),
+    ) as { areaSkills?: unknown };
+    return parsed.areaSkills === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Write per-area skills into every installed assistant skill root, and remove
  * stale `vg-area-*` directories from previous graphs. Only files carrying our
  * version marker are ever rewritten or removed — marker-less files are
  * user-owned and left untouched (including their directory).
+ *
+ * Off by default: writes nothing and removes every generated `vg-area-*`
+ * skill. `"areaSkills": true` turns generation on. The vg install skill itself
+ * is never touched.
  */
 export function writeAreaSkills(root: string, graph: VgGraph): AreaSkillChanges {
   const changes: AreaSkillChanges = { written: [], removed: [] };
-  const files = areaSkillFiles(graph);
+  const files = areaSkillsEnabled(root) ? areaSkillFiles(graph) : new Map<string, string>();
   for (const base of SKILL_BASES) {
     // Gate: this assistant family is installed here at all.
     if (!fs.existsSync(path.join(root, base, 'vg', 'SKILL.md'))) continue;

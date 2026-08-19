@@ -35,6 +35,17 @@ describe('discover', () => {
     expect(rels).toEqual(['a.ts']);
   });
 
+  it('reads exclude globs from vibgrate.config.json', async () => {
+    const { readConfigExcludes, mergeExcludes } = await import('../src/engine/discover.js');
+    const root = project({
+      'a.ts': 'x',
+      'skip/b.ts': 'x',
+      'vibgrate.config.json': JSON.stringify({ exclude: ['skip/**', 'skip/**'] }),
+    });
+    expect(readConfigExcludes(root)).toEqual(['skip/**', 'skip/**']);
+    expect(mergeExcludes(root, ['tmp/**', 'skip/**'])).toEqual(['skip/**', 'tmp/**']);
+  });
+
   it('throws UsageError on an unknown --only language', async () => {
     const root = project({ 'a.ts': 'x' });
     expect(() => discover({ root, only: ['nope'] })).toThrow(UsageError);

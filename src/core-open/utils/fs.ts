@@ -84,7 +84,9 @@ export const SKIP_DIRS = new Set([
   // ── Version control, IDE & tool metadata (never billable source) ──
   '.git', '.svn', '.hg',
   '.idea', '.vscode', '.vs',
-  // Claude Code agent state / worktrees (full monorepo copies under .claude/worktrees/)
+  // Agent / tool state. Hidden dirs are also pruned by isSkippedDirName
+  // (covers .claude/worktrees, .cursor, .codex, .grok, … without a new entry
+  // per agent). These names stay listed so ripgrep globs stay explicit.
   '.claude',
   '.vibgrate', '.wrangler', '.turbo', '.cache',
 
@@ -142,15 +144,27 @@ export const SKIP_DIRS = new Set([
 ]);
 
 /**
+ * Hidden directories that still hold first-party metadata we walk
+ * (CI workflows). Every other `.*` directory is agent/tool state
+ * (Claude/Cursor/Codex/Grok worktrees, IDE metadata, caches) and
+ * must never be scanned, scored, or billed.
+ */
+export const SCANNED_HIDDEN_DIRS = new Set(['.github', '.circleci']);
+
+/**
  * True when a directory basename must be pruned from discovery / billing walks.
- * Covers exact {@link SKIP_DIRS} names plus custom virtualenv names
- * (`.venv-contextbench`, `venv-tools`, …) and Python install trees
- * (`site-packages`) that otherwise mint phantom nested projects.
+ * Covers every hidden directory except {@link SCANNED_HIDDEN_DIRS}, exact
+ * {@link SKIP_DIRS} names, custom virtualenv names (`venv-tools`, …), and
+ * Python install trees (`site-packages`) that otherwise mint phantom
+ * nested projects.
  */
 export function isSkippedDirName(name: string): boolean {
-  if (!name) return false;
+  if (!name || name === '.' || name === '..') return false;
+  // Agent worktrees live under hidden folders (.claude/worktrees, .cursor/…).
+  // Skip every dot-directory so a new agent does not need a new skip entry.
+  if (name.startsWith('.')) return !SCANNED_HIDDEN_DIRS.has(name);
   if (SKIP_DIRS.has(name)) return true;
-  if (name.startsWith('.venv') || name.startsWith('venv-')) return true;
+  if (name.startsWith('venv-')) return true;
   if (name === 'site-packages') return true;
   return false;
 }

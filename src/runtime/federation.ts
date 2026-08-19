@@ -15,6 +15,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { repositoryIdFromRoot, globalGraphPath, globalGraphPathForRef } from './paths.js';
 import { detectGitRef } from './git-ref.js';
+import { isSkippedDirName } from '../engine/discover.js';
 import { normalizeWorkspaceRoots } from '../engine/workspace-roots.js';
 import {
   discoverBridgeEdges,
@@ -194,6 +195,7 @@ export function parseFederationFile(primaryRoot: string, raw: FederationFile): F
   for (const entry of list) {
     if (!entry || typeof entry.root !== 'string' || !entry.root.trim()) continue;
     const abs = path.resolve(primary, entry.root.trim());
+    if (isNestedAgentWorktree(abs, primary)) continue;
     const id = repositoryIdFromRoot(abs);
     if (seen.has(id)) continue;
     seen.add(id);
@@ -236,6 +238,13 @@ export function parseFederationFile(primaryRoot: string, raw: FederationFile): F
   return fed;
 }
 
+/** True when `abs` sits under a hidden agent/tool dir of `primaryRoot`. */
+export function isNestedAgentWorktree(abs: string, primaryRoot: string): boolean {
+  const rel = path.relative(path.resolve(primaryRoot), path.resolve(abs));
+  if (!rel || rel === '.') return false;
+  return rel.split(/[/\\]/).filter(Boolean).some((p) => isSkippedDirName(p));
+}
+
 function memberFromRoot(root: string, role: FederationMemberRole, label: string): FederationMember {
   const git = detectGitRef(root);
   const graphPath = git.kind !== 'none' && git.ref ? globalGraphPathForRef(root, git.ref) : globalGraphPath(root);
@@ -270,9 +279,11 @@ export function federationFromWorkspaceRoots(
     normalized.find((r) => r.id === repositoryIdFromRoot(preferred)) ??
     normalized[0]!;
   const primaryRoot = primaryHit.root;
-  const members: FederationMember[] = normalized.map((ws) =>
-    memberFromRoot(ws.root, ws.root === primaryRoot ? 'primary' : 'member', ws.label),
-  );
+  const members: FederationMember[] = normalized
+    .filter((ws) => !isNestedAgentWorktree(ws.root, primaryRoot))
+    .map((ws) =>
+      memberFromRoot(ws.root, ws.root === primaryRoot ? 'primary' : 'member', ws.label),
+    );
   members.sort((a, b) => {
     if (a.role !== b.role) return a.role === 'primary' ? -1 : 1;
     return a.root.localeCompare(b.root);
