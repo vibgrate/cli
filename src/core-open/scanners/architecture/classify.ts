@@ -176,6 +176,9 @@ const PATH_RULES: PathRule[] = [
   // Directory rules above already cover Controllers/, Services/, Models/,
   // Views/, Migrations/, Middleware/ … because matching is case-insensitive.
   { pattern: /\.tests?\//, layer: 'testing', confidence: 0.9, signal: '*.Tests project directory' },
+  // Compound test-project names without the dot: `FooE2ETests/`, `unittests/`.
+  // Closed keyword list so `latest/` / `contest/` never match.
+  { pattern: /\/[^/]*(?:e2e|unit|integration|functional|acceptance|smoke|component)tests?\//, layer: 'testing', confidence: 0.9, signal: 'test project directory' },
   // Layer-named project directories (`Company.Product.Domain/`,
   // `Company.Product.Database/`) — the dotted segment carries the layer.
   { pattern: /\.domain\//, layer: 'domain', confidence: 0.85, signal: '*.Domain project' },
@@ -277,7 +280,7 @@ const SUFFIX_RULES: Array<{ suffix: string; layer: ArchitectureLayer; confidence
  * `OrderRepository.cs`) where the dot-suffix rules above are the JS/TS one.
  * Matched case-sensitively so `usercontroller.ts` style names don't false-hit.
  */
-const PASCAL_SUFFIX_RULES: Array<{ suffix: string; layer: ArchitectureLayer; confidence: number; signal: string }> = [
+const PASCAL_SUFFIX_RULES: Array<{ suffix: string; layer: ArchitectureLayer; confidence: number; signal: string; extensions?: string[] }> = [
   { suffix: 'Controller', layer: 'routing', confidence: 0.9, signal: 'Controller class' },
   { suffix: 'Endpoint', layer: 'routing', confidence: 0.85, signal: 'Endpoint class' },
   { suffix: 'Middleware', layer: 'middleware', confidence: 0.9, signal: 'Middleware class' },
@@ -308,14 +311,17 @@ const PASCAL_SUFFIX_RULES: Array<{ suffix: string; layer: ArchitectureLayer; con
   { suffix: 'Configuration', layer: 'config', confidence: 0.85, signal: 'Configuration class' },
   { suffix: 'Config', layer: 'config', confidence: 0.8, signal: 'Config class' },
   { suffix: 'Interceptor', layer: 'middleware', confidence: 0.85, signal: 'Interceptor class' },
-  { suffix: 'Activity', layer: 'presentation', confidence: 0.85, signal: 'Android Activity' },
-  { suffix: 'Fragment', layer: 'presentation', confidence: 0.85, signal: 'Android Fragment' },
+  // Mobile suffixes are platform conventions, not universal — scoped to their
+  // languages so a .NET `ProjectApproverSqlFragment.cs` never lands in
+  // presentation on the strength of an Android naming rule.
+  { suffix: 'Activity', layer: 'presentation', confidence: 0.85, signal: 'Android Activity', extensions: ['.java', '.kt', '.kts'] },
+  { suffix: 'Fragment', layer: 'presentation', confidence: 0.85, signal: 'Android Fragment', extensions: ['.java', '.kt', '.kts'] },
   // Swift / iOS — higher confidence than the generic Controller→routing rule
   // so FooViewController lands in presentation, not routing.
-  { suffix: 'ViewController', layer: 'presentation', confidence: 0.95, signal: 'UIKit ViewController' },
+  { suffix: 'ViewController', layer: 'presentation', confidence: 0.95, signal: 'UIKit ViewController', extensions: ['.swift', '.m', '.mm', '.h'] },
   // Flutter
-  { suffix: 'Screen', layer: 'presentation', confidence: 0.85, signal: 'Screen widget' },
-  { suffix: 'Widget', layer: 'presentation', confidence: 0.75, signal: 'Widget class' },
+  { suffix: 'Screen', layer: 'presentation', confidence: 0.85, signal: 'Screen widget', extensions: ['.dart'] },
+  { suffix: 'Widget', layer: 'presentation', confidence: 0.75, signal: 'Widget class', extensions: ['.dart'] },
 ];
 
 // ── File classifier ──
@@ -440,8 +446,10 @@ function classifyOne(
     }
   }
 
+  const fileExt = path.extname(filePath).toLowerCase();
   for (const rule of PASCAL_SUFFIX_RULES) {
     if (spa && SPA_SKIP_PASCAL.has(rule.suffix)) continue;
+    if (rule.extensions && !rule.extensions.includes(fileExt)) continue;
     if (cleanBase.endsWith(rule.suffix)) {
       bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
     }
@@ -505,11 +513,33 @@ export interface ClassifyFileOptions {
 const LAYER_HINT_SEGMENT = /(?:^|\/)(application|domain|infrastructure|persistence|entities)(?:\/|$)/i;
 
 function prefixHasLayerHint(repoRelative: string, localPath: string): boolean {
+  const prefix = strippedPrefix(repoRelative, localPath);
+  return prefix !== null && LAYER_HINT_SEGMENT.test(`/${prefix}/`);
+}
+
+/** The project-scope prefix the walk stripped, or null when it can't be recovered. */
+function strippedPrefix(repoRelative: string, localPath: string): string | null {
   const repo = repoRelative.replace(/\\/g, '/').replace(/^\/+/, '');
   const local = localPath.replace(/\\/g, '/').replace(/^\/+/, '');
-  if (!repo.endsWith(local)) return false;
+  if (!repo.endsWith(local)) return null;
   const prefix = repo.slice(0, repo.length - local.length).replace(/\/+$/, '');
-  return prefix.length > 0 && LAYER_HINT_SEGMENT.test(`/${prefix}/`);
+  return prefix.length > 0 ? prefix : null;
+}
+
+/**
+ * Test signal carried by the stripped project prefix (`tests/e2e/…`,
+ * `Bridge.Api.AccessTokenE2ETests/`). A project-scoped walk classifies on the
+ * local path (`Support/BridgeApiClient.cs`), where a Client/Endpoint suffix
+ * would win — but a file inside a test project is test tooling, not an
+ * architectural layer, and misreading it invents boundary violations
+ * between test files.
+ */
+const TEST_PREFIX_SEGMENT =
+  /\/(__tests__|__mocks__|tests?|spec|testing|e2e)\/|\/[^/]*\.tests?\/|\/[^/]*(?:e2e|unit|integration|functional|acceptance|smoke|component)tests?\//;
+
+function prefixLooksLikeTests(repoRelative: string, localPath: string): boolean {
+  const prefix = strippedPrefix(repoRelative, localPath);
+  return prefix !== null && TEST_PREFIX_SEGMENT.test(`/${prefix.toLowerCase()}/`);
 }
 
 export function classifyFile(
@@ -517,6 +547,20 @@ export function classifyFile(
   archetype: ProjectArchetype,
   opts?: ClassifyFileOptions,
 ): LayerClassification | null {
+  const repoPathForTests = opts?.repoRelative?.replace(/\\/g, '/');
+  if (
+    repoPathForTests
+    && repoPathForTests !== filePath.replace(/\\/g, '/')
+    && prefixLooksLikeTests(repoPathForTests, filePath)
+  ) {
+    return {
+      filePath,
+      layer: 'testing',
+      confidence: 0.9,
+      signals: ['test project prefix'],
+    };
+  }
+
   const local = classifyOne(filePath, archetype, opts);
   const repoPath = opts?.repoRelative?.replace(/\\/g, '/');
   const repo = repoPath

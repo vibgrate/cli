@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as net from 'node:net';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
@@ -124,13 +125,43 @@ export function registerDaemon(program: Command): void {
       // The shutdown closure needs the server; the server needs the hook.
       // Bridge with a mutable ref so `vg daemon stop` can reach us.
       let requestShutdown: () => void = () => {};
-      const server = await startVgdServer({
+      const serverOptions = {
         socketPath,
         onShutdownRequest: () => requestShutdown(),
         // Show the daemon working: graph publishes, branch switches, new repos,
         // and every semantic index build. Silent under --quiet/--json.
-        log: global.quiet || global.json ? undefined : (message) => info(c.dim(`vgd · ${message}`)),
-      });
+        log: global.quiet || global.json ? undefined : (message: string) => info(c.dim(`vgd · ${message}`)),
+      };
+      let server;
+      try {
+        server = await startVgdServer(serverOptions);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code !== 'EADDRINUSE') throw e;
+        // The address is held, yet nothing answered the liveness check above:
+        // a wedged or stale daemon (typically one left behind by an editor
+        // extension update) is squatting on the socket. Every `stopVgd` and
+        // `ensureVgd` sees "not running" for such a holder, so without a
+        // takeover here each `daemon ensure` becomes an infinite
+        // start → EADDRINUSE → exit-1 loop. Retire the holder via its pid
+        // file and bind again rather than surfacing the raw bind error.
+        const takeover = await retireWedgedVgd(socketPath);
+        if (!takeover.ok) {
+          if (takeover.live) {
+            // Lost a start race to a healthy daemon — that is the ordinary
+            // already-running case, not a wedge.
+            throw new CliError(`vgd is already running at ${socketPath}`, ExitCode.ERROR);
+          }
+          throw new CliError(
+            `${socketPath} is held by a process that does not answer vgd requests (${takeover.reason}). ` +
+              'End the stale daemon (a node/vg process running "daemon start"), then re-run `vg daemon start`.',
+            ExitCode.ERROR,
+          );
+        }
+        if (!global.quiet && !global.json) {
+          info(c.dim(`vgd · retired a stale daemon (pid ${takeover.pid}) that was holding ${socketPath}`));
+        }
+        server = await startVgdServer(serverOptions);
+      }
       if (!global.quiet) {
         info(`vgd · listening on ${c.dim(server.socketPath)} (${VGD_PROTOCOL_VERSION})`);
         info(c.dim('  register a workspace: vg daemon register'));
@@ -749,6 +780,94 @@ export async function ensureVgd(
   if (opts.allowVersionMismatch || skew.state !== 'older') return { started: false };
   await stopVgd(socketPath, { force: true });
   return { started: true, pid: await startDetachedVgd(socketPath), replaced: { version: skew.version } };
+}
+
+/** Injectable internals of {@link retireWedgedVgd} (tests). */
+export interface RetireWedgedDeps {
+  isRunning: (socketPath: string) => Promise<boolean>;
+  readPid: () => number | null;
+  signal: (pid: number, signal: NodeJS.Signals) => boolean;
+  held: (socketPath: string) => Promise<boolean>;
+  /** How long to wait for the address to free after each signal. */
+  waitBudgetMs: number;
+  selfPid: number;
+}
+
+export type RetireWedgedResult =
+  | { ok: true; pid: number }
+  | { ok: false; live: true }
+  | { ok: false; live?: false; reason: string };
+
+/**
+ * Free a vgd socket held by a process that no longer answers vgd requests.
+ *
+ * The wedge this exists for: a daemon (often from an older extension install)
+ * keeps the pipe/socket bound but its event loop is stuck, so `ping` times out
+ * everywhere — `vg daemon status` says "not running", `stopVgd` returns
+ * `not-running` without touching it, `ensureVgd` goes straight to a start that
+ * dies on EADDRINUSE, and every client retries that forever. This retires the
+ * holder identified by vgd's own pid file (only a successful `startVgdServer`
+ * bind ever writes it, so it names the current holder), escalating SIGTERM →
+ * SIGKILL, and confirms the address actually freed.
+ *
+ * Refuses to act when a live daemon answers ping (an ordinary lost start race,
+ * not a wedge) or when the pid file is missing or points at this process.
+ */
+export async function retireWedgedVgd(
+  socketPath: string,
+  deps: Partial<RetireWedgedDeps> = {},
+): Promise<RetireWedgedResult> {
+  const isRunning = deps.isRunning ?? ((s: string) => vgdIsRunning({ socketPath: s }));
+  const readPid = deps.readPid ?? readVgdPid;
+  const signal = deps.signal ?? signalPid;
+  const held = deps.held ?? vgdSocketHeld;
+  const waitBudgetMs = deps.waitBudgetMs ?? 3_000;
+  const selfPid = deps.selfPid ?? process.pid;
+
+  if (await isRunning(socketPath)) return { ok: false, live: true };
+  const pid = readPid();
+  if (pid == null) return { ok: false, reason: 'no pid file identifies the holder' };
+  if (pid === selfPid) return { ok: false, reason: 'the pid file points at this process' };
+  if (!signal(pid, 'SIGTERM')) return { ok: false, reason: `pid ${pid} from the pid file is not signalable` };
+  if (await waitForSocketFree(socketPath, waitBudgetMs, held)) return { ok: true, pid };
+  signal(pid, 'SIGKILL');
+  if (await waitForSocketFree(socketPath, waitBudgetMs, held)) return { ok: true, pid };
+  return { ok: false, reason: `pid ${pid} was signalled but ${socketPath} is still held` };
+}
+
+async function waitForSocketFree(
+  socketPath: string,
+  budgetMs: number,
+  held: (socketPath: string) => Promise<boolean>,
+): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    if (!(await held(socketPath))) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(100);
+  }
+}
+
+/**
+ * True when something still accepts connections on the address. Distinct from
+ * {@link vgdIsRunning}: a wedged daemon accepts the connection but never
+ * answers ping. A connect left hanging counts as held — limbo is never "free".
+ */
+function vgdSocketHeld(socketPath: string, timeoutMs = 1_000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(socketPath);
+    let settled = false;
+    const done = (heldNow: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(heldNow);
+    };
+    const timer = setTimeout(() => done(true), timeoutMs);
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
 }
 
 export interface StopVgdOptions {

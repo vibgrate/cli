@@ -15,6 +15,7 @@ import {
   FOLDER_INHERIT_MIN_CONFIDENCE,
   folderInheritSignal,
   GRAPH_CONFLICT_SIGNAL_PREFIX,
+  isTestFilePath,
 } from './folders.js';
 import { capViolations, capWorkspaceEdges } from './fusion.js';
 import { mermaidFromArchitecture } from './mermaid.js';
@@ -690,6 +691,12 @@ function collectBoundaryViolations(
     if (!fromFile || !toFile || fromFile === toFile) continue;
     if (!fileInScope(fromFile, projectPath) || !fileInScope(toFile, projectPath)) continue;
     if (!sameOwningProject(fromFile, toFile, projectPath, projects)) continue;
+    // Test code is exempt from boundary checks even when a stored state
+    // (mis)classified it into a production layer — a test helper calling a
+    // test catalog is not an architecture violation. Same posture as the
+    // `testing` entry in EXEMPT_LAYERS, keyed on the path so it holds when
+    // classification got the layer wrong.
+    if (isTestFilePath(fromFile) || isTestFilePath(toFile)) continue;
 
     const fromState = states.get(fromFile);
     const toState = states.get(toFile);
