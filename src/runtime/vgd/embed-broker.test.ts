@@ -266,6 +266,59 @@ describe('EmbedBroker — graceful degradation', () => {
   });
 });
 
+describe('EmbedBroker — automatic retry after a failed build', () => {
+  it('rebuilds a failed slot on its own instead of reporting it dead forever', async () => {
+    // First worker dies mid-build (the Windows console-close case); its
+    // replacement answers. Nothing else touches the slot — the broker's own
+    // scheduled retry must be what heals it.
+    let spawned = 0;
+    const logs: string[] = [];
+    const broker = new EmbedBroker({
+      log: (m) => logs.push(m),
+      requestTimeoutMs: 300,
+      crashRetryDelayMs: 20,
+      spawnWorker: () => {
+        spawned++;
+        const { worker, child } = fakeChild();
+        if (spawned === 1) worker.mode = 'crash';
+        return child;
+      },
+    });
+    broker.setGraphProvider(() => graph(2));
+
+    const first = await broker.ensureIndex('repoA', 'main', graph(2));
+    expect(first.state).toBe('failed');
+    expect(logs.some((l) => l.includes('retrying repoA@main'))).toBe(true);
+
+    await new Promise((r) => setTimeout(r, 100));
+    expect(broker.slot('repoA', 'main')?.state).toBe('ready');
+    expect(broker.slot('repoA', 'main')?.vectors.size).toBe(2);
+  });
+
+  it('bounds the retries so a permanent failure settles instead of looping', async () => {
+    // The worker survives but the backend answers every request with an
+    // error, so the crash budget never trips — the per-slot bound must.
+    const logs: string[] = [];
+    const { worker, child } = fakeChild();
+    worker.mode = 'error';
+    const broker = new EmbedBroker({
+      log: (m) => logs.push(m),
+      maxCrashes: 2,
+      requestTimeoutMs: 300,
+      crashRetryDelayMs: 5,
+      spawnWorker: () => child,
+    });
+    broker.setGraphProvider(() => graph(1));
+
+    await broker.ensureIndex('repoA', 'main', graph(1));
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(broker.slot('repoA', 'main')?.state).toBe('failed');
+    // maxCrashes=2 → one automatic retry after the initial failure, no more.
+    expect(logs.filter((l) => l.includes('retrying repoA@main')).length).toBe(1);
+  });
+});
+
 describe('EmbedBroker — status', () => {
   it('reports worker state and per-slot index rows', async () => {
     const { child } = fakeChild();

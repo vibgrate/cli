@@ -399,7 +399,17 @@ function maybeWarmEmbeddings(root: string, graph: VgGraph, global: GlobalOpts, w
     ? [cli, 'embed', '-C', root, '--bg']
     : [cli, 'embed', '-C', root, '--bg', '--download'];
   try {
-    const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore' });
+    // On Windows, `detached` (DETACHED_PROCESS) would strip the child of any
+    // console, making every console-subsystem grandchild (git, node) pop a
+    // visible console window; windowsHide gives it a windowless console the
+    // grandchildren inherit. Children outlive their parent on Windows anyway,
+    // so nothing is lost. POSIX keeps detached so the warm survives the
+    // terminal closing.
+    const child = spawn(process.execPath, args, {
+      detached: process.platform !== 'win32',
+      stdio: 'ignore',
+      windowsHide: true,
+    });
     child.unref();
     info(
       c.dim(

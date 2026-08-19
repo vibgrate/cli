@@ -59,10 +59,10 @@ export function registerModels(program: Command): void {
     .command('models')
     .description('Code Modes (Spark/Flow/Forge) + local model fleet')
     .option('--raw', 'list discovered local models only (skip Code Modes status)')
-    .action(function (this: Command, opts: { raw?: boolean }) {
+    .action(async function (this: Command, opts: { raw?: boolean }) {
       const global = readGlobal(this);
       const models = discoverModels();
-      const sys = gatherSystemMemory();
+      const sys = await gatherSystemMemory();
       const report = buildModelsStatusReport(models, sys);
 
       if (opts.raw) {
@@ -94,10 +94,10 @@ export function registerModels(program: Command): void {
   const status = cmd
     .command('status')
     .description('Code Modes status: mode, pack, underlying model, fit, memory breakdown')
-    .action(function (this: Command) {
+    .action(async function (this: Command) {
       const global = readGlobal(this);
       const models = discoverModels();
-      const sys = gatherSystemMemory();
+      const sys = await gatherSystemMemory();
       const orch = buildFullStatus(rootOf(global), models, sys);
       const backends = probeInferenceBackends({ hasBinary });
       if (global.json) {
@@ -119,7 +119,7 @@ export function registerModels(program: Command): void {
       '--apply-recommend',
       'pin the hardware-recommended mode when no default is set (from free RAM/VRAM + repo size)',
     )
-    .action(function (
+    .action(async function (
       this: Command,
       modeArg: string | undefined,
       opts: { auto?: boolean; applyRecommend?: boolean },
@@ -135,7 +135,7 @@ export function registerModels(program: Command): void {
       }
       if (opts.applyRecommend) {
         const state = readOrchestratorState();
-        const sys = gatherSystemMemory();
+        const sys = await gatherSystemMemory();
         const result = applyRecommendedDefaultMode({
           system: sys,
           repo: repoSignals(rootOf(global)),
@@ -160,7 +160,7 @@ export function registerModels(program: Command): void {
         return;
       }
       const state = readOrchestratorState();
-      const sys = gatherSystemMemory();
+      const sys = await gatherSystemMemory();
       const recommended = recommendMode(sys, repoSignals(rootOf(global)));
       const current = state.defaultMode ?? recommended;
       if (global.json) {
@@ -184,10 +184,10 @@ export function registerModels(program: Command): void {
     .command('resolve')
     .description('resolve a Code Mode to pack + underlying model + fit (no download)')
     .argument('[mode]', 'spark | flow | forge (default: auto-fit or configured default)')
-    .action(function (this: Command, modeArg: string | undefined) {
+    .action(async function (this: Command, modeArg: string | undefined) {
       const global = readGlobal(this);
       const root = rootOf(global);
-      const sys = gatherSystemMemory();
+      const sys = await gatherSystemMemory();
       const state = readOrchestratorState();
       const mode = parseMode(modeArg) ?? state.defaultMode;
       const pin = mode ? activePin(mode, state) : null;
@@ -229,7 +229,7 @@ export function registerModels(program: Command): void {
       const global = readGlobal(this);
       const root = rootOf(global);
       const models = discoverModels();
-      const sys = gatherSystemMemory();
+      const sys = await gatherSystemMemory();
       const state = readOrchestratorState();
       const mode = parseMode(modeArg) ?? state.defaultMode;
       const pin = mode ? activePin(mode, state) : null;
@@ -827,7 +827,7 @@ function repoSignals(root: string): { fileCount?: number; graphNodeCount?: numbe
 function buildFullStatus(
   root: string,
   models: ReturnType<typeof discoverModels>,
-  sys: ReturnType<typeof gatherSystemMemory>,
+  sys: Awaited<ReturnType<typeof gatherSystemMemory>>,
 ): OrchestratorStatus {
   const state = readOrchestratorState();
   // Free space on the first-party weight store volume (macOS: Library/Caches/Vibgrate).

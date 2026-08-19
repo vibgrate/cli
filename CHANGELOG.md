@@ -195,6 +195,31 @@ backward compatible.
 
 ### Fixed
 
+- **`vg update` now verifies the daemon it restarts is actually on the new
+  build** — while the install had the socket free, another client (typically a
+  VS Code extension bundling an older engine, or a long-lived `vg serve`)
+  could bind *its* older vgd first, and the update reported "Restarted the vgd
+  daemon on the new version" against that stale process; the very next
+  `vg update` then found a stale daemon again. Every background daemon start
+  now checks the build on the socket after it answers ping, force-retires an
+  older squatter and retries (bounded), and reports honestly when an old
+  client keeps winning. On Windows the update also starts the daemon back up
+  itself after having stopped it to free its files, instead of leaving the
+  socket free for an older client to claim.
+- **No more stray Node console windows on Windows** — children spawned by
+  console-less processes (the vgd daemon's embedding worker and background
+  rebuilds, plus the git/ripgrep/npm probes they run) each popped a visible
+  blank `node.exe`/console window on the desktop; closing one killed the
+  embedding worker with `STATUS_CONTROL_C_EXIT` (exit code 3221225786) and
+  took semantic search down with it. All background child processes are now
+  spawned with hidden consoles (`windowsHide`), and the daemon itself gets a
+  windowless console its whole subtree inherits.
+- **A failed semantic index heals itself** — a slot whose build died (for
+  example the killed embedding worker above) stayed `failed` forever with
+  `vg daemon status` repeating the same error, because nothing ever retried
+  it. The daemon now schedules a bounded automatic rebuild while it still has
+  crash budget, so one external kill no longer permanently degrades semantic
+  search to lexical.
 - **A plan limit no longer blocks the scan itself** — a limit reported by scan
   preflight (repository cap, scan credits, VM minutes) used to abort before the
   scan ran, so a workspace at its repository cap could not use `vg` at all. The

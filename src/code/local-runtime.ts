@@ -9,9 +9,37 @@
 import * as os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { availableRamBytes } from './available-memory.js';
-import { parseOllamaPs, parseNvidiaSmi, type SystemMemory } from './capability.js';
+import { parseOllamaPsApi, parseNvidiaSmi, type LoadedModel, type SystemMemory } from './capability.js';
 import { hasOllamaBinary, resolveOllamaBinary } from '../util/resolve-ollama.js';
 import type { Spinner } from './ui.js';
+
+/** Base URL of the local Ollama server. `OLLAMA_HOST` may be schemeless (`127.0.0.1:11434`). */
+function ollamaHostUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = (env.OLLAMA_HOST ?? '').trim() || '127.0.0.1:11434';
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
+}
+
+/**
+ * Currently-loaded models from the Ollama server's `/api/ps` — over HTTP only,
+ * never by shelling the `ollama` CLI. On Windows and macOS any server-needing
+ * CLI command (including read-only `ollama ps`) auto-launches the Ollama
+ * desktop app when the server is down, so a status probe that shells the CLI
+ * starts software the user never asked for. An HTTP request cannot do that,
+ * and an unreachable server already means the true answer: nothing is loaded.
+ */
+async function loadedOllamaModels(timeoutMs = 750): Promise<LoadedModel[]> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(new URL('/api/ps', ollamaHostUrl()), { signal: ctrl.signal });
+    if (!res.ok) return [];
+    return parseOllamaPsApi(await res.json());
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Gather current system memory, loaded models, and (best-effort) GPU VRAM.
@@ -19,9 +47,8 @@ import type { Spinner } from './ui.js';
  * `freeRamBytes` is *available* RAM (reclaim-aware on macOS/Linux), not bare
  * free pages from `os.freemem()` — see `available-memory.ts`.
  */
-export function gatherSystemMemory(): SystemMemory {
-  const ollama = resolveOllamaBinary();
-  const loaded = ollama ? safeRun(ollama, ['ps']).map(parseOllamaPs).flat() : [];
+export async function gatherSystemMemory(): Promise<SystemMemory> {
+  const loaded = await loadedOllamaModels();
   const smi = safeRun('nvidia-smi', ['--query-gpu=memory.total,memory.used', '--format=csv,noheader,nounits'])
     .map(parseNvidiaSmi)
     .find(Boolean);

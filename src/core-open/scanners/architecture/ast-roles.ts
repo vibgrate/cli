@@ -217,7 +217,7 @@ function buildFileState(filePath: string, result: ArchitectureResult): FileState
   // Off-sample files still have a path prior (suffix / path rules). Re-consult
   // the same classifier the scan used so we confirm/conflict instead of
   // inventing a layer and incrementing totalClassified.
-  const pathClass = classifyFile(n, result.archetype);
+  const pathClass = classifyFile(n, result.archetype, { projectKind: result.projectKind });
   if (pathClass) {
     return {
       filePath: n,

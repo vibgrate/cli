@@ -7,6 +7,31 @@ export function hasExt(ctx: ProjectContext, ...exts: string[]): boolean {
   return exts.some((e) => ctx.extensions.has(e));
 }
 
+/** Project folder + package name, used as a kind signal not a file layer. */
+export function projectNameHaystack(ctx: ProjectContext): string {
+  return `${ctx.projectPath.replace(/\\/g, '/')}/${ctx.project.name ?? ''}`;
+}
+
+/** `WebApp`, `Frontend`, or a delimited `Spa` segment — not a per-file layer. */
+export function looksLikeWebAppName(ctx: ProjectContext): boolean {
+  return /webapp|frontend|(?:^|[/._-])spa(?:[/._-]|$)/i.test(projectNameHaystack(ctx));
+}
+
+/** Delimited `Client` segment. Too weak alone — pair with a UI signal. */
+export function looksLikeClientName(ctx: ProjectContext): boolean {
+  return /(?:^|[/._-])client(?:[/._-]|$)/i.test(projectNameHaystack(ctx));
+}
+
+const SPA_UI_PACKAGES = [
+  'react', 'vue', 'svelte', '@angular/core',
+  'vue-router', 'vuetify', '@vitejs/plugin-vue',
+  'react-router', 'react-router-dom', '@angular/router',
+] as const;
+
+export function hasSpaUiSignal(ctx: ProjectContext): boolean {
+  return hasPackage(ctx, ...SPA_UI_PACKAGES) || hasExt(ctx, '.vue', '.svelte');
+}
+
 export function hasFile(ctx: ProjectContext, ...names: string[]): boolean {
   return names.some((n) => ctx.fileNames.has(n.toLowerCase()));
 }

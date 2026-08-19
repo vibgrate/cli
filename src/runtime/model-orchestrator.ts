@@ -65,8 +65,9 @@ export interface PackContract {
   kvCacheStrategy?: ModelExecutionProfile['kvCacheStrategy'];
   securityTier?: ModelExecutionProfile['securityTier'];
   /**
-   * Preferred inference path when available (ADR-005). Weights may still be
-   * pulled via Ollama; embedded llama.cpp is preferred for sampler/grammar.
+   * Preferred inference path when available (ADR-005). Curated packs are all
+   * embedded llama.cpp; 'ollama' remains only for a user's explicit
+   * `--provider ollama` selection, never a curated default or fallback.
    */
   preferredInference?: 'ollama' | 'llama.cpp';
   /** Process isolation for preferredInference llama.cpp (default embedded). */
@@ -204,14 +205,18 @@ export interface OrchestratorStatus {
 // ── Curated packs (versioned; weights may change under the same mode contract) ─
 
 /** Pack channel — bump when contracts or weight refs change under stable mode names. */
-const PACK_CHANNEL = '2026.07.4';
+const PACK_CHANNEL = '2026.08.1';
 
 /**
  * Current qualified packs — one primary per mode.
  *
- * Approach B default: Spark/Flow **primary** is first-party GGUF (llama.cpp)
- * for install + inference when fit allows. Ollama remains an explicit fallback
- * adapter, not the default path.
+ * Approach B: every mode is first-party GGUF (embedded llama.cpp) for install
+ * and inference. Packs declare **no Ollama fallback**: the `vg code` router is
+ * fail-closed to the Vibgrate manager for Code Modes, so an Ollama-backed
+ * selection here could only install weights the mode would never run — and the
+ * install would shell the `ollama` CLI, which auto-launches the Ollama desktop
+ * app. Ollama is used solely when the user explicitly selects it
+ * (`--provider ollama` / a custom local model).
  */
 export const QUALIFIED_PACKS: QualifiedPack[] = [
   {
@@ -226,22 +231,6 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
       license: 'Apache-2.0',
       weightsBytes: estimateModelBytes('qwen2.5-coder:3b').bytes,
     },
-    fallback: [
-      {
-        backend: 'ollama',
-        weightsRef: 'qwen2.5-coder:3b',
-        quant: 'q4_k_m',
-        license: 'Apache-2.0',
-        weightsBytes: estimateModelBytes('qwen2.5-coder:3b').bytes,
-      },
-      {
-        backend: 'ollama',
-        weightsRef: 'qwen2.5-coder:1.5b',
-        quant: 'q4_k_m',
-        license: 'Apache-2.0',
-        weightsBytes: estimateModelBytes('qwen2.5-coder:1.5b').bytes,
-      },
-    ],
     contract: {
       toolCalling: 'grammar',
       editFormat: 'patch_ir_json',
@@ -257,7 +246,7 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
     },
     resources: { minRamGb: 4, estimatedKvPer1kContext: 2 * 1024 * 1024 },
     provenance: {
-      notes: 'Spark@2026.07.4 — Approach B: first-party GGUF + embedded vibgrate manager; Ollama pack fallback only',
+      notes: 'Spark@2026.08.1 — Approach B: first-party GGUF + embedded vibgrate manager; no Ollama fallback (explicit --provider only)',
     },
   },
   {
@@ -272,22 +261,6 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
       license: 'Apache-2.0',
       weightsBytes: estimateModelBytes('qwen2.5-coder:7b').bytes,
     },
-    fallback: [
-      {
-        backend: 'ollama',
-        weightsRef: 'qwen2.5-coder:7b',
-        quant: 'q4_k_m',
-        license: 'Apache-2.0',
-        weightsBytes: estimateModelBytes('qwen2.5-coder:7b').bytes,
-      },
-      {
-        backend: 'ollama',
-        weightsRef: 'qwen2.5-coder:3b',
-        quant: 'q4_k_m',
-        license: 'Apache-2.0',
-        weightsBytes: estimateModelBytes('qwen2.5-coder:3b').bytes,
-      },
-    ],
     contract: {
       toolCalling: 'native',
       editFormat: 'auto',
@@ -303,7 +276,7 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
     },
     resources: { minRamGb: 8, minVramGb: 6, estimatedKvPer1kContext: 4 * 1024 * 1024 },
     provenance: {
-      notes: 'Flow@2026.07.4 — first-party GGUF primary; Ollama pack fallback only',
+      notes: 'Flow@2026.08.1 — first-party GGUF primary; no Ollama fallback (explicit --provider only)',
     },
   },
   {
@@ -318,22 +291,6 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
       license: 'Apache-2.0',
       weightsBytes: estimateModelBytes('qwen2.5-coder:14b').bytes,
     },
-    fallback: [
-      {
-        backend: 'ollama',
-        weightsRef: 'qwen2.5-coder:14b',
-        quant: 'q4_k_m',
-        license: 'Apache-2.0',
-        weightsBytes: estimateModelBytes('qwen2.5-coder:14b').bytes,
-      },
-      {
-        backend: 'ollama',
-        weightsRef: 'qwen2.5-coder:7b',
-        quant: 'q4_k_m',
-        license: 'Apache-2.0',
-        weightsBytes: estimateModelBytes('qwen2.5-coder:7b').bytes,
-      },
-    ],
     contract: {
       toolCalling: 'native',
       editFormat: 'patch_ir_json',
@@ -350,7 +307,7 @@ export const QUALIFIED_PACKS: QualifiedPack[] = [
     resources: { minRamGb: 16, minVramGb: 12, estimatedKvPer1kContext: 8 * 1024 * 1024 },
     provenance: {
       notes:
-        'Forge@2026.07.4 — first-party 14B GGUF + embedded vibgrate manager (same path as Spark/Flow); Ollama pack fallback only',
+        'Forge@2026.08.1 — first-party 14B GGUF + embedded vibgrate manager (same path as Spark/Flow); no Ollama fallback (explicit --provider only)',
     },
   },
 ];

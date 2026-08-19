@@ -316,16 +316,18 @@ async function runInstall(cmd: string, cwd: string): Promise<{ ok: boolean; outp
  * one blocks a global update (see update-windows.ts). Retire the ones we can
  * before installing: `vg serve` instances on an older build, and the vgd
  * daemon — which is deliberately left stopped rather than restarted, because a
- * restarted daemon re-locks the files we are about to replace. It comes back
- * on the next command that needs it.
+ * restarted daemon re-locks the files we are about to replace. The update
+ * starts it again on the new build once the install lands (see the
+ * `startIfNotRunning` restart below). Returns true when a daemon was stopped.
  */
-async function releaseWindowsFileLocks(cwd: string, keepVersion: string): Promise<void> {
+async function releaseWindowsFileLocks(cwd: string, keepVersion: string): Promise<boolean> {
   reapAndReport(cwd, keepVersion);
   try {
     const { vgdSocketPath } = await import('../../runtime/vgd/index.js');
     const result = await stopVgd(vgdSocketPath());
     if (result === 'stopped') {
-      console.log(chalk.dim('Stopped the vgd daemon so its files can be replaced — it restarts on the next command.'));
+      console.log(chalk.dim('Stopped the vgd daemon so its files can be replaced — it restarts on the new build after the install.'));
+      return true;
     } else if (result === 'refused') {
       console.log(
         chalk.dim(
@@ -336,6 +338,7 @@ async function releaseWindowsFileLocks(cwd: string, keepVersion: string): Promis
   } catch {
     /* best-effort: a daemon problem must not stop the update from being tried */
   }
+  return false;
 }
 
 /**
@@ -494,8 +497,9 @@ export const updateCommand = new Command('update')
 
       // Windows locks loaded native addons, so retire the other vg processes
       // holding them before npm tries to move the install tree aside.
+      let stoppedVgdForInstall = false;
       if (process.platform === 'win32' && isGlobal && opts.reap !== false) {
-        await releaseWindowsFileLocks(cwd, latest);
+        stoppedVgdForInstall = await releaseWindowsFileLocks(cwd, latest);
       }
 
       const install = await runInstall(cmd, cwd);
@@ -523,7 +527,13 @@ export const updateCommand = new Command('update')
       // update keeps running the old build until something restarts it. Forced,
       // because a daemon that outlives the build it was started from is exactly
       // the state this update exists to end — killing it is the lesser harm.
-      if (opts.reap !== false) await restartVgdAndReport({ force: true });
+      // When *we* stopped the daemon to free its files, start it again even if
+      // nothing rebound the socket meanwhile — otherwise the rewarm below has
+      // nothing to warm and the socket sits free for another (possibly older)
+      // client to claim.
+      if (opts.reap !== false) {
+        await restartVgdAndReport({ force: true, startIfNotRunning: stoppedVgdForInstall });
+      }
 
       // An update is a chance for a broken native embedding backend to have
       // been fixed, so never let a stale "crashed" verdict outlive it. The
@@ -603,8 +613,11 @@ async function reconcileVgdAndReport(cwd: string): Promise<void> {
 /**
  * Restart a running vgd so it picks up the just-installed build. Best-effort
  * and never throws — a daemon problem must not fail a successful update.
+ * "Restarted"/"Started" are only printed once the build on the socket has been
+ * verified as current (see `startDetachedVgd`) — never for whatever process
+ * happened to answer ping.
  */
-async function restartVgdAndReport(opts: { force?: boolean } = {}): Promise<void> {
+async function restartVgdAndReport(opts: { force?: boolean; startIfNotRunning?: boolean } = {}): Promise<void> {
   let result: Awaited<ReturnType<typeof restartVgdIfRunning>>;
   try {
     result = await restartVgdIfRunning(undefined, opts);
@@ -614,6 +627,8 @@ async function restartVgdAndReport(opts: { force?: boolean } = {}): Promise<void
   if (result === 'not-running') return; // nothing to restart, say nothing
   if (result === 'restarted') {
     console.log(chalk.dim('Restarted the vgd daemon on the new version.'));
+  } else if (result === 'started') {
+    console.log(chalk.dim('Started the vgd daemon on the new version.'));
   } else if (result === 'refused') {
     console.log(
       chalk.dim('A vgd that cannot be stopped remotely is running — restart the process holding the socket to pick up the update.'),

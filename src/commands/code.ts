@@ -323,7 +323,7 @@ export function registerCode(program: Command): void {
           const resolved = resolveMode({
             mode,
             autoFit: !mode,
-            system: gatherSystemMemory(),
+            system: await gatherSystemMemory(),
             repo,
             pin,
             defaultMode: state.defaultMode,

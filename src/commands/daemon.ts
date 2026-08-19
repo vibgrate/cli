@@ -516,10 +516,19 @@ function socketOf(cmd: Command): string {
  * {@link reinvokeCli}.
  */
 function spawnDetachedDaemonStart(socketPath: string): ReturnType<typeof spawn> {
-  // windowsHide: on Windows a detached console can flash and (with some AV /
-  // job-object setups) keep the child tied to the parent session. Hide it.
+  // On Windows, `detached` (DETACHED_PROCESS) is the wrong tool for a daemon
+  // with descendants: it leaves the process with NO console, so every
+  // console-subsystem child it later spawns (embed worker, rebuild `vg build`,
+  // git) allocates a brand-new VISIBLE console window on the desktop — and a
+  // user closing that stray window kills the child with STATUS_CONTROL_C_EXIT.
+  // windowsHide (CREATE_NO_WINDOW, ignored when combined with detached) gives
+  // the daemon a windowless console its whole subtree inherits instead.
+  // Lifetime is unaffected: Windows never kills children on parent exit, and
+  // the separate console keeps the terminal's Ctrl-C/close away from it. On
+  // POSIX, detached (its own process group) is still what lets the daemon
+  // outlive the terminal.
   const opts = {
-    detached: true,
+    detached: process.platform !== 'win32',
     stdio: 'ignore' as const,
     env: process.env,
     windowsHide: true,
@@ -564,16 +573,70 @@ export async function ensureVgdSoft(
   }
 }
 
+/** Injectable internals of {@link startDetachedVgd} (tests). */
+export interface StartVgdDeps {
+  startOnce: (socketPath: string) => Promise<number | undefined>;
+  skew: (socketPath: string) => Promise<VgdSkew>;
+  stop: (socketPath: string, opts?: StopVgdOptions) => ReturnType<typeof stopVgd>;
+}
+
 /**
- * Spawn a detached background `daemon start` and wait for it to answer ping.
- * Returns the child pid; throws when the socket never becomes ready.
+ * How many times a start will retire an older daemon that re-binds the socket
+ * before conceding. Each round both stops the interloper and gives our own
+ * child another chance to win the bind; a client that keeps spawning an old
+ * build faster than we can retire it is a fight to report, not to keep having.
+ */
+const START_BIND_ATTEMPTS = 3;
+
+/**
+ * Start vgd in the background and hand back a daemon that is genuinely on this
+ * build (or newer). Throws when it cannot.
+ *
+ * A socket that answers ping is NOT proof the start worked: while the socket
+ * is free (mid-update, mid-restart) any other client's `daemon ensure` — a VS
+ * Code extension bundling an older engine, a long-lived `vg serve` on an old
+ * build — can bind ITS daemon first, and our child then exits "already
+ * running". Reporting success against that daemon is exactly the "updated,
+ * but the daemon is still stale" state `vg update` exists to end, so after
+ * every ready signal the build on the socket is verified and an older
+ * squatter is force-stopped and replaced, a bounded number of times. A newer
+ * daemon is left alone (newest wins — see {@link compareDaemonVersion}).
+ */
+export async function startDetachedVgd(
+  socketPath: string,
+  deps: Partial<StartVgdDeps> = {},
+): Promise<number | undefined> {
+  const startOnce = deps.startOnce ?? startDetachedVgdOnce;
+  const skewOf = deps.skew ?? vgdVersionSkew;
+  const stop = deps.stop ?? stopVgd;
+  let pid: number | undefined;
+  for (let attempt = 1; attempt <= START_BIND_ATTEMPTS; attempt++) {
+    pid = await startOnce(socketPath);
+    const skew = await skewOf(socketPath);
+    if (skew.running && skew.state !== 'older') return pid;
+    if (!skew.running) continue; // gone between ready and the check — spawn again
+    await stop(socketPath, { force: true });
+  }
+  throw new CliError(
+    `an older vgd keeps re-binding ${socketPath} — another running client is starting it ` +
+      '(commonly a VS Code extension bundling an older engine, or a long-lived `vg serve`). ' +
+      'Update or restart that client, then run "vg daemon restart --force".',
+    ExitCode.ERROR,
+  );
+}
+
+/**
+ * Spawn a detached background `daemon start` and wait for the socket to answer
+ * ping. Returns the child pid; throws when the socket never becomes ready.
+ * The listener is not necessarily our child — {@link startDetachedVgd} owns
+ * that verification.
  *
  * Ready budget is long because the detached child pays a full Node + CLI cold
  * start of its own (often >8s under Windows AV). The previous 8s window made
  * `vg daemon ensure` report success only when ping raced ahead of the child
  * exiting, or fail right as the child was about to listen.
  */
-async function startDetachedVgd(socketPath: string): Promise<number | undefined> {
+async function startDetachedVgdOnce(socketPath: string): Promise<number | undefined> {
   const child = spawnDetachedDaemonStart(socketPath);
   child.unref();
   const readyMs = 30_000;
@@ -787,22 +850,34 @@ async function vgdReportedPid(socketPath: string): Promise<number | null> {
   }
 }
 
+export interface RestartVgdOptions extends StopVgdOptions {
+  /**
+   * Start a daemon even when none is running. `vg update` on Windows stops
+   * vgd *before* the install so its files can be replaced; afterwards there is
+   * nothing to "re"-start, but leaving the socket empty both makes the rewarm
+   * a no-op and leaves a window for another client to bind an old build.
+   */
+  startIfNotRunning?: boolean;
+}
+
 /**
- * Restart the local vgd if (and only if) one is running — used by `vg update`
- * so a freshly installed CLI does not keep serving from a daemon still running
- * the old build. Best-effort: never throws.
+ * Restart the local vgd if one is running — used by `vg update` so a freshly
+ * installed CLI does not keep serving from a daemon still running the old
+ * build. `restarted`/`started` mean a daemon on this build (or newer) was
+ * verified on the socket, not merely that something answered ping.
+ * Best-effort: never throws.
  */
 export async function restartVgdIfRunning(
   socketPath: string = vgdSocketPath(),
-  opts: StopVgdOptions = {},
-): Promise<'restarted' | 'not-running' | 'refused' | 'failed'> {
+  opts: RestartVgdOptions = {},
+): Promise<'restarted' | 'started' | 'not-running' | 'refused' | 'failed'> {
   try {
     const stopResult = await stopVgd(socketPath, opts);
-    if (stopResult === 'not-running') return 'not-running';
+    if (stopResult === 'not-running' && !opts.startIfNotRunning) return 'not-running';
     if (stopResult === 'refused') return 'refused';
     if (stopResult === 'failed') return 'failed';
     await startDetachedVgd(socketPath);
-    return 'restarted';
+    return stopResult === 'not-running' ? 'started' : 'restarted';
   } catch {
     return 'failed';
   }

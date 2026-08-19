@@ -160,7 +160,7 @@ async function preflightAndPull(selection: WizardResult, prompter: Prompter): Pr
     return false;
   }
   const estimate = estimateModelBytes(selection.model);
-  const report = assessCapability(estimate, gatherSystemMemory());
+  const report = assessCapability(estimate, await gatherSystemMemory());
 
   prompter.note(`${c.bold(selection.model)} — estimated ${fmt(estimate.bytes)}${estimate.guessed ? c.dim(' (size guessed)') : ''}; ~${fmt(report.availableBytes)} free now`);
   for (const s of report.suggestions) prompter.note(c.dim(`· ${s}`));

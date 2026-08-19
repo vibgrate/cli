@@ -10,7 +10,7 @@ import {
   SPRING_AST_ROLES,
   DOTNET_AST_ROLES,
 } from './ast-role-catalog.js';
-import { filePathHas, hasFile, hasPackage, packageHas, typeIs } from './helpers.js';
+import { filePathHas, hasExt, hasFile, hasPackage, packageHas, typeIs } from './helpers.js';
 
 function depFramework(
   id: string,
@@ -52,6 +52,31 @@ export const frameworkPacks: ArchitectureKnowledgePack[] = [
   depFramework('framework/remix', 'remix', ['@remix-run/react', '@remix-run/node', '@remix-run/dev']),
   depFramework('framework/sveltekit', 'sveltekit', ['@sveltejs/kit']),
   depFramework('framework/nuxt', 'nuxt', ['nuxt']),
+  {
+    id: 'framework/vue',
+    frameworks: ['vue'],
+    pathRules: [
+      { pattern: /\/api\//, layer: 'infrastructure', confidence: 0.88, signal: 'SPA HTTP client (api/)' },
+      { pattern: /\/plugins\//, layer: 'config', confidence: 0.82, signal: 'SPA plugin wiring' },
+      { pattern: /(^|\/)router\.[jt]sx?$/, layer: 'routing', confidence: 0.92, signal: 'client router module' },
+      { pattern: /(^|\/)routes\.[jt]sx?$/, layer: 'routing', confidence: 0.9, signal: 'client routes module' },
+    ],
+    match(ctx: ProjectContext) {
+      // Nuxt owns the framework dimension when both are present.
+      if (hasPackage(ctx, 'nuxt')) return [];
+      const dep = hasPackage(ctx, 'vue', 'vue-router', 'vuetify', '@vitejs/plugin-vue');
+      const files = hasExt(ctx, '.vue');
+      if (!dep && !files) return [];
+      const signals: string[] = [];
+      if (hasPackage(ctx, 'vue')) signals.push('dep:vue');
+      if (hasPackage(ctx, 'vue-router')) signals.push('dep:vue-router');
+      if (hasPackage(ctx, 'vuetify')) signals.push('dep:vuetify');
+      if (hasPackage(ctx, '@vitejs/plugin-vue')) signals.push('dep:@vitejs/plugin-vue');
+      if (files) signals.push('vue-source');
+      const confidence = hasPackage(ctx, 'vue') ? 0.9 : files ? 0.78 : 0.82;
+      return [evidenceOf('framework/vue', 'framework', 'vue', confidence, signals)];
+    },
+  },
   depFramework('framework/fastify', 'fastify', ['fastify']),
   depFramework('framework/hono', 'hono', ['hono']),
   depFramework('framework/koa', 'koa', ['koa']),

@@ -321,6 +321,11 @@ function spawnRebuild(root: string, timeoutMs: number): Promise<{ ok: boolean; e
       child = spawn(process.execPath, [process.argv[1] ?? '', 'build', '-C', root, '--json', '--no-daemon', '--no-warm'], {
         stdio: 'ignore',
         env: { ...process.env, NODE_OPTIONS: '' },
+        // A console-less daemon parent means this child (and its git/npm
+        // grandchildren, which inherit the console this flag creates) would
+        // otherwise pop visible console windows on Windows for every
+        // background rebuild.
+        windowsHide: true,
       });
     } catch (e) {
       resolve({ ok: false, error: e instanceof Error ? e.message : String(e) });

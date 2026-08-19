@@ -88,6 +88,8 @@ export interface EmbedBrokerOptions {
   requestTimeoutMs?: number;
   /** Documents per embed request (default 256). */
   batchSize?: number;
+  /** Delay before automatically retrying a failed build (default 5s). */
+  crashRetryDelayMs?: number;
   now?: () => number;
   /** Injected delay (tests). Used while waiting for another process's cache lock. */
   sleep?: (ms: number) => Promise<void>;
@@ -113,6 +115,14 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * Delay before automatically rebuilding a slot whose build failed. Long enough
+ * for a killed worker's cause to have passed (the broker respawns the worker
+ * on the next request anyway), short enough that the index is back before a
+ * user finishes reading `vg daemon status`.
+ */
+const CRASH_RETRY_DELAY_MS = 5_000;
+
 export class EmbedBroker {
   private child: ChildProcess | null = null;
   private starting = false;
@@ -128,6 +138,8 @@ export class EmbedBroker {
   private readonly inflight = new Map<string, Promise<SlotIndex>>();
   /** One deferred retry per slot after standing down for an on-disk writer. */
   private readonly rewarmTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Consecutive failed builds per slot — bounds the automatic retries below. */
+  private readonly failedBuilds = new Map<string, number>();
   /** The slot most recently made current — logged on change. */
   private currentKey: string | undefined;
   private graphProvider?: (repositoryId: string, gitRef: string) => VgGraph | undefined;
@@ -138,6 +150,7 @@ export class EmbedBroker {
   private readonly maxCrashes: number;
   private readonly requestTimeoutMs: number;
   private readonly batchSize: number;
+  private readonly crashRetryDelayMs: number;
   private readonly now: () => number;
   private readonly sleepImpl: (ms: number) => Promise<void>;
 
@@ -147,6 +160,7 @@ export class EmbedBroker {
     this.maxCrashes = options.maxCrashes ?? 3;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 120_000;
     this.batchSize = options.batchSize ?? 256;
+    this.crashRetryDelayMs = options.crashRetryDelayMs ?? CRASH_RETRY_DELAY_MS;
     this.now = options.now ?? ((): number => Date.now());
     this.sleepImpl = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
@@ -215,6 +229,8 @@ export class EmbedBroker {
       vectors: kept,
       nodeCount,
     });
+    // A republished graph is new work — it gets a fresh retry budget.
+    this.failedBuilds.delete(key);
   }
 
   /**
@@ -265,6 +281,7 @@ export class EmbedBroker {
     if (!idx) return;
     this.indexes.delete(key);
     this.clearRewarm(key);
+    this.failedBuilds.delete(key);
     this.log(`semantic: ${repositoryId}@${gitRef} index evicted with its graph slot (${idx.vectors.size} vectors freed)`);
   }
 
@@ -274,6 +291,7 @@ export class EmbedBroker {
     this.inflight.clear();
     for (const timer of this.rewarmTimers.values()) clearTimeout(timer);
     this.rewarmTimers.clear();
+    this.failedBuilds.clear();
   }
 
   /**
@@ -397,6 +415,7 @@ export class EmbedBroker {
       idx.buildMs = idx.builtAt - started;
       idx.error = undefined;
       this.clearRewarm(key);
+      this.failedBuilds.delete(key);
       this.log(`semantic: index ready for ${repositoryId}@${gitRef} — ${vectors.size} vectors in ${idx.buildMs}ms`);
     } catch (err) {
       // Vectors seeded from disk stay usable even when the worker never ran:
@@ -406,6 +425,20 @@ export class EmbedBroker {
       idx.state = 'failed';
       idx.error = err instanceof Error ? err.message : String(err);
       this.log(`semantic: index build failed for ${repositoryId}@${gitRef} — ${idx.error}; callers fall back to lexical`);
+      // `failed` must not be terminal while the broker still has crash budget:
+      // nothing else re-triggers ensureIndex for an idle slot, so without this
+      // one worker death (e.g. killed from outside — Windows console close,
+      // task manager) left `vg daemon status` reporting the same dead index
+      // forever. Bounded per slot so a permanently broken backend settles into
+      // gaveUp/lexical instead of retrying every few seconds for eternity.
+      const failures = (this.failedBuilds.get(key) ?? 0) + 1;
+      this.failedBuilds.set(key, failures);
+      if (!this.gaveUp && failures < this.maxCrashes) {
+        this.log(
+          `semantic: retrying ${repositoryId}@${gitRef} in ${this.crashRetryDelayMs / 1000}s (${failures}/${this.maxCrashes} failed builds)`,
+        );
+        this.scheduleRewarm(repositoryId, gitRef, this.crashRetryDelayMs);
+      }
     }
     return idx;
   }
@@ -420,8 +453,8 @@ export class EmbedBroker {
     }
   }
 
-  /** Retry a slot that stood down for an on-disk writer, once the writer should have moved. */
-  private scheduleRewarm(repositoryId: string, gitRef: string): void {
+  /** Retry a slot that stood down for an on-disk writer, or whose build failed. */
+  private scheduleRewarm(repositoryId: string, gitRef: string, delayMs = 2_000): void {
     const key = activeGraphSlotKey(repositoryId, gitRef);
     if (this.rewarmTimers.has(key)) return;
     const timer = setTimeout(() => {
@@ -431,7 +464,7 @@ export class EmbedBroker {
       const graph = this.graphProvider?.(repositoryId, gitRef);
       if (!graph) return;
       void this.ensureIndex(repositoryId, gitRef, graph);
-    }, 2_000);
+    }, delayMs);
     (timer as unknown as { unref?: () => void }).unref?.();
     this.rewarmTimers.set(key, timer);
   }
@@ -676,5 +709,12 @@ function defaultSpawnWorker(): ChildProcess {
     // Never inherit loader flags or a debugger port: this child exists to be
     // expendable, and anything that changes how it loads defeats the point.
     env: { ...process.env, NODE_OPTIONS: '' },
+    // The daemon can be running without a console (older builds spawn it with
+    // DETACHED_PROCESS), and a console-subsystem child of a console-less
+    // parent gets a brand-new VISIBLE console window on Windows — a bare
+    // node.exe window on the user's desktop. Closing that window killed the
+    // worker with STATUS_CONTROL_C_EXIT (0xC000013A) and took the semantic
+    // index down with it. windowsHide gives the worker a windowless console.
+    windowsHide: true,
   });
 }
