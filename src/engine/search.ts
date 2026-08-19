@@ -460,7 +460,7 @@ function hasRipgrep(): boolean {
   if (process.env.VG_DISABLE_RIPGREP) return false;
   if (rgAvailable === undefined) {
     try {
-      rgAvailable = spawnSync('rg', ['--version'], { stdio: 'ignore', timeout: 3000 }).status === 0;
+      rgAvailable = spawnSync('rg', ['--version'], { stdio: 'ignore', timeout: 3000, windowsHide: true }).status === 0;
     } catch {
       rgAvailable = false;
     }
@@ -481,7 +481,9 @@ function ripgrepCandidates(root: string, needle: string): Listing | null {
   const res = spawnSync(
     'rg',
     ['--files-with-matches', '--fixed-strings', '--ignore-case', '--no-ignore', '--no-messages', ...globs, '--', needle, '.'],
-    { cwd: root, encoding: 'utf8', timeout: 15_000, maxBuffer: 32 * 1024 * 1024 },
+    // windowsHide: rg runs from console-less hosts (vgd, editor-spawned
+    // servers) too — never flash a console window for it.
+    { cwd: root, encoding: 'utf8', timeout: 15_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
   );
   // status 0 = matches, 1 = no matches (both fine); anything else / a spawn error
   // (signal kill on timeout, buffer overflow) is untrustworthy — fall back.

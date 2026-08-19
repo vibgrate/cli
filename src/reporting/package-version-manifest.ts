@@ -27,7 +27,9 @@ export interface PackageVersionManifest {
 
 function runCommand(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // windowsHide: also runs from console-less hosts (vgd background
+    // rebuilds) — never flash a console window on Windows.
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let out = '';
     let err = '';
     child.stdout.on('data', (d: Buffer) => (out += String(d)));

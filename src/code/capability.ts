@@ -68,18 +68,23 @@ export interface LoadedModel {
 }
 
 /**
- * Parse `ollama ps` output into currently-loaded models and their sizes. The
- * table looks like: `NAME  ID  SIZE  PROCESSOR  UNTIL` with SIZE like `5.5 GB`.
+ * Parse the Ollama server's `GET /api/ps` JSON into currently-loaded models.
+ * The body looks like `{ models: [{ name, size, size_vram, … }] }` with sizes
+ * in bytes. Queried over HTTP — never via the `ollama ps` CLI, which
+ * auto-launches the Ollama desktop app when the server is down (see
+ * `local-runtime.ts`). Malformed or unexpected bodies parse to `[]`.
  */
-export function parseOllamaPs(stdout: string): LoadedModel[] {
-  const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+export function parseOllamaPsApi(body: unknown): LoadedModel[] {
+  const models = (body as { models?: unknown } | null)?.models;
+  if (!Array.isArray(models)) return [];
   const out: LoadedModel[] = [];
-  for (const line of lines) {
-    if (/^NAME\b/i.test(line)) continue; // header
-    const sizeMatch = line.match(/(\d+(?:\.\d+)?)\s*(GB|GiB|MB|MiB|TB)/i);
-    const name = line.split(/\s+/)[0];
-    if (!name || !sizeMatch) continue;
-    out.push({ name, bytes: toBytes(Number(sizeMatch[1]), sizeMatch[2]) });
+  for (const entry of models) {
+    const m = entry as { name?: unknown; size?: unknown; size_vram?: unknown } | null;
+    const name = typeof m?.name === 'string' ? m.name.trim() : '';
+    if (!name) continue;
+    const size = typeof m?.size === 'number' && m.size > 0 ? m.size : 0;
+    const sizeVram = typeof m?.size_vram === 'number' && m.size_vram > 0 ? m.size_vram : 0;
+    out.push({ name, bytes: size || sizeVram });
   }
   return out;
 }
@@ -165,12 +170,4 @@ export function assessCapability(model: ModelSizeEstimate, sys: SystemMemory): C
 export function fmt(bytes: number): string {
   if (bytes >= GiB) return `${(bytes / GiB).toFixed(1)} GiB`;
   return `${(bytes / (1024 * 1024)).toFixed(0)} MiB`;
-}
-
-function toBytes(n: number, unit: string): number {
-  const u = unit.toLowerCase();
-  if (u.startsWith('t')) return n * 1000 ** 4;
-  if (u.startsWith('g')) return n * (u.includes('i') ? GiB : 1e9);
-  if (u.startsWith('m')) return n * (u.includes('i') ? 1024 * 1024 : 1e6);
-  return n;
 }

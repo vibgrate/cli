@@ -124,6 +124,9 @@ async function npmViewJson(args: string[], cwd: string): Promise<unknown> {
     const child = spawn(NPM_COMMAND, ['view', ...args, '--json'], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Scans also run from console-less hosts (vgd background rebuilds,
+      // editor-spawned servers) — never flash a console window on Windows.
+      windowsHide: true,
     });
 
     let out = '';

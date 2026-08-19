@@ -101,6 +101,9 @@ function defaultGitRun(args: string[], cwd: string): { stdout: string; status: n
     encoding: 'utf8',
     timeout: 5_000,
     maxBuffer: 1024 * 1024,
+    // Called from console-less processes (the vgd daemon, background warms) —
+    // without this, each git call flashes a console window on Windows.
+    windowsHide: true,
   });
   return { stdout: res.stdout ?? '', status: res.status ?? 1 };
 }

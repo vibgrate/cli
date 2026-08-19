@@ -49,7 +49,7 @@ import {
   generateLayerFlowMermaid,
   LAYER_FLOW_ORDER,
 } from './architecture/mermaid.js';
-import { classifyFile } from './architecture/classify.js';
+import { classifyFile, collectPackLayerRules } from './architecture/classify.js';
 
 export {
   FROZEN_SOURCE_EXTENSIONS,
@@ -90,7 +90,7 @@ export {
   type AstRoleHit,
 } from './architecture/ast-roles.js';
 export { mermaidFromArchitecture, LAYER_FLOW_ORDER } from './architecture/mermaid.js';
-export { classifyFile } from './architecture/classify.js';
+export { classifyFile, collectPackLayerRules, isSpaWebApp } from './architecture/classify.js';
 
 // ── Archetype fingerprinting ──
 
@@ -223,6 +223,7 @@ const FRAMEWORK_TO_PROJECT_KIND: Record<string, string> = {
   laravel: 'web-api',
   phoenix: 'web-api',
   serverless: 'worker',
+  vue: 'web-app',
 };
 
 function projectKindFromFramework(framework: string | undefined): string | undefined {
@@ -1275,12 +1276,13 @@ async function classifyTree(
     dependencyAgeBuckets: { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 },
   };
   const context = buildProjectContext(primary, sourceFiles);
-  const { evidence: rawEvidence } = collectPackEvidence(ARCHITECTURE_PACKS, context);
+  const { evidence: rawEvidence, matching } = collectPackEvidence(ARCHITECTURE_PACKS, context);
   const fusion = fuseEvidence(rawEvidence);
   const { archetype, confidence: archetypeConfidence } = deriveArchetype(detected, fusion);
   const projectKind = fusion.winners.get('projectKind')?.value ?? projectKindFromFramework(fusion.winners.get('framework')?.value);
   const artifactKind = fusion.winners.get('artifactKind')?.value;
   const skipAllLayers = projectKind === 'iac' || projectKind === 'contract';
+  const packRules = collectPackLayerRules(matching);
 
   // 3. Classify each file into a layer on the project-local path so a
   // folder named `api` / `ui` does not itself match PATH_RULES. Prefix
@@ -1293,7 +1295,13 @@ async function classifyTree(
   for (const file of sourceFiles) {
     if (!isLayerCandidate(file) || skipAllLayers) continue;
     const storedPath = scope ? toRepoRelative(scope.projectPath, file) : file;
-    const classification = classifyFile(file, archetype, { repoRelative: storedPath });
+    const classification = classifyFile(file, archetype, {
+      repoRelative: storedPath,
+      projectKind,
+      extraPathRules: packRules.pathRules,
+      extraSuffixRules: packRules.suffixRules,
+      extraPascalSuffixRules: packRules.pascalSuffixRules,
+    });
     if (classification) {
       seedClassified.push({ ...classification, filePath: storedPath });
     } else {

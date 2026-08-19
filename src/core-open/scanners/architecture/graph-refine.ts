@@ -401,6 +401,19 @@ function inferStructure(
     };
   }
 
+  // A Vue/React SPA has components/ + services/ + api/ and is not a
+  // backend layered stack. Do not invent `layered` from folder count.
+  if (result.projectKind === 'web-app') {
+    if (evidencePrimary && !['layered', 'mvc', 'mvvm'].includes(evidencePrimary.value)) {
+      return {
+        primary: evidencePrimary.value,
+        characteristics: [],
+        confidence: evidencePrimary.confidence,
+      };
+    }
+    return undefined;
+  }
+
   if (evidencePrimary) {
     return {
       primary: evidencePrimary.value,
@@ -417,6 +430,10 @@ function inferStructure(
 
 function selectBoundaryProfile(structure: ArchitectureStructure | undefined, result: ArchitectureResult): string | undefined {
   const primary = structure?.primary;
+  if (result.projectKind === 'web-app') {
+    if (primary && (CLEAN_PROFILES.has(primary) || primary === 'vertical-slice')) return primary;
+    return undefined;
+  }
   if (primary && CLEAN_PROFILES.has(primary)) return primary;
   if (primary === 'vertical-slice' || primary === 'mvc' || primary === 'mvvm' || primary === 'layered') {
     return primary;
@@ -442,11 +459,12 @@ export function evaluateLayerBoundary(
   to: ArchitectureLayer,
   fromFile: string,
   toFile: string,
+  projectKind?: string,
 ): { illegal: boolean; rule: string } {
-  return isIllegalEdge(profile, from, to, fromFile, toFile);
+  return isIllegalEdge(profile, from, to, fromFile, toFile, projectKind);
 }
 
-function isIllegalEdge(profile: string, from: ArchitectureLayer, to: ArchitectureLayer, fromFile: string, toFile: string): { illegal: boolean; rule: string } {
+function isIllegalEdge(profile: string, from: ArchitectureLayer, to: ArchitectureLayer, fromFile: string, toFile: string, projectKind?: string): { illegal: boolean; rule: string } {
   // Vertical-slice constraints are about slice identity, not layer rank —
   // two `services` files in different features is the usual illegal case.
   if (profile === 'vertical-slice') {
@@ -468,6 +486,15 @@ function isIllegalEdge(profile: string, from: ArchitectureLayer, to: Architectur
   }
 
   if (profile === 'layered' || profile === 'mvc' || profile === 'mvvm') {
+    // Client routers must import page components. Backend layered rank
+    // treats that as upward; for an SPA it is the wiring.
+    if (
+      projectKind === 'web-app'
+      && to === 'presentation'
+      && (from === 'routing' || from === 'middleware')
+    ) {
+      return { illegal: false, rule: '' };
+    }
     if (EXEMPT_LAYERS.has(from) || EXEMPT_LAYERS.has(to)) return { illegal: false, rule: '' };
     // Domain is the dependency sink on this stack (Clean-shaped), not a
     // tier sitting *above* data-access. Repositories and adapters import
@@ -668,7 +695,7 @@ function collectBoundaryViolations(
     const toState = states.get(toFile);
     if (!fromState?.layer || !toState?.layer) continue;
 
-    const { illegal, rule } = isIllegalEdge(profile, fromState.layer, toState.layer, fromFile, toFile);
+    const { illegal, rule } = isIllegalEdge(profile, fromState.layer, toState.layer, fromFile, toFile, result.projectKind);
     if (!illegal) continue;
     const key = `${fromFile}|${toFile}|${rule}`;
     if (seen.has(key)) continue;

@@ -7,6 +7,11 @@ import type {
   LayerClassification,
   ProjectArchetype,
 } from '../../types.js';
+import type {
+  ArchitectureKnowledgePack,
+  ArchitecturePathRule,
+  ArchitectureSuffixRule,
+} from './types.js';
 
 /**
  * Path / suffix / Pascal file-layer classifier.
@@ -178,7 +183,8 @@ const PATH_RULES: PathRule[] = [
   { pattern: /\.(infrastructure|infra)\//, layer: 'infrastructure', confidence: 0.85, signal: '*.Infrastructure project' },
   { pattern: /\.worker\//, layer: 'infrastructure', confidence: 0.8, signal: '*.Worker project' },
   { pattern: /\.(webapi|api)\//, layer: 'routing', confidence: 0.8, signal: '*.WebApi project' },
-  { pattern: /\.(webapp|web|ui)\//, layer: 'presentation', confidence: 0.75, signal: '*.WebApp project' },
+  // `*.WebApp` / `*.Client` / `*.UI` are project-kind signals, not a
+  // blanket presentation stamp. See isSpaWebApp + project-kind/web-app.
   { pattern: /\.(services?|application)\//, layer: 'services', confidence: 0.8, signal: '*.Services project' },
   { pattern: /\/wwwroot\//, layer: 'presentation', confidence: 0.85, signal: 'wwwroot/ static assets' },
   { pattern: /\/properties\//, layer: 'config', confidence: 0.85, signal: 'Properties/ directory' },
@@ -316,27 +322,87 @@ const PASCAL_SUFFIX_RULES: Array<{ suffix: string; layer: ArchitectureLayer; con
 
 const UI_SOURCE_EXTENSIONS = new Set(['.tsx', '.jsx', '.vue', '.svelte']);
 
+/** Meta-frameworks that are web-app but keep server-side `/api/` = routing. */
+const META_WEBAPP_ARCHETYPES = new Set<ProjectArchetype>([
+  'nextjs', 'nuxt', 'remix', 'sveltekit', 'rails',
+]);
+
+const SPA_SKIP_PASCAL = new Set(['Service', 'Handler', 'Client']);
+
+/**
+ * Client SPA remapping. Applied when projectKind is web-app and the
+ * archetype is not a server meta-framework. `/api/` is a browser HTTP
+ * client; `plugins/` is Vue/Vite wiring; `router.js` is the client router.
+ */
+const SPA_PATH_RULES: readonly PathRule[] = [
+  { pattern: /\/api\//, layer: 'infrastructure', confidence: 0.88, signal: 'SPA HTTP client (api/)' },
+  { pattern: /\/plugins\//, layer: 'config', confidence: 0.82, signal: 'SPA plugin wiring' },
+  { pattern: /(^|\/)router\.[jt]sx?$/, layer: 'routing', confidence: 0.92, signal: 'client router module' },
+  { pattern: /(^|\/)routes\.[jt]sx?$/, layer: 'routing', confidence: 0.9, signal: 'client routes module' },
+];
+
+export function isSpaWebApp(
+  projectKind: string | undefined,
+  archetype: ProjectArchetype,
+): boolean {
+  return projectKind === 'web-app' && !META_WEBAPP_ARCHETYPES.has(archetype);
+}
+
+export function collectPackLayerRules(packs: readonly ArchitectureKnowledgePack[]): {
+  pathRules: ArchitecturePathRule[];
+  suffixRules: ArchitectureSuffixRule[];
+  pascalSuffixRules: ArchitectureSuffixRule[];
+} {
+  const pathRules: ArchitecturePathRule[] = [];
+  const suffixRules: ArchitectureSuffixRule[] = [];
+  const pascalSuffixRules: ArchitectureSuffixRule[] = [];
+  for (const pack of packs) {
+    if (pack.pathRules) pathRules.push(...pack.pathRules);
+    if (pack.suffixRules) suffixRules.push(...pack.suffixRules);
+    if (pack.pascalSuffixRules) pascalSuffixRules.push(...pack.pascalSuffixRules);
+  }
+  return { pathRules, suffixRules, pascalSuffixRules };
+}
+
 /** Domain port: `IOrderRepository` living under Domain/ or Interfaces/. */
 function isDomainRepositoryPort(baseName: string, loweredPath: string): boolean {
   if (!/^I[A-Z]\w*(Repository|Repo)$/.test(baseName)) return false;
   return /\/(domain|interfaces)\//.test(loweredPath);
 }
 
+function considerRule(
+  bestMatch: { layer: ArchitectureLayer; confidence: number; signal: string } | null,
+  layer: ArchitectureLayer,
+  confidence: number,
+  signal: string,
+): { layer: ArchitectureLayer; confidence: number; signal: string } {
+  if (!bestMatch || confidence > bestMatch.confidence) {
+    return { layer, confidence, signal };
+  }
+  return bestMatch;
+}
+
 function classifyOne(
   filePath: string,
   archetype: ProjectArchetype,
+  opts?: ClassifyFileOptions,
 ): { layer: ArchitectureLayer; confidence: number; signal: string } | null {
   // Leading `/` so `/dir/` patterns also match a top-level directory
   // (`tests/Foo.Tests/Bar.cs`); lowercased so PascalCase conventions
   // (.NET `Controllers/`, `Views/`…) hit the same rules as JS lowercase dirs.
   const normalised = '/' + filePath.replace(/\\/g, '/').replace(/^\/+/, '');
   const lowered = normalised.toLowerCase();
+  const spa = isSpaWebApp(opts?.projectKind, archetype);
 
   // Fuse path / suffix / Pascal evidence. Stronger file-level signal wins
   // (UsersController.cs under Domain/ is routing, not domain).
   let bestMatch: { layer: ArchitectureLayer; confidence: number; signal: string } | null = null;
 
-  for (const rule of PATH_RULES) {
+  const pathRules: readonly PathRule[] = spa
+    ? [...SPA_PATH_RULES, ...PATH_RULES]
+    : PATH_RULES;
+
+  for (const rule of pathRules) {
     // Skip rules for other archetypes
     if (rule.archetypes && rule.archetypes.length > 0 && !rule.archetypes.includes(archetype)) {
       continue;
@@ -346,10 +412,16 @@ function classifyOne(
       // Archetype-specific rules get a boost
       const boost = rule.archetypes ? 0.05 : 0;
       const adjustedConfidence = Math.min(rule.confidence + boost, 1);
+      bestMatch = considerRule(bestMatch, rule.layer, adjustedConfidence, rule.signal);
+    }
+  }
 
-      if (!bestMatch || adjustedConfidence > bestMatch.confidence) {
-        bestMatch = { layer: rule.layer, confidence: adjustedConfidence, signal: rule.signal };
-      }
+  for (const rule of opts?.extraPathRules ?? []) {
+    if (rule.archetypes && rule.archetypes.length > 0 && !rule.archetypes.includes(archetype)) {
+      continue;
+    }
+    if (rule.pattern.test(lowered)) {
+      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
     }
   }
 
@@ -358,17 +430,27 @@ function classifyOne(
 
   for (const rule of SUFFIX_RULES) {
     if (cleanBase.endsWith(rule.suffix)) {
-      if (!bestMatch || rule.confidence > bestMatch.confidence) {
-        bestMatch = { layer: rule.layer, confidence: rule.confidence, signal: rule.signal };
-      }
+      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
+    }
+  }
+
+  for (const rule of opts?.extraSuffixRules ?? []) {
+    if (cleanBase.endsWith(rule.suffix)) {
+      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
     }
   }
 
   for (const rule of PASCAL_SUFFIX_RULES) {
+    if (spa && SPA_SKIP_PASCAL.has(rule.suffix)) continue;
     if (cleanBase.endsWith(rule.suffix)) {
-      if (!bestMatch || rule.confidence > bestMatch.confidence) {
-        bestMatch = { layer: rule.layer, confidence: rule.confidence, signal: rule.signal };
-      }
+      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
+    }
+  }
+
+  for (const rule of opts?.extraPascalSuffixRules ?? []) {
+    if (spa && SPA_SKIP_PASCAL.has(rule.suffix)) continue;
+    if (cleanBase.endsWith(rule.suffix)) {
+      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
     }
   }
 
@@ -408,6 +490,11 @@ export interface ClassifyFileOptions {
    * blanket stamp: a stronger local match still wins.
    */
   repoRelative?: string;
+  /** Winning projectKind from pack fusion. Drives SPA remapping. */
+  projectKind?: string;
+  extraPathRules?: readonly ArchitecturePathRule[];
+  extraSuffixRules?: readonly ArchitectureSuffixRule[];
+  extraPascalSuffixRules?: readonly ArchitectureSuffixRule[];
 }
 
 /**
@@ -430,12 +517,12 @@ export function classifyFile(
   archetype: ProjectArchetype,
   opts?: ClassifyFileOptions,
 ): LayerClassification | null {
-  const local = classifyOne(filePath, archetype);
+  const local = classifyOne(filePath, archetype, opts);
   const repoPath = opts?.repoRelative?.replace(/\\/g, '/');
   const repo = repoPath
     && repoPath !== filePath.replace(/\\/g, '/')
     && prefixHasLayerHint(repoPath, filePath)
-    ? classifyOne(repoPath, archetype)
+    ? classifyOne(repoPath, archetype, opts)
     : null;
 
   let best = local;

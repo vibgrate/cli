@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { estimateModelBytes, parseOllamaPs, parseNvidiaSmi, assessCapability, type SystemMemory } from './capability.js';
+import { estimateModelBytes, parseOllamaPsApi, parseNvidiaSmi, assessCapability, type SystemMemory } from './capability.js';
 
 const GiB = 1024 ** 3;
 
@@ -25,20 +25,30 @@ describe('estimateModelBytes', () => {
   });
 });
 
-describe('parseOllamaPs', () => {
-  it('parses loaded models and sizes, skipping the header', () => {
-    const out = [
-      'NAME                ID              SIZE      PROCESSOR    UNTIL',
-      'qwen2.5-coder:7b    abc123          5.5 GB    100% GPU     4 minutes from now',
-      'llama3:8b           def456          6.1 GB    100% GPU     2 minutes from now',
-    ].join('\n');
-    const loaded = parseOllamaPs(out);
+describe('parseOllamaPsApi', () => {
+  it('parses loaded models and sizes from the /api/ps body', () => {
+    const body = {
+      models: [
+        { name: 'qwen2.5-coder:7b', size: 5_500_000_000, size_vram: 5_500_000_000 },
+        { name: 'llama3:8b', size: 6_100_000_000 },
+      ],
+    };
+    const loaded = parseOllamaPsApi(body);
     expect(loaded.map((m) => m.name)).toEqual(['qwen2.5-coder:7b', 'llama3:8b']);
     expect(loaded[0].bytes / 1e9).toBeCloseTo(5.5, 1);
   });
 
-  it('returns [] on empty output', () => {
-    expect(parseOllamaPs('')).toEqual([]);
+  it('falls back to size_vram when size is absent', () => {
+    const loaded = parseOllamaPsApi({ models: [{ name: 'qwen2.5-coder:3b', size_vram: 2_000_000_000 }] });
+    expect(loaded).toEqual([{ name: 'qwen2.5-coder:3b', bytes: 2_000_000_000 }]);
+  });
+
+  it('returns [] on empty, malformed, or nameless bodies', () => {
+    expect(parseOllamaPsApi(undefined)).toEqual([]);
+    expect(parseOllamaPsApi(null)).toEqual([]);
+    expect(parseOllamaPsApi({})).toEqual([]);
+    expect(parseOllamaPsApi({ models: 'nope' })).toEqual([]);
+    expect(parseOllamaPsApi({ models: [{ size: 123 }, null, 'junk'] })).toEqual([]);
   });
 });
 

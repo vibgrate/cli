@@ -4,7 +4,14 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startVgdServer, type VgdServer } from '../runtime/vgd/index.js';
 import { vgdIsRunning } from '../runtime/vgd/client.js';
-import { compareDaemonVersion, stopVgd, vgdCliVersion, vgdVersionSkew } from './daemon.js';
+import {
+  compareDaemonVersion,
+  startDetachedVgd,
+  stopVgd,
+  vgdCliVersion,
+  vgdVersionSkew,
+  type VgdSkew,
+} from './daemon.js';
 import { VERSION } from '../version.js';
 
 const dirs: string[] = [];
@@ -77,6 +84,63 @@ describe('vgdVersionSkew', () => {
     const { socketPath } = await daemon();
     // The daemon reports VERSION; pretend the caller is a later build.
     expect(await vgdVersionSkew(socketPath, '9999.1.0')).toMatchObject({ running: true, state: 'older' });
+  });
+});
+
+describe('startDetachedVgd — the listener is not necessarily our child', () => {
+  it('retires an older daemon that won the bind race and tries again', async () => {
+    // The exact `vg update` failure: while the socket was free, another
+    // client (a VS Code extension bundling an older engine) bound ITS daemon
+    // first. "Ready" alone would report success against the stale build.
+    const events: string[] = [];
+    const skews: VgdSkew[] = [
+      { running: true, version: null, state: 'older' },
+      { running: true, version: VERSION, state: 'match' },
+    ];
+    const pid = await startDetachedVgd('sock', {
+      startOnce: async () => {
+        events.push('start');
+        return 111;
+      },
+      skew: async () => skews.shift() ?? { running: true, version: VERSION, state: 'match' },
+      stop: async () => {
+        events.push('stop');
+        return 'stopped';
+      },
+    });
+    expect(pid).toBe(111);
+    expect(events).toEqual(['start', 'stop', 'start']);
+  });
+
+  it('leaves a newer daemon alone — newest wins, no restart fight', async () => {
+    const events: string[] = [];
+    await startDetachedVgd('sock', {
+      startOnce: async () => {
+        events.push('start');
+        return 7;
+      },
+      skew: async () => ({ running: true, version: '9999.1.0', state: 'newer' }),
+      stop: async () => {
+        events.push('stop');
+        return 'stopped';
+      },
+    });
+    expect(events).toEqual(['start']);
+  });
+
+  it('gives up with an actionable error when an old daemon keeps re-binding', async () => {
+    let stops = 0;
+    await expect(
+      startDetachedVgd('sock', {
+        startOnce: async () => 1,
+        skew: async () => ({ running: true, version: '2026.814.2', state: 'older' }),
+        stop: async () => {
+          stops++;
+          return 'stopped';
+        },
+      }),
+    ).rejects.toThrow(/older vgd keeps re-binding/);
+    expect(stops).toBe(3);
   });
 });
 

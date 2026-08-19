@@ -100,7 +100,7 @@ async function runDoctor(global: GlobalOpts): Promise<void> {
   const reachable = local ? null : await probeReachable(base);
   const launch = detectServeLaunch();
   const optOut = telemetryOptOut();
-  const sys = gatherSystemMemory();
+  const sys = await gatherSystemMemory();
   const localInference = buildLocalInferenceStatus({
     system: sys,
     repo: graph ? { fileCount: graph.nodes?.length ?? 0 } : undefined,

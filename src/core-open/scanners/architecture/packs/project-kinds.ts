@@ -4,7 +4,17 @@
 import { evidenceOf } from '../fusion.js';
 import { isApplicationSourceFile, isContractBasename, isContractExtension, isIacExtension } from '../walker.js';
 import type { ArchitectureEvidence, ArchitectureKnowledgePack, ProjectContext } from '../types.js';
-import { filePathHas, hasExt, hasFile, hasPackage, packageHas, typeIs } from './helpers.js';
+import {
+  filePathHas,
+  hasExt,
+  hasFile,
+  hasPackage,
+  hasSpaUiSignal,
+  looksLikeClientName,
+  looksLikeWebAppName,
+  packageHas,
+  typeIs,
+} from './helpers.js';
 
 function contractFiles(ctx: ProjectContext): string[] {
   const hits: string[] = [];
@@ -142,17 +152,33 @@ export const projectKindPacks: ArchitectureKnowledgePack[] = [
     match(ctx: ProjectContext) {
       const metaFw = hasPackage(ctx, 'next', '@next/core', 'nuxt', '@remix-run/react', '@sveltejs/kit');
       const uiDep = hasPackage(ctx, 'react', 'vue', 'svelte', '@angular/core');
+      const spaDeps = hasPackage(ctx, 'vue-router', 'vuetify', '@vitejs/plugin-vue', 'react-router', 'react-router-dom', '@angular/router');
+      const vueFiles = hasExt(ctx, '.vue');
       const pages = filePathHas(ctx, /(^|\/)(pages|app\/.*page\.)/);
       const railsViews = filePathHas(ctx, /(^|\/)app\/views\//);
       const libPath = /(^|\/)(packages|libs)(\/|$)/.test(ctx.projectPath.replace(/\\/g, '/'));
-      if (!metaFw && !pages && !railsViews && !(uiDep && !libPath)) return [];
-      const apiOnly = !metaFw && !railsViews && filePathHas(ctx, /(^|\/)(controllers|routes)\//) && !pages;
+      const namedWebApp = looksLikeWebAppName(ctx);
+      const clientWithUi = looksLikeClientName(ctx) && (uiDep || spaDeps || vueFiles || pages || railsViews || metaFw);
+      const uiWithoutLib = uiDep && !libPath;
+      if (!metaFw && !pages && !railsViews && !uiWithoutLib && !namedWebApp && !clientWithUi && !spaDeps && !vueFiles) {
+        return [];
+      }
+      const apiOnly = !metaFw && !railsViews && !namedWebApp && !uiDep && !vueFiles && !spaDeps
+        && filePathHas(ctx, /(^|\/)(controllers|routes)\//) && !pages;
       if (apiOnly) return [];
       const signals: string[] = [];
       if (metaFw) signals.push('meta-framework');
-      else if (uiDep) signals.push('ui-dependency');
+      else if (uiDep || spaDeps) signals.push('ui-dependency');
       if (pages || railsViews) signals.push('ui-layout');
-      return [evidenceOf('project-kind/web-app', 'projectKind', 'web-app', metaFw ? 0.88 : 0.72, signals)];
+      if (namedWebApp) signals.push('webapp-path');
+      if (clientWithUi) signals.push('client-path');
+      if (vueFiles) signals.push('vue-source');
+      const confidence = metaFw || (namedWebApp && (uiDep || spaDeps || vueFiles)) || spaDeps
+        ? 0.88
+        : namedWebApp || clientWithUi
+          ? 0.8
+          : 0.72;
+      return [evidenceOf('project-kind/web-app', 'projectKind', 'web-app', confidence, signals)];
     },
   },
   {
@@ -169,9 +195,16 @@ export const projectKindPacks: ArchitectureKnowledgePack[] = [
         p.includes('spring-boot') ||
         p.toLowerCase().includes('microsoft.aspnetcore'),
       );
-      const layout = filePathHas(ctx, /(^|\/)(controllers|routes|handlers|api)\//) ||
-        filePathHas(ctx, /\.controller\.[jt]sx?$/) ||
-        filePathHas(ctx, /Controller\.(cs|java|kt)$/);
+      // SPA `src/api/` is a browser HTTP client, not HTTP routing. A Vue/React
+      // WebApp must not flip to web-api just because that folder exists.
+      const spaClient = hasSpaUiSignal(ctx) || looksLikeWebAppName(ctx);
+      const layout = spaClient
+        ? filePathHas(ctx, /(^|\/)(controllers|routes|handlers)\//)
+          || filePathHas(ctx, /\.controller\.[jt]sx?$/)
+          || filePathHas(ctx, /Controller\.(cs|java|kt)$/)
+        : filePathHas(ctx, /(^|\/)(controllers|routes|handlers|api)\//)
+          || filePathHas(ctx, /\.controller\.[jt]sx?$/)
+          || filePathHas(ctx, /Controller\.(cs|java|kt)$/);
       if (!apiDep && !layout) return [];
       const signals: string[] = [];
       if (apiDep) signals.push('api-dependency');

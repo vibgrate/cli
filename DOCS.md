@@ -1191,11 +1191,11 @@ vg llm-host serve --socket /tmp/vg-llm.sock --yes
 
 Default isolation is **embedded** (same process as the agent). Set `VIBGRATE_INFERENCE_ISOLATION=process` to use the host. Management never moves into the host process.
 
-**First-party weights.** For catalogued GGUF refs (e.g. Spark’s llama.cpp fallback), `vg models install` can download into the Vibgrate weight store under the cache directory (HTTPS hosts allowlisted, including Hugging Face LFS/Xet CDNs). Catalog entries carry **sha256 pins**; a download that does not match is rejected. Ollama remains the default pull channel for Code Mode packs that list `ollama` as primary.
+**First-party weights.** Code Mode packs are first-party GGUF only: `vg models install` downloads the catalogued refs into the Vibgrate weight store under the cache directory (HTTPS hosts allowlisted, including Hugging Face LFS/Xet CDNs). Catalog entries carry **sha256 pins**; a download that does not match is rejected. Ollama is used only for models you select explicitly (`vg models pull <name>`, `--provider ollama`) — never for a Code Mode pack.
 
 **Foundry Local.** On Windows (or any host running Microsoft Foundry Local), use `--provider foundry-local --model <id>` with the OpenAI-compatible server (default `http://127.0.0.1:5272/v1`, override with `FOUNDRY_LOCAL_BASE_URL`). `vg models status` lists models when the server responds.
 
-**Warm local inference (Approach B default).** Code Mode packs (channel 2026.07.3) install first-party GGUF weights when fit allows; Ollama is the fallback adapter. When a GGUF is on disk (weight store or `~/models`), `vg code` prefers embedded llama.cpp automatically. Set `VG_PREFER_OLLAMA=1` to force Ollama first. Spark constrained decoding is **fail-closed**: if the binding cannot attach a PatchIR grammar, generation errors instead of free-text (opt-in raw string GBNF only via `VG_ALLOW_GRAMMAR_STRING_FALLBACK=1`).
+**Warm local inference (Approach B default).** Code Mode packs (channel 2026.08.1) install first-party GGUF weights and run on embedded llama.cpp only — there is no Ollama fallback in a pack. When a GGUF is on disk (weight store or `~/models`), `vg code` prefers embedded llama.cpp automatically. Set `VG_PREFER_OLLAMA=1` to try your own Ollama models first outside Code Modes. Spark constrained decoding is **fail-closed**: if the binding cannot attach a PatchIR grammar, generation errors instead of free-text (opt-in raw string GBNF only via `VG_ALLOW_GRAMMAR_STRING_FALLBACK=1`).
 
 **Identifier enforce (before apply).** Edits and `apply_patch` that invent identifiers not present in the code graph are **blocked** (not merely annotated). Identifiers already in the target file (locals, params, existing helpers) and tokens only in comments/strings are allowed. After an approved edit, the session trie updates so new symbols become legal.
 
@@ -1223,7 +1223,7 @@ Default isolation is **embedded** (same process as the agent). Set `VIBGRATE_INF
 
 **Named install commands run by default** (same polarity as the rest of `vg`: the command does what it says). Pass `--dry-run` to print the plan only. Status/resolve never download. Destructive `rm` confirms on a TTY; non-interactive remove needs `--yes`.
 
-`install` / `pull` install the **full provider dependency closure** for the pack (e.g. runtime npm deps for llama-cpp, then weight download for Ollama). Third-party apps such as Ollama itself are never auto-installed — install them separately if the plan lists them as blocked.
+`install` / `pull` install the **full provider dependency closure** (e.g. runtime npm deps for llama-cpp, then the pinned GGUF from the first-party weight store; `pull` fetches your named model via Ollama). Third-party apps such as Ollama itself are never auto-installed — install them separately if the plan lists them as blocked.
 
 ```bash
 vg models                 # Code Modes status + fleet summary

@@ -123,12 +123,22 @@ describe('resolveMode / recommendMode', () => {
     expect(r.fit.label === 'flies' || r.fit.label === 'comfortable' || r.fit.label === 'tight').toBe(true);
   });
 
-  it('falls back to smaller weights when primary will not fit', () => {
+  it('stays on the first-party GGUF even when the primary is a poor fit (never an Ollama fallback)', () => {
     const system = mem({ totalRamBytes: 8 * GiB, freeRamBytes: 3 * GiB });
     const r = resolveMode({ mode: 'flow', autoFit: false, system });
-    // 7b may not fit; 3b fallback should win when available
+    // The router is fail-closed to embedded llama.cpp for Code Modes, so the
+    // orchestrator must never select Ollama-backed weights the mode can't run:
+    // a poor fit surfaces as the fit label, not as a silent backend switch.
     expect(r.pack.mode).toBe('flow');
-    expect(r.underlying.weightsRef).toMatch(/qwen2\.5-coder/);
+    expect(r.underlying.backend).toBe('llama.cpp');
+    expect(r.underlying.weightsRef).toMatch(/qwen2\.5-coder.*\.gguf$/);
+  });
+
+  it('no curated pack declares an Ollama fallback (Ollama is explicit --provider only)', () => {
+    for (const p of QUALIFIED_PACKS) {
+      expect(p.primary.backend).toBe('llama.cpp');
+      for (const f of p.fallback ?? []) expect(f.backend).not.toBe('ollama');
+    }
   });
 
   it('honors explicit mode over auto-fit', () => {

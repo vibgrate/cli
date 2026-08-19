@@ -187,6 +187,9 @@ function defaultRunProbe(timeoutMs: number): Promise<{ signal: string | null; st
       // The probe must never inherit a debugger port or loader flags that would
       // change what it proves about the addon.
       env: { ...process.env, NODE_OPTIONS: '' },
+      // Console-less hosts (vgd, editor-spawned servers) must not pop a
+      // visible console window for the probe on Windows.
+      windowsHide: true,
     });
     let stdout = '';
     let settled = false;
