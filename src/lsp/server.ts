@@ -52,7 +52,7 @@ import type { RefreshOutcome } from '../engine/refresh.js';
 import { RefreshScheduler } from '../engine/refresh-scheduler.js';
 import { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import { manifestHash, loadScanCache, writeScanCache, isDependencyFile } from './scan-cache.js';
-import { SKIP_DIRS } from '../engine/discover.js';
+import { isSkippedDirName } from '../engine/discover.js';
 import { recordScore, lastEntry, deltaFrom, recentHistory, type ScoreHistoryEntry } from './score-history.js';
 import { readIgnores, type IgnoreEntry } from './ignores.js';
 import { readInventory, recordInventory, newlyDrifted, inventoryKey } from './inventory-history.js';
@@ -1559,24 +1559,15 @@ function looksLikeScanArtifactJson(text: string): boolean {
 
 /**
  * True when a workspace-relative path sits under a tree the scanner must never
- * bill or score — `SKIP_DIRS` (node_modules, .git, …), custom virtualenvs
- * (`.venv-*`), Python install trees (`site-packages`), and Claude agent state
- * (`.claude/worktrees` full-repo copies). Used to scrub stale LSP cache hits
+ * bill or score — hidden agent/tool dirs (`.claude/worktrees`, `.cursor`, …),
+ * `SKIP_DIRS` (node_modules, dist, …), custom virtualenvs (`venv-*`), and
+ * Python install trees (`site-packages`). Used to scrub stale LSP cache hits
  * and to keep the Vulnerabilities panel honest even when the artifact is old.
  */
 function isPrunedWorkspacePath(relPath: string | null | undefined): boolean {
   if (!relPath || relPath === '.' || relPath === '') return false;
   const parts = relPath.split(/[/\\]/).filter(Boolean);
-  // Always prune Claude agent trees — also listed in SKIP_DIRS once engines
-  // ship that entry; hard-coded here so older caches/engines still filter.
-  if (parts.includes('.claude')) return true;
-  return parts.some((p) => {
-    if (SKIP_DIRS.has(p)) return true;
-    // Custom-named virtualenvs and Python install trees (not always exact-name
-    // members of SKIP_DIRS; still never billable / never scoreable source).
-    if (p.startsWith('.venv') || p.startsWith('venv-') || p === 'site-packages') return true;
-    return false;
-  });
+  return parts.some((p) => isSkippedDirName(p));
 }
 
 /** Drop pruned projects/findings from a scan artifact (cache scrub + safety net). */

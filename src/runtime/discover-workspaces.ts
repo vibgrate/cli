@@ -238,6 +238,8 @@ function expandSimpleGlob(primary: string, pattern: string, fs: DiscoverFs, maxD
       }
       if (part === '*') {
         for (const name of fs.readdir(cur)) {
+          // Never expand into agent worktrees / hidden tool dirs.
+          if (name.startsWith('.')) continue;
           const abs = path.join(cur, name);
           if (fs.isDirectory(abs)) next.push(abs);
         }
@@ -258,7 +260,7 @@ function walkDirs(root: string, fs: DiscoverFs, depth: number): string[] {
   if (depth <= 0) return [];
   const out: string[] = [];
   for (const name of fs.readdir(root)) {
-    if (name === 'node_modules' || name === '.git' || name === 'dist' || name === 'build') continue;
+    if (name.startsWith('.') || name === 'node_modules' || name === 'dist' || name === 'build') continue;
     const abs = path.join(root, name);
     if (!fs.isDirectory(abs)) continue;
     out.push(abs);

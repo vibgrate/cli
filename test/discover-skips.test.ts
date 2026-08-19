@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { discover, SKIP_DIRS, SKIP_FILES } from '../src/engine/discover.js';
+import { discover, SCANNED_HIDDEN_DIRS, SKIP_DIRS, SKIP_FILES } from '../src/engine/discover.js';
 import {
+  SCANNED_HIDDEN_DIRS as SCANNER_SCANNED_HIDDEN_DIRS,
   SKIP_DIRS as SCANNER_SKIP_DIRS,
   SOURCE_EXCLUDE_FILES as SCANNER_EXCLUDE_FILES,
 } from '../src/core-open/utils/fs.js';
@@ -32,6 +33,10 @@ describe('graph discovery stays aligned with the scanner skip lists', () => {
   it('every SKIP_FILES entry is lowercase (matching is by lowercased basename)', () => {
     for (const f of SKIP_FILES) expect(f).toBe(f.toLowerCase());
   });
+
+  it('engine SCANNED_HIDDEN_DIRS matches the scanner allowlist', () => {
+    expect([...SCANNED_HIDDEN_DIRS].sort()).toEqual([...SCANNER_SCANNED_HIDDEN_DIRS].sort());
+  });
 });
 
 describe('discover skips package folders and lockfiles', () => {
@@ -46,10 +51,13 @@ describe('discover skips package folders and lockfiles', () => {
       'DerivedData/Build/x.swift': 'func x() {}',
       '.migration_backup/webpack.config.js': 'module.exports = {};',
       'platforms/android/app.js': 'function platform(){}',
-      // Claude Code worktrees are full repo copies — must never be scanned
+      // Agent worktrees are full repo copies — must never be scanned
       '.claude/worktrees/agent/src/Application/Application.csproj':
         '<Project Sdk="Microsoft.NET.Sdk"></Project>',
       '.claude/worktrees/agent/src/app.ts': 'export const leaked = 1;',
+      '.cursor/worktrees/agent/src/app.ts': 'export const leaked = 2;',
+      '.codex/worktrees/agent/src/app.ts': 'export const leaked = 3;',
+      '.grok/worktrees/agent/src/app.ts': 'export const leaked = 4;',
     });
     const rels = discover({ root }).map((f) => f.rel);
     expect(rels).toEqual(['src/app.ts']);

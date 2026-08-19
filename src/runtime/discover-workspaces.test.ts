@@ -108,4 +108,24 @@ describe('discoverWorkspaceRoots', () => {
     const r = discoverWorkspaceRoots(primary, fs);
     expect(r.roots.some((x) => x.root === path.resolve('/other') && x.source === 'code-workspace')).toBe(true);
   });
+
+  it('does not expand workspace globs into hidden agent worktrees', () => {
+    const primary = '/mono';
+    const fs = memFs({
+      [`${primary}/package.json`]: JSON.stringify({
+        name: 'root',
+        workspaces: ['*'],
+      }),
+      [`${primary}/app/package.json`]: '{"name":"app"}',
+      [`${primary}/.claude/worktrees/agent/package.json`]: '{"name":"leaked"}',
+    }, [
+      `${primary}/app`,
+      `${primary}/.claude`,
+      `${primary}/.claude/worktrees`,
+      `${primary}/.claude/worktrees/agent`,
+    ]);
+    const r = discoverWorkspaceRoots(primary, fs);
+    expect(r.roots.map((x) => x.label).sort()).toEqual(['app', 'mono']);
+    expect(r.roots.some((x) => x.root.includes('.claude'))).toBe(false);
+  });
 });

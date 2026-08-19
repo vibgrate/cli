@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { discover, type DiscoveredFile } from './discover.js';
+import { discover, mergeExcludes, type DiscoveredFile } from './discover.js';
 import { parseFiles } from './pool.js';
 import { resolve } from './resolve.js';
 import { buildModuleResolver } from './module-resolver.js';
@@ -142,11 +142,12 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const timer = new StageTimer();
   timer.start('total');
   const root = path.resolve(options.root);
+  const exclude = mergeExcludes(root, options.exclude);
   timer.start('discover');
   const files = discover({
     root,
     only: options.only,
-    exclude: options.exclude,
+    exclude,
     paths: options.paths,
   });
   timer.end('discover');
@@ -300,7 +301,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   // Package manifests (package.json / go.mod) → package nodes + dep import edges.
   // Runs after source resolve so package hubs participate in centrality/areas.
   const manifests = extractManifests(root, {
-    exclude: options.exclude,
+    exclude,
     paths: options.paths,
   });
   if (manifests.files > 0) {
@@ -465,7 +466,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   // Documentation / example-env text nodes for semantic ask (not AST-parsed).
   const docs = discoverDocs({
     root,
-    exclude: options.exclude,
+    exclude,
     paths: options.paths,
   });
   for (const d of docs) {

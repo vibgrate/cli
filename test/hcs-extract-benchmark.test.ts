@@ -11,11 +11,12 @@ import { resetHcsEngineCache } from '../src/engine/hcs-provider.js';
  * performance AND accuracy on one synthetic repo.
  *
  * Performance is asserted on the deterministic cost driver — how many files
- * cross the engine seam for (re-)extraction — plus a generous wall-clock sanity
- * check (a fake engine burns a fixed CPU cost per extracted file, so a
- * one-file edit must beat re-extracting the whole corpus). Exact timings are
- * reported for humans, never asserted, so the suite cannot flake on a busy CI
- * runner.
+ * cross the engine seam for (re-)extraction. A fake engine burns a fixed CPU
+ * cost per extracted file so the human-facing log still shows wall-clock
+ * scaling, but those timings are never asserted: the incremental pass still
+ * hashes the whole corpus for the plan and merges the previous stream, and a
+ * fast or busy CI runner can invert the two times when that bookkeeping is
+ * cheaper than 239 fake parses.
  *
  * Accuracy is asserted absolutely: after edits, the incrementally merged
  * stream must equal a from-scratch extraction of the same tree, fact-for-fact
@@ -211,14 +212,10 @@ describe('vg hcs extract --previous — benchmark (performance + accuracy)', () 
     expect(factLines(incremental)).toHaveLength(FILE_COUNT * 2);
 
     // Performance — the deterministic cost driver: engine-side extraction work
-    // shrank by ≥99% (1 file instead of 240)…
+    // shrank by ≥99% (1 file instead of 240). Wall-clock is logged below, not
+    // asserted — see the file header.
     const workReduction = 1 - incrementalExtracted.length / fullExtracted.length;
     expect(workReduction).toBeGreaterThanOrEqual(0.99);
-    // …and with a fixed per-file extraction cost, the one-file pass must beat
-    // the full pass on the wall clock too (generous 2× headroom for CI noise:
-    // the incremental pass still hashes the whole corpus for the plan, so it
-    // is asserted merely faster, not 240× faster).
-    expect(incrementalMs).toBeLessThan(fullMs * 0.5);
 
     // Report for humans — numbers vary per machine, so they are logged, not asserted.
     // eslint-disable-next-line no-console

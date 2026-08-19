@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { discover } from './discover.js';
+import { discover, mergeExcludes } from './discover.js';
 import { discoverDocs } from './docs-ingest.js';
 import { hashBytes } from './hash.js';
 import { cacheDir } from './cache.js';
@@ -119,14 +119,15 @@ export function probeFreshness(root: string): ProbeResult | null {
   if (!snapshot) return null;
 
   const { scope } = snapshot;
+  const exclude = mergeExcludes(root, scope.exclude);
   // Must match the build's fileStats universe: language sources + context docs
   // (README, CI yaml, package manifests, …). Probing only `discover()` left
   // every document in the snapshot as "removed" after a successful build, so
   // `vg status` kept reporting hundreds of drifted files after ask/serve refresh.
   let discovered: { rel: string; abs: string }[];
   try {
-    const code = discover({ root, only: scope.only, exclude: scope.exclude, paths: scope.paths });
-    const docs = discoverDocs({ root, exclude: scope.exclude, paths: scope.paths });
+    const code = discover({ root, only: scope.only, exclude, paths: scope.paths });
+    const docs = discoverDocs({ root, exclude, paths: scope.paths });
     const byRel = new Map<string, string>();
     for (const f of code) byRel.set(f.rel, f.abs);
     for (const d of docs) {

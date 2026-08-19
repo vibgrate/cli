@@ -17,7 +17,7 @@ import { writeAreaSkills } from '../install/area-skills.js';
 import { serializeGraph } from '../engine/serialize.js';
 import { renderReport } from '../engine/report.js';
 import { renderHtml } from '../engine/html.js';
-import { UsageError } from '../engine/discover.js';
+import { UsageError, mergeExcludes } from '../engine/discover.js';
 import { ResourceLimitError } from '../engine/limits.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { resolveSelfJsEntry } from '../util/cli-invocation.js';
@@ -165,7 +165,7 @@ export async function runBuild(
   if (!global.graph) {
     writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats, {
       only,
-      exclude: opts.exclude,
+      exclude: mergeExcludes(root, opts.exclude),
       paths: paths.length ? paths : undefined,
       deep: global.deep,
       noGround: opts.ground === false,
@@ -213,9 +213,8 @@ export async function runBuild(
         info(c.dim(`vg · refreshed assistant instructions ${r.file} (v${r.from} → v${r.to})`));
       }
     }
-    // Per-area skills, regenerated from the fresh graph on every build.
-    // Deterministic content → zero churn when the graph didn't change; only
-    // repos that ran `vg install` (skill root present) receive anything.
+    // Per-area skills: off unless vibgrate.config.json sets areaSkills: true.
+    // When on, deterministic content → zero churn if the graph didn't change.
     const areaChanges = writeAreaSkills(root, result.graph);
     if (interactive && (areaChanges.written.length || areaChanges.removed.length)) {
       const parts = [

@@ -19,8 +19,8 @@ import { langForExtension, langById, type LanguageDef } from './languages.js';
 // scanner's, so the graph can never index a package folder the scanner
 // already decided is third-party.
 //
-// Exact names only. For prefix patterns (`.venv-*`, `venv-*`) and install
-// trees (`site-packages`), use {@link isSkippedDirName}.
+// Exact names only. Hidden directories (except {@link SCANNED_HIDDEN_DIRS})
+// and prefix patterns (`venv-*`, `site-packages`) use {@link isSkippedDirName}.
 export const SKIP_DIRS = new Set<string>([
   // Version control, IDE & tool metadata
   '.git', '.svn', '.hg',
@@ -67,17 +67,28 @@ export const SKIP_DIRS = new Set<string>([
 ]);
 
 /**
+ * Hidden directories that still hold first-party metadata we walk
+ * (CI workflows). Every other `.*` directory is agent/tool state
+ * (Claude/Cursor/Codex/Grok worktrees, IDE metadata, caches) and
+ * must never be scanned or indexed. Keep aligned with core-open
+ * `utils/fs.ts` {@link SCANNED_HIDDEN_DIRS}.
+ */
+export const SCANNED_HIDDEN_DIRS = new Set(['.github', '.circleci']);
+
+/**
  * True when a directory basename must be pruned from discovery / scoring walks.
- * Covers exact {@link SKIP_DIRS} names plus common virtualenv naming variants
- * (`.venv-contextbench`, `venv-tools`, …) and Python install trees
- * (`site-packages`) that mint hundreds of phantom nested "projects".
+ * Covers every hidden directory except {@link SCANNED_HIDDEN_DIRS}, exact
+ * {@link SKIP_DIRS} names, custom virtualenv names (`venv-tools`, …), and
+ * Python install trees (`site-packages`) that mint hundreds of phantom
+ * nested "projects".
  */
 export function isSkippedDirName(name: string): boolean {
-  if (!name) return false;
+  if (!name || name === '.' || name === '..') return false;
+  // Agent worktrees live under hidden folders (.claude/worktrees, .cursor/…).
+  // Skip every dot-directory so a new agent does not need a new skip entry.
+  if (name.startsWith('.')) return !SCANNED_HIDDEN_DIRS.has(name);
   if (SKIP_DIRS.has(name)) return true;
-  // Custom-named virtualenvs (uv/poetry/team convention: `.venv-<purpose>`).
-  if (name.startsWith('.venv') || name.startsWith('venv-')) return true;
-  // Python install tree — never source we own.
+  if (name.startsWith('venv-')) return true;
   if (name === 'site-packages') return true;
   return false;
 }
@@ -158,6 +169,34 @@ export interface DiscoveredFile {
 
 function toPosix(p: string): string {
   return p.split(path.sep).join('/');
+}
+
+/**
+ * Project-local exclude globs from `vibgrate.config.json`.
+ * JSON only — `.ts`/`.js` configs stay scan-side (they can execute). A missing
+ * or malformed file is an empty list, never an error.
+ */
+export function readConfigExcludes(root: string): string[] {
+  const configPath = path.join(root, 'vibgrate.config.json');
+  try {
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { exclude?: unknown };
+    if (!Array.isArray(parsed.exclude)) return [];
+    return parsed.exclude.filter((x): x is string => typeof x === 'string' && x.trim() !== '');
+  } catch {
+    return [];
+  }
+}
+
+/** Config excludes plus caller extras, de-duplicated, config-first. */
+export function mergeExcludes(root: string, extra?: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const pattern of [...readConfigExcludes(root), ...(extra ?? [])]) {
+    if (seen.has(pattern)) continue;
+    seen.add(pattern);
+    out.push(pattern);
+  }
+  return out;
 }
 
 /** Build the ignore matcher from the repo's .gitignore plus extra excludes. */

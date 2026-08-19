@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { buildGraph } from './build.js';
+import { mergeExcludes } from './discover.js';
 import { probeFreshness, writeSnapshot, hasDrift, type Drift } from './freshness.js';
 import { writeArtifacts, vibgrateDir } from './artifacts.js';
 import { acquireLock, releaseLock } from './lock.js';
@@ -73,10 +74,11 @@ export async function refreshIfStale(root: string, opts: RefreshOptions = {}): P
   const start = process.hrtime.bigint();
   try {
     const { scope } = probe;
+    const exclude = mergeExcludes(root, scope.exclude);
     const result = await buildGraph({
       root,
       only: scope.only,
-      exclude: scope.exclude,
+      exclude,
       paths: scope.paths,
       deep: scope.deep,
       noGround: scope.noGround,
@@ -99,7 +101,7 @@ export async function refreshIfStale(root: string, opts: RefreshOptions = {}): P
         html: fs.existsSync(path.join(dir, 'graph.html')),
       });
     }
-    writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats, scope);
+    writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats, { ...scope, exclude });
 
     const ms = Number((process.hrtime.bigint() - start) / 1000000n);
     return {

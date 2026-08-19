@@ -81,15 +81,18 @@ describe('areaSkillFiles', () => {
 });
 
 describe('writeAreaSkills lifecycle', () => {
-  const setup = (): string => {
+  const setup = (areaSkills?: boolean): string => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'area-skills-'));
     fs.mkdirSync(path.join(root, '.claude/skills/vg'), { recursive: true });
     fs.writeFileSync(path.join(root, '.claude/skills/vg/SKILL.md'), '# vg — the code map\n');
+    if (areaSkills !== undefined) {
+      fs.writeFileSync(path.join(root, 'vibgrate.config.json'), JSON.stringify({ areaSkills }));
+    }
     return root;
   };
 
-  it('writes into installed skill roots only, and reports written files', () => {
-    const root = setup();
+  it('writes into installed skill roots only when areaSkills is true', () => {
+    const root = setup(true);
     const changes = writeAreaSkills(root, makeGraph());
     expect(changes.written).toContain(path.join('.claude/skills', `${AREA_SKILL_PREFIX}payments`, 'SKILL.md'));
     // .agents/skills has no vg install → untouched.
@@ -105,7 +108,7 @@ describe('writeAreaSkills lifecycle', () => {
   });
 
   it('removes stale vg-area-* dirs that carry our marker, keeps user-owned ones', () => {
-    const root = setup();
+    const root = setup(true);
     const base = path.join(root, '.claude/skills');
     fs.mkdirSync(path.join(base, `${AREA_SKILL_PREFIX}old-area`), { recursive: true });
     fs.writeFileSync(path.join(base, `${AREA_SKILL_PREFIX}old-area`, 'SKILL.md'), '<!-- vg:v2 -->\nold\n');
@@ -116,8 +119,24 @@ describe('writeAreaSkills lifecycle', () => {
     expect(fs.existsSync(path.join(base, `${AREA_SKILL_PREFIX}mine`, 'SKILL.md'))).toBe(true);
   });
 
+  it('default (no config) writes nothing and removes leftover generated vg-area-* skills', () => {
+    const root = setup(true);
+    expect(writeAreaSkills(root, makeGraph()).written.length).toBeGreaterThan(0);
+    fs.rmSync(path.join(root, 'vibgrate.config.json'));
+    const changes = writeAreaSkills(root, makeGraph());
+    expect(changes.written).toEqual([]);
+    expect(changes.removed).toEqual(
+      expect.arrayContaining([
+        path.join('.claude/skills', `${AREA_SKILL_PREFIX}payments`),
+        path.join('.claude/skills', `${AREA_SKILL_PREFIX}i18n`),
+      ]),
+    );
+    expect(fs.existsSync(path.join(root, '.claude/skills', `${AREA_SKILL_PREFIX}payments`))).toBe(false);
+    expect(fs.existsSync(path.join(root, '.claude/skills/vg/SKILL.md'))).toBe(true);
+  });
+
   it('never rewrites a current-area file whose marker was removed (user ownership)', () => {
-    const root = setup();
+    const root = setup(true);
     const mine = path.join(root, '.claude/skills', `${AREA_SKILL_PREFIX}payments`, 'SKILL.md');
     fs.mkdirSync(path.dirname(mine), { recursive: true });
     fs.writeFileSync(mine, 'hand-tuned, no marker\n');
