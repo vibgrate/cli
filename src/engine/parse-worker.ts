@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import { parseSource } from './parse.js';
-import { setGrammarsOverride } from './grammars.js';
+import { setGrammarsOverride, resetParser } from './grammars.js';
 import type { FileParse } from './types.js';
 
 /**
@@ -32,6 +32,9 @@ export default async function run(payload: ParsePayload): Promise<FileParse[]> {
       const source = fs.readFileSync(task.abs, 'utf8');
       out.push(await parseSource(task.rel, task.lang, source));
     } catch (err) {
+      // A wasm-level parse crash can leave the language's reused parser
+      // mid-state; drop it so the failure stays contained to this file.
+      resetParser(task.lang);
       out.push({
         rel: task.rel,
         lang: task.lang,

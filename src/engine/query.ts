@@ -1,43 +1,38 @@
 import { indexFor, type GraphIndex } from './relations.js';
 import { cosine, type Embedder } from './embeddings.js';
-import { WEAK_TERMS, expandConcepts, bigramConsumedTokens } from './concepts.js';
-import type { RelevanceAnalysis } from './relevance-provider.js';
+import type { SanitizedRank } from './relevance-provider.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 import { userAskFromInstruction } from './user-ask.js';
 
 /**
- * Deterministic retrieval for `vg ask` (VG-CLI-SPEC §3.2).
+ * Retrieval front-end for `vg ask` / `vg code` capsule seeds (VG-CLI-SPEC
+ * §3.2).
  *
- * Builds a structured, fact-annotated, budget-bounded context block for a
- * question — designed to drop straight into an assistant's context. The default
- * is deterministic lexical+structural retrieval: identifier/term matching with
- * morphological prefix-fuzzing, term-role weighting (process verbs like "add"
- * only corroborate, never seed — see engine/concepts.ts), static concept
- * expansion ("payments" → stripe/billing/…, "direct debit" → sepa/bacs/mandate),
- * and a multi-term coverage bonus, ranked with importance as a mild tiebreaker.
- * `--semantic`/`--deep` adds
- * a hybrid local-embedding pass (`queryGraphSemantic`) that surfaces conceptually
- * related code even when no word is shared — still no API key.
+ * Since the 2026-08 relevance relocation, the RANKING ENGINE lives in the
+ * optional relevance module (`@vibgrate/relevance`, auto-provisioned): the
+ * async callers run the ask through the module via
+ * `relevance-provider.rankQuestion` and pass the SANITIZED result in as
+ * `options.ranked`. This file keeps only what is mechanical:
+ *
+ *  - literal string/URL needle handling (the locate path — exact-text
+ *    matching, not relevance);
+ *  - a deliberately dumb module-less fallback: exact identifier-name and
+ *    name-part matching, nothing that understands language (no lexicon, no
+ *    term roles, no IDF, no typo repair, no expansion) — enough that an ask
+ *    NAMING a symbol still pins its file when the module is unavailable;
+ *  - context-block rendering and the semantic Reciprocal Rank Fusion
+ *    plumbing (`--semantic`), which fuses ORDERINGS and carries no ranking
+ *    heuristics of its own.
  */
 
 export interface QueryOptions {
   budget?: number; // approx token budget for the context block (default 2000)
   limit?: number; // max seed matches to expand (default 12)
-  /** Optional pre-computed relevance analysis (engine/relevance-provider.ts).
-   *  Injected by async callers so this module stays pure and sync; when
-   *  absent, ranking is exactly the built-in lexicon path. */
-  relevance?: RelevanceAnalysis | null;
-  /** Optional per-node topic tags (engine/relevance-enrich.ts). Combined with
-   *  `relevance.topics` into a bounded affinity bonus: a node structurally
-   *  tagged with a topic the question is about ranks above an equal textual
-   *  match outside it. Never seeds alone — it multiplies existing evidence. */
-  topicTags?: Map<string, readonly string[]> | null;
-  /** Previous conversational ask (multi-turn `vg code`). Its content terms —
-   *  never its process verbs — join ranking at a damped weight (CARRY_WEIGHT)
-   *  so a follow-up like "can we use direct debits?" keeps the prior turn's
-   *  topic ("where is stripe used?") instead of ranking the repo on the
-   *  follow-up's words alone. Absent → behaviour is unchanged. */
-  priorQuestion?: string | null;
+  /** Sanitized module ranking (engine/relevance-provider.ts rankQuestion),
+   *  injected by async callers so this module stays pure and sync. When
+   *  absent — module not installed, predates the ranking API, or failed —
+   *  the mechanical fallback below answers. */
+  ranked?: SanitizedRank | null;
 }
 
 export interface QueryMatch {
@@ -53,25 +48,67 @@ export interface QueryResult {
   tokensEstimate: number;
 }
 
-const STOPWORDS = new Set([
+/**
+ * Function-word hygiene for the mechanical fallback tokenizer. This is NOT a
+ * relevance stopword model (that moved into the module): nothing here scores,
+ * ranks, weights, or reorders anything. It is a purely SUBTRACTIVE floor —
+ * the words a caller uses to FRAME an ask rather than to name the code they
+ * mean, which therefore cannot be identifier evidence.
+ *
+ * The floor exists because `mechanicalRank` treats every surviving token as
+ * equal evidence, and English framing words collide with real identifier
+ * parts constantly. Without it, `"add a new feature"` scores `AddBlogForm`
+ * on the camel-part tier (`add`) and `FeatureFlagStore` (`feature`) and fills
+ * the entire seed window — a grab-bag Task Capsule for an ask that named
+ * nothing. That is the capsule-poisoning failure of the 2026-07 field report,
+ * and an empty result is the correct answer.
+ *
+ * Note this is the floor ONLY. Deciding which of several genuine candidates
+ * is most relevant remains the module's job, and no part of that logic —
+ * term roles, weighting, expansion, morphology — belongs in this file.
+ */
+const FUNCTION_WORDS = new Set([
+  // Closed-class English: could only ever match by coincidence.
   'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'to', 'of', 'in', 'on', 'for', 'and', 'or',
   'where', 'what', 'which', 'how', 'do', 'does', 'did', 'i', 'we', 'it', 'this', 'that', 'with',
   'when', 'who', 'why', 'can', 'should', 'my', 'our', 'you', 'your', 'from', 'by', 'at', 'as',
-  // Discovery-question scaffolding: words a caller uses to FRAME the ask
-  // ("find the code responsible for X", "I need to modify X, where do I
-  // start?", "explain how X works in this codebase") rather than to name the
-  // target. Left in, these compete on equal footing with the real identifier
-  // terms and can outrank it outright — e.g. "find the code responsible for
-  // deleteAsync" let "find" alone drag in every FindByIdAsync/FindAll method
-  // in the repo, none of them the target (VG-LOCATE-FAILURE-ANALYSIS.md).
-  'find', 'code', 'responsible', 'need', 'modify', 'me',
-  'implementation', 'explain', 'works', 'codebase', 'contains', 'file',
-  // String/URL occurrence scaffolding: "does not exist", "find occurrences of …"
-  // must not light up DoesNot*/NonExisting*/commandExists via weak substrings
-  // (field report: https://…/signup does not exist find occurrences).
-  'not', 'no', 'exist', 'exists', 'existing', 'occurrence', 'occurrences',
-  'occurence', 'occurences', 'every', 'place', 'places', 'string', 'literal',
-  'text', 'search', 'locate', 'look', 'looking', 'show', 'list', 'all',
+  // Process verbs. A caller says what they want DONE with these; they never
+  // name the code it should be done to. Left in, bare `add` seeds every
+  // Add*/*Add* symbol in the repo ahead of the terms that carry the subject.
+  'add', 'adds', 'added', 'adding',
+  'create', 'creates', 'created', 'creating',
+  'make', 'makes', 'making', 'made',
+  'remove', 'removes', 'removed', 'removing',
+  'delete', 'deletes', 'deleted', 'deleting',
+  'update', 'updates', 'updated', 'updating',
+  'change', 'changes', 'changed', 'changing',
+  'set', 'sets', 'setting', 'setup', 'get', 'gets', 'getting',
+  'use', 'uses', 'used', 'using', 'want', 'wants', 'wanted', 'doing', 'done',
+  'support', 'supports', 'supported', 'supporting',
+  'enable', 'enables', 'enabled', 'enabling',
+  'disable', 'disables', 'disabled', 'disabling',
+  'allow', 'allows', 'allowed', 'handle', 'handles', 'handling',
+  'implement', 'implements', 'implemented', 'implementing',
+  'build', 'builds', 'building', 'built', 'need', 'needs', 'needed',
+  // Filler nouns and connectives: the generic scaffolding of a request.
+  'new', 'newly', 'via', 'through', 'into', 'onto',
+  'way', 'ways', 'thing', 'things', 'stuff',
+  'feature', 'features', 'functionality',
+  'method', 'methods', 'option', 'options', 'ability',
+  'form', 'forms', 'page', 'pages', 'screen', 'screens', 'button', 'buttons',
+  'help', 'start', 'begin', 'work', 'works', 'working',
+  'also', 'currently', 'properly', 'correctly', 'please',
+  'happens', 'happen', 'something', 'somewhere',
+  'step', 'steps', 'flow', 'process',
+  // Discovery-question scaffolding: words that FRAME the search itself
+  // ("find the code responsible for X", "explain how X works").
+  'find', 'code', 'responsible', 'modify', 'me',
+  'implementation', 'explain', 'codebase', 'contains', 'file',
+  // Bug-report framing: says something is WRONG, never what is wrong.
+  // `fix` alone lit up `export_fixed_width_records`, `out` lit up every
+  // *Router*/*rollout* symbol (vg code prompt-relevance corpus).
+  'fix', 'fixes', 'fixing', 'bug', 'bugs', 'broken', 'busted', 'borked',
+  'wrong', 'incorrect', 'incorrectly', 'figure', 'out', 'sure',
 ]);
 
 /**
@@ -176,40 +213,125 @@ export function isLocateOnlyInstruction(instruction: string): boolean {
 export function queryGraph(graph: VgGraph, question: string, options: QueryOptions = {}): QueryResult {
   const budget = options.budget ?? 2000;
   const limit = options.limit ?? 12;
-  // When the ask embeds a URL or quoted string, score symbols only on the
-  // residual framing text. Empty residual → empty matches (honest miss) rather
-  // than path-token false positives that poison Task Capsules.
   const literals = extractLiteralNeedles(question);
-  const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
-  const prep = prepareTerms(forTokens, options.relevance, priorResidual(options.priorQuestion));
-  const weightOf = termWeights(graph, prep.terms.map((t) => t.term));
   const index = indexFor(graph);
 
-  const scored: QueryMatch[] = [];
-  // Two honest-miss paths: literal-only locate (no identifier terms after
-  // stripping needles) and weak-only asks ("add a new feature") whose every
-  // term is a process verb — seeding those from `add*`/`create*` surface
-  // matches is exactly the capsule-poisoning failure (field report 2026-07).
-  if (prep.hasContent) {
-    for (const node of graph.nodes) {
-      if (node.kind === 'file' || node.kind === 'external') continue;
-      const { score, why } = scoreNode(node, prep.terms, weightOf);
-      if (score > 0) {
-        const affinity = topicAffinity(node.id, options.relevance, options.topicTags);
-        scored.push({
-          node,
-          score: round(score * affinity.boost * (1 + IMPORTANCE_WEIGHT * node.importance)),
-          why: why + affinity.label,
-        });
-      }
-    }
-    scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
+  let seeds: QueryMatch[];
+  if (options.ranked) {
+    // Module ranking (already sanitized: every id names a real symbol).
+    // An honest miss from the engine stays an honest miss here.
+    const byId = new Map<string, GraphNode>();
+    for (const node of graph.nodes) byId.set(node.id, node);
+    seeds = options.ranked.hasContent
+      ? options.ranked.seeds
+          .map((s) => {
+            const node = byId.get(s.id);
+            return node ? { node, score: s.score, why: s.why } : null;
+          })
+          .filter((m): m is QueryMatch => m !== null)
+          .slice(0, limit)
+      : [];
+  } else {
+    seeds = mechanicalRank(graph, question, literals).slice(0, limit);
   }
 
-  const seeds = scored.slice(0, limit);
   const { context, tokensEstimate } = buildContext(graph, index, question, seeds, budget, literals);
-
   return { question, matches: seeds, context, tokensEstimate };
+}
+
+/**
+ * The module-less fallback: mechanical identifier matching, deliberately free
+ * of language understanding. A token scores only when it IS a symbol's name,
+ * one of its camel/snake parts, or (length ≥ 4) a substring of the qualified
+ * name — so "write tests for chargeCard" or a pasted `src/…/File.ts` path
+ * still pins the right file, while intent phrasings honestly miss until the
+ * relevance module is available. No lexicon, no term roles, no IDF, no typo
+ * repair, no expansions — that is the module's job now.
+ */
+function mechanicalRank(graph: VgGraph, question: string, literals: string[]): QueryMatch[] {
+  const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
+  let tokens = tokenize(forTokens);
+  // A literal ask's residual framing ("does not exist", "find occurrences")
+  // must not light up DoesNot*/NonExisting*/commandExists lookalikes — the
+  // honest-miss contract of the locate path holds module-less too.
+  if (literals.length > 0) tokens = tokens.filter((t) => !LOCATE_SCAFFOLD.has(t));
+  if (tokens.length === 0) return [];
+  const scored: QueryMatch[] = [];
+  for (const node of graph.nodes) {
+    if (node.kind === 'file' || node.kind === 'external') continue;
+    const name = node.name.toLowerCase();
+    const qn = node.qualifiedName.toLowerCase();
+    const parts = identifierParts(node.name);
+    let score = 0;
+    const hits: string[] = [];
+    for (const t of tokens) {
+      if (name === t) {
+        score += 10;
+        hits.push(t);
+      } else if (parts.has(t)) {
+        score += 6;
+        hits.push(t);
+      } else if (t.length >= 4 && qn.includes(t)) {
+        score += 3;
+        hits.push(t);
+      }
+    }
+    if (score > 0) {
+      scored.push({
+        node,
+        score: round(score * (1 + IMPORTANCE_WEIGHT * node.importance)),
+        why: `matched: ${hits.join(', ')}`,
+      });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
+  return diversifyByFile(scored);
+}
+
+function tokenize(q: string): string[] {
+  return [
+    ...new Set(
+      q
+        .toLowerCase()
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter((t) => t.length >= 1 && !FUNCTION_WORDS.has(t)),
+    ),
+  ];
+}
+
+/**
+ * Importance is a mild tiebreaker, not a doubling: at 0.4 a top hub adds at
+ * most 40%, enough to break genuine ties without overriding term evidence.
+ */
+const IMPORTANCE_WEIGHT = 0.4;
+
+/** Residual framing of a string/URL locate ask — never symbol evidence. */
+const LOCATE_SCAFFOLD = new Set([
+  'not', 'no', 'exist', 'exists', 'existing', 'occurrence', 'occurrences',
+  'occurence', 'occurences', 'find', 'every', 'place', 'places', 'string',
+  'literal', 'text', 'search', 'locate', 'look', 'looking', 'show', 'list', 'all',
+]);
+
+/**
+ * Stable file-diversity pass over the ranked list: each file's best node
+ * keeps its rank; further nodes from an already-represented file are demoted
+ * behind the first representative of every other matching file (never
+ * dropped). Mechanical presentation hygiene — the seed window is a coverage
+ * budget either way.
+ */
+function diversifyByFile(matches: QueryMatch[]): QueryMatch[] {
+  const seen = new Set<string>();
+  const firstPerFile: QueryMatch[] = [];
+  const rest: QueryMatch[] = [];
+  for (const m of matches) {
+    if (seen.has(m.node.file)) {
+      rest.push(m);
+    } else {
+      seen.add(m.node.file);
+      firstPerFile.push(m);
+    }
+  }
+  return firstPerFile.concat(rest);
 }
 
 export interface SemanticQueryOptions extends QueryOptions {
@@ -233,9 +355,9 @@ export interface SemanticQueryOptions extends QueryOptions {
 /**
  * Reciprocal Rank Fusion constant (the standard k=60). Fusing RANKINGS
  * instead of blending raw scores removes the need to calibrate two
- * incomparable scales (tiered lexical evidence vs cosine similarity): a node's
- * fused score is Σ 1/(k + rankᵢ) over the lists it appears in, so agreement
- * between signals dominates and a single signal's outlier magnitude cannot.
+ * incomparable scales: a node's fused score is Σ 1/(k + rankᵢ) over the
+ * lists it appears in, so agreement between signals dominates and a single
+ * signal's outlier magnitude cannot.
  */
 const RRF_K = 60;
 
@@ -249,12 +371,12 @@ function ranksOf(scores: Map<string, number>, nameOf: (id: string) => string): M
 }
 
 /**
- * Hybrid lexical + local-embedding retrieval, combined with Reciprocal Rank
- * Fusion (Phase 3.2 — replaces the former 50/50 score blend), so a question
- * like "where do we handle auth failures?" can surface `verify_token` even
- * with no shared identifier. Topic affinity and importance stay multiplicative
- * tiebreakers on the fused score. Deterministic given the same model + cached
- * vectors; embeddings live in a binary sidecar next to the map, never in `graph.json`.
+ * Hybrid retrieval, combined with Reciprocal Rank Fusion: the module ranking
+ * (or the mechanical fallback) is one arm, the local-embedding pass the
+ * other, so a question like "where do we handle auth failures?" can surface
+ * `verify_token` even with no shared word. Deterministic given the same
+ * model + cached vectors; embeddings live in a binary sidecar next to the
+ * map, never in `graph.json`.
  */
 export async function queryGraphSemantic(
   graph: VgGraph,
@@ -265,36 +387,33 @@ export async function queryGraphSemantic(
   const limit = options.limit ?? 12;
   const literals = extractLiteralNeedles(question);
   const forTokens = literals.length > 0 ? stripLiteralNeedles(question) : question;
-  const prep = prepareTerms(forTokens, options.relevance, priorResidual(options.priorQuestion));
-  const terms = prep.terms.map((t) => t.term);
-  const weightOf = termWeights(graph, terms);
-  const index = indexFor(graph);
+  const residualTokens = tokenize(forTokens);
   // Embed the residual ask (without URL/quote noise) so semantic neighbours
   // aren't dragged toward package names that share host path segments. Skipped
   // entirely when the ranking arrives pre-computed (vgd already embedded it).
   const queryVec = options.semanticRanked
     ? null
     : await options.embedder?.embedQuery(forTokens || question);
+  const index = indexFor(graph);
 
-  // Raw lexical scores (pre-importance) — RRF consumes only their ORDER.
-  // Weak-only asks get no lexical evidence (same suppression as queryGraph);
-  // the semantic cosine below may still surface conceptual neighbours for them.
+  // Lexical arm: module ranking order when available, mechanical otherwise.
+  // RRF consumes only the ORDER. An honest miss contributes an empty arm.
   const lexRaw = new Map<string, number>();
   const whyById = new Map<string, string>();
-  if (prep.hasContent) {
-    for (const node of graph.nodes) {
-      if (node.kind === 'file' || node.kind === 'external') continue;
-      const { score, why } = scoreNode(node, prep.terms, weightOf);
-      lexRaw.set(node.id, score);
-      whyById.set(node.id, why);
-    }
+  const lexSeeds = options.ranked
+    ? options.ranked.hasContent
+      ? options.ranked.seeds.map((s) => ({ id: s.id, score: s.score, why: s.why }))
+      : []
+    : mechanicalRank(graph, question, literals).map((m) => ({ id: m.node.id, score: m.score, why: m.why }));
+  for (const s of lexSeeds) {
+    lexRaw.set(s.id, s.score);
+    whyById.set(s.id, s.why);
   }
 
   const scored: QueryMatch[] = [];
   // Literal-only asks: skip the semantic loop entirely — embeddings over
   // "does not exist find occurrences" still surface unrelated hubs.
-  if (terms.length > 0 || literals.length === 0) {
-    // Independent per-signal rankings, then RRF.
+  if (residualTokens.length > 0 || literals.length === 0) {
     const semRaw = new Map<string, number>();
     const nodeById = new Map<string, GraphNode>();
     for (const node of graph.nodes) {
@@ -302,10 +421,10 @@ export async function queryGraphSemantic(
       nodeById.set(node.id, node);
       if (options.semanticRanked || !queryVec) continue;
       const vec = options.nodeVectors?.get(node.id);
-      const sem = vec && terms.length > 0 ? Math.max(0, cosine(queryVec, vec)) : 0;
+      const sem = vec && residualTokens.length > 0 ? Math.max(0, cosine(queryVec, vec)) : 0;
       if (sem > 0) semRaw.set(node.id, sem);
     }
-    if (options.semanticRanked && terms.length > 0) {
+    if (options.semanticRanked && residualTokens.length > 0) {
       // Ignore ids the ranking knows about but this graph no longer has: the
       // daemon's index can be one publish behind a locally refreshed map.
       for (const { id, score } of options.semanticRanked) {
@@ -322,534 +441,32 @@ export async function queryGraphSemantic(
       const fused = (lr !== undefined ? 1 / (RRF_K + lr) : 0) + (sr !== undefined ? 1 / (RRF_K + sr) : 0);
       const sem = semRaw.get(id) ?? 0;
       const lexWhy = whyById.get(id);
-      const affinity = topicAffinity(id, options.relevance, options.topicTags);
-      const why = (lexWhy || (sem > 0.3 ? `semantic match (${sem.toFixed(2)})` : 'weak match')) + affinity.label;
-      scored.push({ node, score: round(fused * affinity.boost * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
+      const why = lexWhy || (sem > 0.3 ? `semantic match (${sem.toFixed(2)})` : 'weak match');
+      scored.push({ node, score: round(fused * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
     }
     scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
   }
 
-  const seeds = scored.slice(0, limit);
+  const seeds = diversifyByFile(scored).slice(0, limit);
   const { context, tokensEstimate } = buildContext(graph, index, question, seeds, budget, literals);
   return { question, matches: seeds, context, tokensEstimate };
 }
 
 /**
- * Split on anything that isn't a Unicode letter/number (`\p{L}\p{N}`, not the
- * ASCII-only `[a-z0-9]`) so identifiers in non-Latin scripts (Japanese,
- * Cyrillic, ...) survive tokenization instead of vanishing entirely — the
- * ASCII-only split treated every character of e.g. `名前` as a separator,
- * producing zero terms and a guaranteed empty result for any question about
- * it (VG-LOCATE-FAILURE-ANALYSIS.md). Length floor is 1, not 2: a single
- * non-stopword letter/digit is still the whole identifier when that's genuinely
- * the symbol's name (adversarial fixtures deliberately use bare `f`/`x`/`h`
- * names to stress this) — STOPWORDS already screens out short function words.
- */
-function tokenize(q: string): string[] {
-  return [
-    ...new Set(
-      q
-        .toLowerCase()
-        .split(/[^\p{L}\p{N}]+/u)
-        .filter((t) => t.length >= 1 && !STOPWORDS.has(t)),
-    ),
-  ];
-}
-
-/** Ordered, lowercased token stream WITH stopwords — bigram concepts ("sign in",
- *  "direct debit") need adjacency over the raw word order. */
-function tokenizeOrdered(q: string): string[] {
-  return q
-    .toLowerCase()
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((t) => t.length >= 1);
-}
-
-/**
- * A query term with its role resolved. Roles decide how much evidence a match
- * carries (see scoreNode):
- *  - content  — names the topic; full weight, counts toward coverage
- *  - weak     — process verb ("add", "create", "via"); down-weighted, can only
- *               corroborate a content match, never carry a seed alone
- *  - expansion — concept vocabulary from the lexicon ("payments"→"stripe");
- *               reduced weight, counts as content evidence, provenance in `why`
- */
-interface QueryTerm {
-  term: string;
-  weak: boolean;
-  /** Source token/bigram when this term came from concept expansion. */
-  from?: string;
-  /** Provider-supplied confidence (0..1) when this term came from the optional
-   *  relevance provider; replaces the flat EXPANSION_WEIGHT for that term. */
-  providerWeight?: number;
-  /** True when this term was carried over from the previous conversational
-   *  turn (QueryOptions.priorQuestion); scores at CARRY_WEIGHT. */
-  carried?: boolean;
-}
-
-interface PreparedTerms {
-  terms: QueryTerm[];
-  /** True when at least one content or expansion term exists — the bar a
-   *  question must clear before ANY node may seed. */
-  hasContent: boolean;
-}
-
-/** Weak process verbs corroborate at a fraction of a content term's weight. */
-const WEAK_TERM_WEIGHT = 0.25;
-/** Concept expansions score below a literal question term of the same rarity. */
-const EXPANSION_WEIGHT = 0.7;
-/** Per extra distinct content term matched, the multiplicative coverage bonus.
- *  Multi-topic evidence ("direct" + "debit" + "payments") must beat any
- *  single-term surface hit ("add") by construction, not by luck. */
-const COVERAGE_BONUS = 0.35;
-/** Terms carried from the previous conversational turn score at half weight:
- *  enough to keep a follow-up anchored to the conversation's topic (and to
- *  rescue weak-only follow-ups like "can we use it?"), never enough for stale
- *  context to outrank a clearly-named new topic in the current ask. */
-const CARRY_WEIGHT = 0.5;
-
-/** Resolve term roles + concept expansions for the residual ask text. */
-function prepareTerms(forTokens: string, relevance?: RelevanceAnalysis | null, prior?: string | null): PreparedTerms {
-  const base = tokenize(forTokens);
-  const ordered = tokenizeOrdered(forTokens);
-  const baseSet = new Set(base);
-  // A token consumed by a fired bigram concept ("direct" in "direct debits")
-  // is demoted to the weak role: the bigram's expansions carry the topic, and
-  // the constituent alone is a distractor magnet (directGet, redirectUrl, …).
-  const consumed = bigramConsumedTokens(ordered);
-  const terms: QueryTerm[] = base.map((t) => ({ term: t, weak: WEAK_TERMS.has(t) || consumed.has(t) }));
-  const have = new Set(base);
-  for (const e of expandConcepts(ordered)) {
-    if (baseSet.has(e.term)) continue;
-    terms.push({ term: e.term, weak: false, from: e.from });
-    have.add(e.term);
-  }
-  // Provider expansions (already sanitized by engine/relevance-provider.ts)
-  // join as expansion-role terms with their own confidence weight. The
-  // built-in lexicon wins ties: a term it already produced is not re-added,
-  // so provider presence never changes the score of a lexicon-covered term.
-  for (const e of relevance?.expansions ?? []) {
-    if (have.has(e.term)) continue;
-    terms.push({ term: e.term, weak: false, from: e.from, providerWeight: e.weight });
-    have.add(e.term);
-  }
-  // Conversation carry-over: the previous turn's CONTENT terms (plus their
-  // lexicon expansions) join at CARRY_WEIGHT. Weak process verbs from the
-  // prior turn are dropped outright — carrying "add"/"use" forward would
-  // re-open the grab-bag failure this module exists to prevent. A term the
-  // current ask already produced is never re-added, so the current turn
-  // always wins ties and single-turn behaviour is byte-identical.
-  if (prior?.trim()) {
-    const priorOrdered = tokenizeOrdered(prior);
-    const priorConsumed = bigramConsumedTokens(priorOrdered);
-    for (const t of tokenize(prior)) {
-      if (have.has(t) || WEAK_TERMS.has(t) || priorConsumed.has(t)) continue;
-      terms.push({ term: t, weak: false, carried: true });
-      have.add(t);
-    }
-    for (const e of expandConcepts(priorOrdered)) {
-      if (have.has(e.term)) continue;
-      terms.push({ term: e.term, weak: false, from: e.from, carried: true });
-      have.add(e.term);
-    }
-  }
-  const hasContent = terms.some((t) => !t.weak);
-  return { terms, hasContent };
-}
-
-/** Residual text of the previous ask, with URL/quoted needles stripped so a
- *  pasted link in turn N-1 cannot poison turn N's carried vocabulary. */
-function priorResidual(prior: string | null | undefined): string | null {
-  const raw = prior?.trim();
-  if (!raw) return null;
-  return extractLiteralNeedles(raw).length > 0 ? stripLiteralNeedles(raw) : raw;
-}
-
-/**
- * Plain-language concept map for one ask: how its words were interpreted —
- * fired concept/bigram expansions, relevance-kernel topics and vocabulary,
- * and terms carried from the previous conversational turn. Rendered into the
- * Task Capsule so a model (especially a small local one) can read the
- * inference chain ("direct debits" → debit/mandate/…; topic payments →
- * stripe/billing/…) as sentences instead of reverse-engineering the `a→b`
- * slugs in per-seed match provenance. Deterministic and bounded; empty when
- * nothing fired (honest-empty asks stay empty).
- */
-export function conceptMapLines(
-  question: string,
-  relevance?: RelevanceAnalysis | null,
-  priorQuestion?: string | null,
-): string[] {
-  const cap = (xs: string[]) => [...new Set(xs)].slice(0, 8).join(', ');
-  const literals = extractLiteralNeedles(question);
-  const residual = literals.length > 0 ? stripLiteralNeedles(question) : question;
-  const lines: string[] = [];
-
-  // Lexicon / bigram expansions, grouped by the ask term that fired them.
-  const byFrom = new Map<string, string[]>();
-  for (const e of expandConcepts(tokenizeOrdered(residual))) {
-    const list = byFrom.get(e.from) ?? [];
-    list.push(e.term);
-    byFrom.set(e.from, list);
-  }
-  for (const [from, terms] of byFrom) {
-    lines.push(`- "${from}" in the ask implies these codebase identifiers: ${cap(terms)}.`);
-  }
-
-  // ---------------------------------------------------------------------
-  // What the ask is about, deepest first.
-  //
-  // Order is the message. A reader (or a model) wants the most specific thing
-  // first — "cname" — then the product that makes it concrete — "cloudflare" —
-  // then the containing levels, widening out to "infrastructure". Files come
-  // after that, because they are where to look once you know what you are
-  // looking for. Corrections come last: they explain how the ask was read,
-  // which only matters once the reading itself is on the page.
-  // ---------------------------------------------------------------------
-  const matches = relevance?.taxonomy ?? [];
-  if (matches.length) {
-    // Every matched level, deduped, deepest first. Ties keep provider order,
-    // which is evidence-ranked.
-    const seenPath = new Set<string>();
-    const levels: Array<{ path: string; id: string; depth: number; terms: string[] }> = [];
-    for (const m of matches) {
-      for (const l of m.levels) {
-        if (seenPath.has(l.path)) continue;
-        seenPath.add(l.path);
-        levels.push({ path: l.path, id: l.id, depth: l.path.split('/').length, terms: l.terms });
-      }
-    }
-    const deepest = Math.max(...levels.map((l) => l.depth));
-    const describe = (l: { id: string; terms: string[] }, lead: string) =>
-      l.terms.length
-        ? `${lead} ${l.id}; code for it typically uses: ${cap(l.terms)}.`
-        : `${lead} ${l.id}.`;
-
-    for (const l of levels.filter((l) => l.depth === deepest)) {
-      lines.push(describe(l, '- The ask is specifically about'));
-    }
-
-    // The product named sits directly under the most specific topic — it is
-    // what turns that topic into this codebase's version of it. When the
-    // product IS the most specific topic, the line above already said so, and
-    // only the typed form is worth adding.
-    const deepestIds = new Set(levels.filter((l) => l.depth === deepest).map((l) => l.id));
-    for (const v of (relevance?.vendors ?? []).filter((v) => v.score > 0).slice(0, 3)) {
-      if (deepestIds.has(v.name)) {
-        if (v.from !== v.name) lines.push(`- That product was typed "${v.from}".`);
-        continue;
-      }
-      lines.push(
-        v.from === v.name
-          ? `- It names the product "${v.name}".`
-          : `- It names the product "${v.name}" (typed "${v.from}").`,
-      );
-    }
-
-    // Then widen, one level at a time — skipping any level the vendor line
-    // already named, so a Cloudflare ask does not say "cloudflare" twice.
-    const named = new Set((relevance?.vendors ?? []).map((v) => v.name));
-    for (let d = deepest - 1; d >= 1; d--) {
-      for (const l of levels.filter((l) => l.depth === d && !named.has(l.id))) {
-        lines.push(describe(l, '- More broadly, this is'));
-      }
-    }
-  } else if (relevance?.topics?.length) {
-    // Provider without a taxonomy (or an older one): flat topics, as before.
-    const topicVocab = new Map<string, string[]>();
-    for (const e of relevance.expansions ?? []) {
-      const list = topicVocab.get(e.from) ?? [];
-      list.push(e.term);
-      topicVocab.set(e.from, list);
-    }
-    for (const t of relevance.topics.slice(0, 3)) {
-      const vocab = topicVocab.get(t.id);
-      lines.push(
-        vocab?.length
-          ? `- The ask is about the "${t.id}" domain; code for it typically uses: ${cap(vocab)}.`
-          : `- The ask is about the "${t.id}" domain.`,
-      );
-    }
-  }
-
-  // What governs the work, named at the revision the provider tracks. This is
-  // the difference between "this is accessibility work" and "this is
-  // accessibility work, and WCAG 2.2 is what it has to satisfy".
-  const standards = relevance?.standards ?? [];
-  if (standards.length) {
-    const specs = standards.filter((st) => st.kind !== 'regulation');
-    const rules = standards.filter((st) => st.kind === 'regulation');
-    const render = (list: typeof standards) =>
-      list
-        .slice(0, 3)
-        .map((st) => (st.publisher ? `${st.name} (${st.publisher})` : st.name))
-        .join('; ');
-    // A spec and a legal duty are not the same obligation, so they are not
-    // pooled into one sentence.
-    if (specs.length) lines.push(`- Standards that govern this area: ${render(specs)}.`);
-    if (rules.length) lines.push(`- Regulations that apply here: ${render(rules)}.`);
-  }
-
-  // The site's own category slugs for everything above, so a reader (or a
-  // lookup) can cross-reference content by the same key.
-  const categories = relevance?.categories ?? [];
-  if (categories.length) {
-    lines.push(`- Related categories: ${cap(categories)}.`);
-  }
-
-  // Where that work usually lives — the concrete lead, after the abstract one.
-  const fileHints = relevance?.files ?? [];
-  if (fileHints.length) {
-    lines.push(`- Files for this kind of work are usually named or extended: ${cap(fileHints)}.`);
-  }
-
-  // How the ask was read, if it was read as something other than typed.
-  for (const c of (relevance?.corrections ?? []).slice(0, 3)) {
-    lines.push(`- Read "${c.from}" in the ask as "${c.to}".`);
-  }
-
-  // Conversation carry-over provenance.
-  const priorText = priorResidual(priorQuestion);
-  if (priorText) {
-    const current = new Set(tokenize(residual));
-    const consumed = bigramConsumedTokens(tokenizeOrdered(priorText));
-    const carried = tokenize(priorText).filter((t) => !current.has(t) && !WEAK_TERMS.has(t) && !consumed.has(t));
-    if (carried.length) {
-      lines.push(`- This is a follow-up; topic words carried from the previous ask: ${cap(carried)}.`);
-    }
-  }
-
-  if (lines.length) {
-    lines.push(
-      '- Seed notation below: `a→b` = ask term "a" implied identifier "b"; `~t` = word-form match; `↩t` = carried from the previous ask.',
-    );
-  }
-  return lines;
-}
-
-function scoreNode(node: GraphNode, terms: QueryTerm[], weightOf: (t: string) => number = () => 1): { score: number; why: string } {
-  let score = 0;
-  let contentHits = 0;
-  const hits: string[] = [];
-  const name = node.name.toLowerCase();
-  const qn = node.qualifiedName.toLowerCase();
-  const file = node.file.toLowerCase();
-  // Directory segments of the file path: a term naming a whole directory
-  // ("payments" → src/payments/…) is domain evidence, stronger than an
-  // incidental substring somewhere in the path.
-  const dirSegments = new Set(file.split('/').slice(0, -1));
-  // Split the ORIGINAL name on camelCase / snake_case, then lowercase the parts
-  // (splitting must see the capitals, so it happens before lowercasing).
-  const nameParts = identifierParts(node.name);
-  for (const { term: t, weak, from, providerWeight, carried } of terms) {
-    // Each term's contribution is weighted by its specificity (IDF over symbol
-    // names): a match on a distinctive term ("toComparable", "layoutFor") counts
-    // for more than a match on a term shared by hundreds of symbols ("code",
-    // "get", "run"). Without this, an incidental exact-name hit on a common word
-    // in a natural-language question outranked the conceptually-correct symbol,
-    // and importance weighting amplified the wrong hit (VG-NAVIGATION trace).
-    // Role multipliers stack on top: process verbs corroborate at a fraction,
-    // concept expansions score below a literal term of the same rarity.
-    // Expansion role multiplier: provider expansions carry their own 0..1
-    // confidence (capped at the lexicon's EXPANSION_WEIGHT so an installed
-    // provider can widen vocabulary but never outrank the reviewed lexicon's
-    // evidence class); lexicon expansions keep the flat EXPANSION_WEIGHT.
-    const expansionW = providerWeight !== undefined ? Math.min(providerWeight, EXPANSION_WEIGHT) : from ? EXPANSION_WEIGHT : 1;
-    const w = weightOf(t) * (weak ? WEAK_TERM_WEIGHT : 1) * expansionW * (carried ? CARRY_WEIGHT : 1);
-    const label = (carried ? '↩' : '') + (from ? `${from}→${t}` : t);
-    let contribution = 0;
-    if (name === t) {
-      contribution = 10 * w;
-      hits.push(label);
-    } else if (nameParts.has(t)) {
-      contribution = 6 * w;
-      hits.push(label);
-    } else if (name.includes(t)) {
-      contribution = 4 * w;
-      hits.push(label);
-    } else if (qn.includes(t)) {
-      contribution = 3 * w;
-      hits.push(label);
-    } else if (fuzzyPartMatch(t, nameParts)) {
-      // Morphological / subword match: "authentication" ↔ "authenticate"
-      // (shared prefix), so lexical ask survives word-form differences without
-      // a model. The semantic path handles non-shared-root synonyms.
-      contribution = 2 * w;
-      hits.push((carried ? '↩' : '') + (from ? `~${from}→${t}` : `~${t}`));
-    } else if (dirSegments.has(t)) {
-      contribution = 2 * w;
-      hits.push(label);
-    } else if (file.includes(t)) {
-      contribution = 1 * w;
-      hits.push(label);
-    }
-    if (contribution > 0) {
-      score += contribution;
-      if (!weak) contentHits += 1;
-    }
-  }
-  // A node whose only evidence is weak process verbs is noise by definition —
-  // the `add`-grab-bag capsule failure. Suppress it outright: weak terms
-  // corroborate content matches, they never carry a seed.
-  if (contentHits === 0) return { score: 0, why: '' };
-  // Reward multi-term topic coverage multiplicatively so converging evidence
-  // ("direct" + "debit" + payments-expansion) dominates single-term hits.
-  score *= 1 + COVERAGE_BONUS * Math.min(contentHits - 1, 4);
-  return { score, why: hits.length ? `matched: ${hits.join(', ')}` : '' };
-}
-
-/**
- * Importance is a mild tiebreaker, not a doubling. The old `1 + importance`
- * let a hub (importance→1) double its score and outrank a stronger textual
- * match on the actual target; at 0.4 a top hub adds at most 40%, enough to
- * break genuine ties without overriding term evidence.
- */
-const IMPORTANCE_WEIGHT = 0.4;
-
-/**
- * Topic-affinity bonus cap: a node whose enrichment tags intersect the
- * question's inferred topics gains at most this fraction on top of its
- * textual evidence. Sized between IMPORTANCE_WEIGHT (0.4) and nothing:
- * strong enough to break domain ties ("direct debits" → the payments file
- * over an equal-scoring name hit elsewhere), never strong enough to outrank
- * a clearly better textual match — and it multiplies an existing non-zero
- * score, so it can never conjure a seed by itself.
- */
-const TOPIC_AFFINITY_WEIGHT = 0.3;
-
-/** Affinity multiplier + provenance for one node under the current analysis. */
-/**
- * Shared root-first path depth between two taxonomy paths.
- * "infrastructure/networking/dns/cname" vs "infrastructure/networking/dns" → 3.
- */
-function sharedDepth(a: string, b: string): number {
-  const as = a.split('/');
-  const bs = b.split('/');
-  let n = 0;
-  while (n < as.length && n < bs.length && as[n] === bs[n]) n++;
-  return n;
-}
-
-/**
- * How strongly a node's taxonomy tags match what the ask is about.
- *
- * Tags and query matches are both PATHS, so agreement is measured by how far
- * down the tree they agree, not merely whether they share a label. A DNS ask
- * and a file tagged `infrastructure/networking/dns` agree three levels deep
- * and get most of the bonus; the same ask and a file tagged
- * `infrastructure/containers` agree only at the root and get a fraction of it.
- * That is the whole reason tags carry paths.
- *
- * Falls back to flat topic-id matching when the provider predates the
- * taxonomy (or a stale sidecar still holds flat tags), so an older install
- * ranks exactly as it did before.
- */
-function topicAffinity(
-  nodeId: string,
-  relevance: RelevanceAnalysis | null | undefined,
-  topicTags: Map<string, readonly string[]> | null | undefined,
-): { boost: number; label: string } {
-  if (!topicTags) return { boost: 1, label: '' };
-  const tags = topicTags.get(nodeId);
-  if (!tags?.length) return { boost: 1, label: '' };
-
-  const paths = relevance?.taxonomy ?? [];
-  if (paths.length && tags.some((t) => t.includes('/'))) {
-    let best = 0;
-    let label = '';
-    for (const match of paths) {
-      const askDepth = match.path.split('/').length;
-      for (const tag of tags) {
-        const shared = sharedDepth(match.path, tag);
-        if (shared === 0) continue;
-        // Specificity of agreement × confidence in the match.
-        const affinity = (shared / askDepth) * match.score;
-        if (affinity > best) {
-          best = affinity;
-          label = shared === askDepth ? match.path : match.path.split('/').slice(0, shared).join('/');
-        }
-      }
-    }
-    if (best <= 0) return { boost: 1, label: '' };
-    return { boost: 1 + TOPIC_AFFINITY_WEIGHT * Math.min(best, 1), label: `, topic:${label}` };
-  }
-
-  if (!relevance?.topics?.length) return { boost: 1, label: '' };
-  let affinity = 0;
-  const matched: string[] = [];
-  for (const t of relevance.topics) {
-    if (tags.includes(t.id)) {
-      affinity += t.score;
-      matched.push(t.id);
-    }
-  }
-  if (affinity <= 0) return { boost: 1, label: '' };
-  return { boost: 1 + TOPIC_AFFINITY_WEIGHT * Math.min(affinity, 1), label: `, topic:${matched.sort().join('+')}` };
-}
-
-/**
- * Per-term specificity weights (IDF) for one question, computed over the graph's
- * symbol-name vocabulary: `ln((N+1)/(df+1)) + 1`, clamped to a sane band. A term
- * that appears in one symbol name is highly discriminating; one that appears in
- * hundreds ("get", "code", "run", "handler") is near-noise. Clamped so a term
- * matching nothing (huge idf, but it scores 0 anyway) or everything can't
- * distort the scale. Cost is one O(nodes) pass, dwarfed by the scoring loop.
- */
-function termWeights(graph: VgGraph, terms: string[]): (t: string) => number {
-  if (terms.length === 0) return () => 1;
-  const df = new Map<string, number>();
-  let n = 0;
-  for (const node of graph.nodes) {
-    if (node.kind === 'file' || node.kind === 'external') continue;
-    n++;
-    const name = node.name.toLowerCase();
-    const parts = identifierParts(node.name);
-    for (const t of terms) {
-      if (parts.has(t) || name.includes(t)) df.set(t, (df.get(t) ?? 0) + 1);
-    }
-  }
-  const w = new Map<string, number>();
-  for (const t of terms) {
-    const idf = Math.log((n + 1) / ((df.get(t) ?? 0) + 1)) + 1;
-    // Ceiling of 8 (vs a natural df≈40 idf ≈ 5.4) keeps genuinely rare terms
-    // dominant while a term matching nothing/only a file path can't distort.
-    w.set(t, Math.max(0.5, Math.min(8, idf)));
-  }
-  return (t: string) => w.get(t) ?? 1;
-}
-
-/**
- * camelCase / snake_case / kebab split of an identifier → lowercased parts.
- * The separator alternative is Unicode-letter-aware (`\p{L}\p{N}`, not
- * ASCII-only `a-zA-Z0-9`) so non-Latin identifiers split on punctuation
- * without losing every character to it; the camelCase boundary lookaround
- * stays ASCII-only since upper/lowercase casing is itself an ASCII-script
- * concept — scripts without case simply never trigger it and fall through to
- * the separator split.
+ * camelCase / snake_case / kebab / letter↔digit split of an identifier →
+ * lowercased parts. The separator alternative is Unicode-letter-aware
+ * (`\p{L}\p{N}`, not ASCII-only) so non-Latin identifiers split on
+ * punctuation without losing every character to it; the camelCase boundary
+ * lookaround stays ASCII-only since casing is itself an ASCII-script concept.
+ * Letter↔digit boundaries split too, so `Session2` keeps `session` reachable.
  */
 export function identifierParts(name: string): Set<string> {
   return new Set(
     name
-      .split(/[^\p{L}\p{N}]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/u)
+      .split(/[^\p{L}\p{N}]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[\p{L}])(?=[0-9])|(?<=[0-9])(?=[\p{L}])/u)
       .filter(Boolean)
       .map((s) => s.toLowerCase()),
   );
-}
-
-/** A term fuzzily matches a part if they share a long-enough prefix (same root). */
-function fuzzyPartMatch(term: string, parts: Set<string>): boolean {
-  for (const part of parts) {
-    const shared = sharedPrefixLen(term, part);
-    if (shared >= 5 && shared >= 0.6 * Math.min(term.length, part.length)) return true;
-  }
-  return false;
-}
-
-function sharedPrefixLen(a: string, b: string): number {
-  const n = Math.min(a.length, b.length);
-  let i = 0;
-  while (i < n && a[i] === b[i]) i++;
-  return i;
 }
 
 function buildContext(

@@ -98,7 +98,11 @@ export { buildEnvelope, redactGraph } from './engine/push.js';
 export type { GraphUploadEnvelope } from './engine/push.js';
 export { grammarsSourceDir } from './engine/grammars.js';
 
-// Fusion — source-bearing Task Capsule (ContextBench / agent-suite lockstep).
+// Fusion — source-bearing Context Capsule (ContextBench / agent-suite lockstep).
+// `moduleInstalled` is exported so a benchmark harness can record WHICH
+// relevance module produced a run: the module resolves from the npm registry at
+// run time, so without this a report cannot be attributed to a module version.
+export { moduleInstalled as relevanceModuleInstalled } from './install/relevance-module.js';
 export {
   buildTaskCapsule,
   capsuleToCodeContext,

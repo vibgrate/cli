@@ -143,9 +143,23 @@ describe('installRelevanceModule', () => {
 describe('ensureRelevanceModule (vg code auto-provision — silent)', () => {
   it('installs silently when absent, then no-ops when installed', async () => {
     const gz = makeTarball(PROVIDER_JS);
-    const io = { fetchImpl: registryFetch(gz) };
+    // A version at/above the ranking-API floor: ensure treats it as current.
+    const io = { fetchImpl: registryFetch(gz, { version: '2026.823.0' }) };
     expect((await ensureRelevanceModule(io)).status).toBe('installed');
     expect((await ensureRelevanceModule(io)).status).toBe('already-installed');
+  });
+
+  it('force-upgrades an install that predates the ranking API', async () => {
+    const gz = makeTarball(PROVIDER_JS);
+    // First install lands a pre-relocation version…
+    expect((await ensureRelevanceModule({ fetchImpl: registryFetch(gz, { version: '1.2.3' }) })).status).toBe('installed');
+    // …which ensure refuses to treat as current: the next call reinstalls in
+    // place at the registry's latest (the module IS the relevance engine now).
+    const upgraded = await ensureRelevanceModule({ fetchImpl: registryFetch(gz, { version: '2026.823.0' }) });
+    expect(upgraded).toMatchObject({ status: 'installed', version: '2026.823.0' });
+    expect((await ensureRelevanceModule({ fetchImpl: registryFetch(gz, { version: '2026.823.0' }) })).status).toBe(
+      'already-installed',
+    );
   });
 
   it('respects an explicit recorded decline and the kill switch', async () => {

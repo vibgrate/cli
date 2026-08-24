@@ -24,7 +24,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { buildCodeContext } from './context.js';
-import { analyzeQuestion, type RelevanceAnalysis } from '../engine/relevance-provider.js';
+import { rankQuestion, type SanitizedRank } from '../engine/relevance-provider.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
 import { userAskFromInstruction } from '../engine/user-ask.js';
 import { buildTaskCapsule, capsuleToCodeContext } from './capsule.js';
@@ -108,18 +108,17 @@ export async function runCodeSession(options: RunSessionOptions): Promise<CodeSe
 
   // ── inspect ──────────────────────────────────────────────────────────────
   phase('inspect', options.capsule ? 'building source-bearing task capsule' : 'building graph-grounded context');
-  // Optional relevance provider: widens capsule seed vocabulary when
-  // installed; null (the default) changes nothing.
-  const relevance = await analyzeQuestion(userAskFromInstruction(instruction));
-  const topicTags = relevance ? await loadTopicTags(graph, root) : null;
+  // The relevance module ranks the seeds when installed (auto-provisioned);
+  // null → the mechanical fallback.
+  const topicTags = await loadTopicTags(graph, root);
+  const ranked = await rankQuestion(graph, userAskFromInstruction(instruction), { limit: 48, topicTags });
   const context = buildSessionContext(graph, instruction, {
     budget,
     files,
     capsule: options.capsule,
     root,
     fsImpl,
-    relevance,
-    topicTags,
+    ranked,
   });
 
   // Per-model savings: the context build is VG Code's `query_graph`-equivalent.
@@ -263,20 +262,19 @@ export function undoChanges(changes: FileChange[], fsImpl: CodeFs): string[] {
 function buildSessionContext(
   graph: VgGraph,
   instruction: string,
-  opts: { budget?: number; files?: string[]; capsule?: boolean; root: string; fsImpl: CodeFs; relevance?: RelevanceAnalysis | null; topicTags?: Map<string, readonly string[]> | null },
+  opts: { budget?: number; files?: string[]; capsule?: boolean; root: string; fsImpl: CodeFs; ranked?: SanitizedRank | null },
 ): CodeContext {
   const budget = opts.budget;
   const files = opts.files;
   if (!opts.capsule) {
-    return buildCodeContext(graph, instruction, { budget, files, relevance: opts.relevance, topicTags: opts.topicTags });
+    return buildCodeContext(graph, instruction, { budget, files, ranked: opts.ranked });
   }
   const capsule = buildTaskCapsule(graph, instruction, {
     budget,
     files,
     readFile: (rel) => opts.fsImpl.read(rel),
     repositoryId: repositoryIdFromRoot(opts.root),
-    relevance: opts.relevance,
-    topicTags: opts.topicTags,
+    ranked: opts.ranked,
   });
   return capsuleToCodeContext(capsule);
 }

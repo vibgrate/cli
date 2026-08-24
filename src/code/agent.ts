@@ -21,7 +21,7 @@
  */
 
 import { buildCodeContext } from './context.js';
-import { analyzeQuestion, type RelevanceAnalysis } from '../engine/relevance-provider.js';
+import { rankQuestion, type SanitizedRank } from '../engine/relevance-provider.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
 import {
   buildTaskCapsule,
@@ -441,14 +441,18 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     ? AGENT_TOOLS
     : AGENT_TOOLS.filter((t) => t.name !== 'spawn_subagent');
   const allTools = [...agentToolSpecs, ...(options.externalTools?.specs ?? [])];
-  // Optional relevance provider: widens capsule seed vocabulary when
-  // installed; null (the default) changes nothing. Loaded once per run and
-  // reused by the capsule-delta recompile below.
-  // Relevance ranks the user ask only — attachment basenames/paths must not
+  // The relevance module ranks the seeds when installed (auto-provisioned);
+  // null → the mechanical fallback. Computed once per run and reused by the
+  // capsule-delta recompile below.
+  // Ranking sees the user ask only — attachment basenames/paths must not
   // become topics or seeds (same strip as buildCodeContext / literal-locate).
-  const relevance = await analyzeQuestion(userAskFromInstruction(instruction));
-  const topicTags = relevance ? await loadTopicTags(graph, options.root) : null;
-  const built = buildAgentContext(graph, instruction, { ...options, fsImpl, budget, relevance, topicTags });
+  const topicTags = await loadTopicTags(graph, options.root);
+  const ranked = await rankQuestion(graph, userAskFromInstruction(instruction), {
+    limit: 48,
+    priorQuestion: options.priorInstruction ? userAskFromInstruction(options.priorInstruction) : null,
+    topicTags,
+  });
+  const built = buildAgentContext(graph, instruction, { ...options, fsImpl, budget, ranked });
   const context = built.context;
   let capsule = built.capsule;
   const useLadder = options.verifyLadder ?? !!capsule;
@@ -709,12 +713,18 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       // Capsule delta: recompile from session-visible files when capsule mode is on.
       if (options.capsule && capsule) {
         try {
+          // Re-rank against the SESSION graph: approved edits may have added
+          // or renamed symbols, and seed ids must belong to the graph the
+          // capsule is compiled from.
+          const nextRanked = await rankQuestion(session.graph, userAskFromInstruction(instruction), {
+            limit: 48,
+            priorQuestion: options.priorInstruction ? userAskFromInstruction(options.priorInstruction) : null,
+            topicTags: await loadTopicTags(session.graph, root),
+          });
           const nextCapsule = buildTaskCapsule(session.graph, instruction, {
             budget,
             files: options.files,
-            relevance,
-            topicTags,
-            priorInstruction: options.priorInstruction,
+            ranked: nextRanked,
             readFile: (rel) => fsImpl.read(rel),
             repositoryId: repositoryIdFromRoot(root),
             provenance: {
@@ -1310,24 +1320,21 @@ export async function compactWithModel(
 function buildAgentContext(
   graph: VgGraph,
   instruction: string,
-  options: AgentOptions & { relevance?: RelevanceAnalysis | null; topicTags?: Map<string, readonly string[]> | null },
+  options: AgentOptions & { ranked?: SanitizedRank | null },
 ): { context: CodeContext; capsule: TaskCapsule | null } {
   const budget = options.budget ?? 3000;
   const files = options.files;
-  const relevance = options.relevance;
-  const topicTags = options.topicTags;
+  const ranked = options.ranked;
   if (!options.capsule) {
     return {
-      context: buildCodeContext(graph, instruction, { budget, files, relevance, topicTags, priorInstruction: options.priorInstruction }),
+      context: buildCodeContext(graph, instruction, { budget, files, ranked }),
       capsule: null,
     };
   }
   const capsule = buildTaskCapsule(graph, instruction, {
     budget,
     files,
-    relevance,
-    topicTags,
-    priorInstruction: options.priorInstruction,
+    ranked,
     readFile: (rel) => options.fsImpl.read(rel),
     repositoryId: repositoryIdFromRoot(options.root),
     extraPinnedFacts: options.extraPinnedFacts,

@@ -4,10 +4,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   loadRelevanceProvider,
-  analyzeQuestion,
-  sanitizeAnalysis,
+  rankQuestion,
   resetRelevanceProviderCache,
-  type RelevanceAnalysis,
 } from './relevance-provider.js';
 
 const ENV_KEYS = ['VIBGRATE_NO_KERNEL', 'VIBGRATE_RELEVANCE_PATH', 'XDG_CACHE_HOME'] as const;
@@ -54,7 +52,7 @@ const GOOD_STUB = `export function createRelevanceProvider() {
 describe('relevance provider loader', () => {
   it('returns null when nothing is installed (the default)', async () => {
     expect(await loadRelevanceProvider()).toBeNull();
-    expect(await analyzeQuestion('anything')).toBeNull();
+    expect(await rankQuestion({ nodes: [] }, 'anything')).toBeNull();
   });
 
   it('VIBGRATE_NO_KERNEL=1 disables the seam even when a module is present', async () => {
@@ -64,14 +62,42 @@ describe('relevance provider loader', () => {
     expect(await loadRelevanceProvider()).toBeNull();
   });
 
-  it('loads a provider from VIBGRATE_RELEVANCE_PATH and analyzes questions', async () => {
+  it('loads a provider from VIBGRATE_RELEVANCE_PATH; without rankSymbols there is no ranking engine', async () => {
     process.env.VIBGRATE_RELEVANCE_PATH = writeStubModule(GOOD_STUB);
     resetRelevanceProviderCache();
     const provider = await loadRelevanceProvider();
     expect(provider?.version()).toBe('stub-relevance@1');
-    const a = await analyzeQuestion('handle gocardless retries');
-    expect(a?.expansions).toEqual([{ term: 'mandate', from: 'gocardless', weight: 0.6 }]);
-    expect(a?.topics).toEqual([{ id: 'payments', score: 0.9 }]);
+    // A pre-relocation module (analyzeQuery only) is not a ranking engine:
+    // rankQuestion degrades to null → the mechanical fallback answers.
+    expect(await rankQuestion({ nodes: [] }, 'handle gocardless retries')).toBeNull();
+  });
+
+  it('delegates ranking to a module with rankSymbols and sanitizes the result', async () => {
+    process.env.VIBGRATE_RELEVANCE_PATH = writeStubModule(`export function createRelevanceProvider() {
+  return {
+    version: () => 'stub-ranker@1',
+    analyzeQuery: () => ({ version: 'stub-ranker@1', topics: [], expansions: [] }),
+    rankSymbols: (q, symbols) => ({
+      version: 'stub-ranker@1',
+      hasContent: true,
+      seeds: [
+        { id: symbols[0].id, score: 9, why: 'top pick' },
+        { id: 'forged-id', score: 99, why: 'not yours' },
+      ],
+      conceptMap: ['- interpreted.'],
+    }),
+  };
+}`);
+    resetRelevanceProviderCache();
+    const graph = {
+      nodes: [
+        { id: 'n1', name: 'a', qualifiedName: 'a', file: 'src/a.ts', kind: 'function', importance: 0.5 },
+      ],
+    };
+    const ranked = await rankQuestion(graph, 'anything');
+    expect(ranked?.version).toBe('stub-ranker@1');
+    expect(ranked?.seeds).toEqual([{ id: 'n1', score: 9, why: 'top pick' }]);
+    expect(ranked?.conceptMap).toEqual(['- interpreted.']);
   });
 
   it('a module that violates the contract or throws yields null, never an error', async () => {
@@ -80,10 +106,10 @@ describe('relevance provider loader', () => {
     expect(await loadRelevanceProvider()).toBeNull();
 
     process.env.VIBGRATE_RELEVANCE_PATH = writeStubModule(
-      `export function createRelevanceProvider() { return { version: () => 'x', analyzeQuery: () => { throw new Error('boom'); } }; }`,
+      `export function createRelevanceProvider() { return { version: () => 'x', analyzeQuery: () => ({}), rankSymbols: () => { throw new Error('boom'); } }; }`,
     );
     resetRelevanceProviderCache();
-    expect(await analyzeQuestion('anything')).toBeNull();
+    expect(await rankQuestion({ nodes: [] }, 'anything')).toBeNull();
   });
 });
 
@@ -162,45 +188,5 @@ describe('loadTopicTags (binary sidecar bound to one exact graph)', () => {
     // No content identity → no cacheable binding, but tags still compute.
     const noHash = { nodes: (makeGraph('x') as { nodes: unknown[] }).nodes } as never;
     expect(await loadTopicTags(noHash, root, path.join(root, 'other.graph.json'))).toBeNull();
-  });
-});
-
-describe('sanitizeAnalysis (the trust boundary)', () => {
-  const base: RelevanceAnalysis = { version: 'v', topics: [], expansions: [] };
-
-  it('drops expansions with weak-verb provenance or weak terms — the grab-bag guard', () => {
-    const a = sanitizeAnalysis({
-      ...base,
-      expansions: [
-        { term: 'mandate', from: 'add', weight: 0.9 },
-        { term: 'create', from: 'payments', weight: 0.9 },
-        { term: 'billing', from: 'payments', weight: 0.5 },
-      ],
-    })!;
-    expect(a.expansions).toEqual([{ term: 'billing', from: 'payments', weight: 0.5 }]);
-  });
-
-  it('clamps weights, lowercases, dedupes, drops multiword/empty, and caps the list', () => {
-    const a = sanitizeAnalysis({
-      ...base,
-      expansions: [
-        { term: 'Mandate', from: 'GoCardless', weight: 7 },
-        { term: 'mandate', from: 'other', weight: 0.2 },
-        { term: 'direct debit', from: 'x', weight: 0.5 },
-        { term: '', from: 'x', weight: 0.5 },
-        { term: 'bad', from: 'x', weight: 0 },
-        ...Array.from({ length: 40 }, (_, i) => ({ term: `t${i}`, from: 'topic', weight: 0.4 })),
-      ],
-    })!;
-    expect(a.expansions[0]).toEqual({ term: 'mandate', from: 'gocardless', weight: 1 });
-    expect(a.expansions.filter((e) => e.term === 'mandate')).toHaveLength(1);
-    expect(a.expansions.some((e) => e.term.includes(' '))).toBe(false);
-    expect(a.expansions.length).toBeLessThanOrEqual(24);
-  });
-
-  it('clamps topic scores into [0,1] and rejects a versionless payload', () => {
-    const a = sanitizeAnalysis({ ...base, topics: [{ id: 'payments', score: 3 }] })!;
-    expect(a.topics).toEqual([{ id: 'payments', score: 1 }]);
-    expect(sanitizeAnalysis({ topics: [], expansions: [] } as unknown as RelevanceAnalysis)).toBeNull();
   });
 });

@@ -140,10 +140,32 @@ export async function loadLanguage(langId: string): Promise<Language> {
   return language;
 }
 
-/** Construct a fresh parser bound to a language. */
+// One reused parser per language: a Parser allocates in the shared wasm heap
+// and is never garbage-collected there, so a parser-per-file leaks the heap
+// until parsing dies with "memory access out of bounds" on large builds
+// (observed ~10k files in one process). Parsers are reusable across parse()
+// calls; resetParser() discards one after a failed parse left it mid-state.
+const parserCache = new Map<string, Parser>();
+
+/** A per-language reused parser bound to the language's grammar. */
 export async function parserFor(def: LanguageDef): Promise<Parser> {
+  const cached = parserCache.get(def.id);
+  if (cached) return cached;
   const language = await loadLanguage(def.id);
   const parser = new Parser();
   parser.setLanguage(language);
+  parserCache.set(def.id, parser);
   return parser;
+}
+
+/** Drop a language's cached parser (after a parse error left it mid-state). */
+export function resetParser(langId: string): void {
+  const parser = parserCache.get(langId);
+  if (!parser) return;
+  parserCache.delete(langId);
+  try {
+    parser.delete();
+  } catch {
+    // The wasm side may already be unusable; dropping the reference is enough.
+  }
 }

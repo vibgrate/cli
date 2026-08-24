@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { queryGraph, queryGraphSemantic, type QueryResult } from '../engine/query.js';
-import { analyzeQuestion } from '../engine/relevance-provider.js';
+import { rankQuestion } from '../engine/relevance-provider.js';
+import { ensureRelevanceModule } from '../install/relevance-module.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
 import {
   loadEmbedder,
@@ -90,10 +91,13 @@ export function registerAsk(program: Command): void {
       let result: QueryResult;
       let mode = 'lexical';
       let note = '';
-      // Optional relevance provider (engine/relevance-provider.ts): widens
-      // seed vocabulary when installed; null (the default) changes nothing.
-      const relevance = await analyzeQuestion(q);
-      const topicTags = relevance ? await loadTopicTags(graph, root, resolveGraphPath(root, global.graph)) : null;
+      // The relevance module ranks the seeds. If the startup readiness kick
+      // has not landed it yet, retry once here (bounded by the fetch itself,
+      // silent on failure) — then rank, falling back mechanically when the
+      // module still is not available. `--local` stays network-free.
+      if (!global.local) await ensureRelevanceModule();
+      const topicTags = await loadTopicTags(graph, root, resolveGraphPath(root, global.graph));
+      const modRank = await rankQuestion(graph, q, { limit: 48, topicTags });
 
       try {
       if (wantSemantic) {
@@ -120,8 +124,7 @@ export function registerAsk(program: Command): void {
           result = await queryGraphSemantic(graph, q, {
             budget,
             semanticRanked: ranked.ranked,
-            relevance,
-            topicTags,
+            ranked: modRank,
           });
           mode = `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})`;
           activity.add('answer', 'ok', 'answered from the daemon index — no local model load');
@@ -149,18 +152,18 @@ export function registerAsk(program: Command): void {
             const bar = !global.json ? new ProgressBar(c.dim('embedding')) : undefined;
             const vectors = await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
             bar?.done();
-            result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors, relevance, topicTags });
+            result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors, ranked: modRank });
             mode = `semantic (${embedder.id})`;
             activity.add('answer', 'ok', `answered in this process · ${embedder.id} · ${vectors.size} vector(s)`);
           } else {
-            result = queryGraph(graph, q, { budget, relevance, topicTags });
+            result = queryGraph(graph, q, { budget, ranked: modRank });
             note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
             if (detail) note += ` (${detail})`;
             activity.add('answer', 'warn', `lexical only — ${note}`);
           }
         }
       } else {
-        result = queryGraph(graph, q, { budget, relevance, topicTags });
+        result = queryGraph(graph, q, { budget, ranked: modRank });
         if (global.local) note = 'semantic skipped under --local; used lexical';
         activity.add('answer', 'skip', global.local ? 'lexical only (--local)' : 'lexical only (--no-semantic)');
       }

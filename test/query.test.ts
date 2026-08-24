@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildGraph } from '../src/engine/build.js';
-import { queryGraph, conceptMapLines } from '../src/engine/query.js';
-import { sanitizeAnalysis } from '../src/engine/relevance-provider.js';
+import { queryGraph } from '../src/engine/query.js';
+import { sanitizeRank, type RankResult } from '../src/engine/relevance-provider.js';
 import { findNodes, resolveOne } from '../src/engine/lookup.js';
 import { impactOf } from '../src/engine/impact.js';
 import { shortestPath } from '../src/engine/paths.js';
@@ -40,102 +40,46 @@ describe('queryGraph (ask)', () => {
   });
 });
 
-describe('queryGraph with a relevance analysis (provider seam)', () => {
-  const relevance = (expansions: Array<{ term: string; from: string; weight: number }>) => ({
-    version: 'stub-relevance@1',
-    topics: [],
-    expansions,
-  });
+describe('queryGraph with a module ranking (provider seam)', () => {
+  const rankedOf = (raw: RankResult) =>
+    sanitizeRank(raw, new Set(graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external').map((n) => n.id)));
 
-  it('provider expansions surface conceptually-related symbols the ask never names', () => {
-    // "purchase flow" shares no token with OrderService; the expansion
-    // purchase→order bridges it, with provenance in the why string.
-    const without = queryGraph(graph, 'purchase flow');
-    const withRel = queryGraph(graph, 'purchase flow', {
-      relevance: relevance([{ term: 'order', from: 'purchase', weight: 0.6 }]),
+  it('consumes the module ordering verbatim, capped at the limit', () => {
+    const picks = graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external').slice(0, 4);
+    const ranked = rankedOf({
+      version: 'stub-ranker@1',
+      hasContent: true,
+      seeds: picks.map((n, i) => ({ id: n.id, score: 40 - i, why: `pick ${i}` })),
+      conceptMap: [],
     });
-    expect(without.matches.some((m) => m.node.qualifiedName.includes('OrderService'))).toBe(false);
-    const hit = withRel.matches.find((m) => m.node.qualifiedName.includes('OrderService'));
-    expect(hit).toBeTruthy();
-    expect(hit!.why).toContain('purchase→order');
+    const r = queryGraph(graph, 'anything', { ranked, limit: 3 });
+    expect(r.matches.map((m) => m.node.id)).toEqual(picks.slice(0, 3).map((n) => n.id));
   });
 
-  it('junk expansions cannot make a weak-only ask seed (grab-bag guard holds)', () => {
-    const r = queryGraph(graph, 'add a new feature', {
-      relevance: relevance([{ term: 'zzznotathing', from: 'sometopic', weight: 0.9 }]),
-    });
-    expect(r.matches.length).toBe(0);
+  it('an honest module miss yields no seeds even when tokens would match mechanically', () => {
+    const ranked = rankedOf({ version: 'stub-ranker@1', hasContent: false, seeds: [], conceptMap: [] });
+    const r = queryGraph(graph, 'order service', { ranked });
+    expect(r.matches).toEqual([]);
   });
 
-  it('a provider term the lexicon already produced is not double-counted', () => {
-    // Both the analysis and the ask name "order": scores must equal the
-    // no-provider run because base tokens win over provider duplicates.
-    const a = queryGraph(graph, 'order service');
-    const b = queryGraph(graph, 'order service', {
-      relevance: relevance([{ term: 'order', from: 'purchase', weight: 0.9 }]),
-    });
-    expect(b.matches.map((m) => [m.node.id, m.score])).toEqual(a.matches.map((m) => [m.node.id, m.score]));
-  });
-
-  it('is deterministic with a relevance analysis', () => {
-    const opts = { relevance: relevance([{ term: 'order', from: 'purchase', weight: 0.6 }]) };
-    expect(queryGraph(graph, 'purchase flow', opts).context).toBe(queryGraph(graph, 'purchase flow', opts).context);
-  });
-
-  it('topic-affinity: enrichment tags lift in-topic nodes and annotate why, but never seed alone', () => {
-    // Tag every OrderService-family node with a topic the question is about.
-    const tagged = new Map<string, readonly string[]>();
-    for (const n of graph.nodes) if (n.qualifiedName.includes('OrderService')) tagged.set(n.id, ['commerce']);
-    const withAffinity = {
-      relevance: { version: 'stub-relevance@1', topics: [{ id: 'commerce', score: 1 }], expansions: [] },
-      topicTags: tagged,
+  it('is deterministic with a module ranking', () => {
+    const picks = graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external').slice(0, 2);
+    const raw: RankResult = {
+      version: 'stub-ranker@1',
+      hasContent: true,
+      seeds: picks.map((n, i) => ({ id: n.id, score: 10 - i, why: `pick ${i}` })),
+      conceptMap: [],
     };
-    const plain = queryGraph(graph, 'order');
-    const boosted = queryGraph(graph, 'order', withAffinity);
-    const score = (r: typeof plain, name: string) => r.matches.find((m) => m.node.qualifiedName.includes(name))?.score ?? 0;
-    expect(score(boosted, 'OrderService')).toBeGreaterThan(score(plain, 'OrderService'));
-    const hit = boosted.matches.find((m) => m.node.qualifiedName.includes('OrderService'))!;
-    expect(hit.why).toContain('topic:commerce');
-    // A tagged node with zero textual evidence still never seeds.
-    const noText = queryGraph(graph, 'zzzznotathing', withAffinity);
-    expect(noText.matches.length).toBe(0);
+    expect(queryGraph(graph, 'order', { ranked: rankedOf(raw) }).context).toBe(
+      queryGraph(graph, 'order', { ranked: rankedOf(raw) }).context,
+    );
   });
 });
 
-describe('queryGraph term specificity (IDF)', () => {
-  // A distinctive term must outweigh a common-word exact-name hit: the pathology
-  // where "run"/"copy"/"code" in a natural-language question hijacked the ranking.
-  let g: VgGraph;
-  let d: string;
-  beforeAll(async () => {
-    d = makeProject({
-      'src/runners.ts': [
-        'export function run() {}',
-        'export function runScan() {}',
-        'export function runBuild() {}',
-        'export function runDeploy() {}',
-        'export function runTest() {}',
-      ].join('\n'),
-      'src/util.ts': ['export function toComparable(x: number): number {', '  return x;', '}'].join('\n'),
-    });
-    g = (await buildGraph({ root: d, generatedAt: '2020-01-01T00:00:00.000Z', inline: true })).graph;
-  });
-  afterAll(() => cleanup(d));
-
-  it('ranks the rare-term match above a common-word exact-name match', () => {
-    // "run" is common (5 symbols); "comparable" is rare (1). The question is
-    // *about* comparable — run is incidental. toComparable must win.
-    const r = queryGraph(g, 'run the comparable value');
-    expect(r.matches[0].node.name).toBe('toComparable');
-  });
-});
-
-describe('queryGraph question-scaffolding stopwords', () => {
-  // "find the code responsible for X" / "explain how X works" are template
-  // FRAMING, not identifier terms. Left unfiltered, "find" alone dragged in
-  // every Find*/FindBy* method ahead of the actual (differently-named) target
-  // — the dominant "locate" failure mode on real CRUD-heavy repos
-  // (VG-LOCATE-FAILURE-ANALYSIS.md).
+describe('mechanical fallback boundaries (relevance behaviours live in the module)', () => {
+  // IDF weighting, scaffolding stopwords, lexicon expansion, typo repair and
+  // morphology are gated in @vibgrate/relevance now. Mechanically, matching
+  // is exact-name / part / qualified-name only — these hold the boundary.
   let g: VgGraph;
   let d: string;
   beforeAll(async () => {
@@ -143,20 +87,23 @@ describe('queryGraph question-scaffolding stopwords', () => {
       'src/repo.ts': [
         'export class AccessPolicyRepository {',
         '  findByIdAsync(id: string): void {}',
-        '  findAllAsync(): void {}',
         '}',
-        'export class OrderService {',
-        '  deleteAsync(id: string): void {}',
-        '}',
+        'export function toComparable(x: number): number { return x; }',
       ].join('\n'),
     });
     g = (await buildGraph({ root: d, generatedAt: '2020-01-01T00:00:00.000Z', inline: true })).graph;
   });
   afterAll(() => cleanup(d));
 
-  it('does not let template scaffolding ("find", "code", "responsible") outrank the real target', () => {
-    const r = queryGraph(g, 'find the code responsible for delete async');
-    expect(r.matches[0].node.name).toBe('deleteAsync');
+  it('part matching pins a named symbol without any language model', () => {
+    const r = queryGraph(g, 'write tests for toComparable');
+    expect(r.matches[0].node.name).toBe('toComparable');
+  });
+
+  it('never fuzzy-matches: a word-form variant is an honest miss', () => {
+    // "comparables" ≠ part "comparable"; morphology is the module's job.
+    const r = queryGraph(g, 'comparables');
+    expect(r.matches).toEqual([]);
   });
 });
 
@@ -247,101 +194,5 @@ describe('shortestPath', () => {
     expect(typeof disc.hint).toBe('string');
     // deleteAsync should have callees in this fixture.
     expect(disc.from.calls.length + disc.from.calledBy.length).toBeGreaterThan(0);
-  });
-});
-
-describe('concept map — deepest topic first, then vendor, then up the tree', () => {
-  /** Shape of a schema-4 analysis, as the provider seam delivers it. */
-  const analysis = {
-    version: 'vg-relevance@1.3.0+pack.test',
-    topics: [{ id: 'infrastructure', score: 1 }],
-    expansions: [],
-    taxonomy: [
-      {
-        path: 'infrastructure/networking/dns/cname',
-        levels: [
-          { id: 'infrastructure', path: 'infrastructure', score: 1, terms: ['provisioning'] },
-          { id: 'networking', path: 'infrastructure/networking', score: 1, terms: ['subnet'] },
-          { id: 'dns', path: 'infrastructure/networking/dns', score: 1, terms: ['dns record'] },
-          { id: 'cname', path: 'infrastructure/networking/dns/cname', score: 1, terms: ['cname record'] },
-        ],
-        score: 1,
-        evidence: 3.2,
-        via: ['cname record'],
-        terms: ['cname record', 'alias record'],
-        files: ['.zone'],
-        standards: [],
-      },
-    ],
-    vendors: [{ name: 'cloudflare', from: 'cloud flre', node: 'infrastructure/cloud/cloudflare', topic: 'infrastructure', score: 0.4, files: ['wrangler.toml'] }],
-    corrections: [{ from: 'cloud flre', to: 'cloudflare', distance: 1 }],
-    files: ['wrangler.toml', '.zone'],
-    standards: [
-      { name: 'W3C WCAG 2.2', publisher: 'World Wide Web Consortium', node: 'accessibility', kind: 'standard', categories: ['accessibility', 'frontend'] },
-      { name: 'GDPR', publisher: 'European Union', node: 'compliance', kind: 'regulation', categories: ['compliance', 'data-privacy'] },
-    ],
-    categories: ['accessibility', 'frontend', 'compliance', 'data-privacy'],
-  };
-
-  it('orders the lines specific → vendor → broader → files → corrections', () => {
-    const lines = conceptMapLines('add to cloud flre cname record for xyz.com', analysis as never, null);
-    const idx = (needle: string) => lines.findIndex((l) => l.includes(needle));
-
-    expect(idx('specifically about cname')).toBe(0);
-    expect(idx('names the product "cloudflare"')).toBe(1);
-    // Then widening, deepest ancestor first.
-    expect(idx('this is dns')).toBeLessThan(idx('this is networking'));
-    expect(idx('this is networking')).toBeLessThan(idx('this is infrastructure'));
-    // Standards after the hierarchy, then files, then corrections.
-    expect(idx('this is infrastructure')).toBeLessThan(idx('Standards that govern'));
-    expect(idx('Standards that govern')).toBeLessThan(idx('usually named or extended'));
-    expect(idx('usually named or extended')).toBeLessThan(idx('Read "cloud flre"'));
-    // Each level speaks with its own vocabulary, not the leaf's.
-    expect(lines[idx('this is dns')]).toContain('dns record');
-    expect(lines[idx('this is infrastructure')]).not.toContain('cname record');
-  });
-
-  it('does not repeat a product that is already the most specific topic', () => {
-    const withVendorLevel = {
-      ...analysis,
-      taxonomy: [
-        {
-          ...analysis.taxonomy[0]!,
-          path: 'infrastructure/cloud/cloudflare',
-          levels: [
-            { id: 'infrastructure', path: 'infrastructure', score: 1, terms: [] },
-            { id: 'cloud', path: 'infrastructure/cloud', score: 1, terms: [] },
-            { id: 'cloudflare', path: 'infrastructure/cloud/cloudflare', score: 1, terms: ['wrangler'] },
-          ],
-        },
-      ],
-    };
-    const lines = conceptMapLines('cloudflare workers', withVendorLevel as never, null);
-    // The level line names it; the vendor line degrades to the typed form only.
-    expect(lines.some((l) => l.includes('specifically about cloudflare'))).toBe(true);
-    expect(lines.some((l) => l.includes('names the product'))).toBe(false);
-    expect(lines.some((l) => l.includes('That product was typed "cloud flre"'))).toBe(true);
-  });
-
-  it('separates specs from legal duties, and lists category slugs', () => {
-    const lines = conceptMapLines('accessibility work', analysis as never, null);
-    expect(lines.some((l) => l.includes('Standards that govern this area: W3C WCAG 2.2 (World Wide Web Consortium)'))).toBe(true);
-    // A regulation is an obligation, not a spec — it gets its own sentence.
-    expect(lines.some((l) => l.includes('Regulations that apply here: GDPR (European Union)'))).toBe(true);
-    expect(lines.some((l) => l.includes('Related categories: accessibility, frontend, compliance, data-privacy'))).toBe(true);
-    const hostile = sanitizeAnalysis({
-      ...analysis,
-      standards: [{ name: 'Fake', publisher: 'x', node: '../../etc/passwd', kind: 'standard', categories: [] }],
-      categories: ['Data Privacy', '../etc', 'data-privacy', 'data-privacy'],
-    } as never);
-    expect(hostile?.standards).toEqual([]);
-    // Categories must be slugs, deduped — a display name or a path is dropped.
-    expect(hostile?.categories).toEqual(['data-privacy']);
-  });
-
-  it('falls back to flat topics for a provider without a taxonomy', () => {
-    const flat = { version: 'old', topics: [{ id: 'payments', score: 1 }], expansions: [{ term: 'mandate', from: 'payments', weight: 0.45 }] };
-    const lines = conceptMapLines('collect the direct debit', flat as never, null);
-    expect(lines.some((l) => l.includes('the "payments" domain'))).toBe(true);
   });
 });

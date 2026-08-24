@@ -1,39 +1,39 @@
 /**
- * Optional relevance-provider seam for ask / Task Capsule seed ranking.
+ * Relevance-provider seam for ask / Task Capsule seed ranking.
  *
- * A relevance provider is an OPTIONAL, separately installed local module that
- * analyzes a natural-language question and returns weighted expansion terms
- * with provenance (plus inferred topics). When present, its expansions join
- * the built-in concept lexicon (engine/concepts.ts) inside `queryGraph`'s
- * term preparation; when absent (the default install), nothing changes —
- * the deterministic lexicon path is the complete, supported baseline.
+ * Since the 2026-08 relevance relocation, the separately installed local
+ * module (`@vibgrate/relevance`, auto-provisioned by the CLI) IS the ranking
+ * engine: `rankQuestion` hands it the ask plus a name-only symbol view of
+ * the loaded graph and receives an ordered, provenance-annotated seed list
+ * and the plain-language concept map. When the module is unavailable —
+ * offline install failure, explicit decline, `VIBGRATE_NO_KERNEL=1`, or a
+ * pre-ranking module version — callers fall back to the host's mechanical
+ * exact-name matcher (engine/query.ts) and proceed unchanged.
  *
  * Loading mirrors the optional-embedder pattern (engine/embeddings.ts):
- *  - `VIBGRATE_NO_KERNEL=1` disables the seam entirely (off by default).
+ *  - `VIBGRATE_NO_KERNEL=1` disables the seam entirely.
  *  - `VIBGRATE_RELEVANCE_PATH` points at a provider module (a file, or a
  *    directory containing `index.js`).
  *  - Otherwise the default module location is probed:
  *    `$XDG_CACHE_HOME|~/.cache /vibgrate/modules/relevance/index.js`.
  * The module contract: it exports `createRelevanceProvider()` returning
- * `{ version(): string, analyzeQuery(q: string): RelevanceAnalysis }`.
+ * `{ version(), analyzeQuery(q), tagNode?(input), rankSymbols?(q, symbols, opts) }`.
  *
- * Trust boundary: provider output is sanitized here — terms lowercased,
- * weights clamped to [0,1], expansions whose provenance is a weak process
- * verb dropped (they could re-open the `add*` grab-bag failure the term-role
- * model closed), and the total capped — so a buggy or adversarial module can
- * widen vocabulary but never bypass the ranking invariants. Every failure
- * path degrades to `null` (no provider), never to an error: relevance
- * analysis is an enhancement, not a dependency.
+ * Trust boundary: everything a module returns is sanitized here before it
+ * can shape a capsule. A ranking may only ORDER symbols the loaded graph
+ * actually has (`sanitizeRank`: unknown ids dropped, scores validated,
+ * every printable string stripped of control characters and length-capped).
+ * Every failure path degrades to `null` (→ mechanical fallback), never to an
+ * error: the module is the brain, not a dependency.
  *
- * Determinism: given the same question and the same provider version, the
- * sanitized analysis is deterministic; the provider version is surfaced so
+ * Determinism: given the same question, graph, and provider version, the
+ * sanitized ranking is deterministic; the provider version is surfaced so
  * capsules can record it as ranking provenance.
  */
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { WEAK_TERMS } from './concepts.js';
 
 export interface RelevanceExpansion {
   /** Single lowercase word, ready for identifier-part matching. */
@@ -123,36 +123,50 @@ export interface RelevanceAnalysis {
   categories?: string[];
 }
 
+/** One graph symbol, as handed to the provider's ranker: identity and name
+ *  material only — never source contents. */
+export interface RankableSymbol {
+  id: string;
+  name: string;
+  qualifiedName: string;
+  file: string;
+  importance: number;
+}
+
+export interface RankOptions {
+  limit?: number;
+  priorQuestion?: string | null;
+  topicTags?: Record<string, readonly string[]> | null;
+}
+
+export interface RankedSeed {
+  id: string;
+  score: number;
+  why: string;
+}
+
+/** The provider's full ranking answer (schema 5), pre-sanitization. */
+export interface RankResult {
+  version: string;
+  hasContent: boolean;
+  seeds: RankedSeed[];
+  conceptMap: string[];
+}
+
 export interface RelevanceProvider {
   version(): string;
   analyzeQuery(question: string): RelevanceAnalysis;
   /** Optional build-time enrichment: deterministic topic tags for one node
    *  (path + identifier evidence). Providers without it still work. */
   tagNode?(input: { qualifiedName: string; file: string }): string[];
+  /**
+   * Schema-5: rank the given symbols for one ask. When present, the module
+   * IS the relevance engine — the host delegates seed selection here and
+   * keeps only mechanical name matching as its module-less fallback. A
+   * provider without it is treated as no ranking engine at all.
+   */
+  rankSymbols?(question: string, symbols: RankableSymbol[], opts?: RankOptions): RankResult;
 }
-
-/** Upper bound on sanitized expansions accepted from a provider. */
-const MAX_PROVIDER_EXPANSIONS = 24;
-/** Caps on the hierarchical fields, same posture as expansions. */
-const MAX_PROVIDER_PATHS = 6;
-const MAX_PROVIDER_LEVELS = 8;
-const MAX_PROVIDER_TERMS = 10;
-const MAX_PROVIDER_VENDORS = 8;
-const MAX_PROVIDER_CORRECTIONS = 8;
-const MAX_PROVIDER_FILES = 8;
-const MAX_PROVIDER_STANDARDS = 4;
-const MAX_PROVIDER_CATEGORIES = 10;
-/** A category is a lowercase slug from the site vocabulary — nothing else. */
-const CATEGORY_SLUG = /^[a-z0-9][a-z0-9-]{1,40}$/;
-/**
- * A file hint is a filename, a path fragment or an extension — never an
- * absolute path, a parent traversal, or a glob. The capsule prints these, so
- * a provider must not be able to smuggle in something that reads as an
- * instruction or points outside the repository.
- */
-const FILE_HINT = /^(?!\/|~|\.\.)[A-Za-z0-9._*/-]{1,48}$/;
-/** A path segment is a slug: lowercase, digits, dash. Anything else is dropped. */
-const PATH_SEGMENT = /^[a-z0-9][a-z0-9-]*$/;
 
 function disabled(): boolean {
   const v = process.env.VIBGRATE_NO_KERNEL;
@@ -218,145 +232,101 @@ export async function loadRelevanceProvider(): Promise<RelevanceProvider | null>
   return cached;
 }
 
+/** Sanitized module ranking, ready for `queryGraph({ ranked })`. */
+export interface SanitizedRank {
+  version: string;
+  hasContent: boolean;
+  seeds: RankedSeed[];
+  conceptMap: string[];
+}
+
+const MAX_RANK_SEEDS = 64;
+const MAX_CONCEPT_LINES = 24;
+const MAX_WHY_LEN = 240;
+const MAX_LINE_LEN = 400;
+
+/** Printable one-line string, control characters stripped, length-capped. */
+function cleanLine(raw: unknown, cap: number): string {
+  return String(raw ?? '')
+    .replace(/[\u0000-\u001F\u007F]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, cap);
+}
+
 /**
- * Run the provider over a question and sanitize the result. Returns `null`
- * when no provider is available or its output is unusable; the caller passes
- * the analysis into `queryGraph({ relevance })` as-is.
+ * Enforce the trust boundary on a provider ranking (exported for tests).
+ * Seed ids must name symbols the LOADED graph actually has — a module can
+ * order the host's own symbols, never invent one — and every string the
+ * capsule will print is stripped and capped. Malformed entries drop; a
+ * malformed envelope drops the whole ranking (→ mechanical fallback).
  */
-export async function analyzeQuestion(question: string): Promise<RelevanceAnalysis | null> {
+export function sanitizeRank(raw: RankResult, validIds: ReadonlySet<string>): SanitizedRank | null {
+  if (!raw || typeof raw.version !== 'string' || typeof raw.hasContent !== 'boolean') return null;
+  if (!Array.isArray(raw.seeds) || !Array.isArray(raw.conceptMap)) return null;
+  const seen = new Set<string>();
+  const seeds: RankedSeed[] = [];
+  for (const s of raw.seeds) {
+    const id = typeof s?.id === 'string' ? s.id : '';
+    const score = Number(s?.score);
+    if (!id || !validIds.has(id) || seen.has(id)) continue;
+    if (!Number.isFinite(score) || score <= 0) continue;
+    seen.add(id);
+    seeds.push({ id, score, why: cleanLine(s.why, MAX_WHY_LEN) });
+    if (seeds.length >= MAX_RANK_SEEDS) break;
+  }
+  const conceptMap = raw.conceptMap
+    .map((l) => cleanLine(l, MAX_LINE_LEN))
+    .filter((l) => l.length > 0)
+    .slice(0, MAX_CONCEPT_LINES);
+  return { version: raw.version.slice(0, 120), hasContent: raw.hasContent, seeds, conceptMap };
+}
+
+/** Per-graph symbol view for the ranker, cached on graph object identity. */
+const symbolViewCache = new WeakMap<object, { symbols: RankableSymbol[]; ids: Set<string> }>();
+
+function symbolViewOf(graph: {
+  nodes: Array<{ id: string; name: string; qualifiedName: string; file: string; kind: string; importance: number }>;
+}): { symbols: RankableSymbol[]; ids: Set<string> } {
+  const hit = symbolViewCache.get(graph);
+  if (hit) return hit;
+  const symbols: RankableSymbol[] = [];
+  const ids = new Set<string>();
+  for (const n of graph.nodes) {
+    if (n.kind === 'file' || n.kind === 'external') continue;
+    symbols.push({ id: n.id, name: n.name, qualifiedName: n.qualifiedName, file: n.file, importance: n.importance });
+    ids.add(n.id);
+  }
+  const view = { symbols, ids };
+  symbolViewCache.set(graph, view);
+  return view;
+}
+
+/**
+ * Rank a question over a graph's symbols via the installed module. Returns
+ * `null` when no module is installed, the installed module predates the
+ * ranking API, or its output fails sanitization — callers fall back to the
+ * host's mechanical matcher and proceed unchanged. Every failure path is a
+ * degrade, never an error.
+ */
+export async function rankQuestion(
+  graph: { nodes: Array<{ id: string; name: string; qualifiedName: string; file: string; kind: string; importance: number }> },
+  question: string,
+  opts: { limit?: number; priorQuestion?: string | null; topicTags?: Map<string, readonly string[]> | null } = {},
+): Promise<SanitizedRank | null> {
   const provider = await loadRelevanceProvider();
-  if (!provider) return null;
+  if (!provider || typeof provider.rankSymbols !== 'function') return null;
   try {
-    return sanitizeAnalysis(provider.analyzeQuery(question));
+    const { symbols, ids } = symbolViewOf(graph);
+    const topicTags = opts.topicTags ? Object.fromEntries(opts.topicTags) : null;
+    const raw = provider.rankSymbols(question, symbols, {
+      limit: opts.limit,
+      priorQuestion: opts.priorQuestion ?? null,
+      topicTags,
+    });
+    return sanitizeRank(raw, ids);
   } catch {
     return null;
   }
 }
 
-/** Enforce the trust boundary on raw provider output (exported for tests). */
-export function sanitizeAnalysis(raw: RelevanceAnalysis): RelevanceAnalysis | null {
-  if (!raw || typeof raw.version !== 'string') return null;
-  const seen = new Set<string>();
-  const expansions: RelevanceExpansion[] = [];
-  for (const e of raw.expansions ?? []) {
-    const term = String(e?.term ?? '').toLowerCase().trim();
-    const from = String(e?.from ?? '').toLowerCase().trim();
-    const weight = Number(e?.weight);
-    if (!term || !from || term.includes(' ')) continue;
-    // A weak process verb as provenance means the provider expanded the ACTION
-    // ("add", "create"), not the topic — exactly the grab-bag failure the
-    // term-role model suppresses. Never accept those.
-    if (WEAK_TERMS.has(from) || WEAK_TERMS.has(term)) continue;
-    if (!Number.isFinite(weight) || weight <= 0) continue;
-    if (seen.has(term)) continue;
-    seen.add(term);
-    expansions.push({ term, from, weight: Math.min(1, weight) });
-    if (expansions.length >= MAX_PROVIDER_EXPANSIONS) break;
-  }
-  const topics = (raw.topics ?? [])
-    .filter((t) => t && typeof t.id === 'string' && Number.isFinite(t.score))
-    .map((t) => ({ id: t.id, score: Math.max(0, Math.min(1, t.score)) }));
-
-  // Hierarchical fields (provider schema 4). Same trust posture as
-  // expansions: shapes validated, scores clamped, everything capped, and a
-  // malformed entry is dropped rather than repaired — a provider can widen
-  // vocabulary and name a domain, never smuggle in a path the host will
-  // treat as structure it did not verify.
-  const clamp01 = (n: unknown) => (Number.isFinite(Number(n)) ? Math.max(0, Math.min(1, Number(n))) : 0);
-  const cleanFiles = (raw: unknown, cap: number): string[] =>
-    (Array.isArray(raw) ? raw : [])
-      .filter((f): f is string => typeof f === 'string' && FILE_HINT.test(f) && !f.includes('..'))
-      .slice(0, cap);
-  const cleanStandards = (raw: unknown, cap: number): RelevanceStandard[] =>
-    (Array.isArray(raw) ? raw : [])
-      .filter(
-        (st): st is RelevanceStandard =>
-          !!st &&
-          typeof st.name === 'string' &&
-          st.name.length > 0 &&
-          st.name.length <= 80 &&
-          typeof st.publisher === 'string' &&
-          st.publisher.length <= 80 &&
-          validPath(st.node),
-      )
-      .map((st) => ({
-        name: st.name,
-        publisher: st.publisher,
-        node: st.node,
-        kind: st.kind === 'regulation' ? 'regulation' : 'standard',
-        categories: cleanCategories(st.categories, MAX_PROVIDER_CATEGORIES),
-      }))
-      .slice(0, cap);
-  const cleanCategories = (raw: unknown, cap: number): string[] => {
-    const out: string[] = [];
-    for (const c of Array.isArray(raw) ? raw : []) {
-      const slug = String(c ?? '').toLowerCase().trim();
-      if (!CATEGORY_SLUG.test(slug) || out.includes(slug)) continue;
-      out.push(slug);
-      if (out.length >= cap) break;
-    }
-    return out;
-  };
-  const cleanTerms = (raw: unknown, cap: number): string[] =>
-    (Array.isArray(raw) ? raw : [])
-      .filter((t): t is string => typeof t === 'string' && t.length > 0 && t.length <= 40)
-      .map((t) => t.toLowerCase())
-      .slice(0, cap);
-  const validPath = (p: unknown): p is string =>
-    typeof p === 'string' && p.length > 0 && p.length <= 120 && p.split('/').every((seg) => PATH_SEGMENT.test(seg));
-
-  const taxonomy: RelevanceTaxonomyMatch[] = [];
-  for (const m of raw.taxonomy ?? []) {
-    if (!m || !validPath(m.path)) continue;
-    const levels = (m.levels ?? [])
-      .filter((l) => l && validPath(l.path) && typeof l.id === 'string')
-      .slice(0, MAX_PROVIDER_LEVELS)
-      .map((l) => ({ id: l.id, path: l.path, score: clamp01(l.score), terms: cleanTerms(l.terms, MAX_PROVIDER_TERMS) }));
-    // A path with no chain is unusable for prefix matching — drop it.
-    if (!levels.length || levels[levels.length - 1]!.path !== m.path) continue;
-    taxonomy.push({
-      path: m.path,
-      levels,
-      score: clamp01(m.score),
-      evidence: Number.isFinite(Number(m.evidence)) ? Math.max(0, Number(m.evidence)) : 0,
-      via: (m.via ?? []).filter((v): v is string => typeof v === 'string' && v.length <= 80).slice(0, 8),
-      terms: cleanTerms(m.terms, MAX_PROVIDER_TERMS),
-      files: cleanFiles(m.files, MAX_PROVIDER_FILES),
-      standards: cleanStandards(m.standards, MAX_PROVIDER_STANDARDS),
-    });
-    if (taxonomy.length >= MAX_PROVIDER_PATHS) break;
-  }
-
-  const vendors: RelevanceVendorMatch[] = [];
-  for (const v of raw.vendors ?? []) {
-    const name = String(v?.name ?? '').toLowerCase().trim();
-    const from = String(v?.from ?? '').toLowerCase().trim();
-    if (!name || !from || name.length > 60) continue;
-    vendors.push({
-      name,
-      from,
-      ...(validPath(v.node) ? { node: v.node } : {}),
-      topic: typeof v.topic === 'string' ? v.topic : '',
-      score: clamp01(v.score),
-      files: cleanFiles(v.files, MAX_PROVIDER_FILES),
-    });
-    if (vendors.length >= MAX_PROVIDER_VENDORS) break;
-  }
-
-  const corrections: RelevanceCorrection[] = [];
-  for (const c of raw.corrections ?? []) {
-    const from = String(c?.from ?? '').toLowerCase().trim();
-    const to = String(c?.to ?? '').toLowerCase().trim();
-    const distance = Number(c?.distance);
-    if (!from || !to || from === to || from.length > 60 || to.length > 60) continue;
-    if (!Number.isInteger(distance) || distance < 1 || distance > 3) continue;
-    corrections.push({ from, to, distance });
-    if (corrections.length >= MAX_PROVIDER_CORRECTIONS) break;
-  }
-
-  const files = cleanFiles(raw.files, MAX_PROVIDER_FILES);
-  const standards = cleanStandards(raw.standards, MAX_PROVIDER_STANDARDS);
-  const categories = cleanCategories(raw.categories, MAX_PROVIDER_CATEGORIES);
-
-  return { version: raw.version, topics, expansions, taxonomy, vendors, corrections, files, standards, categories };
-}
