@@ -20,6 +20,7 @@ import { BranchGraphSession } from '../runtime/branch-graph-session.js';
 import { discoverModels } from '../engine/models.js';
 import { ensureCodeMap } from './ensure-map.js';
 import { printCodeLogo } from '../util/logo.js';
+import { capsuleTransparencyLines } from './capsule.js';
 import { c, info, out } from '../util/output.js';
 import type { GlobalOpts } from '../cli-options.js';
 import { fetchCatalog } from './catalog.js';
@@ -77,7 +78,7 @@ export interface InteractiveOptions {
   mcpSources?: string[];
   /** Resume a session: `true` for the most recent, or an explicit session id. */
   continueSession?: boolean | string;
-  /** Prefer source-bearing Task Capsule context (Fusion Runtime A/B). */
+  /** Prefer source-bearing Context Capsule context (Fusion Runtime A/B). */
   capsule?: boolean;
   /**
    * Security ladder tier for shell (ADR-002). When omitted: L1 under `--auto`,
@@ -566,7 +567,7 @@ export async function agentTask(params: {
   externalTools?: AgentOptions['externalTools'];
   meter?: SessionMeter;
   prompter?: Prompter;
-  /** Prefer source-bearing Task Capsule context (Fusion Runtime A/B). */
+  /** Prefer source-bearing Context Capsule context (Fusion Runtime A/B). */
   capsule?: boolean;
   files?: string[];
   /** Security ladder substrate (ADR-002). */
@@ -647,7 +648,11 @@ export async function agentTask(params: {
     } else if (e.type === 'session-graph') {
       info(c.dim(`  · session graph updated (${e.reparsed} reparsed, ${e.dirty} dirty)`));
     } else if (e.type === 'capsule') {
-      info(c.dim(`  · Task Capsule · ${e.summary.primary.length} primary · ${e.summary.sourceSliceCount} source slice(s) · ~${e.summary.tokensEstimate} tokens`));
+      info(c.dim(`  · Context Capsule · ${e.summary.primary.length} primary · ${e.summary.sourceSliceCount} source slice(s) · ~${e.summary.tokensEstimate} tokens`));
+      // Capsule transparency: show how the ask was read and which symbols that
+      // reached, before the model answers on top of it. Capped so a long
+      // session stays readable — the full block is in the capsule itself.
+      for (const line of capsuleTransparencyLines(e.summary)) info(c.dim(line));
     } else if (e.type === 'failure-capsule') {
       info(c.yellow(`  · Failure Capsule · ${e.capsule.failedStep.type}${e.capsule.failedStep.command ? ` · ${e.capsule.failedStep.command}` : ''}`));
     } else if (e.type === 'metrics') {

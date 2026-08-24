@@ -11,8 +11,8 @@
  * is fully offline-testable and benchmarkable.
  */
 
-import { conceptMapLines, extractLiteralNeedles, queryGraph } from '../engine/query.js';
-import type { RelevanceAnalysis } from '../engine/relevance-provider.js';
+import { extractLiteralNeedles, queryGraph } from '../engine/query.js';
+import type { SanitizedRank } from '../engine/relevance-provider.js';
 import { indexFor } from '../engine/relations.js';
 import { impactOf } from '../engine/impact.js';
 import type { CodeContext } from './types.js';
@@ -28,16 +28,11 @@ export interface BuildContextOptions {
   impactDepth?: number;
   /** Restrict the edit surface to these files (from `--file`), if given. */
   files?: string[];
-  /** Optional pre-computed relevance analysis (engine/relevance-provider.ts),
-   *  loaded by the async caller; widens seed vocabulary deterministically. */
-  relevance?: RelevanceAnalysis | null;
-  /** Optional per-node topic tags (engine/relevance-enrich.ts). */
-  topicTags?: Map<string, readonly string[]> | null;
-  /** The previous conversational ask (multi-turn `vg code`). Its content
-   *  terms join seed ranking at a damped weight so follow-ups ("do we
-   *  support direct debits?" after "where is stripe used?") stay anchored to
-   *  the conversation's topic. Absent → single-turn behaviour, unchanged. */
-  priorInstruction?: string | null;
+  /** Sanitized module ranking (engine/relevance-provider.ts rankQuestion),
+   *  computed by the async caller over the user's ask — carries the seed
+   *  ordering AND the plain-language concept map. Absent → the mechanical
+   *  fallback ranks and the concept map is empty. */
+  ranked?: SanitizedRank | null;
 }
 
 /**
@@ -58,21 +53,15 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
   // ask — otherwise `image.png` becomes a hard constraint that aborts the task.
   // The full instruction (with attachments) still goes in the Task section.
   const ask = userAskFromInstruction(instruction);
-  const priorAsk = options.priorInstruction
-    ? userAskFromInstruction(options.priorInstruction)
-    : options.priorInstruction;
 
-  // Retrieval seeds: reuse the deterministic lexical/structural retrieval that
-  // backs `vg ask`. When `--file` narrows the surface, keep only seeds in those
+  // Retrieval seeds: the module ranking when the async caller supplied one
+  // (options.ranked — the relevance engine), the mechanical fallback
+  // otherwise. When `--file` narrows the surface, keep only seeds in those
   // files (but still let impact reach outside them, so the review is honest).
-  // URL / quoted-string needles are stripped inside queryGraph so path tokens
-  // cannot poison seeds (dash→dashboard, exist→NonExisting, …).
   const q = queryGraph(graph, ask, {
     budget: Math.floor(budget * 0.6),
     limit: seedLimit * 2,
-    relevance: options.relevance,
-    topicTags: options.topicTags,
-    priorQuestion: priorAsk,
+    ranked: options.ranked,
   });
   let seeds = q.matches.map((m) => ({ node: m.node, why: m.why }));
   if (options.files && options.files.length) {
@@ -108,7 +97,9 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
     ...pinnedFactsFor(graph, seedIds),
   ];
 
-  const conceptMap = conceptMapLines(ask, options.relevance, priorAsk);
+  // The plain-language interpretation is authored by the relevance module
+  // (and sanitized at the seam); the mechanical fallback has none to offer.
+  const conceptMap = options.ranked?.conceptMap ?? [];
   const rendered = render(instruction, seeds, [...impacted.values()], targetFiles, pinnedFacts, conceptMap, index, budget);
   return {
     instruction,

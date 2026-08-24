@@ -1,8 +1,8 @@
 /**
- * Source-bearing Task Capsule compiler (Fusion Runtime Phase 0).
+ * Source-bearing Context Capsule compiler (Fusion Runtime Phase 0).
  *
  * Today's {@link buildCodeContext} pays for graph metadata, then the model still
- * calls `read_file` — double payment. This module compiles a Task Capsule that
+ * calls `read_file` — double payment. This module compiles a Context Capsule that
  * includes exact source ranges (from Tree-sitter spans already on graph nodes)
  * so the first inference can solve without navigation tool calls (ZNS@1 path).
  *
@@ -37,7 +37,14 @@ export const TASK_CAPSULE_SCHEMA_VERSION = 'task-capsule/0' as const;
  *  CARRY_WEIGHT when the caller passes `priorInstruction`. (c) A plain-language
  *  "how the ask was interpreted" concept map is rendered for small local models.
  *  No prior instruction + no bigram ask = 2026.08.2 behaviour exactly. */
-export const CAPSULE_RANKING_VERSION = 'capsule-rank@2026.08.3' as const;
+/** Bumped 2026.08.4: relevance relocation — the ranking engine (lexicon, term
+ *  roles, IDF, tiers, typo repair, morphology, diversification, concept map)
+ *  moved into the auto-provisioned relevance module behind the seam's
+ *  rankSymbols API; the host keeps mechanical name matching as the
+ *  module-less fallback. Seed content with the module active matches
+ *  2026.08.3 + the coding-prompt-corpus improvements; the recorded
+ *  relevanceVersion says which engine ranked this capsule. */
+export const CAPSULE_RANKING_VERSION = 'capsule-rank@2026.08.4' as const;
 export const CAPSULE_COMPILER_ID = 'vg-task-capsule/0' as const;
 
 export interface BuildCapsuleOptions extends BuildContextOptions {
@@ -135,14 +142,33 @@ export interface CapsuleProvenanceExtras {
 export interface CapsuleSummary {
   schemaVersion: string;
   instruction: string;
-  primary: Array<{ qualifiedName: string; file: string; kind: string }>;
-  supporting: Array<{ qualifiedName: string; file: string; kind: string }>;
+  primary: Array<{ qualifiedName: string; file: string; kind: string; why: string }>;
+  supporting: Array<{ qualifiedName: string; file: string; kind: string; why: string }>;
   sourceSliceCount: number;
   sourceFiles: string[];
   tokensEstimate: number;
   rankingVersion: string;
+  /**
+   * How the ask was interpreted, ready to show a human: the capsule's concept
+   * map with the model-facing seed-notation legend dropped and the leading
+   * "- " bullet stripped. Empty when no relevance engine widened the ask.
+   */
+  interpretation: string[];
   /** Truncated rendered capsule for display (not the full prompt dump). */
   preview: string;
+}
+
+/**
+ * The concept map, projected for a human surface. The rendered capsule ends its
+ * concept map with a notation legend that exists so a small local model can
+ * decode the `a→b` slugs on each seed line; a terminal or panel reader has the
+ * `why` strings spelled out next to the symbol, so the legend is noise there.
+ */
+function interpretationFor(conceptMap: string[]): string[] {
+  return conceptMap
+    .filter((line) => !/^\s*-?\s*Seed notation\b/i.test(line))
+    .map((line) => line.replace(/^\s*-\s+/, '').trim())
+    .filter(Boolean);
 }
 
 /** Host-safe capsule summary (capsule transparency UI / stream-json). */
@@ -152,18 +178,62 @@ export function summarizeCapsule(capsule: TaskCapsule): CapsuleSummary {
   return {
     schemaVersion: capsule.schemaVersion,
     instruction: capsule.instruction,
-    primary: capsule.primary.map((p) => ({ qualifiedName: p.qualifiedName, file: p.file, kind: p.kind })),
-    supporting: capsule.supporting.map((p) => ({ qualifiedName: p.qualifiedName, file: p.file, kind: p.kind })),
+    primary: capsule.primary.map((p) => ({ qualifiedName: p.qualifiedName, file: p.file, kind: p.kind, why: p.why })),
+    supporting: capsule.supporting.map((p) => ({ qualifiedName: p.qualifiedName, file: p.file, kind: p.kind, why: p.why })),
     sourceSliceCount: capsule.sourceSlices.length,
     sourceFiles,
     tokensEstimate: capsule.tokensEstimate,
     rankingVersion: capsule.provenance.rankingVersion,
+    interpretation: interpretationFor(capsule.conceptMap),
     preview,
   };
 }
 
 /**
- * Compile a source-bearing Task Capsule. Reuses the same seed / impact /
+ * Interpretation lines shown before the seeds. Matches the VS Code panel's cap
+ * so the two surfaces explain an ask the same way. Three was too few in
+ * practice: the concept map orders broad taxonomy lines ahead of the specific
+ * ones, so a typo repair ("read \"chekout\" as \"checkout\"") — the line a
+ * reader who typed the typo most needs — fell past the cut.
+ */
+const TRANSPARENCY_INTERPRETATION_LINES = 6;
+/** Seeds shown with their match provenance. */
+const TRANSPARENCY_SEED_LINES = 3;
+
+/**
+ * The capsule transparency block for a text surface: how the ask was read, and
+ * which symbols that reached, with the reason each one matched.
+ *
+ * Returns indented, ready-to-print lines (the caller applies dimming). Both
+ * sections are capped — a coding session prints one of these per turn, and the
+ * complete block already travels inside the capsule itself. Empty when there is
+ * nothing to explain (no relevance engine active and no seeds).
+ */
+export function capsuleTransparencyLines(summary: CapsuleSummary): string[] {
+  const lines: string[] = [];
+
+  const interpretation = summary.interpretation ?? [];
+  for (const line of interpretation.slice(0, TRANSPARENCY_INTERPRETATION_LINES)) {
+    lines.push(`      read: ${line}`);
+  }
+  const hiddenInterpretation = interpretation.length - TRANSPARENCY_INTERPRETATION_LINES;
+  if (hiddenInterpretation > 0) lines.push(`      read: … ${hiddenInterpretation} more`);
+
+  const seeds = (summary.primary ?? []).filter((p) => p.qualifiedName);
+  for (const seed of seeds.slice(0, TRANSPARENCY_SEED_LINES)) {
+    // An external/module node carries no file of its own — no dangling separator.
+    const where = seed.file ? ` · ${seed.file}` : '';
+    const why = seed.why ? ` — ${seed.why}` : '';
+    lines.push(`      seed: ${seed.qualifiedName}${where}${why}`);
+  }
+  const hiddenSeeds = seeds.length - TRANSPARENCY_SEED_LINES;
+  if (hiddenSeeds > 0) lines.push(`      seed: … ${hiddenSeeds} more`);
+
+  return lines;
+}
+
+/**
+ * Compile a source-bearing Context Capsule. Reuses the same seed / impact /
  * fact-pinning path as {@link buildCodeContext}, then attaches exact source
  * slices and a verification sketch.
  */
@@ -219,7 +289,7 @@ export function buildTaskCapsule(graph: VgGraph, instruction: string, options: B
       modelProfileId: options.provenance?.modelProfileId ?? null,
       securityTier: options.provenance?.securityTier ?? null,
       policyVersion: options.provenance?.policyVersion ?? null,
-      relevanceVersion: options.relevance?.version ?? null,
+      relevanceVersion: options.ranked?.version ?? null,
     },
   };
 }
@@ -413,7 +483,7 @@ function renderCapsule(
   budget: number,
 ): string {
   const lines: string[] = [];
-  lines.push('# Task capsule (source-bearing, from the deterministic code graph)');
+  lines.push('# Context capsule (source-bearing, from the deterministic code graph)');
   lines.push('');
   lines.push('Use the exact source evidence below. Search or read outside it only if this capsule is insufficient.');
   lines.push('');

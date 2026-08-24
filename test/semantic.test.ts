@@ -33,10 +33,14 @@ beforeAll(async () => {
 });
 afterAll(() => cleanup(dir));
 
-describe('lexical morphology (zero-dep, always on)', () => {
-  it('matches "authentication" against authenticate via shared-prefix fuzzing', () => {
+describe('mechanical lexical matching (module-less fallback)', () => {
+  it('word-form fuzzing is the relevance module\'s job — mechanically, "authentication" is an honest miss', () => {
+    // The shared-prefix morphology that bridged "authentication" →
+    // `authenticate` moved into the relevance module (gated in that
+    // package); the mechanical fallback matches names and parts exactly.
     const r = queryGraph(graph, 'authentication');
-    expect(r.matches.map((m) => m.node.name)).toContain('authenticate');
+    expect(r.matches.map((m) => m.node.name)).not.toContain('authenticate');
+    expect(queryGraph(graph, 'authenticate').matches.map((m) => m.node.name)).toContain('authenticate');
   });
 
   it('does not fuzzy-match unrelated short overlaps', () => {

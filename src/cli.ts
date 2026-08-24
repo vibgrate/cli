@@ -58,6 +58,7 @@ import { registerLocale } from './reporting/commands/locale/index.js';
 import { updateCommand } from './reporting/commands/update.js';
 import { sbomCommand } from './reporting/commands/sbom.js';
 import { evidenceCommand } from './reporting/commands/evidence/index.js';
+import { kickRelevanceReadiness } from './install/relevance-module.js';
 
 /** The set of registered subcommand names (kept in sync with registration). */
 export const KNOWN_COMMANDS = new Set([
@@ -327,6 +328,13 @@ export async function main(argv = process.argv): Promise<void> {
 
   // Honor NO_COLOR / --no-color early so even bootstrap messages obey it.
   if (process.env.NO_COLOR || raw.includes('--no-color')) disableColor();
+
+  // Relevance-module readiness: every `vg` invocation silently kicks a
+  // throttled background provision attempt so the ranking engine is present
+  // by the time `vg ask` / `vg code` need it (those paths retry once,
+  // bounded, then fall back mechanically). Never blocks, never prints;
+  // VIBGRATE_NO_KERNEL / a recorded decline / --local skip it entirely.
+  if (!raw.includes('--local')) kickRelevanceReadiness();
 
   // We need cwd for path-based dispatch; read -C/--cwd from the raw args.
   const cwd = readCwd(raw);

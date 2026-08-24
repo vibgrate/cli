@@ -274,6 +274,11 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   timer.end('parse');
   checkMemoryBudget('parse', limits.memoryBudgetMb);
   for (const p of parsedNew) {
+    // Never persist a failed parse: a transient parse-runtime crash (e.g. a
+    // corrupted wasm heap) would otherwise poison the cache for that content
+    // hash and every later build would reuse the empty parse instead of
+    // re-parsing the file.
+    if (p.defs.length === 0 && p.warnings?.some((w) => w.startsWith('parse failed:'))) continue;
     const st = fileStats.find((f) => f.rel === p.rel);
     cache.set(p.rel, p, st ? { mtimeMs: st.mtimeMs, size: st.size } : undefined);
   }

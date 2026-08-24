@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseSource } from './parse.js';
-import { setGrammarsOverride } from './grammars.js';
+import { setGrammarsOverride, resetParser } from './grammars.js';
 import { checkMemoryBudget, envJobs, envWorkerHeapMb, ResourceLimitError } from './limits.js';
 import type { DiscoveredFile } from './discover.js';
 import type { FileParse } from './types.js';
@@ -78,6 +78,9 @@ async function parseInline(files: DiscoveredFile[], options: ParseOptions): Prom
       const source = fs.readFileSync(file.abs, 'utf8');
       out.push(await parseSource(file.rel, file.lang.id, source));
     } catch (err) {
+      // A wasm-level parse crash can leave the language's reused parser
+      // mid-state; drop it so the failure stays contained to this file.
+      resetParser(file.lang.id);
       out.push(emptyParse(file, `parse failed: ${(err as Error).message}`));
     }
     onProgress?.(out.length, files.length);

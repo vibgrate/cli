@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { buildTaskCapsule, capsuleToCodeContext, TASK_CAPSULE_SCHEMA_VERSION, CAPSULE_RANKING_VERSION } from './capsule.js';
+import {
+  buildTaskCapsule,
+  capsuleToCodeContext,
+  summarizeCapsule,
+  capsuleTransparencyLines,
+  TASK_CAPSULE_SCHEMA_VERSION,
+  CAPSULE_RANKING_VERSION,
+} from './capsule.js';
 import { fixtureGraph } from './graph-fixture.js';
 
 const FIXTURE_FILES: Record<string, string> = {
@@ -81,20 +88,114 @@ describe('buildTaskCapsule', () => {
     expect(ctx.seeds.some((s) => s.node.qualifiedName === 'scanDir')).toBe(true);
   });
 
-  it('renders a plain-language concept map before the symbol list (multi-turn field report)', () => {
-    const capsule = buildTaskCapsule(fixtureGraph(), 'do we support direct debits?', {
+  it('renders the module-authored concept map before the symbol list', () => {
+    // The interpretation lines are authored by the relevance module and
+    // arrive on the sanitized ranking (the linguistic behaviour itself is
+    // gated in the module package); the capsule's job is to render them
+    // ahead of the seeds so the a→b/↩ slugs are decodable.
+    const graph = fixtureGraph();
+    const seed = graph.nodes.find((n) => n.qualifiedName === 'scanDir')!;
+    const capsule = buildTaskCapsule(graph, 'do we support direct debits?', {
       readFile: readFixture,
-      priorInstruction: 'where is stripe used in the repo?',
+      ranked: {
+        version: 'stub-ranker@1',
+        hasContent: true,
+        seeds: [{ id: seed.id, score: 10, why: 'matched: direct debits→mandate' }],
+        conceptMap: ['- "direct debits" in the ask implies these codebase identifiers: mandate, sepa.'],
+      },
     });
     const r = capsule.rendered;
     expect(capsule.conceptMap.length).toBeGreaterThan(0);
     expect(r).toContain('## How the ask was interpreted');
     expect(r).toContain('"direct debits"');
-    expect(r).toMatch(/carried from the previous ask: .*stripe/);
     // Interpretation renders before the seeds so the a→b/↩ slugs are decodable.
     expect(r.indexOf('## How the ask was interpreted')).toBeLessThan(r.indexOf('## Primary symbols'));
     // Projection keeps the concept map for the legacy path.
     expect(capsuleToCodeContext(capsule).conceptMap).toEqual(capsule.conceptMap);
+    // The ranking engine's version lands in provenance.
+    expect(capsule.provenance.relevanceVersion).toBe('stub-ranker@1');
+  });
+
+  it('summarizes the interpretation for a host surface, without the model-facing legend', () => {
+    // The rendered capsule ends its concept map with a seed-notation legend so a
+    // small local model can decode the a→b slugs. A terminal or panel reader
+    // gets the reason spelled out next to each symbol, so the legend is noise
+    // there and the host projection drops it (with the "- " bullet).
+    const graph = fixtureGraph();
+    const seed = graph.nodes.find((n) => n.qualifiedName === 'scanDir')!;
+    const capsule = buildTaskCapsule(graph, 'do we support direct debits?', {
+      readFile: readFixture,
+      ranked: {
+        version: 'stub-ranker@1',
+        hasContent: true,
+        seeds: [{ id: seed.id, score: 10, why: 'matched: direct debits→mandate' }],
+        conceptMap: [
+          '- "direct debits" in the ask implies these codebase identifiers: mandate, sepa.',
+          '- Seed notation below: `a→b` = ask term "a" implied identifier "b".',
+        ],
+      },
+    });
+    const summary = summarizeCapsule(capsule);
+
+    expect(summary.interpretation).toEqual([
+      '"direct debits" in the ask implies these codebase identifiers: mandate, sepa.',
+    ]);
+    // The reason each symbol matched travels with it, so a host never has to
+    // parse the rendered prompt to explain a seed.
+    expect(summary.primary[0]?.why).toBe('matched: direct debits→mandate');
+  });
+
+  it('caps the transparency block so one line per turn cannot flood a session', () => {
+    const graph = fixtureGraph();
+    const seed = graph.nodes.find((n) => n.qualifiedName === 'scanDir')!;
+    const capsule = buildTaskCapsule(graph, 'do we support direct debits?', {
+      readFile: readFixture,
+      ranked: {
+        version: 'stub-ranker@1',
+        hasContent: true,
+        seeds: [{ id: seed.id, score: 10, why: 'matched: direct debits→mandate' }],
+        conceptMap: [
+          '- one.',
+          '- two.',
+          '- three.',
+          '- four.',
+          '- five.',
+          '- six.',
+          '- seven.',
+          '- eight.',
+        ],
+      },
+    });
+    const lines = capsuleTransparencyLines(summarizeCapsule(capsule));
+
+    const read = lines.filter((l) => l.includes('read:'));
+    expect(read).toHaveLength(7); // 6 shown + the "… 2 more" tail
+    expect(read[6]).toContain('… 2 more');
+    expect(lines.some((l) => l.includes('seed: scanDir') && l.includes('matched: direct debits→mandate'))).toBe(true);
+  });
+
+  it('renders a fileless seed without a dangling separator', () => {
+    // External / module nodes carry no file of their own, and the relevance
+    // engine can rank one into the seeds (an ask naming a vendor reaches the
+    // imported package node). Seen in a real render against the bundled fixture.
+    const lines = capsuleTransparencyLines({
+      schemaVersion: 'task-capsule/0',
+      instruction: 'the direct debit mandate fails at checkout',
+      primary: [{ qualifiedName: 'stripe', file: '', kind: 'external', why: 'matched: checkout→stripe' }],
+      supporting: [],
+      sourceSliceCount: 0,
+      sourceFiles: [],
+      tokensEstimate: 10,
+      rankingVersion: 'capsule-rank@test',
+      interpretation: [],
+      preview: '',
+    });
+    expect(lines).toEqual(['      seed: stripe — matched: checkout→stripe']);
+  });
+
+  it('has nothing to show when no relevance engine widened the ask', () => {
+    const capsule = buildTaskCapsule(fixtureGraph(), 'add a timeout to scanDir', { readFile: readFixture });
+    expect(summarizeCapsule(capsule).interpretation).toEqual([]);
   });
 
   it('omits the concept map when nothing fired', () => {
