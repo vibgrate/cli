@@ -24,8 +24,7 @@ export const TASK_CAPSULE_SCHEMA_VERSION = 'task-capsule/0' as const;
 /** Frozen ranking policy id — bump when the heuristic changes (benchmark gate). */
 /** Bumped 2026.07.1: strip URL/quoted needles from seed ranking (no path-token false positives). */
 /** Bumped 2026.08.1: term roles (weak process verbs never seed alone), concept/bigram
- *  expansion (payments→stripe, "direct debit"→sepa/bacs/mandate), multi-term coverage
- *  bonus, directory-segment evidence — gated by the ask-quality corpus (bench/ask-corpus.mjs). */
+ *  expansion, multi-term coverage bonus, directory-segment evidence. */
 /** Bumped 2026.08.2: optional relevance-provider seam — sanitized provider expansions
  *  join term preparation (own 0..1 weight capped at EXPANSION_WEIGHT; weak-provenance
  *  dropped); provider version recorded as `relevanceVersion` provenance. Absent

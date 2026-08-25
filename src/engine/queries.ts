@@ -195,6 +195,13 @@ const RUST: LangQueries = {
     { kind: 'class', query: '(struct_item name: (type_identifier) @name) @def' },
     { kind: 'class', query: '(enum_item name: (type_identifier) @name) @def' },
     { kind: 'interface', query: '(trait_item name: (type_identifier) @name) @def' },
+    // Rust colocates tests: `#[cfg(test)] mod tests` sits at the bottom of the
+    // file it tests. Without the module capture every `#[test] fn` is indexed
+    // as a bare top-level function, so nothing downstream can tell a test from
+    // production code (a test name echoing an ask outranked the code it
+    // covers). Capturing it also qualifies ordinary `mod` members, matching
+    // what Ruby/Scala/C++/OCaml already do.
+    { kind: 'module', query: '(mod_item name: (identifier) @name) @def' },
   ],
   calls: [
     '(call_expression function: (identifier) @callee)',

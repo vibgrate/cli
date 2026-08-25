@@ -31,6 +31,14 @@ import {
   type CapsuleSummary,
   type TaskCapsule,
 } from './capsule.js';
+import {
+  askNamesSymbol,
+  buildWholeRepoPacket,
+  capsuleMode,
+  mappedFilePaths,
+  sourceTokenMass,
+  type CapsuleMode,
+} from './capsule-mode.js';
 import { buildCapsuleDelta, isEmptyCapsuleDelta, type CapsuleDelta } from './capsule-delta.js';
 import {
   createDiscoveryGateState,
@@ -294,6 +302,12 @@ export interface AgentOptions {
    * false keeps today's metadata-only context.
    */
   capsule?: boolean;
+  /**
+   * Override auto `off` / `whole-repo` / `compile` (tests and hosts that
+   * already decided). When omitted, mass × greppability picks the mode.
+   * Ignored unless {@link capsule} is true.
+   */
+  capsuleMode?: CapsuleMode;
   /** Restrict context seeds to these files (from `--file`), if given. */
   files?: string[];
   /**
@@ -1331,11 +1345,47 @@ function buildAgentContext(
       capsule: null,
     };
   }
+
+  const readFile = (rel: string) => options.fsImpl.read(rel);
+  const mapped = (files?.length ? files : mappedFilePaths(graph)).map((path) => ({
+    path,
+    content: readFile(path) ?? '',
+  }));
+  const mode: CapsuleMode =
+    options.capsuleMode ??
+    capsuleMode({
+      sourceTokens: sourceTokenMass(mapped.map((f) => f.content)),
+      askNamesSymbol: askNamesSymbol(graph, instruction),
+    });
+
+  if (mode === 'off') {
+    return {
+      context: buildCodeContext(graph, instruction, { budget, files, ranked }),
+      capsule: null,
+    };
+  }
+  if (mode === 'whole-repo') {
+    const packet = buildWholeRepoPacket(instruction, mapped, budget);
+    return {
+      context: {
+        instruction,
+        seeds: [],
+        targetFiles: packet.files,
+        impacted: [],
+        pinnedFacts: [],
+        conceptMap: [],
+        rendered: packet.rendered,
+        tokensEstimate: packet.tokensEstimate,
+      },
+      capsule: null,
+    };
+  }
+
   const capsule = buildTaskCapsule(graph, instruction, {
     budget,
     files,
     ranked,
-    readFile: (rel) => options.fsImpl.read(rel),
+    readFile,
     repositoryId: repositoryIdFromRoot(options.root),
     extraPinnedFacts: options.extraPinnedFacts,
     provenance: {
