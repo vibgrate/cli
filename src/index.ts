@@ -111,6 +111,16 @@ export {
   CAPSULE_RANKING_VERSION,
   CAPSULE_COMPILER_ID,
 } from './code/capsule.js';
+export {
+  capsuleMode,
+  buildWholeRepoPacket,
+  askNamesSymbol,
+  mappedFilePaths,
+  sourceTokenMass,
+  WHOLE_REPO_MAX_SOURCE_TOKENS,
+  COMPILE_MIN_SOURCE_TOKENS,
+} from './code/capsule-mode.js';
+export type { CapsuleMode, WholeRepoPacket, WholeRepoFile } from './code/capsule-mode.js';
 export type {
   TaskCapsule,
   BuildCapsuleOptions,

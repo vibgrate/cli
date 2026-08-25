@@ -811,6 +811,42 @@ describe('runAgent — the agentic loop', () => {
 
     expect(result.stopped).toBe('finished');
     const joined = seen.join('\n');
+    // Tiny fixture trees auto-select whole-repo (paste the files), not the ranked dump.
+    expect(joined).toContain('# Repository source (entire mapped tree)');
+    expect(joined).toContain('function scanDir');
+    expect(joined).not.toContain('Exact source evidence');
+  });
+
+  it('with capsule:true and capsuleMode:compile, first context is the ranked capsule', async () => {
+    const scanBody = 'export function scanDir(dir: string): Report { return { ok: true }; }\n';
+    const seen: string[] = [];
+    const scripted = new ScriptedProvider('m', [{ toolCalls: [tc('finish', { summary: 'done' }, 't1')] }]);
+    const provider: Provider = {
+      id: scripted.id,
+      label: scripted.label,
+      local: scripted.local,
+      model: scripted.model,
+      async chat(messages, opts) {
+        for (const m of messages) {
+          if (typeof m.content === 'string') seen.push(m.content);
+        }
+        return scripted.chat(messages, opts);
+      },
+    };
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'add a timeout to scanDir',
+      providers: [provider],
+      fsImpl: memFs({ 'src/scan.ts': scanBody }),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      capsule: true,
+      capsuleMode: 'compile',
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    const joined = seen.join('\n');
     expect(joined).toContain('Exact source evidence');
     expect(joined).toContain('function scanDir');
   });

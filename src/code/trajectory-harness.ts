@@ -138,6 +138,9 @@ export async function runFusionTask(
     approve: async () => options.autoApprove !== false,
     auto: true,
     capsule: usedCapsule,
+    // FCS / ZNS@1 measure the ranked Task Capsule. Tiny fixtures would
+    // otherwise auto-select whole-repo paste and report usedCapsule=false.
+    capsuleMode: usedCapsule ? 'compile' : undefined,
     verify: task.verifyCommand ? { command: task.verifyCommand, maxRounds: 2 } : undefined,
     verifyLadder: usedCapsule,
     overlay: usedCapsule,
