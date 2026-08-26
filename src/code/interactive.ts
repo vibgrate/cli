@@ -705,8 +705,10 @@ export async function agentTask(params: {
     result.stopped === 'finished'
       ? c.green(`✔ ${result.finalText}`)
       : result.stopped === 'max-steps'
-        ? c.yellow(`stopped at the step limit — ${result.changes.length} change(s) so far`)
-        : c.dim(result.finalText),
+        ? c.yellow(`stopped at the step limit — ${result.changes.length} change(s) so far. ${result.finalText}`)
+        : // Every non-finished stop explains itself; an empty line here would be
+          // the "no output at all" the stop reasons exist to prevent.
+          c.yellow(result.finalText || `stopped: ${result.stopped}`),
   );
   const meterNote = perTask !== undefined ? ` · ${params.meter!.summary()}` : '';
   if (result.changes.length || perTask) info(c.dim(`  ${summary} · via ${result.provider.id}/${result.provider.model}${result.provider.fellBack ? ' (fell back)' : ''}${meterNote}`));

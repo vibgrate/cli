@@ -388,6 +388,15 @@ const EMPTY_REPLY_RETRIES = 2;
  * an explicit truncation note.
  */
 const TRUNCATED_REPLY_CONTINUES = 2;
+/**
+ * Extra attempts granted when a reply carried *reasoning but no answer*. A
+ * reasoning model that spends its output budget thinking is still working, so
+ * charging those turns to EMPTY_REPLY_RETRIES ended the run after ~3 steps with
+ * nothing on screen but thinking traces. Bounded for the same reason as above:
+ * a model that has thought this many times without writing a word is stuck, and
+ * the run stops with an explanation rather than an empty reply.
+ */
+const REASONING_ONLY_RETRIES = 3;
 
 export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const { root, instruction, providers } = options;
@@ -507,6 +516,8 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const changes: FileChange[] = [];
   const repeats = new Map<string, number>();
   let emptyReplies = 0;
+  /** Replies that carried reasoning but no answer and no tool call. */
+  let reasoningOnlyReplies = 0;
   /** Continuations spent recovering the tail of cap-truncated replies this run. */
   let truncatedContinues = 0;
   /** Text already emitted for a reply the cap cut short, awaiting its remainder. */
@@ -1051,25 +1062,44 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       }
       // An empty or non-prose reply (weak/local models do this) is not an
       // answer — the user would see nothing. Nudge and retry before giving up.
-      emptyReplies++;
-      if (emptyReplies <= EMPTY_REPLY_RETRIES && step < maxSteps) {
+      //
+      // A reasoning model that returned *only* reasoning is a distinct case: it
+      // is thinking, not failing, so it gets its own budget on top of the empty
+      // reply retries. Otherwise a run reads as "six thinking blocks and then
+      // nothing" — the model never got a turn in which to write the answer.
+      const reasoningOnly = displayText.trim().length === 0 && !!result.reasoning?.trim();
+      if (reasoningOnly) reasoningOnlyReplies++;
+      else emptyReplies++;
+      const retriesLeft = reasoningOnly
+        ? reasoningOnlyReplies <= REASONING_ONLY_RETRIES
+        : emptyReplies <= EMPTY_REPLY_RETRIES;
+      if (retriesLeft && step < maxSteps) {
         messages.push({
           role: 'user',
-          content:
-            displayText.trim().length === 0
+          content: reasoningOnly
+            ? 'You produced reasoning but no visible reply. Reasoning is never shown as the answer. ' +
+              'Stop thinking and act now: call a tool, or write the answer to the task in plain Markdown.'
+            : displayText.trim().length === 0
               ? 'Your last reply was empty. Either call a tool to keep working, or answer the task in plain Markdown now.'
               : 'Your last reply was neither a tool call nor a readable answer. Do not emit raw JSON or templates — call a tool, or answer the task in plain Markdown.',
         });
         continue;
       }
+      // Terminal text is never empty: a silent finish is exactly the failure
+      // this branch exists to report, and every host renders `finalText`.
       return finish(
         'no-tools',
         fullText ||
-          `The model (${providerInfo.model}) returned no usable output after ${emptyReplies} attempt(s). Try a stronger model, or re-ask with a more specific instruction.`,
+          (reasoningOnlyReplies > 0
+            ? `The model (${providerInfo.model}) kept reasoning without ever writing an answer (${reasoningOnlyReplies} reasoning-only reply/replies` +
+              `${emptyReplies > 0 ? `, ${emptyReplies} empty reply/replies` : ''}). ` +
+              'Lower the reasoning effort, raise the output limit, or re-ask with a more specific instruction.'
+            : `The model (${providerInfo.model}) returned no usable output after ${emptyReplies} attempt(s). Try a stronger model, or re-ask with a more specific instruction.`),
         step,
       );
     }
     emptyReplies = 0;
+    reasoningOnlyReplies = 0;
     truncatedPrefix = '';
 
     messages.push({ role: 'assistant', content: result.text, toolCalls });
@@ -1154,7 +1184,12 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       if (stopNoProgress) return finish('no-progress', `stopped: the model repeated \`${call.name}\` without making progress`, step);
     }
   }
-  return finish('max-steps', 'reached the step limit before finishing', maxSteps);
+  return finish(
+    'max-steps',
+    `Stopped at the step limit (${maxSteps} steps) before the task was finished. ` +
+      'Re-run with `--max-steps <n>`, or set `maxSteps` in vibgrate.config.json, to give it more room.',
+    maxSteps,
+  );
 }
 
 /**
