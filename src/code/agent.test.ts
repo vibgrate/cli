@@ -382,6 +382,65 @@ describe('runAgent — the agentic loop', () => {
     expect(result.finalText).not.toBe('done');
   });
 
+  it('gives a reasoning-only model extra turns to write its answer', async () => {
+    // A thinking model that spends four turns reasoning and answers on the
+    // fifth used to be cut off after the empty-reply retries — the user saw
+    // thinking blocks and no answer.
+    const provider = new ScriptedProvider('m', [
+      { reasoning: 'thinking about the timeout' },
+      { reasoning: 'still thinking' },
+      { reasoning: 'nearly there' },
+      { text: 'The scan timeout is set in src/scan.ts and defaults to zero.' },
+    ]);
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'x',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    expect(result.finalText).toContain('scan timeout');
+  });
+
+  it('stops with an explanation when the model only ever reasons', async () => {
+    const provider = new ScriptedProvider('m', [{ reasoning: 'thinking forever' }]); // never answers
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'x',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('no-tools');
+    expect(result.finalText).toMatch(/reasoning/i);
+    expect(result.finalText.trim()).not.toBe('');
+  });
+
+  it('names the step cap and how to raise it when the run runs out of steps', async () => {
+    const provider = new ScriptedProvider('m', [{ toolCalls: [tc('search_code', { query: 'x' })] }]);
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'x',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      maxSteps: 2,
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('max-steps');
+    expect(result.finalText).toMatch(/step limit \(2 steps\)/);
+    expect(result.finalText).toMatch(/max-steps|maxSteps/);
+  });
+
   it('plan mode denies every mutation engine-side without calling the approval gate', async () => {
     const approvals: string[] = [];
     const provider = new ScriptedProvider('m', [
