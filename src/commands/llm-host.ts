@@ -30,12 +30,12 @@ export function registerLlmHost(program: Command): void {
       let binding: unknown | null = null;
       const ensured = await ensurePackage('node-llama-cpp@^3', {
         consent: !!opts.yes,
-        local: !!global.local,
+        local: !!global.offline,
         interactive: false,
       });
       if (ensured.module) {
         binding = ensured.module;
-      } else if (opts.yes || !global.local) {
+      } else if (opts.yes || !global.offline) {
         // Soft: host can still start; generate will error until binding present.
         if (!global.json) {
           info(

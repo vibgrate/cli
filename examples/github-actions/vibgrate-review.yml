@@ -1,0 +1,72 @@
+## Vibgrate Review — architecture + security-control review of a pull request.
+##
+## The same binary you run on a laptop. There is no GitHub-specific analyser:
+## GitHub is a delivery channel that runs `vg review`, and the receipt it
+## produces is the same `vg.review.receipt.v1` document either way.
+##
+## Two things this file does on purpose:
+##
+##   * `pull_request`, never `pull_request_target`. `pull_request_target` runs
+##     with the base repository's secrets against the *fork's* code — a fork PR
+##     could then read your DSN. Review needs no write token and no secrets to
+##     produce a receipt, so the safe trigger is the only trigger.
+##   * `persist-credentials: false` on checkout, so the job's `GITHUB_TOKEN` is
+##     not left in `.git/config` where any step (or a compromised dependency)
+##     could reuse it.
+##
+## `--fail-on fail` is the default and the right starting point: only a `fail`
+## decision (an unresolved protected finding, or a high-severity finding above
+## the confidence threshold) stops the build. Move to
+## `--fail-on needs_review` once a repository has opted into enforcement.
+
+name: Vibgrate Review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Review compares HEAD against the merge-base with the base branch,
+          # so the job needs enough history to find it.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Review reasons from the code map. Without one it exits 6 —
+      # "engine unavailable" — which is deliberately never read as a pass.
+      - name: Build the code map
+        run: npx @vibgrate/cli build --quiet
+
+      - name: Review the change
+        run: |
+          npx @vibgrate/cli review \
+            --base "origin/${{ github.base_ref }}" \
+            --format json \
+            --out review-receipt.json \
+            --fail-on fail
+
+      # Always upload: the receipt of a failing review is the one worth reading.
+      - name: Upload the receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibgrate-review-receipt
+          path: review-receipt.json
+
+      - name: Write the PR summary
+        if: always()
+        run: |
+          npx @vibgrate/cli review \
+            --base "origin/${{ github.base_ref }}" \
+            --format md >> "$GITHUB_STEP_SUMMARY"

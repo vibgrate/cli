@@ -445,9 +445,32 @@ function formatArchitectureDiagram(arch: ArchitectureResult): string[] {
       lines.push(chalk.dim(`    + ${arch.folders.length - 12} more`));
     }
   }
+  if (arch.coverage) {
+    const pct = Math.round(arch.coverage.ratio * 100);
+    lines.push(
+      `  Coverage: ${pct}%  (${arch.coverage.classified} classified, ${arch.coverage.unclassified} unclassified)`,
+    );
+    const attributed = Object.entries(arch.coverage.bySource)
+      .filter(([, n]) => n > 0)
+      .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+      .map(([src, n]) => `${src} ${n}`);
+    if (attributed.length > 0) {
+      lines.push(chalk.dim(`    by source: ${attributed.join(', ')}`));
+    }
+  }
   if (arch.unclassifiedFiles && arch.unclassifiedFiles.length > 0) {
     const extra = arch.unclassified > arch.unclassifiedFiles.length ? ` of ${arch.unclassified}` : '';
     lines.push(`  Unclassified source (sample): ${arch.unclassifiedFiles.length}${extra}`);
+  }
+  if (arch.unclassifiedFolders && arch.unclassifiedFolders.length > 0) {
+    // The shape of the miss: which directories the rule table cannot see.
+    lines.push('  Unclassified by folder:');
+    for (const folder of arch.unclassifiedFolders.slice(0, 8)) {
+      lines.push(`    ${String(folder.count).padStart(4)}  ${folder.path}`);
+    }
+    if (arch.unclassifiedFolders.length > 8) {
+      lines.push(chalk.dim(`    + ${arch.unclassifiedFolders.length - 8} more`));
+    }
   }
   lines.push('');
   if (arch.layers.length > 0) {

@@ -38,7 +38,7 @@ export function registerLsp(program: Command): void {
         root,
         // `--local` is the established air-gap flag across the CLI; honour it
         // here too, so an offline editor session stays offline.
-        offline: global.local === true,
+        offline: global.offline === true,
         diagnostics: opts.diagnostics === true,
         graph: opts.graph !== false,
         semantic: opts.semantic !== false,

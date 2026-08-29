@@ -590,6 +590,7 @@ All HCS computation runs in an optional, separately-licensed engine module that 
 | `vg fix` | Ranked, risk-tiered upgrade plans from the hosted planner — then apply the one you choose |
 | `vg init [path]` | Initialise config and `.vibgrate/` |
 | `vg report` | Generate a report from a scan artifact |
+| `vg review` | **Vibgrate Review** — architecture + security-control review of the current change, locally. One decision (`pass` / `needs_review` / `fail` / `undetermined`) in a signed receipt; protected findings cannot be blessed into a pass. Reports change integrity, not a proof of security. Builds or refreshes the code map itself when it is missing or stale (`--no-auto-build` opts out) |
 | `vg sbom export` / `delta` / `vex` | Export CycloneDX/SPDX SBOM, diff two artifacts, or emit an OpenVEX document |
 | `vg scan [path]` | Scan for upgrade drift |
 | `vg scan --full` | Comprehensive scan: drift + vulnerabilities + a banned-dependency report |
@@ -684,6 +685,7 @@ When `@vibgrate/cli` is installed, it registers **both** bin entries uncondition
 | [**Vibgrate AI Context**](https://vibgrate.com/library) | `vg serve` — version-correct library docs, your code map, and offline drift, served to any assistant. [Supported assistants](https://vibgrate.com/skills) · [on mcp.so](https://mcp.so/servers/cli-a2b26f) |
 | [**Vibgrate Cloud MCP**](https://vibgrate.com/mcp) | The hosted MCP server over your workspace data (OAuth 2.1) |
 | [**Vibgrate Cloud**](https://vibgrate.com/cloud) | History, trends, and team rollups. [Create a workspace](https://dash.vibgrate.com) · [pricing](https://vibgrate.com/pricing) |
+| [**Vibgrate Review**](https://vibgrate.com/cli/docs/review-command) | `vg review` — did this change move the system toward its declared architecture, or weaken a security control? Runs locally from the code map; the receipt, not the repository, is what gets pushed |
 | [**Vibgrate Evidence**](https://vibgrate.com/evidence) | `vg evidence` — freeze shipped releases, then answer "which shipped products contain this vulnerability?" as signed, offline-verifiable evidence. Jurisdiction-neutral regimes, [EU CRA](https://vibgrate.com/cra) first |
 
 **How the scores work:** [DriftScore](https://vibgrate.com/driftscore) · [RiskScore](https://vibgrate.com/riskscore) · [DriftRisk Index](https://vibgrate.com/driftrisk) · [published methodology](https://vibgrate.com/whitepapers/software-risk-and-drift-scoring-methodology) · [public index of real scans](https://vibgrate.com/driftrisk/index) · [README badges](https://vibgrate.com/badges)

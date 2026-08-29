@@ -18,6 +18,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg fix](#vg-fix)
   - [vg init](#vg-init)
   - [vg report](#vg-report)
+  - [vg review](#vg-review)
   - [vg sbom](#vg-sbom)
   - [vg scan](#vg-scan)
     - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
@@ -420,6 +421,179 @@ vg report [--in <file>] [--format md|text|json]
 ---
 
 
+### vg review
+
+**Vibgrate Review** — architecture and security-control review of the change you
+just made, run locally from the code map. Where `vg scan` answers "how far behind
+is the stack?", `vg review` answers a different question about the same
+repository: *did this change move the system toward its declared architecture,
+weaken a security control, or create an implication the author did not account
+for?*
+
+```bash
+vg review                            # the working tree + index, vs HEAD
+vg review --base origin/main         # merge-base of HEAD and the base branch
+vg review explain arch-01            # the evidence behind one finding
+```
+
+| Flag                  | Default | Description                                                                |
+| --------------------- | ------- | -------------------------------------------------------------------------- |
+| `--base <ref>`        | —       | Review HEAD against the merge-base with `<ref>`                             |
+| `--format <fmt>`      | `text`  | `text`, `json` (the receipt), `sarif` (security findings only), `md`        |
+| `-o, --out <file>`    | —       | Write the formatted result to a file                                        |
+| `--push`              | off     | Send the receipt to Vibgrate Cloud (needs a DSN)                            |
+| `--fail-on <level>`   | from config | Gate CI on this decision: `none`, `fail`, or `needs_review`              |
+| `--explain`           | off     | Add local-model explanations. **Requires a local model; fails closed (exit 6) without one** |
+| `--include-spans`     | off     | Include evidence line ranges in the pushed receipt                          |
+| `--include-snippets`  | off     | Include capped source snippets in the pushed receipt (explicit opt-in)      |
+| `--offline` (global)  | off     | Never touch the network — no push, no model fetch                          |
+| `--write-context`     | off     | Write `.vibgrate/review-context.md` — committed agent memory                |
+| `--inject-context [file]` | off | Update the managed review block inside `CLAUDE.md` (or a named file)      |
+
+`vg review` reads the code map, so run `vg` (or `vg build`) in the repository
+first. Without a map it exits `6` — never `0`.
+
+#### Decisions
+
+Policy owns the decision, and it is the only layer that writes one. Findings —
+from the scanners or from the optional local model — have nowhere to put a
+verdict.
+
+| Decision       | Meaning                                                                       |
+| -------------- | ----------------------------------------------------------------------------- |
+| `pass`         | No material delta, or every finding is target-aligned                          |
+| `fail`         | An unresolved **protected** finding, or a high-severity finding above the confidence threshold |
+| `needs_review` | Findings a human should look at                                                |
+| `undetermined` | Not enough evidence to decide — deliberately not a pass                        |
+
+**Gating is opt-in, exactly as it is for [`vg scan`](#vg-scan).** By default
+`vg review` reports the decision, writes it to the receipt, and exits `0` — even
+on `fail`. It breaks the build only when you ask it to:
+
+| Gate | Set by | Exits `2` on |
+| --- | --- | --- |
+| `none` | the default | never |
+| `fail` | `--fail-on fail`, or `enforcement = "enforced"` with `fail_on = "fail"` | `fail` |
+| `needs_review` | `--fail-on needs_review`, or the same in config | `fail`, `needs_review`, `undetermined` |
+
+A gate failure exits `2` (`GATE_FAILED`) — the same code `vg scan`, `vg drift`
+and `vg hcs gate` use. It is deliberately **not** `1`: across this CLI `1` means
+the command itself errored, and a policy verdict of `fail` is the command
+working correctly. Machines should branch on `decision` in the receipt, which is
+unambiguous; the exit code exists for CI.
+
+`enforcement = "advisory"` means no gate at all. That is what makes the setting
+real rather than a label on the receipt — an advisory repository reports
+honestly and never blocks a merge.
+
+**Protected findings** — an unguarded entrypoint, a removed guard, a validated
+taint flow, a known-vulnerable dependency — carry `protected_finding: true`.
+While one is unresolved, policy cannot emit `pass`: not via an approved
+exception, not via low confidence, not via the quick path, and not via anything
+the model says. Turn a rule off in `.vibgrate/review.toml` if it does not apply
+to your repository; that is the only way to stop it gating.
+
+#### What it looks for
+
+| Finding | What it means |
+|---|---|
+| `boundary_bypass` | A dependency breaks the declared layering, or skips a tier |
+| `peer_deviation` | This file does something its peers do differently |
+| `unguarded_entrypoint` | **Protected.** A mutating route has no authorization guard, where its peers do |
+| `guard_removed` | **Protected.** A guard was deleted and nothing equivalent remains |
+| `known_vulnerable_dependency` | **Protected.** A changed manifest declares a package with a known advisory |
+| `duplicate_implementation` | This re-implements something the repository already has |
+| `unverified_change` | Changed code with no test reaching it |
+
+Two of these deserve a note, because they are what a linter cannot do:
+
+**Peers are graph areas and roles, not folders.** A directory is a filing
+decision; an area is a structural one. Recent files count roughly twice what
+year-old ones do, so a large abandoned wing does not get to dictate "the
+convention". Where peers are too evenly split to have one, Review says *no
+convention* instead of naming a plurality winner.
+
+**A majority is never treated as correct.** Peers establish what is *normal*;
+only `target_pattern` establishes what is *right*. A file that goes through the
+service layer while all its peers bypass it is the first one to improve — Review
+will not flag it. That is the difference between this and a consistency scanner,
+which by construction scores your best file worst.
+
+**Routes get three answers, not two.** Every route is `auth`, `not-auth`, or
+`unsure`, and `unsure` is never promoted. A guard Review does not recognise, or
+a file it could not parse, becomes an honest unknown — never "this route is
+open". Below four classified peer routes a finding is advisory and cannot gate.
+
+#### Before you write it — `assess_change`
+
+`vg review` asks "was that change sound?". The MCP tool `assess_change` asks
+"would this be sound?", while an agent is still deciding — the only point at
+which the fix is free.
+
+```jsonc
+// one call, from any MCP client wired to `vg serve`
+{ "file": "src/routes/invoices.ts", "content": "<the proposed code>" }
+```
+
+It returns the conflicts, anything the proposal duplicates, the convention its
+peers follow with example files to open, and the declared target. One tool, not
+a family of them: a family pushes the judgement into the model, and in this
+product the model never decides.
+
+#### Agent memory — `--write-context`
+
+`vg review --write-context` writes `.vibgrate/review-context.md`: the declared
+target, the conventions with exemplars, what is currently open, and what to do.
+Commit it, and the next agent starts from the answer.
+
+It tells the agent to follow the **declared target**, never "the majority" —
+otherwise a repository mid-migration ends up with memory instructing every agent
+to perpetuate the legacy it is migrating away from. `--inject-context` keeps the
+same content in a marked block inside `CLAUDE.md`, leaving everything a human
+wrote in that file untouched.
+
+#### Configuration — `.vibgrate/review.toml`
+
+```toml
+[review]
+enforcement = "advisory"          # advisory | enforced
+fail_on = "fail"                  # fail | needs_review
+target_pattern = "layered"        # the architecture you say you want
+
+[review.protected]
+unguarded_entrypoint = true
+known_vulnerable_dependency = true
+validated_taint = true
+```
+
+Read from the **trusted base branch** when `--base` is given, so a pull request
+cannot weaken the policy applied to itself.
+
+Declaring `target_pattern` is what turns a layering observation into a
+*regression*. Without it, a dependency that skips a tier is reported as a medium
+finding about the repository's own majority — because a majority is not the same
+thing as a decision, and Review will not treat it as one.
+
+#### What it does not claim
+
+Review reports change integrity. It does not prove code is secure, correct, or
+free of vulnerabilities; it does not replace Semgrep, CodeQL, a compiler, or your
+tests; and **absence of findings is not a certification**.
+
+#### Privacy
+
+Source stays on the machine. `--push` sends the receipt — decisions, claims,
+evidence ids, paths, digests, versions — never the analysis capsule and never
+source text. Line ranges are opt-in (`--include-spans`); snippets are a second,
+explicit opt-in (`--include-snippets`) and are capped. `--offline`, or simply
+having no DSN, keeps the receipt on disk.
+
+Ready-to-use workflows: `examples/github-actions/vibgrate-review.yml` and
+`vibgrate-review-sarif.yml`.
+
+---
+
+
 ### vg sbom
 
 Export [SBOMs](https://vibgrate.com/glossary/sbom) from an existing scan artifact or compare two artifacts.
@@ -654,7 +828,7 @@ Ask the code map a question using hybrid lexical + structural + semantic search.
 vg ask "<question>"
 ```
 
-A local ONNX embedding model is downloaded once on first use, then cached and fully offline. Degrades gracefully to lexical-only under `--local` or `--no-semantic`.
+A local ONNX embedding model is downloaded once on first use, then cached and fully offline. Degrades gracefully to lexical-only under `--offline` or `--no-semantic`.
 
 > **Semantic search is opt-in.** The embedding backend (`fastembed`, which pulls a native ONNX runtime) is declared as an **optional dependency**: package managers install it by default, but if it's absent — e.g. you installed with `--omit=optional`, or it failed to build on your platform — `vg ask` and `vg embed` transparently fall back to lexical + structural search. Nothing else in the CLI needs it, so `vg build`, `vg show`, `vg impact`, drift reporting, and MCP serving all run without it. If you never use semantic `ask`, you can install lean: `npm i @vibgrate/cli --omit=optional`. A host application that bundles the CLI without optional dependencies (Vibgrate for VS Code does this) can supply the backend from its own directory by setting `VIBGRATE_EMBEDDER_PATH` to a folder whose `node_modules` contains `fastembed`; when set, that copy is used first.
 
@@ -933,7 +1107,7 @@ With no `--provider`, `vg code` chooses from what you have already configured, b
 | `--session` | — | With `--stream-json`: stay open for further turns instead of exiting after one |
 | `--mock <file>` | — | Use a scripted reply instead of a model (offline; tests/CI/benchmarks) |
 | `-o, --out <file>` | — | Write the JSON result to a file (for CI/benchmarks) |
-| `--local` (global) | — | On-device model backends only — no hosted model call, no catalog fetch |
+| `--local` (global) | — | On-device model backends only — never a hosted model. Implies `--offline` |
 
 `--stream-json` is the protocol **Vibgrate for VS Code** speaks to the CLI: the panel renders the agent's steps, approves or denies each mutating tool call over stdin, and with `--session` keeps one warm graph across turns. It is a supported surface for any host UI, not just ours.
 
@@ -1260,7 +1434,7 @@ vg models catalog
 | `uninstall <name>` | Uninstall a local model — Ollama, LM Studio, or GGUF (`--dry-run` plan; TTY confirm or `--yes`; `--runtime` optional auto-detect) |
 | `host-bench` | Approach B measurement arms (`--simulate` default, `--mock`, `--live --model-path`, `--gate`) |
 | `coding-metrics` | Unified host-bench + Fusion FCS/ZNS report (`--out`, `--gate`, `--version`); publish path for release |
-| `catalog` | Live hosted model catalog (cached; not used under `--local`) |
+| `catalog` | Live hosted model catalog (cached; not used under `--offline`) |
 | `--json` | Machine-readable JSON on stdout |
 
 ```bash
@@ -1338,7 +1512,7 @@ Add `--json` for machine-readable output.
 
 ### vg serve
 
-Start [Vibgrate AI Context](https://vibgrate.com/library) — a local-first [MCP](https://vibgrate.com/glossary/model-context-protocol) serving your code map, drift, and version-correct docs to your AI assistant (fully offline under `--local`).
+Start [Vibgrate AI Context](https://vibgrate.com/library) — a local-first [MCP](https://vibgrate.com/glossary/model-context-protocol) serving your code map, drift, and version-correct docs to your AI assistant (fully offline under `--offline`).
 
 ```bash
 vg serve
@@ -1350,7 +1524,7 @@ vg serve
 | `--port <n>` | `7437` | Port for `--http` |
 | `--host <h>` | `127.0.0.1` | Host for `--http` |
 | `--savings` | — | Record local, counts-only usage savings (opt-in) |
-| `--share-stats` | — | Also upload the counts-only usage ledger to Vibgrate to improve the local MCP (opt-in; off by default; implies `--savings`; disabled under `--local`) |
+| `--share-stats` | — | Also upload the counts-only usage ledger to Vibgrate to improve the local MCP (opt-in; off by default; implies `--savings`; disabled under `--offline`) |
 | `--dedup` | — | Collapse a node's heavy relation lists on repeat reads within a session, to save tokens (opt-in) |
 | `--no-refresh` | — | Serve the map as built; skip the auto-rebuild when files change |
 
@@ -1358,7 +1532,7 @@ Via stdio (default), your AI assistant spawns the server. Via `--http`, it runs 
 
 **A live status display shows what the server is doing for you.** While `vg serve` runs in a terminal, a status block on stderr updates in place: uptime, which AI clients are connected (detected from the MCP handshake), calls and average response time per tool, and — for the navigation tools with a grep/read baseline — the context tokens served vs the estimated tokens a grep-and-read agent would have burned instead, with the estimated saving labelled as such. Outside a terminal (when your assistant spawns the server) it degrades to a quiet one-line heartbeat in the server logs every 15 minutes, and only when there has been activity. The display is in-memory only and always on — nothing is written to disk or uploaded (recording and sharing below stay opt-in) — and `--quiet` turns it off.
 
-**Usage stats — local by default, sharing is opt-in.** `--savings` records a *counts-only* ledger under `.vibgrate/` — per navigation call: which tool, how it resolved (complete/partial/miss), the vg-vs-grep token figures, whether it came over the MCP (`mcp`) or the `vg` CLI (`cli`), and a coarse client label (which AI). `vg savings` reports it locally; nothing leaves your machine. `--share-stats` additionally uploads that same counts-only ledger to Vibgrate periodically, so we can see how the local MCP is used and improve it. It **never** sends code, file paths, question text, repo identity, or any credential — only counts, outcomes, token figures, the vg version, your OS/arch, and a random per-install id. It's off unless you pass the flag, is disabled entirely under `--local`, and the endpoint can be overridden with `VIBGRATE_STATS_ENDPOINT`.
+**Usage stats — local by default, sharing is opt-in.** `--savings` records a *counts-only* ledger under `.vibgrate/` — per navigation call: which tool, how it resolved (complete/partial/miss), the vg-vs-grep token figures, whether it came over the MCP (`mcp`) or the `vg` CLI (`cli`), and a coarse client label (which AI). `vg savings` reports it locally; nothing leaves your machine. `--share-stats` additionally uploads that same counts-only ledger to Vibgrate periodically, so we can see how the local MCP is used and improve it. It **never** sends code, file paths, question text, repo identity, or any credential — only counts, outcomes, token figures, the vg version, your OS/arch, and a random per-install id. It's off unless you pass the flag, is disabled entirely under `--offline`, and the endpoint can be overridden with `VIBGRATE_STATS_ENDPOINT`.
 
 **Attributing CLI calls.** The MCP path detects the calling client automatically from the connection handshake. For CLI calls, pass `--client=<ai>` (e.g. `vg "how does auth work" --client=claude`) so the call is attributed in `vg savings` and any shared stats — this is what `vg install` writes into each assistant's skill. Without `--client`, a bare `vg ask` records nothing.
 
@@ -1372,7 +1546,7 @@ The server exposes read-only tools your assistant can call over the code map and
 - `upgrade_impact` — what an upgrade will cost: version distance, how many files import the package, the vulnerabilities it fixes, and — with `changelog: true` — online breaking-change notes between your version and the latest.
 - `resolve_library`, `library_docs` — version-correct, drift-annotated library docs.
 
-All tools are read-only. The server is local-first: it always answers from your machine when it can, and its only network touches are the embedder's one-time model fetch, `upgrade_impact`'s `changelog`, and `library_docs`' fall-through to the hosted catalog when the local docs for a library are thin or missing. `--local` is the hard airgap — it disables all three.
+All tools are read-only. The server is local-first: it always answers from your machine when it can, and its only network touches are the embedder's one-time model fetch, `upgrade_impact`'s `changelog`, and `library_docs`' fall-through to the hosted catalog when the local docs for a library are thin or missing. `--offline` is the hard airgap — it disables all three.
 
 ---
 
@@ -1660,7 +1834,7 @@ vg doctor --local
 | Flag | Description |
 |------|-------------|
 | `--json` | Machine-readable JSON on stdout |
-| `--local` | Skip the hosted reachability probe |
+| `--offline` | Skip the hosted reachability probe |
 | `-C, --cwd <dir>` | Run as if started in that directory |
 
 ---
@@ -1682,7 +1856,7 @@ vg lsp --local
 | `--diagnostics` | Also publish Problems-panel diagnostics (EOL runtime, unmaintained packages, license change). **Off by default** — drift is not a defect, and the Problems panel is not filled by default. |
 | `--no-graph` | Skip the local code graph entirely: no background build; graph queries report it as turned off |
 | `--no-semantic` | Never use semantic search for graph queries (lexical only; embedding model is not downloaded) |
-| `--local` | Never touch the network (air-gapped editor sessions) |
+| `--offline` | Never touch the network (air-gapped editor sessions) |
 
 The process owns stdin/stdout until the client sends `shutdown` + `exit`. Speaks standard LSP plus a custom `vibgrate/score` notification carrying the DriftScore and its **band** (never a colour) so clients can theme correctly.
 
@@ -2224,6 +2398,25 @@ What it **does** collect:
 
 ---
 
+## `--offline` vs `--local`
+
+Two different questions, so two flags:
+
+| Flag | Question it answers | Effect |
+| --- | --- | --- |
+| `--offline` | May this reach the network? | No model download, no catalog fetch, no upload. Available on every command. |
+| `--local` | Where does inference run? | On-device backends only, never a hosted model. Consumed by [`vg code`](#vg-code). |
+
+**`--local` implies `--offline`**, so anything that already passes `--local`
+keeps its exact behaviour. The converse does not hold, and deliberately so:
+forcing on-device inference is a choice you may want on a fully connected
+machine — for privacy, cost, or latency — and `--offline` would not say it.
+
+`vg scan --offline` and `vg evidence --offline` mean the same thing they always
+have.
+
+---
+
 ## Exit Codes
 
 CI and agents branch on these, so they are a stable contract.
@@ -2239,6 +2432,8 @@ CI and agents branch on these, so they are a stable contract.
 | `6`  | `ENGINE_UNAVAILABLE`  | A required optional module is not installed and could not be fetched (see [`vg module`](#vg-module)) |
 
 `6` is deliberately distinct from `2`: a CI gate must never read "engine missing" as a gate verdict.
+The same rule is why [`vg review`](#vg-review) exits `6` when there is no code map, and why `--explain`
+exits `6` rather than quietly producing a review no model contributed to.
 
 ---
 

@@ -37,7 +37,7 @@ export function registerExport(program: Command): void {
       const content = exportGraph(format, {
         graph,
         deps: needsDeps ? inventory(root).records : undefined,
-        models: needsDeps && !global.local ? discoverModels() : undefined,
+        models: needsDeps && !global.offline ? discoverModels() : undefined,
         generatedAt: graph.generatedAt,
         compact: opts.compact === true ? true : opts.compact === false ? false : undefined,
         slim: opts.slim === true,

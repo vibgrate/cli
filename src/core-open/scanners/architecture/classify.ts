@@ -3,6 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import type {
+  ArchitectureCoverageSource,
   ArchitectureLayer,
   LayerClassification,
   ProjectArchetype,
@@ -376,14 +377,23 @@ function isDomainRepositoryPort(baseName: string, loweredPath: string): boolean 
   return /\/(domain|interfaces)\//.test(loweredPath);
 }
 
+/** A winning rule, tagged with the rule family that produced it. */
+interface RuleMatch {
+  layer: ArchitectureLayer;
+  confidence: number;
+  signal: string;
+  source: ArchitectureCoverageSource;
+}
+
 function considerRule(
-  bestMatch: { layer: ArchitectureLayer; confidence: number; signal: string } | null,
+  bestMatch: RuleMatch | null,
   layer: ArchitectureLayer,
   confidence: number,
   signal: string,
-): { layer: ArchitectureLayer; confidence: number; signal: string } {
+  source: ArchitectureCoverageSource,
+): RuleMatch {
   if (!bestMatch || confidence > bestMatch.confidence) {
-    return { layer, confidence, signal };
+    return { layer, confidence, signal, source };
   }
   return bestMatch;
 }
@@ -392,7 +402,7 @@ function classifyOne(
   filePath: string,
   archetype: ProjectArchetype,
   opts?: ClassifyFileOptions,
-): { layer: ArchitectureLayer; confidence: number; signal: string } | null {
+): RuleMatch | null {
   // Leading `/` so `/dir/` patterns also match a top-level directory
   // (`tests/Foo.Tests/Bar.cs`); lowercased so PascalCase conventions
   // (.NET `Controllers/`, `Views/`…) hit the same rules as JS lowercase dirs.
@@ -402,7 +412,7 @@ function classifyOne(
 
   // Fuse path / suffix / Pascal evidence. Stronger file-level signal wins
   // (UsersController.cs under Domain/ is routing, not domain).
-  let bestMatch: { layer: ArchitectureLayer; confidence: number; signal: string } | null = null;
+  let bestMatch: RuleMatch | null = null;
 
   const pathRules: readonly PathRule[] = spa
     ? [...SPA_PATH_RULES, ...PATH_RULES]
@@ -418,7 +428,7 @@ function classifyOne(
       // Archetype-specific rules get a boost
       const boost = rule.archetypes ? 0.05 : 0;
       const adjustedConfidence = Math.min(rule.confidence + boost, 1);
-      bestMatch = considerRule(bestMatch, rule.layer, adjustedConfidence, rule.signal);
+      bestMatch = considerRule(bestMatch, rule.layer, adjustedConfidence, rule.signal, 'path');
     }
   }
 
@@ -427,7 +437,7 @@ function classifyOne(
       continue;
     }
     if (rule.pattern.test(lowered)) {
-      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
+      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal, 'path');
     }
   }
 
@@ -436,13 +446,13 @@ function classifyOne(
 
   for (const rule of SUFFIX_RULES) {
     if (cleanBase.endsWith(rule.suffix)) {
-      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
+      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal, 'suffix');
     }
   }
 
   for (const rule of opts?.extraSuffixRules ?? []) {
     if (cleanBase.endsWith(rule.suffix)) {
-      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
+      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal, 'suffix');
     }
   }
 
@@ -451,19 +461,24 @@ function classifyOne(
     if (spa && SPA_SKIP_PASCAL.has(rule.suffix)) continue;
     if (rule.extensions && !rule.extensions.includes(fileExt)) continue;
     if (cleanBase.endsWith(rule.suffix)) {
-      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
+      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal, 'pascal');
     }
   }
 
   for (const rule of opts?.extraPascalSuffixRules ?? []) {
     if (spa && SPA_SKIP_PASCAL.has(rule.suffix)) continue;
     if (cleanBase.endsWith(rule.suffix)) {
-      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal);
+      bestMatch = considerRule(bestMatch, rule.layer, rule.confidence, rule.signal, 'pascal');
     }
   }
 
   if (isDomainRepositoryPort(cleanBase, lowered)) {
-    const port = { layer: 'domain' as const, confidence: 0.93, signal: 'domain repository port' };
+    const port = {
+      layer: 'domain' as const,
+      confidence: 0.93,
+      signal: 'domain repository port',
+      source: 'pascal' as const,
+    };
     if (!bestMatch || port.confidence >= bestMatch.confidence || bestMatch.layer === 'data-access') {
       bestMatch = port;
     }
@@ -477,13 +492,15 @@ function classifyOne(
     && /\/(model|entity|entities)\//.test(lowered)
     && /(Controller|Request|Response|Dto|DTO)$/.test(cleanBase)
   ) {
-    bestMatch = { layer: 'domain', confidence: 0.88, signal: 'entity folder beats type suffix' };
+    bestMatch = { layer: 'domain', confidence: 0.88, signal: 'entity folder beats type suffix', source: 'path' };
   }
 
   if (!bestMatch) {
     const ext = path.extname(filePath).toLowerCase();
     if (UI_SOURCE_EXTENSIONS.has(ext)) {
-      bestMatch = { layer: 'presentation', confidence: 0.62, signal: 'ui source extension' };
+      // Keys off the filename's extension, so it is attributed with the other
+      // filename-shaped rules rather than the directory ones.
+      bestMatch = { layer: 'presentation', confidence: 0.62, signal: 'ui source extension', source: 'suffix' };
     }
   }
 
@@ -558,6 +575,7 @@ export function classifyFile(
       layer: 'testing',
       confidence: 0.9,
       signals: ['test project prefix'],
+      source: 'path',
     };
   }
 
@@ -582,5 +600,6 @@ export function classifyFile(
     layer: best.layer,
     confidence: best.confidence,
     signals: usedHint ? [best.signal, 'project-path-hint'] : [best.signal],
+    source: best.source,
   };
 }

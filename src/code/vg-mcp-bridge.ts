@@ -20,6 +20,12 @@ import type { ToolResult } from './tools.js';
 export const VG_MCP_SERVER_ID = 'vibgrate' as const;
 const NS = `mcp__${VG_MCP_SERVER_ID}__`;
 
+/**
+ * Agent-native names that must keep going to the VG Code tool set, not the
+ * un-namespaced MCP alias. `library_docs` exists on both surfaces.
+ */
+const AGENT_RESERVED_NAMES = new Set(['library_docs']);
+
 export type ExternalToolset = {
   specs: ToolSpec[];
   owns: (name: string) => boolean;
@@ -45,11 +51,22 @@ export function createVgBuiltinMcpTools(opts: VgBuiltinMcpOptions): ExternalTool
     parameters: t.inputSchema && typeof t.inputSchema === 'object' ? t.inputSchema : { type: 'object', properties: {} },
   })).sort((a, b) => a.name.localeCompare(b.name));
 
+  /** Advertised name, or the bare MCP name Spark copies from AGENTS.md. */
+  const resolveName = (name: string): string | undefined => {
+    if (byName.has(name)) return name;
+    const namespaced = name.startsWith(NS) ? name : `${NS}${name}`;
+    if (namespaced !== name && byName.has(namespaced) && !AGENT_RESERVED_NAMES.has(name)) {
+      return namespaced;
+    }
+    return undefined;
+  };
+
   return {
     specs,
-    owns: (name) => byName.has(name),
+    owns: (name) => resolveName(name) != null,
     async execute(call, live) {
-      const tool = byName.get(call.name);
+      const resolved = resolveName(call.name);
+      const tool = resolved ? byName.get(resolved) : undefined;
       if (!tool) return { content: `unknown MCP tool ${call.name}`, mutated: false };
       try {
         const graph = live?.graph ?? opts.getGraph();

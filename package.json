@@ -1,6 +1,6 @@
 {
   "name": "@vibgrate/cli",
-  "version": "2026.826.1",
+  "version": "2026.829.1",
   "description": "vg — local codebase intelligence CLI + MCP server for AI coding agents: deterministic code graph, drift reporting, and version-correct library docs (Apache-2.0)",
   "//mcpName": "Official MCP registry ownership proof: the registry fetches the published npm package and requires this field to match the com.vibgrate/ai-context server entry (see docs/marketing/mcp-registry/README.md). Must ship in the published @vibgrate/cli package.json.",
   "mcpName": "com.vibgrate/ai-context",
@@ -96,7 +96,7 @@
   "optionalDependencies": {
     "@anush008/tokenizers": "^0.6.0",
     "onnxruntime-node": "^1.27.0",
-    "tar": "^7.5.19"
+    "tar": "^7.5.21"
   },
   "devDependencies": {
     "@tree-sitter-grammars/tree-sitter-hcl": "1.2.0",

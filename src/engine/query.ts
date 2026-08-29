@@ -103,7 +103,7 @@ const FUNCTION_WORDS = new Set([
   // Discovery-question scaffolding: words that FRAME the search itself
   // ("find the code responsible for X", "explain how X works").
   'find', 'code', 'responsible', 'modify', 'me',
-  'implementation', 'explain', 'codebase', 'contains', 'file',
+  'implementation', 'explain', 'codebase', 'contains', 'file', 'files',
   // Bug-report framing: says something is WRONG, never what is wrong.
   // `fix` alone lit up `export_fixed_width_records`, `out` lit up every
   // *Router*/*rollout* symbol (vg code prompt-relevance corpus).

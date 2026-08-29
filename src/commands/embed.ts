@@ -60,7 +60,7 @@ export function registerEmbed(program: Command): void {
       const bg = opts.bg === true;
       const speak = !bg && !global.json;
 
-      if (global.local) {
+      if (global.offline) {
         if (global.json) json({ embedded: 0, model: modelId, semantic: false, reason: 'local' });
         else if (speak) info(c.dim('vg embed · semantic is off (--local) — lexical search only'));
         return;
@@ -85,7 +85,7 @@ export function registerEmbed(program: Command): void {
       let reason: EmbedUnavailable | undefined;
       let detail: string | undefined;
       const embedder = await loadEmbedder({
-        local: global.local,
+        local: global.offline,
         // Background warm-ups skip the download unless explicitly asked to fetch
         // (`--bg --download`, spawned by `vg build` so the model is ready by the
         // time `vg serve`/`vg ask` needs it).

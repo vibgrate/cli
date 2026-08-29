@@ -118,6 +118,7 @@ function cloneClassification(c: LayerClassification): LayerClassification {
     signals: [...c.signals],
   };
   if (c.role) next.role = c.role;
+  if (c.source) next.source = c.source;
   return next;
 }
 
@@ -249,6 +250,7 @@ export function applyFolderInheritance(input: {
         layer: folder.layer,
         confidence: folder.confidence,
         signals: [folderInheritSignal(folder.layer)],
+        source: 'folder-inherit',
       });
     } else {
       stillUnclassified.push(file);

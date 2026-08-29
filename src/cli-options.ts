@@ -14,7 +14,22 @@ export interface GlobalOpts {
   graph?: string;
   /** --no-cache (commander exposes this as `cache: false`) */
   noCache?: boolean;
-  /** --local (never touch the network) */
+  /**
+   * `--offline` — never reach the network. Skip the embedding model, the
+   * relevance module, the hosted catalog, and any upload.
+   *
+   * **Read this, not `local`, for every network decision.** `--local` implies
+   * `--offline`, so this is already true whenever the user passed either.
+   */
+  offline?: boolean;
+  /**
+   * `--local` — run inference **on-device only**: pick a local backend
+   * (embedded → ollama), never a hosted model. Consumed by `vg code` alone.
+   *
+   * It implies {@link offline} (an on-device run has nothing to fetch), which
+   * is what keeps every pre-existing `--local` script working unchanged. The
+   * converse does not hold: `--offline` says nothing about where inference runs.
+   */
   local?: boolean;
   /** --quiet */
   quiet?: boolean;
@@ -47,7 +62,21 @@ export function applyGlobalOptions(cmd: Command): Command {
     .option('--generated-at <iso>', 'pin the artifact timestamp for byte-deterministic output')
     .option('--graph <file>', 'override the map path')
     .option('--no-cache', 'full rebuild (ignore the incremental cache)')
-    .option('--local', 'never touch the network (lexical-only semantic)')
+    // Two distinct questions, two flags.
+    //
+    // `--offline` answers "may this reach the network?" — the same question
+    // `vg scan --offline` and `vg evidence --offline` already answer, so the
+    // whole CLI now spells it the same way.
+    //
+    // `--local` answers "where does inference run?" — on-device only, never a
+    // hosted model. That is a choice you may want while fully online, which is
+    // why it cannot simply be renamed: `vg code --local` on a connected machine
+    // is meaningful, and `--offline` would not say it.
+    //
+    // `--local` implies `--offline`, so every script that already passes
+    // `--local` keeps its exact current behaviour. The converse does not hold.
+    .option('--offline', 'never touch the network (no model download, no catalog fetch, no upload)')
+    .option('--local', 'run inference on-device only — never a hosted model (implies --offline)')
     .option('--quiet', 'suppress progress output')
     .option('--client <name>', 'identify the AI client (e.g. claude) so navigation calls are counted in vg savings')
     .option('--no-daemon', 'never auto-start or use the local runtime (vgd) — run everything in this process')
@@ -67,6 +96,10 @@ export function readGlobal(cmd: Command): GlobalOpts {
     generatedAt: o.generatedAt as string | undefined,
     graph: o.graph as string | undefined,
     noCache: o.cache === false,
+    // `--local` implies `--offline`: an on-device run has nothing to fetch, and
+    // folding it in here is what makes every existing `--local` invocation keep
+    // working without each consumer having to remember the implication.
+    offline: (o.offline as boolean | undefined) === true || (o.local as boolean | undefined) === true,
     local: o.local as boolean | undefined,
     quiet: o.quiet as boolean | undefined,
     client: o.client as string | undefined,

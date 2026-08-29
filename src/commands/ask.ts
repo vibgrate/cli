@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { queryGraph, queryGraphSemantic, type QueryResult } from '../engine/query.js';
 import { rankQuestion } from '../engine/relevance-provider.js';
+import { rankingAskFrom } from '../engine/user-ask.js';
 import { ensureRelevanceModule } from '../install/relevance-module.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
 import {
@@ -86,7 +87,7 @@ export function registerAsk(program: Command): void {
       const budget = Number(opts.budget) || 2000;
       const q = question.join(' ');
       // Semantic is the default; --no-semantic or --local opt out.
-      const wantSemantic = opts.semantic !== false && !global.local;
+      const wantSemantic = opts.semantic !== false && !global.offline;
 
       let result: QueryResult;
       let mode = 'lexical';
@@ -95,9 +96,9 @@ export function registerAsk(program: Command): void {
       // has not landed it yet, retry once here (bounded by the fetch itself,
       // silent on failure) — then rank, falling back mechanically when the
       // module still is not available. `--local` stays network-free.
-      if (!global.local) await ensureRelevanceModule();
+      if (!global.offline) await ensureRelevanceModule();
       const topicTags = await loadTopicTags(graph, root, resolveGraphPath(root, global.graph));
-      const modRank = await rankQuestion(graph, q, { limit: 48, topicTags });
+      const modRank = await rankQuestion(graph, rankingAskFrom(q), { limit: 48, topicTags });
 
       try {
       if (wantSemantic) {
@@ -141,7 +142,7 @@ export function registerAsk(program: Command): void {
           let reason: EmbedUnavailable | undefined;
           let detail: string | undefined;
           const embedder = await loadEmbedder({
-            local: global.local,
+            local: global.offline,
             onUnavailable: (r, d) => {
               reason = r;
               detail = d;
@@ -164,8 +165,8 @@ export function registerAsk(program: Command): void {
         }
       } else {
         result = queryGraph(graph, q, { budget, ranked: modRank });
-        if (global.local) note = 'semantic skipped under --local; used lexical';
-        activity.add('answer', 'skip', global.local ? 'lexical only (--local)' : 'lexical only (--no-semantic)');
+        if (global.offline) note = 'semantic skipped under --offline; used lexical';
+        activity.add('answer', 'skip', global.offline ? 'lexical only (--offline)' : 'lexical only (--no-semantic)');
       }
       } finally {
         live?.stop();

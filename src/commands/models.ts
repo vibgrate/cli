@@ -263,7 +263,7 @@ export function registerModels(program: Command): void {
         promise: resolved.pack.promise,
         fit: resolved.fit.label,
         installedNames: models.map((m) => m.name),
-        offline: !!global.local,
+        offline: !!global.offline,
         hasBinary,
         downloadUrl: resolved.underlying.downloadUrl,
         sha256: resolved.underlying.sha256,
@@ -295,7 +295,7 @@ export function registerModels(program: Command): void {
       }
 
       const result = await executeModelInstallPlan(installPlan, {
-        offline: !!global.local,
+        offline: !!global.offline,
         quiet: !!global.json,
         onProgress: (line) => {
           if (!global.json) info(c.dim(`  ${line}`));
@@ -389,7 +389,7 @@ export function registerModels(program: Command): void {
         backend: 'ollama',
         weightsRef: name,
         installedNames: models.map((m) => m.name),
-        offline: !!global.local,
+        offline: !!global.offline,
         hasBinary,
       });
 
@@ -411,7 +411,7 @@ export function registerModels(program: Command): void {
       if (!global.json) printInstallPlanHuman('vg models pull', installPlan);
 
       const result = await executeModelInstallPlan(installPlan, {
-        offline: !!global.local,
+        offline: !!global.offline,
         quiet: !!global.json,
         onProgress: (line) => {
           if (!global.json) info(c.dim(`  ${line}`));
@@ -786,11 +786,12 @@ export function registerModels(program: Command): void {
   const catalog = cmd
     .command('catalog')
     .description('the live hosted model catalog (OpenRouter) — key-free, cached, refreshed from the network')
-    .option('--offline', 'never touch the network — use the cache (or the curated fallback)')
+    // `--offline` is a global flag now, so this command no longer declares its
+    // own (commander rejects the duplicate). Same surface, same behaviour.
     .option('--refresh', 'bypass the cache and refresh from the network')
-    .action(async function (this: Command, opts: { offline?: boolean; refresh?: boolean }) {
+    .action(async function (this: Command, opts: { refresh?: boolean }) {
       const global = readGlobal(this);
-      const cat = await fetchCatalog({ offline: opts.offline, noCache: opts.refresh });
+      const cat = await fetchCatalog({ offline: global.offline, noCache: opts.refresh });
       if (global.json) {
         json(cat);
         return;

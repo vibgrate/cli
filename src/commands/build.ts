@@ -385,7 +385,7 @@ async function verifyGraph(root: string, opts: BuildCmdOpts, global: GlobalOpts)
  * `vg embed --bg [--download]`; a lock prevents it racing a foreground `ask`.
  */
 function maybeWarmEmbeddings(root: string, graph: VgGraph, global: GlobalOpts, warm: boolean): void {
-  if (!warm || global.json || global.quiet || global.local) return;
+  if (!warm || global.json || global.quiet || global.offline) return;
   if (!process.stdout.isTTY && !process.stderr.isTTY) return;
   const cli = resolveSelfJsEntry() ?? process.argv[1];
   if (!cli) return;

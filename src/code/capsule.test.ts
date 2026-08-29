@@ -58,12 +58,32 @@ describe('buildTaskCapsule', () => {
     expect(capsule.relationships.some((r) => r.kind === 'impacts' && r.to === 'formatReport')).toBe(true);
   });
 
-  it('orders the rendered block cache-stably: evidence before task', () => {
+  it('orders the rendered block cache-stably: constraints, then symbols, then evidence', () => {
     const capsule = buildTaskCapsule(fixtureGraph(), 'add a timeout to scanDir', { readFile: readFixture });
     const r = capsule.rendered;
-    expect(r.indexOf('## Primary symbols')).toBeLessThan(r.indexOf('## Task'));
-    expect(r.indexOf('## Exact source evidence')).toBeLessThan(r.indexOf('## Task'));
-    expect(r.trimEnd().endsWith('add a timeout to scanDir')).toBe(true);
+    expect(r.indexOf('## Primary symbols')).toBeLessThan(r.indexOf('## Exact source evidence'));
+    expect(r.indexOf('## Exact source evidence')).toBeLessThan(r.indexOf('## Verification plan'));
+  });
+
+  it('never echoes the instruction — the caller sends the ask as its own turn', () => {
+    // The capsule used to end with "## Task" + the instruction while
+    // buildAgentMessages ALSO appended a task turn, so a long ask was billed
+    // twice on every step and its echo evicted source slices from the budget.
+    const ask = 'add a timeout to scanDir';
+    const capsule = buildTaskCapsule(fixtureGraph(), ask, { readFile: readFixture });
+    expect(capsule.rendered).not.toContain('## Task');
+    expect(capsule.rendered).not.toContain(ask);
+    // The instruction is still carried on the capsule for callers that need it.
+    expect(capsule.instruction).toBe(ask);
+  });
+
+  it('does not let a long ask inflate the capsule or evict its evidence', () => {
+    const short = 'add a timeout to scanDir';
+    const long = `${short}. ${'This ticket has a great deal of surrounding narrative. '.repeat(60)}`;
+    const a = buildTaskCapsule(fixtureGraph(), short, { readFile: readFixture });
+    const b = buildTaskCapsule(fixtureGraph(), long, { readFile: readFixture });
+    expect(b.tokensEstimate).toBe(a.tokensEstimate);
+    expect(b.sourceSlices.length).toBe(a.sourceSlices.length);
   });
 
   it('is deterministic given the same graph, instruction, and files', () => {
@@ -217,3 +237,47 @@ describe('buildTaskCapsule', () => {
   });
 });
 
+
+describe('seed count is the configured limit', () => {
+  const graph = fixtureGraph();
+  const ids = graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external').map((n) => n.id);
+
+  const ranking = (scores: number[]) => ({
+    version: 'test',
+    hasContent: true,
+    conceptMap: [],
+    seeds: scores.map((score, i) => ({ id: ids[i % ids.length]!, score, why: 'test' })),
+  });
+
+  /**
+   * A relative-floor trim (keep seeds scoring >= a quarter of the top) was
+   * measured and dropped: it did little on no-signal asks — their score curves
+   * still clear eight seeds — while on a peaked REAL ranking it dropped the
+   * mid-score supporting symbols an agent uses to orient. Recall over a
+   * speculative trim. docs/graph/VG-ASK-LENGTH-CAPSULE-FOLLOWUP.md
+   */
+  it('keeps the whole cluster on a peaked ranking, cliff and all', () => {
+    const c = buildTaskCapsule(graph, 'change scanDir', {
+      readFile: readFixture,
+      ranked: ranking([400, 380, 10, 8, 6]),
+    });
+    expect(c.primary.length).toBe(5);
+  });
+
+  it('keeps them on a flat ranking too', () => {
+    const c = buildTaskCapsule(graph, 'change scanDir', {
+      readFile: readFixture,
+      ranked: ranking([100, 5, 4, 3, 2]),
+    });
+    expect(c.primary.length).toBe(5);
+  });
+
+  it('never exceeds the seed limit', () => {
+    const c = buildTaskCapsule(graph, 'change scanDir', {
+      readFile: readFixture,
+      seeds: 3,
+      ranked: ranking([100, 100, 100, 100, 100, 100]),
+    });
+    expect(c.primary.length).toBeLessThanOrEqual(3);
+  });
+});

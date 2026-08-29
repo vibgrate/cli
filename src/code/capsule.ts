@@ -265,7 +265,7 @@ export function buildTaskCapsule(graph: VgGraph, instruction: string, options: B
   const extraFacts = (options.extraPinnedFacts ?? []).filter((f) => typeof f === 'string' && f.trim());
   const pinnedFacts = [...base.pinnedFacts, ...extraFacts];
   const verificationPlan = buildVerificationPlan(graph, base);
-  const rendered = renderCapsule(instruction, primary, supporting, sourceSlices, pinnedFacts, base.conceptMap, base.targetFiles, verificationPlan, relationships, budget);
+  const rendered = renderCapsule(primary, supporting, sourceSlices, pinnedFacts, base.conceptMap, base.targetFiles, verificationPlan, relationships, budget);
 
   return {
     schemaVersion: TASK_CAPSULE_SCHEMA_VERSION,
@@ -469,8 +469,28 @@ function buildVerificationPlan(graph: VgGraph, base: CodeContext): VerificationP
   };
 }
 
+/**
+ * How many "How the ask was interpreted" lines the rendered block carries.
+ *
+ * The relevance module returns up to 24 (sanitizeRank's cap) and a verbose ask
+ * genuinely produces that many — measured 8.4 lines on a normal ask against
+ * 22.1 on a verbose one. Those lines share a fixed budget with the source
+ * slices, so an uncapped concept map lets a long ask evict the very evidence
+ * the capsule exists to carry. Six is the same cap the transparency surfaces
+ * use, so a reader and the model see the ask read the same way.
+ */
+const CONCEPT_MAP_MAX_LINES = 6;
+
+/**
+ * Render the capsule body. The instruction is deliberately NOT echoed here:
+ * every consumer (buildAgentMessages, the bench capsule arms) already sends the
+ * ask as its own trailing turn, so echoing it a second time billed a long ask
+ * twice on every step of a run — and, because the echo counted against this
+ * budget, a verbose ask evicted the source slices that make the capsule worth
+ * compiling at all. Measured at 42% capsule growth for 25%->16% evidence share
+ * (docs/graph/VG-ASK-LENGTH-CAPSULE-ANALYSIS.md 3.4/3.5).
+ */
 function renderCapsule(
-  instruction: string,
   primary: CapsuleSymbolRef[],
   supporting: CapsuleSymbolRef[],
   slices: SourceSlice[],
@@ -498,7 +518,7 @@ function renderCapsule(
   // decodable instead of noise.
   if (conceptMap.length) {
     lines.push('## How the ask was interpreted');
-    for (const l of conceptMap) lines.push(l);
+    for (const l of conceptMap.slice(0, CONCEPT_MAP_MAX_LINES)) lines.push(l);
     lines.push('');
   }
 
@@ -538,7 +558,7 @@ function renderCapsule(
         '```',
         '',
       ];
-      const candidate = [...lines, ...block, '## Task', instruction].join('\n');
+      const candidate = [...lines, ...block].join('\n');
       if (estimateTokens(candidate) > budget && included > 0) break;
       lines.push(...block);
       included += 1;
@@ -555,8 +575,6 @@ function renderCapsule(
   for (const n of verification.notes) lines.push(`- note: ${n}`);
   lines.push('');
 
-  lines.push('## Task');
-  lines.push(instruction);
   return lines.join('\n');
 }
 

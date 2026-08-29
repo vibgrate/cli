@@ -155,6 +155,19 @@ export interface ProjectRef {
  * `undefined path` (or `'__repo__'`) returns the whole-workspace aggregate;
  * a project path returns that project's own architecture detection.
  */
+export interface ArchitectureCoverageWire {
+  classified: number;
+  unclassified: number;
+  ratio: number;
+  bySource: Record<string, number>;
+}
+
+export interface ArchitectureUnclassifiedFolderWire {
+  path: string;
+  count: number;
+  sampleFiles: string[];
+}
+
 export interface FolderClassificationWire {
   path: string;
   layer: string;
@@ -171,6 +184,9 @@ export interface ArchitectureResponse {
   unclassified: number;
   folders?: FolderClassificationWire[];
   unclassifiedFiles?: string[];
+  coverage?: ArchitectureCoverageWire;
+  unclassifiedFolders?: ArchitectureUnclassifiedFolderWire[];
+  unclassifiedFoldersCapped?: true;
   classified?: Array<{
     filePath: string;
     layer: string;
@@ -251,6 +267,9 @@ function architectureWire(arch: {
   unclassified: number;
   folders?: FolderClassificationWire[];
   unclassifiedFiles?: string[];
+  coverage?: ArchitectureCoverageWire;
+  unclassifiedFolders?: ArchitectureUnclassifiedFolderWire[];
+  unclassifiedFoldersCapped?: true;
   classified?: Array<{
     filePath: string;
     layer: string;
@@ -286,6 +305,9 @@ function architectureWire(arch: {
   };
   if (arch.folders) out.folders = arch.folders;
   if (arch.unclassifiedFiles) out.unclassifiedFiles = arch.unclassifiedFiles;
+  if (arch.coverage) out.coverage = arch.coverage;
+  if (arch.unclassifiedFolders) out.unclassifiedFolders = arch.unclassifiedFolders;
+  if (arch.unclassifiedFoldersCapped) out.unclassifiedFoldersCapped = true;
   if (arch.classified) out.classified = arch.classified;
   if (arch.workspaceShape) out.workspaceShape = arch.workspaceShape;
   if (arch.supportLevel !== undefined) out.supportLevel = arch.supportLevel;

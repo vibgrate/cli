@@ -55,10 +55,10 @@ export function registerLib(program: Command): void {
 
       // Network is ON BY DEFAULT (local-first, hosted-on-miss). `--local` is the hard airgap:
       // no network ever. `--online` is kept only as a back-compat no-op for add/refresh sources.
-      const network = !global.local;
+      const network = !global.offline;
       if (!verb) return listCatalog(root, global.json);
       // add/refresh still gate URL/git fetching behind --online (or network default) to avoid surprise fetches.
-      const online = (Boolean(opts.online) || network) && !global.local;
+      const online = (Boolean(opts.online) || network) && !global.offline;
       if (verb === 'add') return addCmd(root, rest, { ...opts, online }, global.json);
       if (verb === 'publish') return publishCmd(root, rest, opts, global, global.json);
       if (verb === 'resolve') return resolveCmd(root, rest, global.json);
@@ -136,10 +136,10 @@ async function publishCmd(
   root: string,
   rest: string[],
   opts: { name?: string; version?: string; readme?: string; dts?: string; language?: string; region?: string; ingest?: string },
-  global: { local?: boolean },
+  global: { offline?: boolean },
   asJson?: boolean,
 ): Promise<void> {
-  if (global.local) throw usageError('vg lib publish uploads to the hosted catalog — it needs network (remove --local)');
+  if (global.offline) throw usageError('vg lib publish uploads to the hosted catalog — it needs network (remove --offline/--local)');
   const name = (rest.join(' ') || opts.name || '').trim();
   if (!name) throw usageError('usage: vg lib publish <name> [--version <v>] [--readme <path>] [--dts <path>] [--language <lang>]');
 

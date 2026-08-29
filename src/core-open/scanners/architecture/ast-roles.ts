@@ -20,6 +20,7 @@ import {
   FOLDER_INHERIT_MIN_CONFIDENCE,
   folderInheritSignal,
 } from './folders.js';
+import { creditCoverage, debitUnclassifiedFolder, reattributeCoverage } from './coverage.js';
 import { CLASSIFIED_ROLE_CAP } from './types.js';
 import { mermaidFromArchitecture } from './mermaid.js';
 import { classifyFile } from './classify.js';
@@ -344,13 +345,19 @@ export function applyAstRoles(
         confidence: hit.confidence,
         signals,
         role: hit.role,
+        source: 'ast',
       };
       classified.set(hit.filePath, entry);
       addFileToLayer(ensureLayer(result, hit.layer), hit.filePath);
       result.totalClassified += 1;
-      if (unclassified.delete(hit.filePath) && result.unclassified > 0) {
-        result.unclassified -= 1;
-      }
+      // Decrement whether or not the file made the capped sample — it had no
+      // layer, so it was unclassified in the real population either way. Graph
+      // refine already does this; gating on sample membership let the two
+      // counters drift apart on an off-sample rescue.
+      unclassified.delete(hit.filePath);
+      if (result.unclassified > 0) result.unclassified -= 1;
+      creditCoverage(result, 'ast');
+      debitUnclassifiedFolder(result, hit.filePath);
       addFolderSignal(result, hit.filePath, `${AST_ROLE_SIGNAL_PREFIX}${hit.role}`);
       applied = true;
       continue;
@@ -400,12 +407,14 @@ export function applyAstRoles(
         'ast-overrides-suffix',
         hit.signal,
       ]);
+      reattributeCoverage(result, already?.source ?? 'suffix', 'ast');
       classified.set(hit.filePath, {
         filePath: hit.filePath,
         layer: hit.layer,
         confidence: hit.confidence,
         signals,
         role: hit.role,
+        source: 'ast',
       });
       addFileToLayer(ensureLayer(result, hit.layer), hit.filePath);
       addFolderSignal(result, hit.filePath, `${AST_ROLE_SIGNAL_PREFIX}${hit.role}`);

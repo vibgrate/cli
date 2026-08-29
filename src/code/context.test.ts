@@ -21,12 +21,21 @@ describe('buildCodeContext', () => {
     expect(ctx.impacted.some((i) => i.node.qualifiedName === 'formatReport')).toBe(true);
   });
 
-  it('orders the block cache-stably: constraints/context first, the task last', () => {
+  it('orders the block cache-stably: constraints before symbols before scope', () => {
     const ctx = buildCodeContext(fixtureGraph(), 'add a timeout to scanDir');
     const rendered = ctx.rendered;
-    expect(rendered.indexOf('## Hard constraints')).toBeLessThan(rendered.indexOf('## Task'));
-    expect(rendered.indexOf('## Relevant symbols')).toBeLessThan(rendered.indexOf('## Task'));
-    expect(rendered.trimEnd().endsWith('add a timeout to scanDir')).toBe(true);
+    expect(rendered.indexOf('## Hard constraints')).toBeLessThan(rendered.indexOf('## Relevant symbols'));
+    expect(rendered.indexOf('## Relevant symbols')).toBeLessThan(rendered.indexOf('## Files in scope'));
+  });
+
+  it('never echoes the instruction — the caller sends the ask as its own turn', () => {
+    // buildAgentMessages appends a task turn of its own, so echoing the ask
+    // here billed it twice on every step and let a long one crowd out symbols.
+    const ask = 'add a timeout to scanDir';
+    const ctx = buildCodeContext(fixtureGraph(), ask);
+    expect(ctx.rendered).not.toContain('## Task');
+    expect(ctx.rendered).not.toContain(ask);
+    expect(ctx.instruction).toBe(ask);
   });
 
   it('restricts target files when --file scoping is given', () => {
@@ -71,10 +80,12 @@ describe('buildCodeContext', () => {
     expect(ctx.pinnedFacts.some((f) => f.includes('literal-locate') && f.includes('image.png'))).toBe(
       false,
     );
-    // Full instruction (attachments) still appears in the Task section for the model.
-    expect(ctx.rendered).toContain('## Task');
-    expect(ctx.rendered).toContain('User attachments');
-    expect(ctx.rendered).toContain('image.png');
+    // The full instruction — attachments included — still reaches the model:
+    // it is carried on `instruction` and sent as the caller's own task turn,
+    // rather than echoed into this block (which would bill it twice).
+    expect(ctx.instruction).toContain('User attachments');
+    expect(ctx.instruction).toContain('image.png');
+    expect(ctx.rendered).not.toContain('image.png');
     // Seed ranking still follows the user ask.
     expect(ctx.seeds.some((s) => s.node.qualifiedName === 'scanDir')).toBe(true);
   });

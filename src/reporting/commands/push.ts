@@ -10,6 +10,8 @@ import { prepareCompressedUpload } from '../utils/compact-artifact.js';
 import { uploadScanArtifact } from '../utils/upload.js';
 import { loadConfig } from '../../core-open/index.js';
 import type { ScanArtifact } from '../types.js';
+import { buildEnvelope, pushReceipt } from '../../review/push.js';
+import { RECEIPT_SCHEMA, type ReviewReceipt } from '../../review/schemas.js';
 
 interface ParsedDsn {
   keyId: string;
@@ -43,10 +45,10 @@ export function computeHmac(body: string, secret: string): string {
 }
 
 export const pushCommand = new Command('push')
-  .description('Push scan results to Vibgrate API')
+  .description('Push a scan artifact — or a `vg review` receipt — to Vibgrate Cloud')
   .option('--dsn <dsn>', 'DSN token (or use VIBGRATE_DSN env)')
   .option('--region <region>', `Override data residency region (${availableRegionIds().join(', ')})`)
-  .option('--file <file>', 'Scan artifact file', '.vibgrate/scan_result.json')
+  .option('--file <file>', 'Scan artifact, or a vg.review.receipt.v1 file (auto-detected)', '.vibgrate/scan_result.json')
   .option('--strict', 'Fail on upload errors')
   .action(async (opts: { dsn?: string; region?: string; file: string; strict?: boolean }) => {
     const dsn = resolveDsn(opts.dsn);
@@ -68,9 +70,33 @@ export const pushCommand = new Command('push')
 
     const filePath = path.resolve(opts.file);
     if (!(await pathExists(filePath))) {
-      console.error(chalk.red(`Scan artifact not found: ${filePath}`));
-      console.error(chalk.dim('Run "vibgrate scan" first.'));
+      console.error(chalk.red(`Artifact not found: ${filePath}`));
+      console.error(chalk.dim('Run "vg scan" (or "vg review --out <file>") first.'));
       if (opts.strict) process.exit(1);
+      return;
+    }
+
+    // `vg push` accepts a review receipt the same way it accepts a scan
+    // artifact. The two are told apart by `schema_version`, not by filename or
+    // a flag: a receipt is self-describing, so pointing `--file` at one is
+    // enough and there is no way to push it to the wrong writer.
+    const document = await readJsonFile<{ schema_version?: string }>(filePath);
+    if (document?.schema_version === RECEIPT_SCHEMA) {
+      const receipt = document as unknown as ReviewReceipt;
+      const envelope = buildEnvelope(receipt, {
+        workspaceId: parsed.workspaceId,
+        pushedAt: new Date().toISOString(),
+      });
+      console.log(
+        chalk.dim(`Uploading review receipt (${receipt.decision}) for ${receipt.git.head_sha.slice(0, 8)}...`),
+      );
+      const result = await pushReceipt(parsed, envelope);
+      if (!result.ok) {
+        console.error(chalk.red(`Upload failed (${result.status}): ${result.detail ?? ''}`));
+        if (opts.strict) process.exit(1);
+        return;
+      }
+      console.log(chalk.green('✔') + ` Review receipt pushed to ${result.host}`);
       return;
     }
 
@@ -78,7 +104,7 @@ export const pushCommand = new Command('push')
     // lets `scanners.databaseSchema` in vibgrate.config.ts (read from the
     // current directory, same as `vg scan`) raise/lower the default upload
     // caps (see DOCS.md § Database Schema).
-    const artifact = await readJsonFile<ScanArtifact>(filePath);
+    const artifact = document as unknown as ScanArtifact;
     const config = await loadConfig(process.cwd());
     const databaseSchemaCaps = config.scanners !== false ? config.scanners?.databaseSchema : undefined;
     const { body, contentEncoding } = await prepareCompressedUpload(artifact, { databaseSchemaCaps });

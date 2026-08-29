@@ -60,7 +60,7 @@ export function registerServe(program: Command): void {
       // Sharing needs the network, so `--local` (air-gapped) hard-disables the
       // upload — but still lets `--savings` record locally. Sharing implies
       // recording so there's something to send.
-      const local = global.local === true;
+      const local = global.offline === true;
       // The universal DO_NOT_TRACK opt-out (and VIBGRATE_TELEMETRY=0) wins even
       // over an explicit --share-stats: the env is how operators of shared or
       // managed machines say "never upload", and CI passes flags mechanically.

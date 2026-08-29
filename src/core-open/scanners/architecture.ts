@@ -42,6 +42,12 @@ import {
   mergeFolderClassifications,
   mergeUnclassifiedFiles,
 } from './architecture/folders.js';
+import {
+  buildCoverage,
+  buildUnclassifiedFolders,
+  mergeCoverage,
+  mergeUnclassifiedFolders,
+} from './architecture/coverage.js';
 import { detectLocalContractEdges, detectWorkspaceEdges } from './architecture/workspace-edges.js';
 import { detectGeneratedMeta } from './architecture/packs/artifacts.js';
 import type { FusionResult, ProjectContext } from './architecture/types.js';
@@ -1044,6 +1050,16 @@ function applyAggregatedPackFields(target: ArchitectureResult, unique: Architect
   const unclassifiedFiles = mergeUnclassifiedFiles(unique.map((r) => r.unclassifiedFiles));
   if (unclassifiedFiles) target.unclassifiedFiles = unclassifiedFiles;
   else delete target.unclassifiedFiles;
+  const coverage = mergeCoverage(unique.map((r) => r.coverage));
+  if (coverage) target.coverage = coverage;
+  else delete target.coverage;
+  const groupedFolders = mergeUnclassifiedFolders(unique.map((r) => r.unclassifiedFolders));
+  if (groupedFolders.folders.length > 0) target.unclassifiedFolders = groupedFolders.folders;
+  else delete target.unclassifiedFolders;
+  // A child's already-dropped sample must stay flagged. Absent ≠ false.
+  if (groupedFolders.capped || unique.some((r) => r.unclassifiedFoldersCapped)) {
+    target.unclassifiedFoldersCapped = true;
+  } else delete target.unclassifiedFoldersCapped;
   const payload = capEvidence(allEvidence);
   if (payload.evidence) target.evidence = payload.evidence;
   // A child's already-dropped sample must stay flagged. Absent ≠ false.
@@ -1417,6 +1433,16 @@ async function classifyTree(
   if (!skipAllLayers && inherited.folders.length > 0) result.folders = inherited.folders;
   const unclassifiedSample = capUnclassifiedFiles(inherited.unclassifiedSource);
   if (unclassifiedSample) result.unclassifiedFiles = unclassifiedSample;
+
+  // A0: coverage is emitted whenever this project had source to walk. A
+  // contract / IaC project legitimately has neither, and an absent field
+  // there is honest — it is not "0% covered".
+  if (!skipAllLayers && (classifications.length > 0 || unclassified > 0)) {
+    result.coverage = buildCoverage(classifications, unclassified);
+    const grouped = buildUnclassifiedFolders(inherited.unclassifiedSource);
+    if (grouped.folders.length > 0) result.unclassifiedFolders = grouped.folders;
+    if (grouped.capped) result.unclassifiedFoldersCapped = true;
+  }
 
   const supportLevel = computeSupportLevel(fusion, classifications.length, primary.type);
   result.supportLevel = supportLevel;

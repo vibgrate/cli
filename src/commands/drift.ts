@@ -20,14 +20,14 @@ export function registerDrift(program: Command): void {
     .action(async function (this: Command, opts: { online?: boolean; failOn?: string }) {
       const global = readGlobal(this);
       const root = rootOf(global);
-      if (opts.online && global.local) {
+      if (opts.online && global.offline) {
         throw new CliError('--online conflicts with --local (no network in local mode)', ExitCode.USAGE_ERROR);
       }
       if (opts.failOn && !['major', 'minor', 'standards'].includes(opts.failOn)) {
         throw new CliError(`--fail-on must be one of: major, minor, standards (got "${opts.failOn}")`, ExitCode.USAGE_ERROR);
       }
       const inv = inventory(root);
-      if (opts.online && !global.local) await enrichOnline(inv.records);
+      if (opts.online && !global.offline) await enrichOnline(inv.records);
 
       // Enterprise standards gate (D9/S5.2): check the inventory against the committed policy.
       let standards: { policyPath: string | null; defined: boolean; violations: StandardViolation[] } | null = null;

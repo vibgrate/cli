@@ -2,6 +2,7 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import type {
+  ArchitectureCoverageSource,
   ArchitectureLayer,
   ArchitectureResult,
   ArchitectureStructure,
@@ -17,6 +18,8 @@ import {
   GRAPH_CONFLICT_SIGNAL_PREFIX,
   isTestFilePath,
 } from './folders.js';
+import { creditCoverage, debitUnclassifiedFolder, reattributeCoverage } from './coverage.js';
+import { classifyFile } from './classify.js';
 import { capViolations, capWorkspaceEdges } from './fusion.js';
 import { mermaidFromArchitecture } from './mermaid.js';
 
@@ -147,6 +150,8 @@ interface FileLayerState {
   layer?: ArchitectureLayer;
   confidence: number;
   signals: string[];
+  /** Stage that decided the current layer, for coverage reattribution. */
+  source?: ArchitectureCoverageSource;
 }
 
 function nearestFolder(filePath: string, folders: readonly FolderClassification[]): FolderClassification | undefined {
@@ -165,6 +170,25 @@ function fileInLayerSample(result: ArchitectureResult, filePath: string): Archit
   return undefined;
 }
 
+/**
+ * Which stage decided this file's layer, for coverage reattribution.
+ *
+ * `result.classified` only ever holds files that earned an AST role, so it
+ * answers for a handful of files at most. For everything else the classifier
+ * is re-run — it is pure and cheap, and `ast-roles.ts` already recovers an
+ * off-sample path prior the same way. Defaulting to `path` here would debit
+ * that bucket for suffix / pascal / folder-inherit files on every override.
+ */
+function decidingSource(
+  result: ArchitectureResult,
+  filePath: string,
+): ArchitectureCoverageSource {
+  const hit = (result.classified ?? []).find((c) => normalizeRelPath(c.filePath) === filePath);
+  if (hit?.source) return hit.source;
+  const reclassified = classifyFile(filePath, result.archetype, { projectKind: result.projectKind });
+  return reclassified?.source ?? 'path';
+}
+
 function buildFileState(
   filePath: string,
   result: ArchitectureResult,
@@ -178,7 +202,7 @@ function buildFileState(
       : folder && folder.layer !== sampleLayer
         ? Math.max(DEFAULT_PATH_CONFIDENCE, 0.85)
         : DEFAULT_PATH_CONFIDENCE;
-    return { filePath: n, layer: sampleLayer, confidence, signals: [] };
+    return { filePath: n, layer: sampleLayer, confidence, signals: [], source: decidingSource(result, n) };
   }
   // Same threshold as PR 2: a folder at 0.60–0.69 is labelled, not inherited.
   if (folder && folder.confidence >= FOLDER_INHERIT_MIN_CONFIDENCE) {
@@ -187,6 +211,7 @@ function buildFileState(
       layer: folder.layer,
       confidence: folder.confidence,
       signals: [folderInheritSignal(folder.layer)],
+      source: 'folder-inherit',
     };
   }
   return { filePath: n, layer: undefined, confidence: 0, signals: [] };
@@ -618,9 +643,12 @@ function applyConfirmation(
       state.signals = sortedSignals([GRAPH_NEIGHBORHOOD_SIGNAL, ...extra]);
       const target = ensureLayer(result, majority.layer);
       addFileToLayer(target, file);
+      state.source = 'graph';
       result.totalClassified += 1;
       unclassified.delete(file);
       if (result.unclassified > 0) result.unclassified -= 1;
+      creditCoverage(result, 'graph');
+      debitUnclassifiedFolder(result, file);
       addFolderSignal(result, file, GRAPH_NEIGHBORHOOD_SIGNAL);
       continue;
     }
@@ -641,6 +669,8 @@ function applyConfirmation(
       state.layer = majority.layer;
       state.confidence = GRAPH_ASSIGN_CONFIDENCE;
       state.signals = sortedSignals([...state.signals, GRAPH_OVERRIDE_SIGNAL, ...extra]);
+      reattributeCoverage(result, state.source ?? 'path', 'graph');
+      state.source = 'graph';
       addFileToLayer(ensureLayer(result, majority.layer), file);
       addFolderSignal(result, file, GRAPH_OVERRIDE_SIGNAL);
       continue;

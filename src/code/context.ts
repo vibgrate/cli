@@ -63,6 +63,9 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
     limit: seedLimit * 2,
     ranked: options.ranked,
   });
+  // Keep every candidate here: `--file` narrows below, and capping first would
+  // discard in-scope symbols ranked outside the top `seedLimit`. The cap runs
+  // after the filter (as it always has), so the count is unchanged.
   let seeds = q.matches.map((m) => ({ node: m.node, why: m.why }));
   if (options.files && options.files.length) {
     const set = new Set(options.files.map(normalize));
@@ -100,7 +103,7 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
   // The plain-language interpretation is authored by the relevance module
   // (and sanitized at the seam); the mechanical fallback has none to offer.
   const conceptMap = options.ranked?.conceptMap ?? [];
-  const rendered = render(instruction, seeds, [...impacted.values()], targetFiles, pinnedFacts, conceptMap, index, budget);
+  const rendered = render(seeds, [...impacted.values()], targetFiles, pinnedFacts, conceptMap, index, budget);
   return {
     instruction,
     seeds,
@@ -137,8 +140,25 @@ function pinnedFactsFor(graph: VgGraph, seedIds: Set<string>): string[] {
   return out.sort().slice(0, 12);
 }
 
+/**
+ * How many "How the ask was interpreted" lines the rendered block carries.
+ *
+ * The relevance module returns up to 24 (sanitizeRank's cap) and a verbose ask
+ * genuinely produces that many — measured 8.4 lines on a normal ask against
+ * 22.1 on a verbose one. Those lines share a fixed budget with the source
+ * slices, so an uncapped concept map lets a long ask evict the very evidence
+ * the capsule exists to carry. Six is the same cap the transparency surfaces
+ * use, so a reader and the model see the ask read the same way.
+ */
+const CONCEPT_MAP_MAX_LINES = 6;
+
+/**
+ * Render the context block. Like the capsule, this does NOT echo the
+ * instruction: buildAgentMessages sends it as its own trailing turn, so
+ * echoing it here billed it twice per step and let a long ask crowd out the
+ * symbol blocks below.
+ */
 function render(
-  instruction: string,
   seeds: { node: GraphNode; why: string }[],
   impacted: { node: GraphNode; via: string }[],
   targetFiles: string[],
@@ -159,7 +179,7 @@ function render(
 
   if (conceptMap.length) {
     lines.push('## How the ask was interpreted');
-    for (const l of conceptMap) lines.push(l);
+    for (const l of conceptMap.slice(0, CONCEPT_MAP_MAX_LINES)) lines.push(l);
     lines.push('');
   }
 
@@ -191,8 +211,6 @@ function render(
   for (const f of targetFiles) lines.push(`- ${f}`);
   lines.push('');
 
-  lines.push('## Task');
-  lines.push(instruction);
   return lines.join('\n');
 }
 

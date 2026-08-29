@@ -700,6 +700,31 @@ describe('runAgent — the agentic loop', () => {
     expect(JSON.stringify(rec)).not.toContain('npm test');
   });
 
+  it('runs search_symbols (AGENTS.md MCP name) instead of looping on unknown tool', async () => {
+    const provider = new ScriptedProvider('m', [
+      { toolCalls: [tc('search_symbols', { query: 'scanDir' }, 's1')] },
+      { toolCalls: [tc('finish', { summary: 'scanDir is in src/scan.ts' }, 'f1')] },
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'where is scanDir',
+      providers: [provider],
+      fsImpl: memFs(),
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      noAudit: true,
+      onEvent: (e) => events.push(e),
+    });
+    expect(result.stopped).toBe('finished');
+    const results = events.filter((e): e is Extract<AgentEvent, { type: 'tool-result' }> => e.type === 'tool-result');
+    expect(results[0]?.name).toBe('search_symbols');
+    expect(results[0]?.failed).not.toBe(true);
+    expect(results[0]?.content).toMatch(/scanDir/);
+    expect(results[0]?.content).not.toMatch(/unknown tool/);
+  });
+
   it('stops as no-progress when the model repeats an identical non-mutating call', async () => {
     // Always the same search — never mutates, never finishes.
     const provider = new ScriptedProvider('m', [{ toolCalls: [tc('search_code', { query: 'timeout' }, 'x')] }]);
