@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { executeTool, AGENT_TOOLS, occurrenceSearchQuery, type ToolContext } from './tools.js';
+import {
+  executeTool,
+  AGENT_TOOLS,
+  occurrenceSearchQuery,
+  resolveAgentToolCall,
+  type ToolContext,
+} from './tools.js';
 import { fixtureGraph } from './graph-fixture.js';
 import type { CodeFs } from './session.js';
 import type { ToolCall } from './types.js';
@@ -71,6 +77,46 @@ describe('AGENT_TOOLS', () => {
       'finish',
       'abort',
     ]);
+  });
+});
+
+describe('MCP / foreign-agent tool aliases', () => {
+  it('maps search_symbols onto search_code', () => {
+    const r = resolveAgentToolCall(call('search_symbols', { query: 'scanDir' }));
+    expect(r.name).toBe('search_code');
+    expect(r.arguments).toEqual({ query: 'scanDir' });
+  });
+
+  it('maps get_node name onto a search_code query', () => {
+    const r = resolveAgentToolCall(call('get_node', { name: 'scanDir' }));
+    expect(r.name).toBe('search_code');
+    expect(r.arguments.query).toBe('scanDir');
+  });
+
+  it('maps impact_of name onto graph_impact symbol', () => {
+    const r = resolveAgentToolCall(call('impact_of', { name: 'scanDir' }));
+    expect(r.name).toBe('graph_impact');
+    expect(r.arguments.symbol).toBe('scanDir');
+  });
+
+  it('maps namespaced MCP names that VG Code already owns', () => {
+    const r = resolveAgentToolCall(call('mcp__vibgrate__library_docs', { name: 'zod' }));
+    expect(r.name).toBe('library_docs');
+  });
+
+  it('executes search_symbols instead of returning unknown tool', async () => {
+    const r = await executeTool(call('search_symbols', { query: 'scanDir' }), ctx());
+    expect(r.failed).not.toBe(true);
+    expect(r.content).not.toMatch(/unknown tool/);
+    expect(r.content).toContain('scanDir');
+  });
+
+  it('unknown-tool errors name search_code when the model invented search_foo', async () => {
+    const r = await executeTool(call('not_a_real_tool', { query: 'x' }), ctx());
+    expect(r.failed).toBe(true);
+    expect(r.content).toMatch(/unknown tool "not_a_real_tool"/);
+    expect(r.content).toMatch(/search_code/);
+    expect(r.content).toMatch(/Call only a name from that list/);
   });
 });
 

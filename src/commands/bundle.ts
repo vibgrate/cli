@@ -26,7 +26,8 @@ export function registerBundle(program: Command): void {
   const cmd = program
     .command('bundle')
     .description('build an air-gapped bundle (grammars + graph + library catalog)')
-    .option('--offline', 'offline bundle (default; present for clarity)')
+    // `--offline` was a no-op here ("default; present for clarity") and is now
+    // a global flag, so `vg bundle --offline` still parses exactly as before.
     .option('-o, --out <dir>', 'output directory', 'vg-bundle')
     .action(function (this: Command, opts: { out?: string }) {
       const global = readGlobal(this);

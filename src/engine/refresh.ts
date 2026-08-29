@@ -39,6 +39,12 @@ export interface RefreshOptions {
    * exists (falls back to a fresh `defaultGraphPath` resolution).
    */
   graphPath?: string;
+  /**
+   * Live progress during the parse phase. A refresh is silent by default —
+   * callers own their surface — but `vg review`'s auto-prep needs to show a
+   * bar, because there the rebuild is the thing the user is waiting on.
+   */
+  onParseProgress?: (done: number, total: number) => void;
 }
 
 export type RefreshOutcome =
@@ -89,6 +95,7 @@ export async function refreshIfStale(root: string, opts: RefreshOptions = {}): P
       grammarsDir: scope.grammarsDir,
       inline: opts.inline,
       jobs: opts.jobs,
+      onParseProgress: opts.onParseProgress,
     });
 
     const wrote = result.graph.provenance.corpusHash !== probe.corpusHash;

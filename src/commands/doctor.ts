@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Command } from 'commander';
 import { loadGraph } from '../engine/load.js';
-import { resolveGraphPath } from '../engine/artifacts.js';
+import { displayGraphPath, resolveGraphPath } from '../engine/artifacts.js';
 import { probeFreshness, driftCount } from '../engine/freshness.js';
 import { loadCatalog, catalogPath } from '../engine/lib.js';
 import { hostedBase } from '../engine/hosted.js';
@@ -78,7 +78,7 @@ interface Diagnosis {
 
 async function runDoctor(global: GlobalOpts): Promise<void> {
   const root = rootOf(global);
-  const local = global.local === true;
+  const local = global.offline === true;
   const graphPath = resolveGraphPath(root, global.graph);
 
   const configFile = CONFIG_BASENAMES.find((f) => fs.existsSync(path.join(root, f))) ?? null;
@@ -113,7 +113,7 @@ async function runDoctor(global: GlobalOpts): Promise<void> {
     root,
     configFile,
     map: {
-      path: path.relative(root, graphPath),
+      path: displayGraphPath(root, graphPath),
       built: graph !== null,
       generatedAt: graph?.generatedAt ?? null,
       staleFiles,

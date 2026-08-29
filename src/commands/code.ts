@@ -282,7 +282,7 @@ export function registerCode(program: Command): void {
       // (the seam degrades to the built-in lexicon). VIBGRATE_NO_KERNEL=1 or
       // an explicit `vg module` decline skips this entirely; `--local` stays
       // network-free.
-      if (!global.local) {
+      if (!global.offline) {
         await ensureRelevanceModule();
       }
 
@@ -513,7 +513,7 @@ export function registerCode(program: Command): void {
         const ensure = await ensureManagerRuntime({
           providerId: route.providers[0].id,
           model: route.providers[0].model,
-          offline: !!global.local,
+          offline: !!global.offline,
           // Code Mode / explicit custom selection / --yes count as consent for
           // npm runtime deps (and ollama pull when the binary is already present).
           consent: !!(opts.yes || codeModeActive || customSelection || process.stdin.isTTY),

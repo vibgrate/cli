@@ -467,11 +467,74 @@ export const AGENT_TOOLS: ToolSpec[] = [
   },
 ];
 
+const VG_MCP_PREFIX = 'mcp__vibgrate__';
+const AGENT_TOOL_NAME_SET = new Set(AGENT_TOOLS.map((t) => t.name));
+
+function pickQuery(a: Record<string, unknown>): Record<string, unknown> {
+  const query =
+    (typeof a.query === 'string' && a.query) ||
+    (typeof a.question === 'string' && a.question) ||
+    (typeof a.name === 'string' && a.name) ||
+    (typeof a.symbol === 'string' && a.symbol) ||
+    '';
+  return { ...a, query };
+}
+
+function pickSymbol(a: Record<string, unknown>): Record<string, unknown> {
+  const symbol =
+    (typeof a.symbol === 'string' && a.symbol) ||
+    (typeof a.name === 'string' && a.name) ||
+    (typeof a.query === 'string' && a.query) ||
+    '';
+  return { ...a, symbol };
+}
+
+/**
+ * Names a model emits after reading AGENTS.md / Claude skills (the MCP surface)
+ * or copying another coding agent. Mapped onto the VG Code tool set so a small
+ * local model that calls `search_symbols` does not spin on "unknown tool".
+ */
+export const AGENT_TOOL_ALIASES: Record<
+  string,
+  { name: string; mapArgs?: (a: Record<string, unknown>) => Record<string, unknown> }
+> = {
+  search_symbols: { name: 'search_code' },
+  query_graph: { name: 'search_code', mapArgs: pickQuery },
+  orient: { name: 'search_code', mapArgs: pickQuery },
+  get_node: { name: 'search_code', mapArgs: pickQuery },
+  impact_of: { name: 'graph_impact', mapArgs: pickSymbol },
+  grep: { name: 'search_code' },
+  codebase_search: { name: 'search_code' },
+  semantic_search: { name: 'search_code' },
+};
+
+/** Rewrite a model-emitted call onto an advertised VG Code tool, if needed. */
+export function resolveAgentToolCall(call: ToolCall): ToolCall {
+  let name = call.name;
+  if (name.startsWith(VG_MCP_PREFIX)) name = name.slice(VG_MCP_PREFIX.length);
+  if (AGENT_TOOL_NAME_SET.has(name)) {
+    return name === call.name ? call : { ...call, name };
+  }
+  const alias = AGENT_TOOL_ALIASES[name];
+  if (!alias) return call;
+  const mapped = alias.mapArgs ? alias.mapArgs(call.arguments ?? {}) : call.arguments;
+  return { ...call, name: alias.name, arguments: mapped ?? {} };
+}
+
+function unknownToolMessage(requested: string): string {
+  const available = AGENT_TOOLS.map((t) => t.name).join(', ');
+  const bare = requested.startsWith(VG_MCP_PREFIX) ? requested.slice(VG_MCP_PREFIX.length) : requested;
+  const alias = AGENT_TOOL_ALIASES[bare];
+  const hint = alias ? ` Use \`${alias.name}\` instead.` : '';
+  return `unknown tool "${requested}".${hint} Available: ${available}. Call only a name from that list.`;
+}
+
 /** Execute one tool call against the workspace. Never throws — errors come back as tool content. */
 export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<ToolResult> {
-  const a = call.arguments;
+  const resolved = resolveAgentToolCall(call);
+  const a = resolved.arguments;
   try {
-    switch (call.name) {
+    switch (resolved.name) {
       case 'search_code':
         return await search(ctx, str(a.query));
       case 'read_file':
@@ -534,7 +597,7 @@ export async function executeTool(call: ToolCall, ctx: ToolContext): Promise<Too
           finalSummary: `aborted: ${str(a.reason) || 'no reason given'}`,
         };
       default:
-        return { content: `unknown tool "${call.name}". Available: ${AGENT_TOOLS.map((t) => t.name).join(', ')}`, mutated: false, failed: true };
+        return { content: unknownToolMessage(call.name), mutated: false, failed: true };
     }
   } catch (e) {
     return { content: `tool ${call.name} failed: ${(e as Error).message}`, mutated: false, failed: true };

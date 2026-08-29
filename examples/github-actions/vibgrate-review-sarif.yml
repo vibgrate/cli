@@ -1,0 +1,50 @@
+## Vibgrate Review → GitHub code scanning.
+##
+## `--format sarif` emits the **security** findings only. Architectural
+## findings stay on the receipt and the Check summary on purpose: code scanning
+## is a security surface, and filling it with layering observations trains
+## reviewers to ignore the alerts that matter. Run this alongside
+## `vibgrate-review.yml`, which carries the full result.
+
+name: Vibgrate Review SARIF
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  review-sarif:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build the code map
+        run: npx @vibgrate/cli build --quiet
+
+      - name: Generate SARIF
+        # Exit 1/2 means the review found something — that is exactly when the
+        # SARIF is worth uploading, so the decision must not stop the job here.
+        # The gate belongs in `vibgrate-review.yml`, which owns the pass/fail.
+        continue-on-error: true
+        run: |
+          npx @vibgrate/cli review \
+            --base "origin/${{ github.base_ref }}" \
+            --format sarif \
+            --out vibgrate-review.sarif
+
+      - name: Upload SARIF to GitHub code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: vibgrate-review.sarif
+          category: vibgrate-review

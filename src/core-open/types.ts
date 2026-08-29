@@ -1223,6 +1223,8 @@ export interface LayerClassification {
   signals: string[];
   /** Confirmed syntactic role. Omit when the AST pass did not hit. */
   role?: ArchitectureFileRole;
+  /** Which stage decided this layer. Feeds `ArchitectureCoverage.bySource`. */
+  source?: ArchitectureCoverageSource;
 }
 
 /** A directory labelled from its classified children, or inherited from an ancestor. */
@@ -1347,6 +1349,56 @@ export interface ArchitectureObserved {
 }
 
 /** Full architecture detection result */
+/**
+ * Which stage of the pipeline assigned a file's layer. Attribution follows the
+ * stage that *decided* the layer, not one that merely agreed with it:
+ * `graph-confirm` / `ast-confirm` raise confidence without changing the source.
+ * `declared` is reserved for Wave B (declared-rule selectors); it is a valid
+ * key that stays 0 until that lands, so the shape never changes under callers.
+ */
+export type ArchitectureCoverageSource =
+  | 'path'
+  | 'suffix'
+  | 'pascal'
+  | 'folder-inherit'
+  | 'graph'
+  | 'ast'
+  | 'declared';
+
+/**
+ * Honest classification coverage. `classified` and `unclassified` mirror
+ * `totalClassified` / `unclassified` on the same result — they are emitted
+ * together so an instrumentation drift between the counters and the
+ * attribution is detectable rather than silent.
+ */
+export interface ArchitectureCoverage {
+  classified: number;
+  unclassified: number;
+  /**
+   * `classified / (classified + unclassified)`, rounded to 4 decimal places so
+   * the serialized artifact is stable. 0 when nothing was walked (an empty
+   * denominator is not 100% coverage).
+   */
+  ratio: number;
+  /** Every key always present; sums to `classified`. */
+  bySource: Record<ArchitectureCoverageSource, number>;
+}
+
+/**
+ * Where the unclassified source actually is. `unclassifiedFiles` is a flat
+ * 40-path sample and cannot show the shape of the miss; this groups the same
+ * population by directory so a folder holding 76 unclassified files is visible
+ * as one row instead of crowding out the sample.
+ */
+export interface ArchitectureUnclassifiedFolder {
+  /** Directory path relative to the result root (`.` for the tree root). */
+  path: string;
+  /** Unclassified source files directly in this directory. */
+  count: number;
+  /** Sorted sample of those files. Capped. */
+  sampleFiles: string[];
+}
+
 export interface ArchitectureResult {
   /** Detected project archetype */
   archetype: ProjectArchetype;
@@ -1413,6 +1465,18 @@ export interface ArchitectureResult {
   generatedBy?: string;
   /** Repo-relative path of the source contract, when known. */
   sourceContract?: string;
+  /**
+   * Classification coverage and its attribution. Omit when no source files
+   * were walked (contract / IaC projects); absent is not "0% covered".
+   */
+  coverage?: ArchitectureCoverage;
+  /**
+   * Unclassified source grouped by directory, sorted by count desc then path.
+   * Cap 40. Omit when none (absent ≠ []).
+   */
+  unclassifiedFolders?: ArchitectureUnclassifiedFolder[];
+  /** Present only when the unclassified-folder sample dropped directories. */
+  unclassifiedFoldersCapped?: true;
   /** Placeholder — do not emit until declared-vs-observed lands. */
   declared?: ArchitectureDeclared;
   /** Placeholder — do not emit until declared-vs-observed lands. */

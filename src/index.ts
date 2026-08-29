@@ -103,6 +103,15 @@ export { grammarsSourceDir } from './engine/grammars.js';
 // relevance module produced a run: the module resolves from the npm registry at
 // run time, so without this a report cannot be attributed to a module version.
 export { moduleInstalled as relevanceModuleInstalled } from './install/relevance-module.js';
+// The ranking seam itself. A harness that compiles a capsule WITHOUT calling
+// `rankQuestion` measures the module-less mechanical fallback, not the shipped
+// path (`vg code` / `vg ask` / the MCP server all rank first, then compile), and
+// silently reports `relevanceVersion: null`. Exported so token-bench can run the
+// same two steps in the same order.
+export { rankQuestion, loadRelevanceProvider } from './engine/relevance-provider.js';
+export type { SanitizedRank, RankedSeed, RelevanceProvider } from './engine/relevance-provider.js';
+export { loadTopicTags } from './engine/relevance-enrich.js';
+export { userAskFromInstruction, rankingAskFrom } from './engine/user-ask.js';
 export {
   buildTaskCapsule,
   capsuleToCodeContext,
@@ -113,6 +122,8 @@ export {
 } from './code/capsule.js';
 export {
   capsuleMode,
+  rankConfidenceOf,
+  MIN_RANK_CONFIDENCE,
   buildWholeRepoPacket,
   askNamesSymbol,
   mappedFilePaths,

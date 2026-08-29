@@ -28,6 +28,25 @@ describe('createVgBuiltinMcpTools', () => {
     expect(r.content).toMatch(/scanDir/);
   });
 
+  it('accepts the un-namespaced MCP name Spark copies from AGENTS.md', async () => {
+    const set = createVgBuiltinMcpTools({ getGraph: () => fixtureGraph(), root: '/repo' });
+    expect(set.owns('search_symbols')).toBe(true);
+    expect(set.specs.some((s) => s.name === 'search_symbols')).toBe(false);
+    const r = await set.execute({
+      id: '1',
+      name: 'search_symbols',
+      arguments: { query: 'scanDir', limit: 5 },
+    });
+    expect(r.content).toMatch(/scanDir/);
+    expect(r.content).not.toMatch(/unknown/i);
+  });
+
+  it('does not steal library_docs from the VG Code tool set', () => {
+    const set = createVgBuiltinMcpTools({ getGraph: () => fixtureGraph(), root: '/repo' });
+    expect(set.owns('library_docs')).toBe(false);
+    expect(set.owns(`mcp__${VG_MCP_SERVER_ID}__library_docs`)).toBe(true);
+  });
+
   it('uses live graph from execute() when provided', async () => {
     const g = fixtureGraph();
     const set = createVgBuiltinMcpTools({ getGraph: () => g, root: '/repo' });

@@ -617,6 +617,8 @@ export interface LayerClassification {
   signals: string[];
   /** Confirmed syntactic role. Omit when the AST pass did not hit. */
   role?: ArchitectureFileRole;
+  /** Which stage decided this layer. Feeds ArchitectureCoverage.bySource. */
+  source?: ArchitectureCoverageSource;
 }
 
 /** A directory labelled from its classified children, or inherited from an ancestor. */
@@ -658,6 +660,32 @@ export interface LayerPackageRef {
 /** Workspace composition — not a project archetype. */
 export type WorkspaceShape = 'single' | 'monorepo' | 'polyglot-platform';
 
+/** Which stage of the pipeline decided a file's layer. */
+export type ArchitectureCoverageSource =
+  | 'path'
+  | 'suffix'
+  | 'pascal'
+  | 'folder-inherit'
+  | 'graph'
+  | 'ast'
+  | 'declared';
+
+/** Honest classification coverage. Mirrors core-open. */
+export interface ArchitectureCoverage {
+  classified: number;
+  unclassified: number;
+  /** classified / (classified + unclassified), 4 dp. 0 when nothing walked. */
+  ratio: number;
+  bySource: Record<ArchitectureCoverageSource, number>;
+}
+
+/** Unclassified source grouped by directory. Mirrors core-open. */
+export interface ArchitectureUnclassifiedFolder {
+  path: string;
+  count: number;
+  sampleFiles: string[];
+}
+
 /** Full architecture detection result */
 export interface ArchitectureResult {
   /** Detected project archetype */
@@ -674,6 +702,11 @@ export interface ArchitectureResult {
   folders?: FolderClassification[];
   /** Sample of still-unclassified source paths, cap 40. Omit when none (absent ≠ []). */
   unclassifiedFiles?: string[];
+  /** Classification coverage and attribution. Omit when no source was walked. */
+  coverage?: ArchitectureCoverage;
+  /** Unclassified source grouped by directory, cap 40. Omit when none (absent ≠ []). */
+  unclassifiedFolders?: ArchitectureUnclassifiedFolder[];
+  unclassifiedFoldersCapped?: true;
   /** File-level classifications that carry a confirmed AST role. Cap 64. Omit when none. */
   classified?: LayerClassification[];
   /** Workspace composition. Omit on a per-project result. */

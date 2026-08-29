@@ -49,9 +49,47 @@ export function askNamesSymbol(graph: VgGraph, instruction: string): boolean {
   return q.matches.some((m) => m.score >= 6);
 }
 
-export function capsuleMode(input: { sourceTokens: number; askNamesSymbol: boolean }): CapsuleMode {
+/**
+ * @deprecated Not a shipped threshold — a compatibility shim. An earlier
+ * revision used 150 as an absolute ranking-score gate; it suppressed 3 of 114
+ * real measurements, all terse one-line symptom asks, two of which retrieve
+ * their target. Stand-down is now `rankConfidence === 0` only. Exported at 1
+ * so a harness comparing `confidence < MIN_RANK_CONFIDENCE` keeps compiling
+ * and matches the shipped rule (only honest-empty is suppressed).
+ */
+export const MIN_RANK_CONFIDENCE = 1;
+
+/**
+ * Top ranking score from a module ranking, or null when there is nothing
+ * comparable to threshold — no module answered, or it returned no scored seed.
+ *
+ * **Zero means the module's honest-empty verdict** (`hasContent === false`):
+ * the ask named nothing this repo knows. Null means "no signal at all" and
+ * never suppresses. A weak but nonzero score is a real, if faint, match and
+ * compiles — a terse "invoice total is wrong" scoring 113 is the most common
+ * field shape there is, and silencing it is `vg code` feeling dumber.
+ */
+export function rankConfidenceOf(ranked: { hasContent?: boolean; seeds?: Array<{ score?: number }> } | null | undefined): number | null {
+  if (!ranked) return null;
+  if (ranked.hasContent === false) return 0;
+  const scores = (ranked.seeds ?? []).map((s) => Number(s?.score)).filter((n) => Number.isFinite(n) && n > 0);
+  if (!scores.length) return null;
+  return Math.max(...scores);
+}
+
+export function capsuleMode(input: {
+  sourceTokens: number;
+  askNamesSymbol: boolean;
+  /** Top module ranking score; 0 is the honest-empty verdict, null no signal. */
+  rankConfidence?: number | null;
+}): CapsuleMode {
   const mass = Math.max(0, input.sourceTokens);
   if (mass <= WHOLE_REPO_MAX_SOURCE_TOKENS) return 'whole-repo';
+  // Stand down ONLY on the module's honest-empty verdict. A score threshold
+  // was measured and dropped: at any level that catches a log dump (129.9) it
+  // also silences real terse symptom asks (113.6, 117.8, 133.3), two of which
+  // retrieve their target. See docs/graph/VG-ASK-LENGTH-CAPSULE-FOLLOWUP.md.
+  if (input.rankConfidence === 0) return 'off';
   if (mass > COMPILE_MIN_SOURCE_TOKENS) return 'compile';
   // Modest mass: greppable asks lose to grep (measured). Symptom-only in this
   // band is unmeasured — fail closed to off.
@@ -75,9 +113,11 @@ export interface WholeRepoPacket {
  * First-turn packet = the mapped files, not a ranked dump. Files are sorted
  * by path. `budget` caps the paste (default {@link WHOLE_REPO_MAX_SOURCE_TOKENS});
  * at least one file is always included when any exist.
+ *
+ * The instruction is NOT echoed into the packet — the caller sends the ask as
+ * its own trailing turn, so echoing it here billed it twice per step.
  */
 export function buildWholeRepoPacket(
-  instruction: string,
   files: WholeRepoFile[],
   budget: number = WHOLE_REPO_MAX_SOURCE_TOKENS,
 ): WholeRepoPacket {
@@ -96,13 +136,11 @@ export function buildWholeRepoPacket(
   const included: string[] = [];
   for (const f of sorted) {
     const block = [`### \`${f.path}\``, `\`\`\`${langFor(f.path)}`, f.content.replace(/\n$/, ''), '```', ''];
-    const candidate = [...lines, ...block, '## Task', instruction].join('\n');
+    const candidate = [...lines, ...block].join('\n');
     if (included.length > 0 && estimateSourceTokens(candidate) > budget) break;
     lines.push(...block);
     included.push(f.path);
   }
-  lines.push('## Task');
-  lines.push(instruction);
   const rendered = lines.join('\n');
   return {
     rendered,

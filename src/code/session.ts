@@ -26,7 +26,7 @@ import * as path from 'node:path';
 import { buildCodeContext } from './context.js';
 import { rankQuestion, type SanitizedRank } from '../engine/relevance-provider.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
-import { userAskFromInstruction } from '../engine/user-ask.js';
+import { rankingAskFrom } from '../engine/user-ask.js';
 import { buildTaskCapsule, capsuleToCodeContext } from './capsule.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { repositoryIdFromRoot } from '../runtime/paths.js';
@@ -111,7 +111,7 @@ export async function runCodeSession(options: RunSessionOptions): Promise<CodeSe
   // The relevance module ranks the seeds when installed (auto-provisioned);
   // null → the mechanical fallback.
   const topicTags = await loadTopicTags(graph, root);
-  const ranked = await rankQuestion(graph, userAskFromInstruction(instruction), { limit: 48, topicTags });
+  const ranked = await rankQuestion(graph, rankingAskFrom(instruction), { limit: 48, topicTags });
   const context = buildSessionContext(graph, instruction, {
     budget,
     files,

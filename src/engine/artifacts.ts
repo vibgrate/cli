@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { serializeGraph } from './serialize.js';
 import { mapFileExists, snapshotPathFor, writeGraphSnapshot } from './snapshot.js';
@@ -80,6 +81,24 @@ export function defaultGraphPath(root: string, env: NodeJS.ProcessEnv = process.
  * force portable `.vibgrate/graph.json` artifacts and must not pay a synchronous
  * `git rev-parse` (or prefer a leftover global snapshot) on every resolve.
  */
+/**
+ * How to show a graph path to a human.
+ *
+ * The map usually lives in the global store, not the repo, so
+ * `path.relative(root, graphPath)` produces `../../../home/you/.local/state/...`
+ * — accurate and unreadable. Show a repo-relative path only when the file is
+ * actually inside the repo; otherwise show the absolute path with the home
+ * directory abbreviated to `~`.
+ */
+export function displayGraphPath(root: string, graphPath: string, home: string = os.homedir()): string {
+  const rel = path.relative(root, graphPath);
+  if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel;
+  if (home && (graphPath === home || graphPath.startsWith(home + path.sep))) {
+    return `~${graphPath.slice(home.length)}`;
+  }
+  return graphPath;
+}
+
 export function resolveGraphPath(root: string, override?: string, env: NodeJS.ProcessEnv = process.env): string {
   if (override?.trim()) return path.resolve(override.trim());
   if (preferInRepoGraph(env)) {

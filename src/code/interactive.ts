@@ -138,7 +138,7 @@ async function chooseModel(root: string, global: GlobalOpts, opts: InteractiveOp
   }
 
   const sp = prompter.spinner('Loading the model catalog…');
-  const catalog = await fetchCatalog({ offline: global.local });
+  const catalog = await fetchCatalog({ offline: global.offline });
   sp.stop(catalog.source === 'network' ? 'Model catalog loaded' : catalog.source === 'cache' ? 'Model catalog (cached)' : 'Model catalog (offline list)');
   const localModels = discoverModels();
 
@@ -199,7 +199,7 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
     const ensure = await ensureManagerRuntime({
       providerId: route.providers[0]?.id ?? sel.provider,
       model: route.providers[0]?.model ?? sel.model,
-      offline: !!global.local,
+      offline: !!global.offline,
       consent: true,
     });
     if (!ensure.ok) prompter.note(c.yellow(ensure.error ?? 'model manager not ready'));
@@ -514,7 +514,7 @@ function sessionId(): string {
 async function reselectModel(root: string, global: GlobalOpts, prompter: Prompter): Promise<WizardResult | null> {
   try {
     const sp = prompter.spinner('Loading the model catalog…');
-    const catalog = await fetchCatalog({ offline: global.local });
+    const catalog = await fetchCatalog({ offline: global.offline });
     sp.stop('Model catalog loaded');
     const selection = await runProviderWizard(prompter, { catalog, localModels: discoverModels() });
     if (selection.kind === 'local' && selection.needsPull) {

@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { Command } from 'commander';
 import { loadGraph } from '../engine/load.js';
-import { resolveGraphPath, vibgrateDir } from '../engine/artifacts.js';
+import { displayGraphPath, resolveGraphPath, vibgrateDir } from '../engine/artifacts.js';
 import { cacheDir } from '../engine/cache.js';
 import { discover } from '../engine/discover.js';
 import { probeFreshness, driftCount } from '../engine/freshness.js';
@@ -55,7 +55,7 @@ async function runStatus(global: GlobalOpts): Promise<void> {
   if (global.json) {
     json({
       root: path.relative(process.cwd(), root) || '.',
-      graphPath: path.relative(root, graphPath),
+      graphPath: displayGraphPath(root, graphPath),
       built: graph !== null,
       generatedAt: graph?.generatedAt ?? null,
       counts: graph?.meta.counts ?? null,
@@ -71,12 +71,12 @@ async function runStatus(global: GlobalOpts): Promise<void> {
   }
 
   if (!graph) {
-    info(`${c.cyan('vg')} · no map yet at ${c.dim(path.relative(root, graphPath))}`);
+    info(`${c.cyan('vg')} · no map yet at ${c.dim(displayGraphPath(root, graphPath))}`);
     info(`  run ${c.bold('vg')} to build one`);
     return;
   }
 
-  info(`${c.cyan('vg')} · ${path.relative(root, graphPath)}`);
+  info(`${c.cyan('vg')} · ${displayGraphPath(root, graphPath)}`);
   info(`  generated ${graph.generatedAt}`);
   info(
     `  nodes ${c.bold(String(graph.meta.counts.nodes))}  edges ${c.bold(

@@ -40,6 +40,7 @@ import { registerDaemon } from './commands/daemon.js';
 import { registerPolicy } from './commands/policy.js';
 import { registerLlmHost } from './commands/llm-host.js';
 import { registerHcs } from './commands/hcs.js';
+import { registerReview } from './commands/review.js';
 import { CliError, ExitCode } from './util/exit.js';
 import { c, info, disableColor } from './util/output.js';
 
@@ -94,6 +95,7 @@ export const KNOWN_COMMANDS = new Set([
   'module',
   'daemon',
   'policy',
+  'review',
   'llm-host',
   'hcs',
   'install',
@@ -182,6 +184,7 @@ export function buildProgram(): Command {
   registerPolicy(program);
   registerLlmHost(program);
   registerHcs(program);
+  registerReview(program);
 
   // Drift-reporting commands (merged from the Vibgrate CLI). `push` here is the
   // real scan-artifact upload, so it replaces the graph engine's no-op `push`.
@@ -224,6 +227,7 @@ const VALUE_FLAGS = new Set([
   '--only',
   '--exclude',
   '--export',
+  '--out',
   '-o',
   '--budget',
   '-b',
@@ -334,7 +338,9 @@ export async function main(argv = process.argv): Promise<void> {
   // by the time `vg ask` / `vg code` need it (those paths retry once,
   // bounded, then fall back mechanically). Never blocks, never prints;
   // VIBGRATE_NO_KERNEL / a recorded decline / --local skip it entirely.
-  if (!raw.includes('--local')) kickRelevanceReadiness();
+  // Both flags suppress it: `--offline` says "no network", and `--local`
+  // implies that. Read from raw argv because this runs before commander parses.
+  if (!raw.includes('--local') && !raw.includes('--offline')) kickRelevanceReadiness();
 
   // We need cwd for path-based dispatch; read -C/--cwd from the raw args.
   const cwd = readCwd(raw);

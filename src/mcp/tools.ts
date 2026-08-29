@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { queryGraph, queryGraphSemantic } from '../engine/query.js';
 import type { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import { rankQuestion } from '../engine/relevance-provider.js';
+import { rankingAskFrom } from '../engine/user-ask.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
 import { loadEmbedder, getNodeEmbeddings, isModelReady, withTimeout, type Embedder } from '../engine/embeddings.js';
 import { resolveOne } from '../engine/lookup.js';
@@ -18,6 +19,7 @@ import { loadVulnerabilities, filterBySeverity, resolvePackageTarget, openFixabl
 import { attributedInventory } from './attribution.js';
 import { computeUpgradeImpact, getChangelogSignals, type VulnSeverity } from '../core-open/index.js';
 import { discoverModels } from '../engine/models.js';
+import { assessProposedChange } from '../review/mcp-assess.js';
 import { FREE_PACK } from '../grounding/pack.js';
 import { loadCatalog, resolveLib, readDoc, driftFor, resolveVersion, localPackageDocs, localApiSurface } from '../engine/lib.js';
 import { selectForBudget, symbolsFromApi } from '../engine/select.js';
@@ -132,7 +134,7 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
   // fallback. rankQuestion never throws and the provider is memoized, so
   // this adds no meaningful latency to the navigation path.
   const topicTags = await loadTopicTags(graph, ctx.root, ctx.graphPath);
-  const modRank = await rankQuestion(graph, question, { limit: 48, topicTags });
+  const modRank = await rankQuestion(graph, rankingAskFrom(question), { limit: 48, topicTags });
   // The daemon first: it already holds vectors for this slot, so it answers the
   // semantic half without this process loading the model at all. `null` means
   // "rank it yourself" — the same path taken when no daemon is running.
@@ -1016,6 +1018,22 @@ export const TOOLS: VgTool[] = [
       }
       return answer ?? { error: 'not_found' };
     },
+  },
+  {
+    name: 'assess_change',
+    description:
+      'Before you write: would this code fit? One call reports whether the proposal conflicts with what its peers do, would add an unguarded route, or re-implements something that already exists — with the files to follow instead. Ask this while deciding; `vg review` asks the same questions after the fact, when the fix costs more.',
+    inputSchema: obj(
+      {
+        file: { type: 'string', description: 'repo-relative path the code would live at' },
+        content: { type: 'string', maxLength: 20000, description: 'the proposed code' },
+      },
+      ['file', 'content'],
+    ),
+    // A thin adapter. Every rule lives in `review/assess.ts`, transport-free, so
+    // the hook, the CLI and this tool cannot drift into three sets of answers.
+    handler: (graph, args, ctx) =>
+      assessProposedChange(graph, ctx.root, String(args.file ?? ''), String(args.content ?? '')),
   },
 ];
 

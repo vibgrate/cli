@@ -35,6 +35,7 @@ import {
   askNamesSymbol,
   buildWholeRepoPacket,
   capsuleMode,
+  rankConfidenceOf,
   mappedFilePaths,
   sourceTokenMass,
   type CapsuleMode,
@@ -93,7 +94,7 @@ import { buildIdentifierTrieFromGraph } from '../runtime/identifier-trie.js';
 import type { TrieNode } from '../runtime/identifier-trie.js';
 import { graphDraftCandidates, KvBlockRegistry } from '../runtime/kv-cache.js';
 import { lookupModelCapabilities } from './model-capabilities.js';
-import { userAskFromInstruction } from '../engine/user-ask.js';
+import { rankingAskFrom } from '../engine/user-ask.js';
 
 export type { CapsuleSummary, RunProvenance };
 export { CONTEXT_POLICY_VERSION };
@@ -470,9 +471,9 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   // Ranking sees the user ask only — attachment basenames/paths must not
   // become topics or seeds (same strip as buildCodeContext / literal-locate).
   const topicTags = await loadTopicTags(graph, options.root);
-  const ranked = await rankQuestion(graph, userAskFromInstruction(instruction), {
+  const ranked = await rankQuestion(graph, rankingAskFrom(instruction), {
     limit: 48,
-    priorQuestion: options.priorInstruction ? userAskFromInstruction(options.priorInstruction) : null,
+    priorQuestion: options.priorInstruction ? rankingAskFrom(options.priorInstruction) : null,
     topicTags,
   });
   const built = buildAgentContext(graph, instruction, { ...options, fsImpl, budget, ranked });
@@ -741,9 +742,9 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
           // Re-rank against the SESSION graph: approved edits may have added
           // or renamed symbols, and seed ids must belong to the graph the
           // capsule is compiled from.
-          const nextRanked = await rankQuestion(session.graph, userAskFromInstruction(instruction), {
+          const nextRanked = await rankQuestion(session.graph, rankingAskFrom(instruction), {
             limit: 48,
-            priorQuestion: options.priorInstruction ? userAskFromInstruction(options.priorInstruction) : null,
+            priorQuestion: options.priorInstruction ? rankingAskFrom(options.priorInstruction) : null,
             topicTags: await loadTopicTags(session.graph, root),
           });
           const nextCapsule = buildTaskCapsule(session.graph, instruction, {
@@ -1391,6 +1392,7 @@ function buildAgentContext(
     capsuleMode({
       sourceTokens: sourceTokenMass(mapped.map((f) => f.content)),
       askNamesSymbol: askNamesSymbol(graph, instruction),
+      rankConfidence: rankConfidenceOf(ranked),
     });
 
   if (mode === 'off') {
@@ -1400,7 +1402,7 @@ function buildAgentContext(
     };
   }
   if (mode === 'whole-repo') {
-    const packet = buildWholeRepoPacket(instruction, mapped, budget);
+    const packet = buildWholeRepoPacket(mapped, budget);
     return {
       context: {
         instruction,
