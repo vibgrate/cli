@@ -140,6 +140,12 @@ export interface GraphNode {
   lang: string;
   visibility?: 'public' | 'private' | 'protected' | 'internal';
   signature?: string;
+  /**
+   * Decorators written above a Python `def` (`@router.post("/login")`),
+   * single-lined and bounded. Kept apart from `signature` so the node id,
+   * which hashes the signature, is unchanged. Additive in vg-graph/1.1.
+   */
+  decorators?: string;
   doc?: string; // short leading doc-comment / docstring summary (deterministic; not a full body)
   /**
    * What the callable's body calls, scanned from its text (never run), as bounded counts (SQL/ORM reads and
