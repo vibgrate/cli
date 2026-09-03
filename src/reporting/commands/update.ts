@@ -13,6 +13,7 @@ import { liveStatsDir, reapOtherVersionServers, type ReapedServer } from '../../
 import { restartVgdIfRunning, stopVgd, vgdVersionSkew } from '../../commands/daemon.js';
 import { isFileLockError, scheduleDeferredUpdate } from './update-windows.js';
 import { updateLocalModules } from '../../install/update-modules.js';
+import type { VgdClientOptions, VgdRequest, VgdResponse } from '../../runtime/vgd/index.js';
 
 export type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'bun';
 
@@ -601,24 +602,62 @@ export const updateCommand = new Command('update')
     },
   );
 
+/** Injectable daemon client for {@link rewarmVgdAndReport} (tests). */
+export interface RewarmVgdDeps {
+  vgdIsRunning: () => Promise<boolean>;
+  vgdRequest: (request: VgdRequest, options?: VgdClientOptions) => Promise<VgdResponse>;
+  /** Where the progress lines go (default: dim stdout). */
+  log: (line: string) => void;
+}
+
+/**
+ * How long the non-blocking `embed-index` kick may take to be acknowledged.
+ * The daemon answers as soon as the build is queued, but that prefix reads the
+ * on-disk vector cache for the whole repo first, which is seconds on a large
+ * map — the budget is for that and for a wedged event loop, never for the
+ * build itself.
+ */
+const REWARM_KICK_TIMEOUT_MS = 30_000;
+
+async function resolveRewarmDeps(deps: Partial<RewarmVgdDeps>): Promise<RewarmVgdDeps> {
+  const log = deps.log ?? ((line: string): void => console.log(chalk.dim(line)));
+  if (deps.vgdIsRunning && deps.vgdRequest) return { vgdIsRunning: deps.vgdIsRunning, vgdRequest: deps.vgdRequest, log };
+  const vgd = await import('../../runtime/vgd/index.js');
+  return { vgdIsRunning: deps.vgdIsRunning ?? vgd.vgdIsRunning, vgdRequest: deps.vgdRequest ?? vgd.vgdRequest, log };
+}
+
 /**
  * Re-warm the daemon after it was restarted: publish this repo's map into the
- * fresh process and build its semantic index. Best-effort and never throws —
- * an unbuilt map or an unavailable embedding backend just means the next
- * command warms it instead, exactly as before.
+ * fresh process and kick its semantic index build. Best-effort and never
+ * throws — an unbuilt map or an unavailable embedding backend just means the
+ * next command warms it instead, exactly as before.
+ *
+ * The index build is kicked, never awaited (`wait: false`). The daemon does
+ * the work in its own process either way, so the CLI waiting adds nothing —
+ * and a blocking `embed-index` kept `vg update` on the socket until every
+ * node of the repo had been embedded: minutes on a large repo with a cold
+ * cache, up to the client's 600s timeout, with "Re-published the code map
+ * into the restarted daemon." as the last line on screen. From the terminal
+ * that is an update that never exits.
  */
-async function rewarmVgdAndReport(cwd: string): Promise<void> {
+export async function rewarmVgdAndReport(cwd: string, deps: Partial<RewarmVgdDeps> = {}): Promise<void> {
   try {
-    const { vgdIsRunning, vgdRequest } = await import('../../runtime/vgd/index.js');
+    const { vgdIsRunning, vgdRequest, log } = await resolveRewarmDeps(deps);
     if (!(await vgdIsRunning())) return;
     const loaded = await vgdRequest({ op: 'load-graph', root: cwd });
     // `stored`, not `repositoryId`: several response shapes carry an id, and
     // only the load-graph success shape means a map is now resident.
     if (!loaded.ok || !('stored' in loaded)) return; // no map built yet — nothing to warm
-    console.log(chalk.dim('Re-published the code map into the restarted daemon.'));
-    const indexed = await vgdRequest({ op: 'embed-index', repositoryId: loaded.repositoryId });
-    if (indexed.ok && 'vectors' in indexed && indexed.state === 'ready') {
-      console.log(chalk.dim(`Semantic index warm again (${indexed.vectors} vectors).`));
+    log('Re-published the code map into the restarted daemon.');
+    const kicked = await vgdRequest(
+      { op: 'embed-index', repositoryId: loaded.repositoryId, wait: false },
+      { timeoutMs: REWARM_KICK_TIMEOUT_MS },
+    );
+    if (!kicked.ok || !('vectors' in kicked)) return;
+    if (kicked.state === 'ready') {
+      log(`Semantic index warm again (${kicked.vectors} vectors).`);
+    } else {
+      log('Semantic index is rebuilding in the background — the next "vg ask" waits for it if it is still going.');
     }
   } catch {
     /* daemon busy, no map, semantic off — all fine, the next command warms */

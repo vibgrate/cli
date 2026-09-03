@@ -88,3 +88,27 @@ describe('inheritDuties', () => {
     expect(JSON.stringify(a[0]!.duties)).toBe(JSON.stringify(b[0]!.duties));
   });
 });
+
+describe('inheritDuties: call-site liveness and same-language resolution', () => {
+  it('inherits nothing through a call site that cannot run, and passes a guard on', () => {
+    const nodes = [
+      node('dead', 'UserService.never_persists', 'app/service.py', [{ k: 'persist', o: 'User', t: 'UserRepository', via: 'repo.add', live: false, g: 'False', line: 40 }]),
+      node('guarded', 'UserService.register', 'app/service.py', [{ k: 'persist', o: 'User', t: 'UserRepository', via: 'repo.add', live: true, g: 'unless dry_run', line: 30 }]),
+      node('repo', 'UserRepository.add', 'app/service.py', [{ k: 'persist', o: 'User', t: 'AsyncSession', via: 'db.add', live: true, line: 11 }]),
+    ];
+    inheritDuties(nodes, [edge('dead', 'repo'), edge('guarded', 'repo')]);
+    expect(nodes[0]!.duties!.filter((d) => d.hop)).toEqual([]);
+    expect(nodes[1]!.duties!.filter((d) => d.hop)).toEqual([{ k: 'persist', via: 'UserRepository.add', live: true, hop: 1, line: 0, o: 'User', t: 'AsyncSession', g: 'unless dry_run' }]);
+  });
+
+  it('resolves a typed delegation to the same file, then the same language, never across languages', () => {
+    const ts = (id: string, qn: string, file: string, duties?: GraphNode['duties']): GraphNode => ({ ...node(id, qn, file, duties), lang: 'ts' }) as GraphNode;
+    const nodes = [
+      ts('c', 'OrdersController.create', 'ts/orders.ts', [{ k: 'delegate', t: 'OrderService', via: 'OrderService.place', live: true, line: 37 }]),
+      ts('s-ts', 'OrderService.place', 'ts/orders.ts', [{ k: 'persist', o: 'Order', t: 'OrderRepository', via: 'orders.save', live: true, line: 26 }]),
+      node('s-java', 'OrderService.place', 'java/OrderService.java', [{ k: 'http', o: 'Order', t: 'PaymentClient', via: 'paymentClient.charge', live: true, line: 20 }]),
+    ];
+    inheritDuties(nodes, []);
+    expect(nodes[0]!.duties!.filter((d) => d.hop).map((d) => d.k)).toEqual(['persist']);
+  });
+});

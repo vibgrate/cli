@@ -301,9 +301,6 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   timer.start('resolve');
   const moduleResolver = buildModuleResolver(root, new Set(parses.map((p) => p.rel)));
   const resolved = resolve(parses, moduleResolver);
-  // Duties a callee performs become purposes of its callers (1–2 hops): a
-  // delegating one-liner controller still reports the write behind it.
-  inheritDuties(resolved.nodes, resolved.edges);
   timer.end('resolve');
   checkMemoryBudget('resolve', limits.memoryBudgetMb);
 
@@ -466,6 +463,12 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     scipStats = { ...res.stats, tool: scip.tool };
   }
 
+  // Duties a callee performs become purposes of its callers (1–2 hops): a
+  // delegating one-liner controller still reports the write behind it. Runs
+  // on the final edge set, so a call only the tsc / scip rung could resolve
+  // (`fetchApi<T>("/cart")`) carries its callee's duties too.
+  inheritDuties(resolved.nodes, edges);
+  // Test linkage copies the nodes, so the duties have to be in place first.
   // Test-awareness: static test→code linkage, then runtime coverage if present.
   const linked = applyStaticTestLinkage(resolved.nodes, edges);
   let nodes = linked.nodes;

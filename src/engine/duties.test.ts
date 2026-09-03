@@ -233,3 +233,103 @@ describe('fileBindings', () => {
     expect(py.get('cache')).toBe('RedisCache');
   });
 });
+
+describe('duties: Rails, Django and typed clients', () => {
+  it('reads a Rails action: a bare model finder is a query, `render json:` is the response', async () => {
+    const src = `
+class PostsController < ApplicationController
+  def show
+    @post = Post.find(params[:id])
+    render json: @post
+  end
+
+  def create
+    @post = Post.new(post_params)
+    @post.save!
+    render json: @post, status: :created
+  end
+
+  def publish
+    PostPublisher.new(@post).call
+    redirect_to @post
+  end
+end`;
+    const show = await dutiesOf('rb', 'app/controllers/posts_controller.rb', src, 'show');
+    expect(show.map((d) => [d.k, d.o, d.via])).toEqual([
+      ['query', 'Post', 'Post.find'],
+      ['respond', '200', 'render'],
+    ]);
+    const create = await dutiesOf('rb', 'app/controllers/posts_controller.rb', src, 'create');
+    expect(create.map((d) => [d.k, d.o])).toEqual([
+      ['persist', 'Post'],
+      ['respond', '201'],
+    ]);
+    // `PostPublisher.new(@post).call` is `PostPublisher.call` for the inherit pass.
+    const publish = await dutiesOf('rb', 'app/controllers/posts_controller.rb', src, 'publish');
+    expect(publish.map((d) => [d.k, d.via, d.o])).toEqual([
+      ['delegate', 'PostPublisher.call', 'Post'],
+      ['respond', 'redirect_to', '302'],
+    ]);
+  });
+
+  it('names the instance, not the value, on a bang write; a mailer deliver is a publish', async () => {
+    const src = `
+class PostPublisher
+  def initialize(post)
+    @post = post
+  end
+
+  def call
+    @post.update!(published_at: Time.current)
+    PostMailer.published(@post).deliver_later
+  end
+end`;
+    const d = await dutiesOf('rb', 'app/services/post_publisher.rb', src, 'call');
+    expect(d[0]).toMatchObject({ k: 'persist', o: 'Post', via: 'update!' });
+    expect(kinds(d)).toContain('publish');
+  });
+
+  it('reads Django `Model.objects` as the store and names the model', async () => {
+    const src = `
+class UserService:
+    def actives(self):
+        return list(User.objects.filter(active=True))
+
+    def promote(self, user_id):
+        User.objects.filter(id=user_id).update(role="admin")
+`;
+    const d = await dutiesOf('py', 'app/services.py', src, 'actives');
+    expect(d[0]).toMatchObject({ k: 'query', o: 'User' });
+    const p = await dutiesOf('py', 'app/services.py', src, 'promote');
+    expect(p.find((d) => d.k === 'persist')).toMatchObject({ o: 'User' });
+  });
+
+  it('counts any method on a receiver declared as an HTTP client as calling out', async () => {
+    const src = `
+public class OrderService {
+    private final PaymentClient paymentClient;
+    public OrderService(PaymentClient paymentClient) { this.paymentClient = paymentClient; }
+
+    public Order place(Order order) {
+        paymentClient.charge(order.getId(), order.getTotal());
+        return order;
+    }
+}`;
+    const d = await dutiesOf('java', 'src/main/java/app/OrderService.java', src, 'place');
+    expect(d[0]).toMatchObject({ k: 'http', t: 'PaymentClient', via: 'paymentClient.charge', live: true });
+  });
+
+  it('keeps Python decorators beside the signature, out of the id hash', async () => {
+    const src = `
+router = APIRouter()
+
+@router.post("/login")
+def login(form_data, service: UserService):
+    return service.authenticate(form_data.username, form_data.password)
+`;
+    const parsed = await parseSource('app/api.py', 'py', src);
+    const def = parsed.defs.find((d) => d.name === 'login')!;
+    expect(def.signature).toBe('def login(form_data, service: UserService)');
+    expect(def.decorators).toBe('@router.post("/login")');
+  });
+});

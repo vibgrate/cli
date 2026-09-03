@@ -97,7 +97,9 @@ const TYPE_CLASS: Array<[RegExp, ReceiverClass]> = [
 
 /** Same classes by the *spelling* of an untyped receiver (last resort). */
 const NAME_CLASS: Array<[RegExp, ReceiverClass]> = [
-  [/^(?:_?(?:db|database|conn|connection|cur|cursor|session|tx|transaction|em|prisma|knex|orm|qs|queryset|objects|context|_context|dbcontext|ctx\.db|supabase|firestore|mongo|collection|table|store))$|(?:repositor(?:y|ies)|repo|dao|context|session|store|collection|model|entities)$/i, 'store'],
+  [/^(?:_?(?:db|database|conn|connection|cur|cursor|session|tx|transaction|em|prisma|knex|orm|qs|queryset|objects|context|_context|dbcontext|ctx\.db|supabase|firestore|mongo|collection|table|store))$|(?:repositor(?:y|ies)|repo|dao|context|session|store|collection|model|entities|\.objects)$/i, 'store'],
+  // Django: anything reached through `Model.objects` is the ORM.
+  [/\.objects\b/, 'store'],
   [/^(?:_?(?:http|httpclient|client|axios|api|apiclient|gateway|adapter|sdk|fetcher|requests|httpx|aiohttp))$|(?:client|gateway|adapter|api)$/i, 'http'],
   [/^(?:_?(?:bus|queue|publisher|producer|emitter|events|eventbus|channel|topic|mailer|notifier|kafka|rabbit|sqs|sns|celery|sender|dispatcher))$|(?:bus|queue|publisher|producer|emitter|mailer|sender|dispatcher)$/i, 'queue'],
   [/^(?:_?(?:cache|redis|memcache|memcached))$|cache$/i, 'cache'],
@@ -108,6 +110,11 @@ const NAME_CLASS: Array<[RegExp, ReceiverClass]> = [
   [/(?:service|usecase|interactor|handler|manager|facade)$/i, 'service'],
 ];
 
+/** Types that spell `Http` but are request plumbing or a security builder, never an outbound client. */
+const NOT_CLIENT = /(?:httpsecurity|httpcontext|httprequest|httpresponse|httpservletrequest|httpservletresponse|httpmessage|httpheaders|httpstatus|httpmethod|httpentity|httpsession|httpcontextaccessor|httprequestmessage|httpresponsemessage|clientsession)$/;
+/** Schema DDL verbs (ActiveRecord / Alembic / Knex / TypeORM migrations, SQLAlchemy metadata). */
+const DDL_VERB = /^(?:create_table|drop_table|add_column|remove_column|add_index|remove_index|change_column|rename_column|rename_table|add_reference|add_foreign_key|remove_foreign_key|create_join_table|change_table|alter_column|drop_index|create_index|bulk_insert|create_all|drop_all|run_migrations|createtable|droptable|addcolumn|dropcolumn|renamecolumn|createindex|dropindex|altertable|renametable)$/i;
+const DDL_ARGS = /(?:create_all|drop_all|run_migrations|create_table|drop_table|createTable|dropTable)\b/;
 /** Contexts and sessions that are request plumbing, never a store. */
 const NOT_STORE = /(?:httpcontext|servletcontext|requestcontext|securitycontext|executioncontext|bindingcontext|validationcontext|actioncontext|filtercontext|hubcallercontext|synchronizationcontext|cancellationtoken|httpsession|websocketsession|clientsession|usersession|appcontext|applicationcontext|beancontext|springcontext|reactcontext|canvasrenderingcontext)$/;
 
@@ -130,6 +137,9 @@ function classifyName(receiver: string): ReceiverClass {
 
 const READ = /^(?:find\w*|get\w*|load\w*|read\w*|fetch\w*|query\w*|select\w*|where|filter|first\w*|single\w*|last\w*|all|count\w*|exists\w*|any\w*|aggregate|search\w*|list\w*|lookup\w*|scan|one|many|paginate|include|asnotracking|tolist\w*|toarray\w*|execute(?:query|reader)\w*|raw|exec|values|pluck|only|defer|selectinload|joinedload|find_by|find_each|get_object_or_404|from|of|fetchone|fetchall|queryrow\w*|querycontext)$/i;
 const WRITE = /^(?:save\w*|insert\w*|create\w*|update\w*|upsert\w*|delete\w*|remove\w*|destroy\w*|persist\w*|merge|flush|commit|add\w*|attach|detach|entry|bulk_\w+|get_or_create|update_or_create|executeupdate|executenonquery|namedexec|mustexec|increment|decrement|set|put|write\w*|store|truncate|drop|sync|push|touch|delete_all|update_all|insert_all|upsert_all|find_or_create_by|update_attributes?|savechanges\w*|addrange\w*|removerange|\$transaction|transaction)$/i;
+/** ActiveRecord class-level finders and writers on a bare model constant. */
+const RAILS_READ = /^(?:find|find_by|where|all|first|last|exists|count|pluck|order|includes|select|take|find_each|find_in_batches|joins|distinct|limit|sum|average|maximum|minimum|ids|find_or_initialize_by|find_sole_by|sole)$/;
+const RAILS_WRITE = /^(?:create|update|destroy|destroy_all|delete|delete_all|update_all|insert|insert_all|upsert|upsert_all|find_or_create_by|create_or_find_by|touch_all|increment_counter|decrement_counter|update_counters)$/;
 /** Unit-of-work verbs: a write with no object of its own. */
 const UOW = /^(?:savechanges(?:async)?|commit|flush|\$transaction|transaction|begin_transaction|begintransaction|save_changes)$/i;
 /** `execute` / `query` / `raw`: a read unless the statement text says otherwise. */
@@ -383,9 +393,12 @@ function nounFromArgs(args: string, bindings: Bindings, locals: Bindings): strin
 /** `_context.Products` → `Product`; `this.orders` → `Order`; `prisma.user` → `User`. */
 function nounFromReceiver(receiver: string): string | undefined {
   const segs = receiver.split(/[.:>\-?!]+/).filter(Boolean);
+  // Django's `User.objects.filter(...)` names the model before `objects`.
+  const objects = segs.indexOf('objects');
+  if (objects >= 1) segs.length = objects;
   const last = segs[segs.length - 1];
   if (!last) return undefined;
-  const clean = last.replace(/^_/, '');
+  const clean = last.replace(/^[_@$]+/, '');
   if (/^(?:db|context|_context|dbContext|session|prisma|repo|repository|em|manager|orm|conn|tx|store|client|http|cache|logger|log|bus|queue|mediator|this|self|base|super|ctx|entities)$/i.test(clean)) return undefined;
   if (/^[A-Z]/.test(clean)) return domainNoun(singular(clean));
   if (clean.length > 3) return domainNoun(singular(clean[0]!.toUpperCase() + clean.slice(1)));
@@ -424,7 +437,10 @@ function classifySite(site: Site, def: Node, langId: string, bindings: Bindings,
   const base = receiver.replace(/^(?:this|self|@|super)[.:>-]*/, '').split(/[.:>\-?!]+/)[0] ?? '';
   const declared = base ? (bindings.get(base) ?? locals.get(base)) : undefined;
   let cls: ReceiverClass = declared ? classifyType(declared) : 'unknown';
-  if (cls === 'unknown' && receiver) cls = classifyName(receiver);
+  // A receiver *declared* as request plumbing (`HttpSecurity http`) keeps
+  // that answer; only an untyped receiver falls back to its spelling.
+  const typedPlumbing = !!declared && NOT_CLIENT.test(declared.replace(/<.*$/, '').toLowerCase());
+  if (cls === 'unknown' && receiver && !typedPlumbing) cls = classifyName(receiver);
   const args = argumentsText(site.call);
   const flow = controlFlow(site.call, def);
   const line = site.call.startPosition.row + 1;
@@ -450,7 +466,35 @@ function classifySite(site: Site, def: Node, langId: string, bindings: Bindings,
   }
   // Strong, receiver-independent verbs.
   if (/^(?:saveandflush|saveall|insertmany|insertone|createmany|updatemany|deletemany|bulk_create|bulk_update|get_or_create|update_or_create|executeupdate|find_or_create_by)$/i.test(lower) || /^(?:save|update|create|destroy)!$/.test(callee)) {
-    return mk('persist', nounFromArgs(args, bindings, locals) ?? nounFromReceiver(receiver) ?? nounFromType(declared), callee);
+    // `@post.update!(published_at: Time.current)`: the instance is the object,
+    // not the value it is being given.
+    const instanceFirst = /!$/.test(callee) || /^[@$]/.test(receiver);
+    const obj = instanceFirst
+      ? (nounFromReceiver(receiver) ?? nounFromArgs(args, bindings, locals) ?? nounFromType(declared))
+      : (nounFromArgs(args, bindings, locals) ?? nounFromReceiver(receiver) ?? nounFromType(declared));
+    return mk('persist', obj, callee);
+  }
+  // Rails: an instance variable holding a record writes itself (`@post.save`, `@post.update(attrs)`).
+  if (langId === 'rb' && /^@\w+$/.test(receiver) && /^(?:save|destroy|update|update_attributes?|update_columns?|touch|delete|increment|decrement|toggle)$/.test(verb)) {
+    return mk('persist', nounFromReceiver(receiver), viaOf());
+  }
+  // Schema DDL: a migration's `create_table :posts`, Alembic's `op.drop_table`,
+  // SQLAlchemy's `Base.metadata.create_all` (also through `conn.run_sync`).
+  if (
+    (DDL_VERB.test(verb) && (!receiver || cls === 'store' || /(?:^|\.)(?:op|migration|schema|metadata|queryinterface|queryrunner|knex)$/i.test(receiver))) ||
+    (cls === 'store' && /^(?:run_sync|run)$/.test(verb) && DDL_ARGS.test(args))
+  ) {
+    const table = /[:'"`](\w+)/.exec(args)?.[1];
+    return mk('persist', table ? domainNoun(singular(table[0]!.toUpperCase() + table.slice(1))) : undefined, viaOf());
+  }
+  // Rails: a bare model constant is the store (`Post.find(id)`, `Post.create!(attrs)`).
+  if (langId === 'rb' && /^[A-Z]\w*$/.test(receiver)) {
+    if (RAILS_WRITE.test(verb)) return mk('persist', nounFromReceiver(receiver), viaOf());
+    if (RAILS_READ.test(verb)) return mk('query', nounFromReceiver(receiver), viaOf());
+  }
+  // Rails / Sidekiq: `PostMailer.published(post).deliver_later`, `Job.perform_later(id)`.
+  if (langId === 'rb' && /^(?:deliver_later|deliver_now|perform_later|perform_async|perform_in|perform_at)$/.test(verb)) {
+    return mk('publish', nounFromReceiver(base) ?? rawTypeFromArgs(args, bindings, locals), viaOf());
   }
   if (/^(?:findunique|findmany|findfirst|findone|findall|findbyid|findbypk|tolistasync|toarrayasync|firstordefaultasync|singleordefaultasync|anyasync|countasync|findasync|asnotracking|fetchone|fetchall|find_by|find_each|selectinload|joinedload|get_object_or_404)$/i.test(lower)) {
     return mk('query', nounFromReceiver(receiver) ?? nounFromType(declared) ?? nounFromArgs(args, bindings, locals), callee);
@@ -468,7 +512,9 @@ function classifySite(site: Site, def: Node, langId: string, bindings: Bindings,
       break;
     }
     case 'http': {
-      if (HTTP_VERB.test(verb) || /async$/i.test(verb)) {
+      // A receiver *declared* as an HTTP client calls out whatever the
+      // method is named (`paymentClient.charge`); an untyped one needs a verb.
+      if (declared || HTTP_VERB.test(verb) || /async$/i.test(verb)) {
         const path = /["'`]([^"'`\s]{1,60})["'`]/.exec(args)?.[1];
         return mk('http', nounFromArgs(args.replace(/["'`][^"'`]*["'`]/g, ''), bindings, locals) ?? (path ? path : undefined), viaOf());
       }
@@ -528,6 +574,23 @@ function classifySite(site: Site, def: Node, langId: string, bindings: Bindings,
 
   // Receiver-free duties by verb alone.
   if (!receiver || /^(?:this|self|@)$/.test(receiver)) {
+    if ((langId === 'rb' || langId === 'py') && /^(?:render|render_template|render_to_response|redirect_to|head|respond_with|respond_to)$/.test(verb)) {
+      // `render :new` / `render_template('x.html')` draws a template: UI
+      // rendering. `render json: @post` / `redirect_to` only answer.
+      const template = /^render_t/.test(verb) || (verb === 'render' && (/^\s*(?::\w+|['"]|template:|partial:|action:|html:|layout:)/.test(args) || /['"][\w/.-]+\.html?['"]/.test(args)));
+      if (template) {
+        const name = /(?::(\w+)|['"]([\w/.-]+)['"])/.exec(args);
+        return mk('render', name?.[1] ?? name?.[2], callee);
+      }
+      const named = /status:\s*:(\w+)/.exec(args)?.[1]?.replace(/_/g, '');
+      const code = /\b([1-5]\d\d)\b/.exec(args)?.[1] ?? (named ? STATUS_OF[named] : undefined) ?? (verb === 'redirect_to' ? '302' : '200');
+      return mk('respond', code, callee);
+    }
+    // A bare fetch helper (`fetchApi('/cart')`, `apiGet`, `httpPost`, `request(`) calls out.
+    if (/^(?:fetch(?:api|json|with\w+)|\w*api(?:fetch|get|post|put|patch|delete|request|call)|http(?:get|post|put|patch|delete|request)|fetcher|request)$/i.test(verb)) {
+      const path = /["'`]([^"'`\s]{1,60})["'`]/.exec(args)?.[1];
+      return mk('http', path, callee);
+    }
     if (/^(?:ok|created|createdataction|createdatroute|nocontent|notfound|badrequest|unauthorized|forbid|accepted|conflict|problem|statuscode|jsonify|jsonresponse|httpresponse\w*|redirect(?:toaction|toroute)?)$/i.test(lower)) {
       return mk('respond', /\b([1-5]\d\d)\b/.exec(args)?.[1] ?? STATUS_OF[lower], callee);
     }
@@ -542,6 +605,12 @@ function classifySite(site: Site, def: Node, langId: string, bindings: Bindings,
   // delegation the inherit pass can follow.
   const resolved = calleeOf(site.callee);
   if (resolved) return mk('delegate', rawTypeFromArgs(args, bindings, locals), resolved.slice(0, 60));
+  // Ruby service objects: `PostPublisher.new(post).call` is `PostPublisher.call`,
+  // which the inherit pass resolves by qualified name.
+  if (langId === 'rb') {
+    const ctor = /^([A-Z]\w*(?:::[A-Z]\w*)*)\.new\b/.exec(receiver)?.[1];
+    if (ctor && /^(?:call|perform|execute|run)$/.test(verb)) return mk('delegate', rawTypeFromArgs(args, bindings, locals), `${ctor.split('::').pop()}.${verb}`.slice(0, 60));
+  }
   return undefined;
 }
 

@@ -98,6 +98,31 @@ function isQualifiedCallee(node: Node): boolean {
   return false;
 }
 
+/**
+ * Python decorators above a `def` (`@router.post("/login")`), which tree-sitter
+ * keeps outside the function node in a `decorated_definition`. Other grammars
+ * put annotations / attributes / decorators inside the definition, where
+ * `signatureOf` already sees them. Single-lined, bounded; undefined when none.
+ */
+function decoratorsOf(def: Node, langId: string): string | undefined {
+  if (langId !== 'py' || def.parent?.type !== 'decorated_definition') return undefined;
+  const parts: string[] = [];
+  for (const c of def.parent.namedChildren) if (c && c.type === 'decorator') parts.push(c.text.replace(/\s+/g, ' ').trim());
+  if (!parts.length) return undefined;
+  const joined = redactSecrets(parts.join(' '));
+  return joined.length > 200 ? `${joined.slice(0, 197)}...` : joined;
+}
+
+/** Declaration node types that a brace language allows without a body. */
+const ABSTRACTABLE_DEF = new Set(['method_declaration', 'constructor_declaration', 'function_declaration', 'function_definition']);
+const BRACE_BODY_LANGS = new Set(['java', 'cs', 'kt', 'ts', 'tsx', 'js', 'jsx', 'go', 'rust', 'scala', 'swift', 'php', 'cpp', 'c']);
+
+/** False for an interface / abstract method in a brace language (no `body` child). */
+function hasBody(def: Node, langId: string): boolean {
+  if (!BRACE_BODY_LANGS.has(langId) || !ABSTRACTABLE_DEF.has(def.type)) return true;
+  return def.childForFieldName('body') != null;
+}
+
 function signatureOf(source: string, def: Node, langId: string): string {
   // The text up to the body opening, single-lined, bounded — a deterministic,
   // human-meaningful signature without dragging in the whole body.
@@ -465,11 +490,15 @@ function collectDefs(
       // GUARDRAILS §1: signatures/docs are lifted verbatim from source and are
       // persisted (graph.json, `vg share` commits it) — scrub at ingest.
       doc: scrubbedDoc(source, defNode, langId),
+      decorators: rule.kind === 'function' || rule.kind === 'method' ? decoratorsOf(defNode, langId) : undefined,
       visibility: undefined,
       // Body effects — what the callable executes — for the architecture
       // classifier. Counts only; no source text leaves this function.
+      // A declaration without a body (an interface or abstract method) has
+      // nothing to scan: no effects at all, so the classifier does not read
+      // "no sites" as a contradiction of what the name says.
       effects:
-        rule.kind === 'function' || rule.kind === 'method' || rule.kind === 'route' || rule.kind === 'job' || rule.kind === 'component' || rule.kind === 'test'
+        (rule.kind === 'function' || rule.kind === 'method' || rule.kind === 'route' || rule.kind === 'job' || rule.kind === 'component' || rule.kind === 'test') && hasBody(defNode, langId)
           ? scanEffects(source.slice(defNode.startIndex, spanEnd.endIndex), langId)
           : undefined,
       _start: defNode.startIndex,

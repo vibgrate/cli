@@ -12,6 +12,8 @@ export interface RawDef {
   startByte: number;
   endByte: number;
   signature?: string;
+  /** Python decorators above the `def`, single-lined (see schema.ts). */
+  decorators?: string;
   doc?: string; // short leading doc-comment / docstring summary (deterministic, truncated)
   visibility?: 'public' | 'private' | 'protected' | 'internal';
   /** What the body's code calls, scanned (engine/effects.ts) — callables only, deterministic. */

@@ -20,6 +20,35 @@ const CALLABLE = new Set(['function', 'method', 'route', 'component', 'job', 'te
 const MAX_INHERITED = 8;
 const MAX_HOPS = 2;
 
+/** Last segment of a `via` (`repo.add` → `add`, `IProductService.Create` → `Create`). */
+function lastSeg(via: string | undefined): string {
+  return via?.split(/[.:#]/).pop() ?? '';
+}
+
+/**
+ * The caller's own duty sites that target `callee`: a `delegate` whose `via`
+ * is the callee's qualified name, or a typed site whose receiver type and
+ * method name the callee. Returns the merged liveness — live when any site
+ * is live, carrying a guard only when every live site has one.
+ */
+function callSite(caller: GraphNode, callee: GraphNode): { live: boolean; guard?: string } | undefined {
+  const qn = callee.qualifiedName;
+  const segs = qn.split('.');
+  const method = segs[segs.length - 1] ?? '';
+  const cls = segs.length >= 2 ? segs[segs.length - 2]! : '';
+  const sites = (caller.duties ?? []).filter((d) => {
+    if (d.hop) return false;
+    if (d.via === qn) return true;
+    if (!d.t || !cls || lastSeg(d.via) !== method) return false;
+    return d.t === cls || d.t.replace(/^I(?=[A-Z])/, '') === cls || `${d.t}Impl` === cls;
+  });
+  if (!sites.length) return undefined;
+  const live = sites.filter((d) => d.live);
+  if (!live.length) return { live: false };
+  const guard = live.every((d) => d.g) ? live[0]!.g : undefined;
+  return guard ? { live: true, guard } : { live: true };
+}
+
 export function inheritDuties(nodes: GraphNode[], edges: GraphEdge[]): void {
   const byId = new Map<string, GraphNode>();
   for (const n of nodes) if (CALLABLE.has(n.kind)) byId.set(n.id, n);
@@ -37,10 +66,23 @@ export function inheritDuties(nodes: GraphNode[], edges: GraphEdge[]): void {
   // Typed delegations the edge resolver could not follow: a duty `via`
   // `ProductService.Create` (or `IProductService.Create`) names a callable;
   // a MediatR-style `Send(CreateProductCommand)` names `CreateProductCommandHandler.Handle`.
-  const byQualified = new Map<string, string>();
+  // A qualified name can exist in several files (and languages): pick the
+  // caller's own file first, then its language; never cross languages.
+  const byQualified = new Map<string, GraphNode[]>();
   const handlerByClass = new Map<string, string>();
+  const pick = (caller: GraphNode, name: string): string | undefined => {
+    const cands = byQualified.get(name);
+    if (!cands) return undefined;
+    const hit = cands.find((c) => c.file === caller.file) ?? cands.find((c) => c.lang === caller.lang);
+    return hit?.id;
+  };
   for (const n of byId.values()) {
-    if (!byQualified.has(n.qualifiedName)) byQualified.set(n.qualifiedName, n.id);
+    let list = byQualified.get(n.qualifiedName);
+    if (!list) {
+      list = [];
+      byQualified.set(n.qualifiedName, list);
+    }
+    list.push(n);
     const segs = n.qualifiedName.split('.');
     if (segs.length >= 2 && /^(?:Handle|handle|HandleAsync|Execute|execute|ExecuteAsync|__call__|run|Run|invoke|Invoke)$/.test(segs[segs.length - 1]!)) {
       const cls = segs[segs.length - 2]!;
@@ -55,7 +97,7 @@ export function inheritDuties(nodes: GraphNode[], edges: GraphEdge[]): void {
         const [cls, method] = d.via.split('.');
         if (cls && method) {
           for (const c of [cls, cls.replace(/^I(?=[A-Z])/, ''), `${cls}Impl`]) {
-            const id = byQualified.get(`${c}.${method}`);
+            const id = pick(n, `${c}.${method}`);
             if (id) targets.push(id);
           }
         }
@@ -97,6 +139,11 @@ export function inheritDuties(nodes: GraphNode[], edges: GraphEdge[]): void {
         const src = current.get(calleeId);
         if (!src) continue;
         const callee = byId.get(calleeId)!;
+        // The caller's own sites for this callee decide whether the callee's
+        // duties can happen here: a call under `if (false)` or after a
+        // `return` inherits nothing; a guarded call passes its guard on.
+        const site = callSite(caller, callee);
+        if (site && !site.live) continue;
         for (const d of src) {
           if (out.length >= MAX_INHERITED) break;
           const key = `${d.k}|${callee.qualifiedName}`;
@@ -105,6 +152,7 @@ export function inheritDuties(nodes: GraphNode[], edges: GraphEdge[]): void {
           const inherited: Duty = { k: d.k, via: callee.qualifiedName, live: true, hop, line: 0 };
           if (d.o) inherited.o = d.o;
           if (d.t) inherited.t = d.t;
+          if (site?.guard) inherited.g = site.guard;
           out.push(inherited);
         }
       }

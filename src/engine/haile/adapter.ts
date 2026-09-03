@@ -86,7 +86,7 @@ export function adaptGraph(graph: Pick<VgGraph, 'nodes' | 'edges'>, options: Ada
   const out: HaileCallable[] = [];
   for (const node of graph.nodes) {
     if (!isCallableKind(node.kind)) continue;
-    const signature = node.signature ?? '';
+    const signature = `${node.decorators ? `${node.decorators} ` : ''}${node.signature ?? ''}`;
     const callable: HaileCallable = {
       node_id: node.id,
       file_path: node.file,

@@ -195,6 +195,15 @@ backward compatible.
 
 ### Fixed
 
+- **`vg update` no longer hangs after "Re-published the code map into the
+  restarted daemon."** — the post-update rewarm asked the freshly restarted
+  daemon to build the repo's semantic index and *waited for it*, so on a large
+  repo with a cold vector cache the command sat on the socket for minutes (up
+  to the client's 10-minute timeout) with no output, and the only way out was
+  Ctrl-C. The daemon does that work in its own process regardless, so the
+  rewarm now just kicks the build (`wait: false`) and returns; it reports
+  "Semantic index warm again" when the on-disk cache covered it, and says the
+  index is rebuilding in the background otherwise.
 - **`vg update` now verifies the daemon it restarts is actually on the new
   build** — while the install had the socket free, another client (typically a
   VS Code extension bundling an older engine, or a long-lived `vg serve`)

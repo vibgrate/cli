@@ -43,6 +43,7 @@ export const PURPOSES = [
   'serialise',
   'render',
   'network_io',
+  'respond',
   'file_io',
   'compute',
   'cache',

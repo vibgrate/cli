@@ -110,6 +110,7 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
         span: { start: d.startLine, end: d.endLine },
         lang: p.lang,
         signature: d.signature,
+        ...(d.decorators ? { decorators: d.decorators } : {}),
         doc: d.doc,
         ...(d.effects ? { effects: d.effects } : {}),
         ...(d.duties ? { duties: d.duties } : {}),
