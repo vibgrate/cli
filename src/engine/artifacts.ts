@@ -7,6 +7,7 @@ import { renderReport } from './report.js';
 import { renderHtml } from './html.js';
 import { globalGraphPath, globalGraphPathForRef, repositoryStoreDir } from '../runtime/paths.js';
 import { deleteTagsSidecarFor } from './relevance-enrich.js';
+import { deleteHaileSidecarFor, writeHaileSidecarFor } from './haile/index.js';
 import { detectGitRef } from '../runtime/git-ref.js';
 import type { VgGraph } from '../schema.js';
 
@@ -146,6 +147,7 @@ const DEFAULT_GITIGNORE = [
   'graph.json',
   'graph.snap',
   'graph.tags.snap',
+  'graph.haile.json',
   // Binary semantic index next to the map (never model-named; never under cache/).
   'embeddings',
   'graph.html',
@@ -240,6 +242,7 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
   // graph (the sidecar would also self-invalidate via corpusHash, but a
   // removed/replaced graph must take its derived artifacts with it).
   deleteTagsSidecarFor(graphPath);
+  deleteHaileSidecarFor(graphPath);
 
   if (storeMode) {
     if (!writeGraphSnapshot(graphPath, graph, { standalone: true })) {
@@ -290,6 +293,11 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
     fs.writeFileSync(factsPath, graph.facts.map((f) => JSON.stringify(f)).join('\n') + '\n');
     written.factsPath = factsPath;
   }
+
+  // HAILE sidecar is derived and must not enter graph.json. Best-effort:
+  // a classify fault never fails the build. --max-privacy / --no-graph never
+  // reach writeArtifacts (see shouldBuildCodeMap).
+  writeHaileSidecarFor(graph, graphPath);
 
   return written;
 }

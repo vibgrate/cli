@@ -1,4 +1,6 @@
 import type { NodeKind } from '../schema.js';
+import type { CallableEffects } from './effects.js';
+import type { Duty } from './duties.js';
 
 /** A definition extracted from one file (pre-resolution, pre-id). */
 export interface RawDef {
@@ -12,6 +14,10 @@ export interface RawDef {
   signature?: string;
   doc?: string; // short leading doc-comment / docstring summary (deterministic, truncated)
   visibility?: 'public' | 'private' | 'protected' | 'internal';
+  /** What the body's code calls, scanned (engine/effects.ts) — callables only, deterministic. */
+  effects?: CallableEffects;
+  /** Ordered duties reconstructed from the syntax tree (engine/duties.ts). */
+  duties?: Duty[];
 }
 
 export interface RawCall {

@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { loadRoleMap } from '../engine/haile/role-preference.js';
 import * as path from 'node:path';
 import { queryGraph, queryGraphSemantic } from '../engine/query.js';
 import type { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
@@ -135,6 +136,7 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
   // this adds no meaningful latency to the navigation path.
   const topicTags = await loadTopicTags(graph, ctx.root, ctx.graphPath);
   const modRank = await rankQuestion(graph, rankingAskFrom(question), { limit: 48, topicTags });
+  const roles = loadRoleMap(ctx.root, graph.provenance?.corpusHash);
   // The daemon first: it already holds vectors for this slot, so it answers the
   // semantic half without this process loading the model at all. `null` means
   // "rank it yourself" — the same path taken when no daemon is running.
@@ -150,6 +152,7 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
           budget,
           semanticRanked: ranked.ranked,
           ranked: modRank,
+          roles,
         });
         return { q, mode: `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})` };
       }
@@ -166,7 +169,7 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
         // cancel it, so the work continues in the background and caches to disk —
         // this call answers lexically, the next hits the warm cache and is fast.
         const nodeVectors = await getNodeEmbeddings(graph, embedder, ctx.root);
-        const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors, ranked: modRank });
+        const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors, ranked: modRank, roles });
         mode = `semantic (${embedder.id})`;
         return r;
       })(),
@@ -177,7 +180,7 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
   } catch {
     // Over the latency budget or a semantic fault — answer from the lexical floor.
   }
-  return { q: queryGraph(graph, question, { budget, ranked: modRank }), mode: 'lexical' };
+  return { q: queryGraph(graph, question, { budget, ranked: modRank, roles }), mode: 'lexical' };
 }
 
 /**

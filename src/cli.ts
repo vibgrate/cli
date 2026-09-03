@@ -60,6 +60,7 @@ import { updateCommand } from './reporting/commands/update.js';
 import { sbomCommand } from './reporting/commands/sbom.js';
 import { evidenceCommand } from './reporting/commands/evidence/index.js';
 import { kickRelevanceReadiness } from './install/relevance-module.js';
+import { kickHaileReadiness } from './install/haile-module.js';
 
 /** The set of registered subcommand names (kept in sync with registration). */
 export const KNOWN_COMMANDS = new Set([
@@ -340,7 +341,13 @@ export async function main(argv = process.argv): Promise<void> {
   // VIBGRATE_NO_KERNEL / a recorded decline / --local skip it entirely.
   // Both flags suppress it: `--offline` says "no network", and `--local`
   // implies that. Read from raw argv because this runs before commander parses.
-  if (!raw.includes('--local') && !raw.includes('--offline')) kickRelevanceReadiness();
+  if (!raw.includes('--local') && !raw.includes('--offline')) {
+    kickRelevanceReadiness();
+    // Same posture for the architecture-classify module: installed by default,
+    // silently, in the background. `vg build` runs the bounded ensure and owns
+    // the user-visible warning when the module cannot be provisioned.
+    kickHaileReadiness();
+  }
 
   // We need cwd for path-based dispatch; read -C/--cwd from the raw args.
   const cwd = readCwd(raw);

@@ -1,3 +1,5 @@
+import type { CallableEffects } from './engine/effects.js';
+import type { Duty } from './engine/duties.js';
 /**
  * The `vg-graph/1.1` on-disk schema.
  *
@@ -126,6 +128,8 @@ export interface Centrality {
   eigenvector: number;
 }
 
+export type { CallableEffects, Duty };
+
 export interface GraphNode {
   id: string; // blake3(canonical(kind, qualifiedName, file, signature))
   kind: NodeKind;
@@ -137,6 +141,25 @@ export interface GraphNode {
   visibility?: 'public' | 'private' | 'protected' | 'internal';
   signature?: string;
   doc?: string; // short leading doc-comment / docstring summary (deterministic; not a full body)
+  /**
+   * What the callable's body calls, scanned from its text (never run), as bounded counts (SQL/ORM reads and
+   * writes, outbound HTTP, HTTP responses, file I/O, auth, crypto, messaging,
+   * cache, logging, rendering, validation, plus fan-out / branch / loop /
+   * await / throw / return / state-assignment counts and a few matched API
+   * tokens). Additive in vg-graph/1.1; absent for non-callables and empty
+   * bodies. Excluded from the id hash. See engine/effects.ts.
+   */
+  effects?: CallableEffects;
+  /**
+   * Ordered duties reconstructed from the callable's syntax tree — what each
+   * statement would do (`validate SKU`, `persist Product via SaveChangesAsync`,
+   * `respond 201`), with a liveness bit (dead after return/throw, in catch,
+   * `if (false)`), an optional guard, and `hop` 1–2 for duties inherited from
+   * callees along call edges. Additive in vg-graph/1.1; identifiers and short
+   * guards only, never source text. Excluded from the id hash. See
+   * engine/duties.ts.
+   */
+  duties?: Duty[];
   importance: number; // 0..1 blended centrality
   centrality: Centrality;
   area: number; // area id (the node's community); -1 = unassigned (cluster "none")

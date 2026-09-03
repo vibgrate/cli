@@ -145,3 +145,31 @@ describe('writeArtifacts global store', () => {
     }
   });
 });
+
+describe('HAILE classify file via writeArtifacts', () => {
+  it('gitignores graph.haile.json and does not write it when the module is absent', () => {
+    const root = tmpDir();
+    const prev = process.env.VIBGRATE_GRAPH_IN_REPO;
+    const prevNo = process.env.VIBGRATE_NO_KERNEL;
+    const prevPath = process.env.VIBGRATE_HAILE_PATH;
+    process.env.VIBGRATE_GRAPH_IN_REPO = '1';
+    process.env.VIBGRATE_NO_KERNEL = '1';
+    delete process.env.VIBGRATE_HAILE_PATH;
+    try {
+      const written = writeArtifacts(tinyGraph(), { root, html: false, report: false });
+      const classifyFile = written.graphPath.replace(/\.json$/, '.haile.json');
+      expect(classifyFile).toBe(path.join(root, '.vibgrate', 'graph.haile.json'));
+      const gi = fs.readFileSync(path.join(root, '.vibgrate', '.gitignore'), 'utf8');
+      expect(gi.split(/\r?\n/)).toContain('graph.haile.json');
+      // Public CLI must not classify in-process. Missing module → no file, build still succeeds.
+      expect(fs.existsSync(classifyFile)).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.VIBGRATE_GRAPH_IN_REPO;
+      else process.env.VIBGRATE_GRAPH_IN_REPO = prev;
+      if (prevNo === undefined) delete process.env.VIBGRATE_NO_KERNEL;
+      else process.env.VIBGRATE_NO_KERNEL = prevNo;
+      if (prevPath === undefined) delete process.env.VIBGRATE_HAILE_PATH;
+      else process.env.VIBGRATE_HAILE_PATH = prevPath;
+    }
+  });
+});

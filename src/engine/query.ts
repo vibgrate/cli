@@ -1,6 +1,7 @@
 import { indexFor, type GraphIndex } from './relations.js';
 import { cosine, type Embedder } from './embeddings.js';
 import type { SanitizedRank } from './relevance-provider.js';
+import { applyRolePreference, type RoleMap } from './haile/role-preference.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 import { userAskFromInstruction } from './user-ask.js';
 
@@ -33,12 +34,21 @@ export interface QueryOptions {
    *  absent — module not installed, predates the ranking API, or failed —
    *  the mechanical fallback below answers. */
   ranked?: SanitizedRank | null;
+  /**
+   * Architecture-module roles for this graph (engine/haile/role-preference.ts
+   * loadRoleMap). When present, the ranked seeds are re-ordered so controllers,
+   * application services and ports come first under the budget and utilities
+   * the ask did not reach for are left out. Absent → ranking untouched.
+   */
+  roles?: RoleMap | null;
 }
 
 export interface QueryMatch {
   node: GraphNode;
   score: number;
   why: string;
+  /** Architecture-module role when the map is classified (structured; not part of the rendered context). */
+  role?: string;
 }
 
 export interface QueryResult {
@@ -229,11 +239,13 @@ export function queryGraph(graph: VgGraph, question: string, options: QueryOptio
             return node ? { node, score: s.score, why: s.why } : null;
           })
           .filter((m): m is QueryMatch => m !== null)
-          .slice(0, limit)
       : [];
   } else {
-    seeds = mechanicalRank(graph, question, literals).slice(0, limit);
+    seeds = mechanicalRank(graph, question, literals);
   }
+  // Role preference looks one window past the cut so a controller ranked
+  // 13th can still open the answer, then the budget cut applies as before.
+  seeds = applyRolePreference(seeds.slice(0, limit * 2), options.roles, question).slice(0, limit);
 
   const { context, tokensEstimate } = buildContext(graph, index, question, seeds, budget, literals);
   return { question, matches: seeds, context, tokensEstimate };
@@ -447,7 +459,7 @@ export async function queryGraphSemantic(
     scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
   }
 
-  const seeds = diversifyByFile(scored).slice(0, limit);
+  const seeds = applyRolePreference(diversifyByFile(scored).slice(0, limit * 2), options.roles, question).slice(0, limit);
   const { context, tokensEstimate } = buildContext(graph, index, question, seeds, budget, literals);
   return { question, matches: seeds, context, tokensEstimate };
 }

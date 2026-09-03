@@ -14,14 +14,21 @@ import {
   installHcsModule,
   removeHcsModule,
 } from '../install/hcs-module.js';
+import {
+  HAILE_DISCLOSURE,
+  HAILE_MODULE_NAME,
+  haileModuleInstalled,
+  installHaileModule,
+  removeHaileModule,
+} from '../install/haile-module.js';
 import { type InstallOptions, type InstallResult, kernelDisabled, readConsent, writeConsent } from '../install/module-core.js';
 import { loadRelevanceProvider, resetRelevanceProviderCache } from '../engine/relevance-provider.js';
 import { loadHcsEngine, resetHcsEngineCache } from '../engine/hcs-provider.js';
+import { loadHaileProvider, resetHaileProviderCache } from '../engine/haile/haile-provider.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { c, info, json, out } from '../util/output.js';
 import { readGlobal, applyGlobalOptions } from '../cli-options.js';
 
-/** Everything the command needs to manage one optional module. */
 interface ManagedModule {
   npmName: string;
   disclosure: string;
@@ -29,7 +36,6 @@ interface ManagedModule {
   remove(): void;
   installed(): { installed: boolean; version?: string };
   resetLoader(): void;
-  /** Load through the seam; report the loaded engine/provider version. */
   loadedVersion(): Promise<string | null>;
 }
 
@@ -58,19 +64,22 @@ const MODULES: Record<string, ManagedModule> = {
       return engine ? engine.version() : null;
     },
   },
+  haile: {
+    npmName: HAILE_MODULE_NAME,
+    disclosure: HAILE_DISCLOSURE,
+    install: installHaileModule,
+    remove: removeHaileModule,
+    installed: haileModuleInstalled,
+    resetLoader: resetHaileProviderCache,
+    loadedVersion: async () => {
+      const provider = await loadHaileProvider();
+      return provider ? provider.version() : null;
+    },
+  },
 };
 
 const SUPPORTED = Object.keys(MODULES).join(', ');
 
-/**
- * `vg module` — manage optional local modules (relevance, hcs).
- *
- * `install` fetches the module from the npm registry as a plain tarball,
- * verifies its integrity, and unpacks it into the vibgrate cache — the user's
- * project is never touched and nothing from the tarball executes at install
- * time. `remove` deletes it. `status` reports what is installed and whether
- * the seam can load it. All state is per-user, not per-repo.
- */
 export function registerModule(program: Command): void {
   const cmd = program.command('module').description(`manage optional local modules (${SUPPORTED})`);
 

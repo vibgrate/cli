@@ -7,6 +7,8 @@ import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
 import { ambiguityError } from './ambiguity.js';
 import { c, info, json } from '../util/output.js';
+import { resolveGraphPath } from '../engine/artifacts.js';
+import { findHaileSymbol, formatHaileLines, haileJsonFields, readHaileSidecar } from '../engine/haile/index.js';
 
 /**
  * `vg show <name>` (VG-CLI-SPEC §3.3) — the richest single-node view: what it
@@ -21,7 +23,7 @@ export function registerShow(program: Command): void {
     .option('--pick <n>', 'pick the nth candidate when ambiguous')
     .action(function (this: Command, name: string, opts: { pick?: string }) {
       const global = readGlobal(this);
-      const { graph } = requireGraph(global);
+      const { root, graph } = requireGraph(global);
       const { node, candidates } = resolveOne(graph, name, opts.pick ? Number(opts.pick) : undefined);
 
       if (!node) {
@@ -37,6 +39,12 @@ export function registerShow(program: Command): void {
       const extendsEdges = index.out(node.id, 'extends').concat(index.out(node.id, 'implements'));
       const supertypes = extendsEdges.map((e) => index.node(e.dst)?.qualifiedName).filter(Boolean);
       const area = graph.areas.find((a) => a.id === node.area);
+      const haile = findHaileSymbol(
+        readHaileSidecar(resolveGraphPath(root, global.graph), {
+          corpusHash: graph.provenance?.corpusHash,
+        }),
+        node.id,
+      );
 
       // `show` is the CLI twin of the MCP `get_node` tool — record it under that
       // shared name (source `cli`) when an AI host identified itself. Baseline =
@@ -79,6 +87,7 @@ export function registerShow(program: Command): void {
           calls: callees.map((n) => n.qualifiedName),
           calledBy: callers.map((n) => n.qualifiedName),
           extends: supertypes,
+          haile: haileJsonFields(haile) ?? null,
         });
         return;
       }
@@ -89,6 +98,9 @@ export function registerShow(program: Command): void {
       info(
         `  importance ${node.importance.toFixed(3)}${node.isHub ? c.yellow(' ★ hub') : ''} · area #${node.area}${area ? ` ${c.dim(area.label)}` : ''}`,
       );
+      if (haile) {
+        for (const line of formatHaileLines(haile)) info(line);
+      }
       if (supertypes.length) info(`  ${c.dim('extends:')} ${supertypes.join(', ')}`);
       info(`  ${c.dim('calls')} (${callees.length}): ${callees.slice(0, 12).map((n) => n.qualifiedName).join(', ') || '—'}`);
       info(`  ${c.dim('called by')} (${callers.length}): ${callers.slice(0, 12).map((n) => n.qualifiedName).join(', ') || '—'}`);

@@ -12,6 +12,7 @@ import { pathExists } from '../utils/fs.js';
 import { liveStatsDir, reapOtherVersionServers, type ReapedServer } from '../../mcp/live-stats.js';
 import { restartVgdIfRunning, stopVgd, vgdVersionSkew } from '../../commands/daemon.js';
 import { isFileLockError, scheduleDeferredUpdate } from './update-windows.js';
+import { updateLocalModules } from '../../install/update-modules.js';
 
 export type PackageManager = 'pnpm' | 'npm' | 'yarn' | 'bun';
 
@@ -383,8 +384,45 @@ async function offerDeferredWindowsUpdate(cmd: string, assumeYes: boolean): Prom
   return true;
 }
 
+/**
+ * Check the optional local modules (relevance, hcs, haile) against the
+ * registry and, unless checkOnly, bring the eligible ones to latest. Modules
+ * pin to `dist-tags.latest` at first provision and never refresh on their
+ * own, so `vg update` is where they catch up. Explicit opt-outs (a recorded
+ * denial, VIBGRATE_NO_KERNEL=1) and HCS-not-installed stay silent; a module
+ * failure is a warning, never a failed update.
+ */
+async function refreshLocalModules(checkOnly: boolean): Promise<void> {
+  for (const r of await updateLocalModules({ checkOnly })) {
+    switch (r.status) {
+      case 'updated':
+        console.log(chalk.green('✔') + ` ${r.npmName} module updated ${r.from} → ${r.to}`);
+        break;
+      case 'installed':
+        console.log(chalk.green('✔') + ` ${r.npmName} module installed (${r.to})`);
+        break;
+      case 'update-available':
+        console.log(chalk.yellow(`Module update available: ${r.npmName} ${r.from} → ${r.to}`));
+        break;
+      case 'install-available':
+        console.log(chalk.yellow(`Module not installed yet: ${r.npmName} (${r.to} available)`));
+        break;
+      case 'up-to-date':
+        console.log(chalk.dim(`  ${r.npmName} module up to date (${r.to})`));
+        break;
+      case 'failed':
+        console.log(chalk.yellow(`  ${r.npmName} module could not be updated — ${r.detail ?? 'unknown error'}`));
+        break;
+      default:
+        // disabled / declined / hcs-not-installed: explicit opt-outs and
+        // provision-on-use modules are not news during an update.
+        break;
+    }
+  }
+}
+
 export const updateCommand = new Command('update')
-  .description('Update vibgrate to the latest version')
+  .description('Update vibgrate and its local modules to the latest versions')
   .option('--check', 'Only check for updates, do not install')
   .option('--pm <manager>', 'Package manager to use (npm, pnpm, yarn, bun)')
   .option('--global', 'Update global installation')
@@ -413,6 +451,11 @@ export const updateCommand = new Command('update')
       const semver = await import('semver');
       if (!semver.gt(latest, VERSION)) {
         console.log(chalk.green('✔') + ` You are on the latest version (${VERSION}).`);
+        // The CLI being current says nothing about the local modules — they
+        // pin to the registry's latest at first install and only catch up
+        // here. Refresh them (or just report, under --check) before the
+        // process-hygiene steps below.
+        await refreshLocalModules(Boolean(opts.check));
         // Even on the latest binary, an assistant-spawned `vg serve` started
         // before a prior update may still be executing an OLDER build (a
         // long-lived stdio child the client never restarted). Retire those so
@@ -432,6 +475,7 @@ export const updateCommand = new Command('update')
       console.log(chalk.yellow(`Update available: ${VERSION} → ${latest}`));
 
       if (opts.check) {
+        await refreshLocalModules(true);
         console.log(chalk.dim('Run "vg update" to install.'));
         return;
       }
@@ -505,6 +549,9 @@ export const updateCommand = new Command('update')
       const install = await runInstall(cmd, cwd);
       if (install.ok) {
         console.log(chalk.green('✔') + ` Updated to ${PACKAGE_NAME}@${latest}`);
+        // The self-update carried the binary; the local modules update here,
+        // in the same run, so one `vg update` leaves everything current.
+        await refreshLocalModules(false);
       } else if (process.platform === 'win32' && isFileLockError(install.output)) {
         // Only this process's own locks are left. It cannot release them and
         // keep running, so hand the install to a script that waits for us.
