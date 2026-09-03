@@ -13,6 +13,7 @@
 
 import { extractLiteralNeedles, queryGraph } from '../engine/query.js';
 import type { SanitizedRank } from '../engine/relevance-provider.js';
+import type { RoleMap } from '../engine/haile/role-preference.js';
 import { indexFor } from '../engine/relations.js';
 import { impactOf } from '../engine/impact.js';
 import type { CodeContext } from './types.js';
@@ -33,6 +34,8 @@ export interface BuildContextOptions {
    *  ordering AND the plain-language concept map. Absent → the mechanical
    *  fallback ranks and the concept map is empty. */
   ranked?: SanitizedRank | null;
+  /** Architecture-module roles (loadRoleMap) — orders seeds by role under the budget; absent → untouched. */
+  roles?: RoleMap | null;
 }
 
 /**
@@ -62,6 +65,7 @@ export function buildCodeContext(graph: VgGraph, instruction: string, options: B
     budget: Math.floor(budget * 0.6),
     limit: seedLimit * 2,
     ranked: options.ranked,
+    roles: options.roles,
   });
   // Keep every candidate here: `--file` narrows below, and capping first would
   // discard in-scope symbols ranked outside the top `seedLimit`. The cap runs

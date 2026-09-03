@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { loadRoleMap } from '../engine/haile/role-preference.js';
 import { queryGraph, queryGraphSemantic, type QueryResult } from '../engine/query.js';
 import { rankQuestion } from '../engine/relevance-provider.js';
 import { rankingAskFrom } from '../engine/user-ask.js';
@@ -97,6 +98,10 @@ export function registerAsk(program: Command): void {
       // silent on failure) — then rank, falling back mechanically when the
       // module still is not available. `--local` stays network-free.
       if (!global.offline) await ensureRelevanceModule();
+      // Architecture-module roles (when `vg build` classified this map): the
+      // context builders open with controllers / services / ports and leave
+      // unasked-for utilities out. Null when there is no classify file.
+      const roles = loadRoleMap(root, graph.provenance?.corpusHash);
       const topicTags = await loadTopicTags(graph, root, resolveGraphPath(root, global.graph));
       const modRank = await rankQuestion(graph, rankingAskFrom(q), { limit: 48, topicTags });
 
@@ -123,6 +128,7 @@ export function registerAsk(program: Command): void {
         if (ranked) {
           live?.set('answering from the daemon index…');
           result = await queryGraphSemantic(graph, q, {
+                roles,
             budget,
             semanticRanked: ranked.ranked,
             ranked: modRank,
@@ -153,18 +159,18 @@ export function registerAsk(program: Command): void {
             const bar = !global.json ? new ProgressBar(c.dim('embedding')) : undefined;
             const vectors = await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
             bar?.done();
-            result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors, ranked: modRank });
+            result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors, ranked: modRank, roles });
             mode = `semantic (${embedder.id})`;
             activity.add('answer', 'ok', `answered in this process · ${embedder.id} · ${vectors.size} vector(s)`);
           } else {
-            result = queryGraph(graph, q, { budget, ranked: modRank });
+            result = queryGraph(graph, q, { budget, ranked: modRank, roles });
             note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
             if (detail) note += ` (${detail})`;
             activity.add('answer', 'warn', `lexical only — ${note}`);
           }
         }
       } else {
-        result = queryGraph(graph, q, { budget, ranked: modRank });
+        result = queryGraph(graph, q, { budget, ranked: modRank, roles });
         if (global.offline) note = 'semantic skipped under --offline; used lexical';
         activity.add('answer', 'skip', global.offline ? 'lexical only (--offline)' : 'lexical only (--no-semantic)');
       }

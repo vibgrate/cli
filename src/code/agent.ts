@@ -21,6 +21,7 @@
  */
 
 import { buildCodeContext } from './context.js';
+import { loadRoleMap } from '../engine/haile/role-preference.js';
 import { rankQuestion, type SanitizedRank } from '../engine/relevance-provider.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
 import {
@@ -751,6 +752,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
             budget,
             files: options.files,
             ranked: nextRanked,
+            roles: loadRoleMap(root, session.graph.provenance?.corpusHash),
             readFile: (rel) => fsImpl.read(rel),
             repositoryId: repositoryIdFromRoot(root),
             provenance: {
@@ -1422,6 +1424,7 @@ function buildAgentContext(
     budget,
     files,
     ranked,
+    roles: loadRoleMap(options.root, graph.provenance?.corpusHash),
     readFile,
     repositoryId: repositoryIdFromRoot(options.root),
     extraPinnedFacts: options.extraPinnedFacts,

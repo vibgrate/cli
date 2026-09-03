@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { discover, mergeExcludes, type DiscoveredFile } from './discover.js';
 import { parseFiles } from './pool.js';
 import { resolve } from './resolve.js';
+import { inheritDuties } from './duties-inherit.js';
 import { buildModuleResolver } from './module-resolver.js';
 import { assembleTsResult, tsWalkFiles, type TsFilePartial } from './ts-resolver.js';
 import { decodeScipIndex, scipEdges } from './scip.js';
@@ -300,6 +301,9 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   timer.start('resolve');
   const moduleResolver = buildModuleResolver(root, new Set(parses.map((p) => p.rel)));
   const resolved = resolve(parses, moduleResolver);
+  // Duties a callee performs become purposes of its callers (1–2 hops): a
+  // delegating one-liner controller still reports the write behind it.
+  inheritDuties(resolved.nodes, resolved.edges);
   timer.end('resolve');
   checkMemoryBudget('resolve', limits.memoryBudgetMb);
 

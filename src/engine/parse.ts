@@ -6,6 +6,8 @@ import { extractEmbeddedScript } from './sfc.js';
 import { hashString } from './hash.js';
 import { redactSecrets } from '../core-open/utils/redact.js';
 import { extractAstRolesFromTree } from './ast-roles.js';
+import { scanEffects } from './effects.js';
+import { extractDuties, fileBindings, type Bindings } from './duties.js';
 import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport, RawTypeRef } from './types.js';
 
 /**
@@ -43,6 +45,8 @@ function namedCapture(
  * call node (`obj.foo()` / `pkg::foo()` / `recv.foo()` across the grammars).
  * A bare call's identifier hangs directly off the call node instead.
  */
+const CALLABLE_DEF_KINDS = new Set(['function', 'method', 'route', 'job', 'component', 'test']);
+
 const MEMBER_PARENT_TYPES = new Set([
   'member_expression', // ts/js: obj.foo()
   'attribute', // python: obj.foo()
@@ -238,7 +242,7 @@ export async function parseSource(
   const root = tree.rootNode;
 
   // --- definitions ---
-  const rawDefs: (RawDef & { _start: number; _end: number })[] = [];
+  const rawDefs: (RawDef & { _start: number; _end: number; _node: Node })[] = [];
   for (const rule of langQueries.defs) {
     collectDefs(language, effLangId, text, root, rule, rawDefs);
   }
@@ -259,9 +263,10 @@ export async function parseSource(
   }
   result.defs = byStart
     .map((d) => {
-      const { _start, _end, ...rest } = d;
+      const { _start, _end, _node, ...rest } = d;
       void _start;
       void _end;
+      void _node;
       return rest;
     })
     .sort(
@@ -285,12 +290,14 @@ export async function parseSource(
     }
   }
   const calls: RawCall[] = [];
+  const calleeCaptures: Node[] = [];
   for (const qsrc of langQueries.calls) {
     const q = compile(language, effLangId, qsrc);
     if (!q) continue;
     for (const cap of q.captures(root)) {
       if (cap.name !== 'callee') continue;
       if (defNameBytes.has(cap.node.startIndex)) continue;
+      calleeCaptures.push(cap.node);
       calls.push({
         callee: cap.node.text,
         byte: cap.node.startIndex,
@@ -300,6 +307,42 @@ export async function parseSource(
     }
   }
   result.calls = calls.sort((a, b) => a.byte - b.byte || a.callee.localeCompare(b.callee));
+
+  // --- duties (what each callable's body would do, statement by statement) ---
+  // Each callee capture is attributed to the smallest enclosing definition,
+  // the same rule resolve.ts uses for call edges, so a lambda's calls do not
+  // double as its parent's.
+  const calleeNodesByDef = new Map<number, Node[]>();
+  for (const cap of calleeCaptures) {
+    let owner: (typeof byStart)[number] | undefined;
+    for (const d of byStart) {
+      if (d._start <= cap.startIndex && d._end >= cap.endIndex && (!owner || d._end - d._start < owner._end - owner._start)) owner = d;
+    }
+    if (!owner) continue;
+    const key = owner._start;
+    let list = calleeNodesByDef.get(key);
+    if (!list) {
+      list = [];
+      calleeNodesByDef.set(key, list);
+    }
+    list.push(cap);
+  }
+  if (calleeNodesByDef.size) {
+    const bindings: Bindings = fileBindings(text, effLangId);
+    const uniqueByName = new Map<string, string | null>();
+    for (const d of byStart) uniqueByName.set(d.name, uniqueByName.has(d.name) ? null : d.qualifiedName);
+    const calleeOf = (n: Node): string | undefined => uniqueByName.get(n.text) ?? undefined;
+    for (const d of byStart) {
+      if (!CALLABLE_DEF_KINDS.has(d.kind)) continue;
+      const callees = calleeNodesByDef.get(d._start);
+      if (!callees?.length) continue;
+      const duties = extractDuties({ def: d._node, callees, text, langId: effLangId, bindings, calleeOf });
+      if (duties) {
+        const target = result.defs.find((r) => r.qualifiedName === d.qualifiedName && r.startLine === d.startLine);
+        if (target) target.duties = duties;
+      }
+    }
+  }
 
   // --- imports ---
   const imports: RawImport[] = [];
@@ -395,7 +438,7 @@ function collectDefs(
   source: string,
   root: Node,
   rule: DefRule,
-  out: (RawDef & { _start: number; _end: number })[],
+  out: (RawDef & { _start: number; _end: number; _node: Node })[],
 ): void {
   const q = compile(language, langId, rule.query);
   if (!q) return;
@@ -423,8 +466,15 @@ function collectDefs(
       // persisted (graph.json, `vg share` commits it) — scrub at ingest.
       doc: scrubbedDoc(source, defNode, langId),
       visibility: undefined,
+      // Body effects — what the callable executes — for the architecture
+      // classifier. Counts only; no source text leaves this function.
+      effects:
+        rule.kind === 'function' || rule.kind === 'method' || rule.kind === 'route' || rule.kind === 'job' || rule.kind === 'component' || rule.kind === 'test'
+          ? scanEffects(source.slice(defNode.startIndex, spanEnd.endIndex), langId)
+          : undefined,
       _start: defNode.startIndex,
       _end: spanEnd.endIndex,
+      _node: defNode,
     });
   }
 }

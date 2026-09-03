@@ -43,7 +43,13 @@ export const TASK_CAPSULE_SCHEMA_VERSION = 'task-capsule/0' as const;
  *  module-less fallback. Seed content with the module active matches
  *  2026.08.3 + the coding-prompt-corpus improvements; the recorded
  *  relevanceVersion says which engine ranked this capsule. */
-export const CAPSULE_RANKING_VERSION = 'capsule-rank@2026.08.4' as const;
+/** Bumped 2026.09.1: architecture-module role preference (engine/haile/
+ *  role-preference.ts). When a classify file bound to the graph exists, the
+ *  ranked seeds re-order by a bounded lift — a controller / application_service
+ *  / port rises by at most two places — and utilities the ask did not reach for
+ *  are dropped; the role travels as a structured field, never in the rendered
+ *  text. No classify file = 2026.08.4 behaviour exactly. */
+export const CAPSULE_RANKING_VERSION = 'capsule-rank@2026.09.1' as const;
 export const CAPSULE_COMPILER_ID = 'vg-task-capsule/0' as const;
 
 export interface BuildCapsuleOptions extends BuildContextOptions {

@@ -22,6 +22,7 @@
  */
 
 import * as fs from 'node:fs';
+import { loadRoleMap } from '../engine/haile/role-preference.js';
 import * as path from 'node:path';
 import { buildCodeContext } from './context.js';
 import { rankQuestion, type SanitizedRank } from '../engine/relevance-provider.js';
@@ -266,8 +267,9 @@ function buildSessionContext(
 ): CodeContext {
   const budget = opts.budget;
   const files = opts.files;
+  const roles = loadRoleMap(opts.root, graph.provenance?.corpusHash);
   if (!opts.capsule) {
-    return buildCodeContext(graph, instruction, { budget, files, ranked: opts.ranked });
+    return buildCodeContext(graph, instruction, { budget, files, ranked: opts.ranked, roles });
   }
   const capsule = buildTaskCapsule(graph, instruction, {
     budget,
@@ -275,6 +277,7 @@ function buildSessionContext(
     readFile: (rel) => opts.fsImpl.read(rel),
     repositoryId: repositoryIdFromRoot(opts.root),
     ranked: opts.ranked,
+    roles,
   });
   return capsuleToCodeContext(capsule);
 }

@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
 import { buildGraph } from '../engine/build.js';
+import { ensureHaileModule } from '../install/haile-module.js';
 import { verifyDeterminism } from '../engine/verify.js';
 import { epistemicBreakdown } from '../engine/epistemic.js';
 import { signGraphAttestation, verifyGraphAttestation, type SignSummary } from './attest-actions.js';
@@ -151,12 +152,28 @@ export async function runBuild(
   }
   bar?.done();
 
+  // Architecture classify is installed by default: run the bounded ensure now
+  // so this build can write the classify sidecar. A module that cannot be
+  // provisioned (or was declined / disabled) only costs the role/purpose
+  // lines — the build itself never waits on the network under --offline and
+  // never fails because of it.
+  const haile = global.offline ? null : await ensureHaileModule().catch(() => null);
+
   const written = writeArtifacts(result.graph, {
     root,
     html: opts.html,
     report: opts.report,
     graphPath: global.graph,
   });
+
+  if (haile?.status === 'unavailable' && !global.json && !global.quiet) {
+    info(
+      c.yellow(
+        '  architecture module could not be installed — role/purpose lines are omitted; '
+        + 'vg retries automatically (disable with VIBGRATE_NO_KERNEL=1)',
+      ),
+    );
+  }
 
   // Record the freshness snapshot (stat+hash per corpus file, plus this build's
   // scope) so `vg serve`/`vg ask` can auto-refresh the map when the tree drifts.

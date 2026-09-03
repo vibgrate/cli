@@ -190,3 +190,45 @@ describe('runGraphQuery — ask via the local runtime', () => {
     expectLexicalAnswer(result);
   });
 });
+
+describe('runGraphQuery show — architecture module fields', () => {
+  it('attaches the classify fields when a corpus-bound sidecar holds the node, and nothing otherwise', async () => {
+    const { emptySidecar, writeSidecarDocument } = await import('../engine/haile/sidecar.js');
+    const { resolveGraphPath } = await import('../engine/artifacts.js');
+    const prev = process.env.VIBGRATE_GRAPH_IN_REPO;
+    process.env.VIBGRATE_GRAPH_IN_REPO = '1';
+    try {
+      const target = graph.nodes.find((n) => n.name === 'verifyPassword')!;
+      const before = await runGraphQuery(graph, { mode: 'show', name: 'verifyPassword' }, { root, offline: true });
+      expect(before.ok ? (before.data as { architecture?: unknown }).architecture : 'query failed').toBeUndefined();
+
+      const graphPath = resolveGraphPath(root);
+      fs.mkdirSync(path.dirname(graphPath), { recursive: true });
+      const doc = emptySidecar(graph.provenance?.corpusHash ?? '');
+      doc.symbols = [
+        {
+          node_id: target.id,
+          file_path: target.file,
+          name: target.name,
+          qualified_name: target.qualifiedName,
+          symbol_kind: 'function',
+          role: { primary: 'cross_cutting', alternatives: [], confidence: 0.9, band: 'high' },
+          purposes: [{ purpose: 'authenticate', confidence: 1 }],
+          intent: { text: 'authenticates verifyPassword', verbs: ['authenticate'], objects: ['verifyPassword'] },
+          evidence: [],
+        },
+      ];
+      writeSidecarDocument(doc, graphPath);
+
+      const after = await runGraphQuery(graph, { mode: 'show', name: 'verifyPassword' }, { root, offline: true });
+      if (!after.ok) throw new Error(`show failed: ${after.message}`);
+      const arch = (after.data as { architecture?: { role: { primary: string }; band: string; intent: { text: string } } }).architecture;
+      expect(arch?.role.primary).toBe('cross_cutting');
+      expect(arch?.band).toBe('high');
+      expect(arch?.intent.text).toBe('authenticates verifyPassword');
+    } finally {
+      if (prev === undefined) delete process.env.VIBGRATE_GRAPH_IN_REPO;
+      else process.env.VIBGRATE_GRAPH_IN_REPO = prev;
+    }
+  });
+});

@@ -111,6 +111,8 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
         lang: p.lang,
         signature: d.signature,
         doc: d.doc,
+        ...(d.effects ? { effects: d.effects } : {}),
+        ...(d.duties ? { duties: d.duties } : {}),
       });
       const ref: DefNodeRef = {
         id,

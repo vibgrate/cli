@@ -1,5 +1,5 @@
 /**
- * Generic installer for optional local modules (relevance, hcs, …).
+ * Generic installer for optional local modules (relevance, hcs, haile, …).
  *
  * A module is a separately licensed, separately distributed local package that
  * the CLI loads through a provider seam. This core manages the shared
@@ -9,7 +9,7 @@
  * script execution (the tarball is unpacked, nothing in it is run at install
  * time). Per-module policy (consent posture, auto-provisioning, error
  * loudness) lives with each module's own wrapper (relevance-module.ts,
- * hcs-module.ts) — this file is mechanism only.
+ * hcs-module.ts, haile-module.ts) — this file is mechanism only.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -50,8 +50,14 @@ function registryBase(opts: InstallOptions): string {
   return (process.env.VIBGRATE_MODULE_REGISTRY || opts.registry || DEFAULT_REGISTRY).replace(/\/+$/, '');
 }
 
-/** Base dir all modules install under: `$XDG_CACHE_HOME|~/.cache /vibgrate/modules`. */
+/**
+ * Base dir all modules install under.
+ * `VIBGRATE_MODULE_DIR` overrides the whole tree; otherwise
+ * `$XDG_CACHE_HOME|~/.cache/vibgrate/modules`.
+ */
 export function modulesBaseDir(): string {
+  const override = process.env.VIBGRATE_MODULE_DIR?.trim();
+  if (override) return path.resolve(override);
   const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
   return path.join(base, 'vibgrate', 'modules');
 }
@@ -165,6 +171,23 @@ export function untar(data: Buffer): Array<{ name: string; body: Buffer }> {
  * is the tarball's `package/dist/*` mapped to the module root (so
  * `<dir>/index.js` is the seam's entrypoint), plus LICENSE/README.
  */
+/**
+ * The registry's `dist-tags.latest` for a module package, or null when the
+ * registry is unreachable or the package has no published version. Read-only:
+ * fetches metadata only, never a tarball.
+ */
+export async function latestModuleVersion(npmName: string, opts: InstallOptions = {}): Promise<string | null> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  try {
+    const res = await doFetch(`${registryBase(opts)}/${npmName.replace('/', '%2f')}`);
+    if (!res.ok) return null;
+    const meta = (await res.json()) as { 'dist-tags'?: Record<string, string> };
+    return meta['dist-tags']?.latest ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function installModule(mod: ModuleDescriptor, opts: InstallOptions = {}): Promise<InstallResult> {
   if (kernelDisabled()) return { status: 'disabled', detail: 'VIBGRATE_NO_KERNEL is set' };
   const existing = moduleInstalledAt(mod.dir());

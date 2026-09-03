@@ -13,6 +13,9 @@
  */
 
 import { queryGraph, queryGraphSemantic, type QueryResult } from '../engine/query.js';
+import { resolveGraphPath } from '../engine/artifacts.js';
+import { findHaileSymbol, haileJsonFields, readHaileSidecar } from '../engine/haile/index.js';
+import { loadRoleMap } from '../engine/haile/role-preference.js';
 import type { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import {
   loadEmbedder,
@@ -107,7 +110,7 @@ export async function runGraphQuery(
     case 'path':
       return runPath(graph, params);
     case 'show':
-      return runShow(graph, params);
+      return runShow(graph, params, ctx);
     case 'tree':
       return runTree(graph, params);
     default:
@@ -133,6 +136,7 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
   let result: QueryResult | null = null;
   let mode = 'lexical';
   let note: string | undefined;
+  const roles = loadRoleMap(ctx.root, graph.provenance?.corpusHash);
 
   // The daemon first — and for this process especially, because ranking there
   // means the native backend is never loaded into the language server at all.
@@ -145,7 +149,7 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
       );
       if (ranked) {
         log(`ask: ranked by vgd against ${ranked.vectors} vector(s) — no local model load`);
-        result = await queryGraphSemantic(graph, question, { budget, semanticRanked: ranked.ranked });
+        result = await queryGraphSemantic(graph, question, { budget, semanticRanked: ranked.ranked, roles });
         mode = `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})`;
       }
     } catch {
@@ -175,7 +179,7 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
           log(`ask: embedder "${embedder.id}" loaded in ${Date.now() - started}ms; embedding nodes…`);
           const vectors = await getNodeEmbeddings(graph, embedder, ctx.root);
           log(`ask: ${vectors.size} node vectors ready in ${Date.now() - started}ms; ranking…`);
-          const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors: vectors });
+          const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors: vectors, roles });
           mode = `semantic (${embedder.id})`;
           return r;
         })(),
@@ -213,7 +217,7 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
   }
 
   if (!result) {
-    result = queryGraph(graph, question, { budget });
+    result = queryGraph(graph, question, { budget, roles });
   }
   log(`ask: answered with ${mode} — ${result.matches.length} match(es)`);
 
@@ -325,7 +329,7 @@ function runPath(graph: VgGraph, params: GraphQueryParams): GraphQueryResult {
   };
 }
 
-function runShow(graph: VgGraph, params: GraphQueryParams): GraphQueryResult {
+function runShow(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryContext): GraphQueryResult {
   const name = (params.name ?? '').trim();
   if (!name) return { ok: false, mode: 'show', error: 'bad-request', message: 'name is required' };
   const resolved = resolveOrError(graph, name, 'show');
@@ -358,8 +362,22 @@ function runShow(graph: VgGraph, params: GraphQueryParams): GraphQueryResult {
       calls: callees.map((n) => n.qualifiedName),
       calledBy: callers.map((n) => n.qualifiedName),
       extends: supertypes,
+      // The architecture module's view of this node — the same four fields
+      // `vg show --json` carries — when a classify file bound to this graph
+      // holds it. Absent (not null) otherwise, so a client renders nothing.
+      ...architectureFieldsFor(graph, node.id, ctx),
     },
   };
+}
+
+function architectureFieldsFor(graph: VgGraph, nodeId: string, ctx: GraphQueryContext): { architecture?: Record<string, unknown> } {
+  try {
+    const sidecar = readHaileSidecar(resolveGraphPath(ctx.root), { corpusHash: graph.provenance?.corpusHash });
+    const fields = haileJsonFields(findHaileSymbol(sidecar, nodeId));
+    return fields ? { architecture: fields } : {};
+  } catch {
+    return {};
+  }
 }
 
 function dedupeNodes(nodes: GraphNode[]): GraphNode[] {

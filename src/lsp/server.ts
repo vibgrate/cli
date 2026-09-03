@@ -45,6 +45,12 @@ import { fileRolesFromParseCache } from '../engine/ast-roles.js';
 import type { AstRoleHit } from '../core-open/scanners/architecture/ast-roles.js';
 import { boundaryProfileRules } from '../core-open/scanners/architecture/graph-refine.js';
 import { loadGraph } from '../engine/load.js';
+import {
+  architectureSidecarSummary,
+  loadArchitectureCallables,
+  type ArchitectureCallableWire,
+} from '../engine/haile/architecture-callables.js';
+import { haileModuleStatus } from '../install/haile-module.js';
 import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
 import { loadGraphPreferIndex } from '../engine/index-db.js';
@@ -222,6 +228,27 @@ export interface ArchitectureResponse {
   manifestPath?: string;
   /** Workspace-relative lockfile path — absent at whole-workspace scope or when none was resolved. */
   lockfilePath?: string;
+  /**
+   * What the callables in this scope do, from the architecture module's
+   * classify file (`vg build`). Omitted — not empty — when the module did not
+   * run, the sidecar is stale for this graph, or nothing in scope classified.
+   * Abstain / unknown rows are never sent. File-layer stays the interlingua:
+   * `layer` on a row is a copy, never a relabel.
+   */
+  callables?: ArchitectureCallableWire[];
+  /**
+   * Where the architecture module stands, so a client can tell "nothing to
+   * show" from "the engine tried to install it and could not" without
+   * reading the module cache itself. Only `unavailable` justifies an offer.
+   */
+  architectureModule?: ArchitectureModuleWire;
+}
+
+export interface ArchitectureModuleWire {
+  status: 'present' | 'unavailable' | 'absent' | 'disabled' | 'declined';
+  version?: string;
+  engineVersion?: string;
+  symbolCount?: number;
 }
 
 type ProjectArchetypeWire = string;
@@ -1451,6 +1478,7 @@ export class VibgrateLanguageServer {
       if (!arch) return null;
       return {
         ...architectureWire(arch),
+        ...this.architectureCallables('__repo__'),
       };
     }
     const project = projectByPath(a, p.path);
@@ -1459,7 +1487,30 @@ export class VibgrateLanguageServer {
       ...architectureWire(project.architecture),
       manifestPath: manifestRelativePath(project),
       lockfilePath: lockfileRelativePath(this.opts.root, project),
+      ...this.architectureCallables(p.path),
     };
+  }
+
+  /**
+   * The architecture-module half of `vibgrate/architecture`: classified
+   * callables for the scope plus the module's status. Additive and
+   * best-effort — a missing or stale classify file simply omits `callables`,
+   * and nothing here can fail the file-layer response.
+   */
+  private architectureCallables(scopePath: string): Pick<ArchitectureResponse, 'callables' | 'architectureModule'> {
+    try {
+      const corpusHash = this.graph?.provenance?.corpusHash;
+      const status = haileModuleStatus();
+      const summary = status.status === 'present' ? architectureSidecarSummary(this.opts.root, { corpusHash }) : undefined;
+      const out: Pick<ArchitectureResponse, 'callables' | 'architectureModule'> = {
+        architectureModule: { ...status, ...(summary ?? {}) },
+      };
+      const callables = loadArchitectureCallables(this.opts.root, scopePath, { corpusHash });
+      if (callables) out.callables = callables;
+      return out;
+    } catch {
+      return {};
+    }
   }
 
   /**
