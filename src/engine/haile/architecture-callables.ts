@@ -14,8 +14,8 @@ export interface ArchitectureCallableWire {
   purposes: string[];
   intent: string;
   layer?: string;
-  /** Boundary findings from the module's policy pack (additive). */
-  findings?: { rule: string; severity: string; message: string }[];
+  /** Boundary findings from the module's policy pack (additive). `line` is the symbol's own offending call, absent when inherited. */
+  findings?: { rule: string; severity: string; message: string; line?: number }[];
 }
 
 const CALLABLE_CAP = 200;
@@ -65,7 +65,12 @@ export function loadArchitectureCallables(
       row.findings = symbol.findings
         .filter((f) => f && typeof f.rule === 'string' && typeof f.message === 'string')
         .slice(0, 4)
-        .map((f) => ({ rule: f.rule, severity: typeof f.severity === 'string' ? f.severity : 'warn', message: f.message }));
+        .map((f) => ({
+          rule: f.rule,
+          severity: typeof f.severity === 'string' ? f.severity : 'warn',
+          message: f.message,
+          ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}),
+        }));
     }
     rows.push(row);
     if (rows.length >= CALLABLE_CAP) break;
@@ -77,10 +82,10 @@ export function loadArchitectureCallables(
 export function architectureSidecarSummary(
   root: string,
   options: LoadArchitectureCallablesOptions = {},
-): { engineVersion: string; symbolCount: number } | undefined {
+): { engineVersion: string; symbolCount: number; policy: string } | undefined {
   const sidecar = readHaileSidecar(options.graphPath ?? resolveGraphPath(root), {
     corpusHash: options.corpusHash,
   });
   if (!sidecar) return undefined;
-  return { engineVersion: sidecar.engine_version, symbolCount: sidecar.symbols.length };
+  return { engineVersion: sidecar.engine_version, symbolCount: sidecar.symbols.length, policy: typeof sidecar.policy === 'string' ? sidecar.policy : 'hexagonal-v1' };
 }

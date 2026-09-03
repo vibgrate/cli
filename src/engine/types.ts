@@ -1,6 +1,6 @@
 import type { NodeKind } from '../schema.js';
 import type { CallableEffects } from './effects.js';
-import type { Duty } from './duties.js';
+import type { Duty, DutyCandidate } from './duties.js';
 
 /** A definition extracted from one file (pre-resolution, pre-id). */
 export interface RawDef {
@@ -20,6 +20,8 @@ export interface RawDef {
   effects?: CallableEffects;
   /** Ordered duties reconstructed from the syntax tree (engine/duties.ts). */
   duties?: Duty[];
+  /** Untyped call sites for the build's edge-binding pass. Transient: never a node field. */
+  dutyCandidates?: DutyCandidate[];
 }
 
 export interface RawCall {

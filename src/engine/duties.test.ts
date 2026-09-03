@@ -115,6 +115,21 @@ def charge(self, order):
 });
 
 describe('duties: what is not a duty', () => {
+  it('registering services on IServiceCollection is DI plumbing, not a write to a store', async () => {
+    const src = `
+using Microsoft.Extensions.DependencyInjection;
+public static class DependencyInjection {
+    public static IServiceCollection AddApplicationServices(this IServiceCollection services)
+    {
+        services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());
+        services.AddMediatR(cfg => cfg.RegisterServicesFromAssembly(Assembly.GetExecutingAssembly()));
+        return services;
+    }
+}`;
+    const d = await dutiesOf('cs', 'src/Application/DependencyInjection.cs', src, 'AddApplicationServices');
+    expect(kinds(d)).not.toContain('persist');
+  });
+
   it('a fetch Response.json() is not an HTTP response being sent', async () => {
     const src = `
 export async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise<T> {

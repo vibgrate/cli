@@ -71,6 +71,33 @@ export interface Duty {
 /** Declared types of identifiers in a file (fields, properties, ctor params). */
 export type Bindings = Map<string, string>;
 
+/**
+ * A call site the walker could not type from this file — `catalog.AddAsync(p)`
+ * where `catalog` is declared on a base class, injected through a factory, or
+ * spelled unconventionally. Never persisted: the build binds it against the
+ * callee a scip / tsc / high-confidence edge resolved to (engine/duties-bind.ts)
+ * and only a bound duty reaches `GraphNode.duties`.
+ */
+export interface DutyCandidate {
+  /** Method name as called (`AddAsync`, `save`). */
+  verb: string;
+  /** `receiver.method`, as `via` would read. */
+  via: string;
+  line: number;
+  live: boolean;
+  g?: string;
+  /** Object from the arguments' declared types / constructors, if any. */
+  o?: string;
+  /** Object read off a query argument (`where: { id }`), if any. */
+  q?: string;
+  /** Object from the receiver's own spelling, if any. */
+  r?: string;
+  /** First string literal in the arguments (an HTTP path), if any. */
+  path?: string;
+  /** The arguments spell a SQL write (`INSERT` / `UPDATE` / `DELETE`). */
+  sqlWrite?: boolean;
+}
+
 const MAX_DUTIES = 24;
 const MAX_GUARD = 40;
 
@@ -116,7 +143,7 @@ const NOT_CLIENT = /(?:httpsecurity|httpcontext|httprequest|httpresponse|httpser
 const DDL_VERB = /^(?:create_table|drop_table|add_column|remove_column|add_index|remove_index|change_column|rename_column|rename_table|add_reference|add_foreign_key|remove_foreign_key|create_join_table|change_table|alter_column|drop_index|create_index|bulk_insert|create_all|drop_all|run_migrations|createtable|droptable|addcolumn|dropcolumn|renamecolumn|createindex|dropindex|altertable|renametable)$/i;
 const DDL_ARGS = /(?:create_all|drop_all|run_migrations|create_table|drop_table|createTable|dropTable)\b/;
 /** Contexts and sessions that are request plumbing, never a store. */
-const NOT_STORE = /(?:httpcontext|servletcontext|requestcontext|securitycontext|executioncontext|bindingcontext|validationcontext|actioncontext|filtercontext|hubcallercontext|synchronizationcontext|cancellationtoken|httpsession|websocketsession|clientsession|usersession|appcontext|applicationcontext|beancontext|springcontext|reactcontext|canvasrenderingcontext)$/;
+const NOT_STORE = /(?:servicecollection|serviceprovider|servicescope|containerbuilder|hostbuilder|applicationbuilder|webapplicationbuilder|endpointroutebuilder|httpcontext|servletcontext|requestcontext|securitycontext|executioncontext|bindingcontext|validationcontext|actioncontext|filtercontext|hubcallercontext|synchronizationcontext|cancellationtoken|httpsession|websocketsession|clientsession|usersession|appcontext|applicationcontext|beancontext|springcontext|reactcontext|canvasrenderingcontext)$/;
 
 function classifyType(typeName: string): ReceiverClass {
   const t = typeName.replace(/<.*$/, '').replace(/[?[\]*&]/g, '').toLowerCase();
@@ -145,6 +172,8 @@ const UOW = /^(?:savechanges(?:async)?|commit|flush|\$transaction|transaction|be
 /** `execute` / `query` / `raw`: a read unless the statement text says otherwise. */
 const AMBIGUOUS_EXEC = /^(?:execute|executeasync|exec|query|queryasync|raw|run|sql|statement|execute_query|executequery|executescalar|executeraw|queryraw|\$executeraw|\$queryraw|executesql|executesqlraw)$/i;
 const SQL_WRITE_WORDS = /\b(?:insert|update|delete|merge|drop|alter|truncate|upsert|create\s+(?:table|index))\b/i;
+/** HTTP verbs plain enough to leave a candidate on an untyped receiver (`call` / `send` / `do` are not). */
+const CANDIDATE_HTTP_VERB = /^(?:get|post|put|patch|delete|head|options|getasync|postasync|putasync|deleteasync|patchasync|sendasync|getfromjsonasync|postasjsonasync|putasjsonasync|getstringasync|exchange|getforobject|getforentity|postforobject|postforentity)$/i;
 const HTTP_VERB = /^(?:get|post|put|patch|delete|head|options|request|send|fetch|do|call|invoke|getasync|postasync|putasync|deleteasync|patchasync|postasjsonasync|putasjsonasync|getstringasync|getfromjsonasync|sendasync|getforobject|getforentity|postforobject|postforentity|exchange|execute|urlopen|newrequest|ajax)$/i;
 const PUBLISH_VERB = /^(?:publish\w*|emit|enqueue|send\w*|dispatch|broadcast\w*|produce|push|add|notify\w*|raise\w*|fire\w*|trigger\w*|deliver\w*|perform_later|perform_async|delay|apply_async|sendmail|send_mail|deliver_now|deliver_later|publishevent)$/i;
 const CACHE_VERB = /^(?:get\w*|set\w*|del|delete\w*|has|remember|fetch|wrap|clear|invalidate\w*|getorcreate\w*|getorset\w*|expire|ttl|incr|decr|write|read)$/i;
@@ -430,7 +459,47 @@ interface Site {
   callee: Node;
 }
 
-function classifySite(site: Site, def: Node, langId: string, bindings: Bindings, locals: Bindings, calleeOf: (n: Node) => string | undefined): Duty | undefined {
+/**
+ * Bind a candidate to the class of the callee an edge resolved to. The same
+ * verb tables as `classifySite`, with the receiver class taken from the
+ * callee's declaring class (`ProductRepository` → store) instead of a
+ * file-local declaration. Undefined when the class or the verb says nothing.
+ */
+export function bindCandidate(cand: DutyCandidate, calleeClass: string): Duty | undefined {
+  const cls = classifyType(calleeClass);
+  const verb = cand.verb;
+  const mk = (k: DutyKind, o?: string): Duty => {
+    const d: Duty = { k, live: cand.live, line: cand.line, via: cand.via, t: calleeClass.slice(0, 40) };
+    if (o) d.o = o;
+    if (cand.g) d.g = cand.g;
+    return d;
+  };
+  switch (cls) {
+    case 'store':
+      if (AMBIGUOUS_EXEC.test(verb)) return mk(cand.sqlWrite ? 'persist' : 'query', cand.q ?? cand.o ?? cand.r);
+      if (WRITE.test(verb)) return mk('persist', cand.o ?? cand.r);
+      if (READ.test(verb)) return mk('query', cand.q ?? cand.r ?? cand.o);
+      return undefined;
+    case 'http':
+      return mk('http', cand.o ?? cand.path);
+    case 'queue':
+      return PUBLISH_VERB.test(verb) ? mk('publish', cand.o) : undefined;
+    case 'cache':
+      return CACHE_VERB.test(verb) ? mk('cache', cand.o) : undefined;
+    case 'auth':
+      return AUTH_VERB.test(verb) ? mk('auth', cand.o) : undefined;
+    case 'crypto':
+      return CRYPTO_VERB.test(verb) ? mk('crypto') : undefined;
+    case 'fs':
+      return FS_VERB.test(verb) ? mk('fs', cand.o) : undefined;
+    default:
+      return undefined;
+  }
+}
+
+type SiteResult = Duty | { candidate: DutyCandidate } | undefined;
+
+function classifySite(site: Site, def: Node, langId: string, bindings: Bindings, locals: Bindings, calleeOf: (n: Node) => string | undefined): SiteResult {
   const callee = site.callee.text;
   const verb = callee.replace(/[!?]$/, '');
   const receiver = receiverOf(site.call, site.callee);
@@ -599,8 +668,6 @@ function classifySite(site: Site, def: Node, langId: string, bindings: Bindings,
     if (/^(?:bcrypt|checkpw|hashpw|verify_password|get_password_hash|check_password|create_access_token|create_refresh_token|decode_token|verify_token|authenticate|login_user|logout_user|comparePassword|verifyPassword)$/i.test(verb)) return mk('auth', nounFromArgs(args, bindings, locals), callee);
     if (/^(?:publishEvent|publish|emit|broadcast|dispatch|sendEmail|send_mail|deliver_now|deliver_later)$/i.test(verb)) return mk('publish', nounFromArgs(args, bindings, locals), callee);
   }
-  // Store-shaped strong verbs on an untyped, unspelled receiver stay quiet:
-  // `catalog.put(x)` without a declared type is not evidence.
   // A resolved same-file / cross-file callee that is itself a callable is a
   // delegation the inherit pass can follow.
   const resolved = calleeOf(site.callee);
@@ -610,6 +677,23 @@ function classifySite(site: Site, def: Node, langId: string, bindings: Bindings,
   if (langId === 'rb') {
     const ctor = /^([A-Z]\w*(?:::[A-Z]\w*)*)\.new\b/.exec(receiver)?.[1];
     if (ctor && /^(?:call|perform|execute|run)$/.test(verb)) return mk('delegate', rawTypeFromArgs(args, bindings, locals), `${ctor.split('::').pop()}.${verb}`.slice(0, 60));
+  }
+  // Store / HTTP / queue-shaped verbs on an untyped, unspelled receiver are
+  // not evidence on their own (`catalog.put(x)`), but the build may know the
+  // callee: leave a candidate for the edge-binding pass.
+  if (cls === 'unknown' && receiver && !typedPlumbing && (WRITE.test(verb) || READ.test(verb) || AMBIGUOUS_EXEC.test(verb) || CANDIDATE_HTTP_VERB.test(verb) || PUBLISH_VERB.test(verb))) {
+    const cand: DutyCandidate = { verb, via: viaOf(), line, live: flow.live };
+    if (flow.guard) cand.g = flow.guard;
+    const o = nounFromArgs(args, bindings, locals);
+    const q = nounFromQuery(args);
+    const r = nounFromReceiver(receiver);
+    const p = /["'`]([^"'`\s]{1,60})["'`]/.exec(args)?.[1];
+    if (o) cand.o = o;
+    if (q) cand.q = q;
+    if (r) cand.r = r;
+    if (p) cand.path = p;
+    if (SQL_WRITE_WORDS.test(args)) cand.sqlWrite = true;
+    return { candidate: cand };
   }
   return undefined;
 }
@@ -633,20 +717,33 @@ export interface DutyInput {
 
 /** Ordered duties of one definition. Undefined when nothing was recognised. */
 export function extractDuties(input: DutyInput): Duty[] | undefined {
+  return extractDutiesWithCandidates(input).duties;
+}
+
+const dutyKey = (d: Duty): string => (d.k === 'respond' ? `respond|${d.line}` : `${d.k}|${d.o ?? ''}|${d.via ?? ''}|${d.line}`);
+
+/** Duties plus the untyped sites the build can still bind against resolved callees. */
+export function extractDutiesWithCandidates(input: DutyInput): { duties?: Duty[]; candidates?: DutyCandidate[] } {
   const { def, callees, langId, bindings } = input;
-  if (!callees.length) return undefined;
+  if (!callees.length) return {};
   const bodyText = input.text.slice(def.startIndex, Math.min(def.endIndex, def.startIndex + 30_000));
   const locals = localTypes(bodyText);
   const calleeOf = input.calleeOf ?? (() => undefined);
   const out: Duty[] = [];
+  const candidates: DutyCandidate[] = [];
   const seen = new Set<string>();
   for (const callee of callees) {
     const call = callNodeOf(callee);
     if (!call) continue;
     // Nested definitions (lambdas that are their own defs) are not this body's duties.
-    const duty = classifySite({ call, callee }, def, langId, bindings, locals, calleeOf);
-    if (!duty) continue;
-    const key = duty.k === 'respond' ? `respond|${duty.line}` : `${duty.k}|${duty.o ?? ''}|${duty.via ?? ''}|${duty.line}`;
+    const res = classifySite({ call, callee }, def, langId, bindings, locals, calleeOf);
+    if (!res) continue;
+    if ('candidate' in res) {
+      if (candidates.length < MAX_DUTIES) candidates.push(res.candidate);
+      continue;
+    }
+    const duty = res;
+    const key = dutyKey(duty);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(duty);
@@ -657,7 +754,21 @@ export function extractDuties(input: DutyInput): Duty[] | undefined {
   const real = out.filter((d) => d.k !== 'delegate');
   const delegates = out.filter((d) => d.k === 'delegate' && d.via && /[A-Z]\w*\.|\./.test(d.via));
   const kept = [...real, ...delegates].sort((a, b) => a.line - b.line || a.k.localeCompare(b.k));
-  return kept.length ? kept : undefined;
+  return { ...(kept.length ? { duties: kept } : {}), ...(candidates.length ? { candidates } : {}) };
+}
+
+/** Merge bound duties into a node's own list: extraction's dedupe key, line order, capped. */
+export function mergeDuties(existing: Duty[] | undefined, extra: Duty[]): Duty[] {
+  const seen = new Set((existing ?? []).map(dutyKey));
+  const out = [...(existing ?? [])];
+  for (const d of extra) {
+    const key = dutyKey(d);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(d);
+  }
+  const own = out.filter((d) => !d.hop).sort((a, b) => a.line - b.line || a.k.localeCompare(b.k)).slice(0, MAX_DUTIES);
+  return [...own, ...out.filter((d) => d.hop)];
 }
 
 /** Effect-style counts derived from duties (own sites only), for consumers of `node.effects`. */

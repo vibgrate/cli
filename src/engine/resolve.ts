@@ -3,6 +3,7 @@ import { nodeId, edgeId } from './ids.js';
 import { relativeResolver, type ModuleResolver } from './module-resolver.js';
 import { isTestFile } from './tests.js';
 import type { FileParse } from './types.js';
+import type { DutyCandidate } from './duties.js';
 import type { EdgeKind, GraphEdge, GraphNode, NodeKind, ResolverKind } from '../schema.js';
 
 /**
@@ -36,6 +37,8 @@ export interface UnresolvedRef {
 export interface ResolveResult {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** Untyped duty sites per node id, for the edge-binding pass. Not serialized. */
+  dutyCandidates: Map<string, DutyCandidate[]>;
   /** References the heuristic rung could not resolve (deduped, sorted). */
   unresolved: UnresolvedRef[];
   /** File-level resolved import targets (rel → rels), for downstream
@@ -70,6 +73,7 @@ type BaseNode = Omit<
 
 export function resolve(parses: FileParse[], resolver?: ModuleResolver): ResolveResult {
   const baseNodes = new Map<string, BaseNode>();
+  const dutyCandidates = new Map<string, DutyCandidate[]>();
   const relSet = new Set(parses.map((p) => p.rel));
   // Default to relative-only resolution; build.ts passes a full resolver that
   // also follows tsconfig path aliases and workspace-package names.
@@ -115,6 +119,7 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
         ...(d.effects ? { effects: d.effects } : {}),
         ...(d.duties ? { duties: d.duties } : {}),
       });
+      if (d.dutyCandidates?.length) dutyCandidates.set(id, d.dutyCandidates);
       const ref: DefNodeRef = {
         id,
         name: d.name,
@@ -302,7 +307,7 @@ export function resolve(parses: FileParse[], resolver?: ModuleResolver): Resolve
       a.from.localeCompare(b.from) || a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name),
   );
 
-  return { nodes, edges: edges.toArray(), unresolved: unresolvedList, stats, importsByFile: importedFilesByRel };
+  return { nodes, edges: edges.toArray(), unresolved: unresolvedList, stats, importsByFile: importedFilesByRel, dutyCandidates };
 }
 
 // --- helpers ---

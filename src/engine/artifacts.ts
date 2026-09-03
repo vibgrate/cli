@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import type { HailePolicy } from './haile/types.js';
 import * as path from 'node:path';
 import { serializeGraph } from './serialize.js';
 import { mapFileExists, snapshotPathFor, writeGraphSnapshot } from './snapshot.js';
@@ -32,6 +33,8 @@ export interface WriteOptions {
   html?: boolean; // default true
   report?: boolean; // default true
   graphPath?: string; // override graph.json path
+  /** Boundary policy pack for the architecture sidecar (`--policy`); else config / default. */
+  policy?: string;
 }
 
 export interface WrittenArtifacts {
@@ -297,7 +300,7 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
   // HAILE sidecar is derived and must not enter graph.json. Best-effort:
   // a classify fault never fails the build. --max-privacy / --no-graph never
   // reach writeArtifacts (see shouldBuildCodeMap).
-  writeHaileSidecarFor(graph, graphPath);
+  writeHaileSidecarFor(graph, graphPath, { root: options.root, ...(options.policy ? { policy: options.policy as HailePolicy } : {}) });
 
   return written;
 }

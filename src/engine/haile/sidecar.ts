@@ -13,7 +13,9 @@ import {
   HAILE_IR,
   HAILE_MAGIC,
   HAILE_TAXONOMY,
+  type HailePolicy,
 } from './types.js';
+import { architecturePolicyFor } from './policy-config.js';
 
 export function haileSidecarPathFor(graphPath: string): string {
   if (graphPath.endsWith('.json')) return `${graphPath.slice(0, -5)}.haile.json`;
@@ -75,7 +77,7 @@ export function writeSidecarDocument(sidecar: HaileSidecar, graphPath: string): 
 export function writeHaileSidecarFor(
   graph: VgGraph,
   graphPath: string,
-  options: { profile?: HaileProfile } = {},
+  options: { profile?: HaileProfile; policy?: HailePolicy; root?: string } = {},
 ): string | null {
   try {
     const entry = resolveHaileModuleEntry();
@@ -83,9 +85,12 @@ export function writeHaileSidecarFor(
     const file = haileSidecarPathFor(graphPath);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const profile = options.profile ?? DEFAULT_PROFILE;
+    // The policy comes from the flag, then the environment, then
+    // `.vibgrate/architecture.toml` next to the graph's repository root.
+    const policy = architecturePolicyFor(options.root ?? path.dirname(path.dirname(graphPath)), options.policy);
     const result = spawnSync(
       process.execPath,
-      [entry, 'sidecar', '--stdin', '--out', file, '--profile', profile],
+      [entry, 'sidecar', '--stdin', '--out', file, '--profile', profile, '--policy', policy],
       {
         input: JSON.stringify(graph),
         encoding: 'utf8',

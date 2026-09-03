@@ -36,3 +36,24 @@ describe('boundary findings on vg show', () => {
     expect(haileJsonFields({ ...symbol, findings: undefined })?.findings).toEqual([]);
   });
 });
+
+describe('finding lines and the policy id', () => {
+  it('prints the offending line when the engine knew it, and leaves inherited crossings unanchored', async () => {
+    const { formatHaileLines } = await import('./format.js');
+    const base = {
+      node_id: 'n1',
+      file_path: 'src/Api/OrdersController.cs',
+      name: 'Create',
+      qualified_name: 'OrdersController.Create',
+      symbol_kind: 'method',
+      role: { primary: 'controller', alternatives: [], confidence: 0.9, band: 'high' },
+      purposes: [{ purpose: 'persist', confidence: 1 }],
+      intent: { text: 'writes Order via save', verbs: ['persist'], objects: ['Order'] },
+      evidence: [],
+    } as never;
+    const withLine = formatHaileLines({ ...(base as object), findings: [{ rule: 'layered-v1/controller-reads', severity: 'warn', message: 'HTTP handler reads the store via findById; controllers must go through the service layer', line: 31 }] } as never);
+    expect(withLine).toContain('  boundary warning: HTTP handler reads the store via findById; controllers must go through the service layer (layered-v1/controller-reads) · line 31');
+    const inherited = formatHaileLines({ ...(base as object), findings: [{ rule: 'hexagonal-v1/controller-persists', severity: 'hard', message: 'HTTP handler writes the store via OrderRepository.save (1 hop); controllers must not persist' }] } as never);
+    expect(inherited.some((l) => l.endsWith('(hexagonal-v1/controller-persists)'))).toBe(true);
+  });
+});
