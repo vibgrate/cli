@@ -3,7 +3,7 @@
 export const HAILE_MAGIC = 'vg.haile.v1';
 export const HAILE_TAXONOMY = 'haile.taxonomy.v1';
 export const HAILE_IR = 'haile.ir.v1';
-export const HAILE_ENGINE_VERSION = 'haile-fast/2026.903.3';
+export const HAILE_ENGINE_VERSION = 'haile-fast/2026.903.5';
 
 export const ROLES = [
   'entry_point',
@@ -129,7 +129,20 @@ export interface HaileFinding {
   rule: string;
   severity: 'hard' | 'warn' | string;
   message: string;
+  /** 1-based line of the symbol's own offending call; absent when the crossing is only inherited. */
+  line?: number;
 }
+
+/**
+ * Boundary policy packs the module can evaluate. `hexagonal-v1`: ports and
+ * adapters — the application layer owns its ports, the domain stays pure,
+ * handlers only delegate. `layered-v1`: controller → service → repository —
+ * the service layer owns the ORM and a controller must not read or write
+ * the store itself.
+ */
+export type HailePolicy = 'hexagonal-v1' | 'layered-v1';
+export const POLICIES: readonly HailePolicy[] = ['hexagonal-v1', 'layered-v1'];
+export const DEFAULT_POLICY: HailePolicy = 'hexagonal-v1';
 
 export interface HaileModuleSummary {
   path: string;
@@ -147,6 +160,8 @@ export interface HaileSidecar {
   corpus_hash: string;
   engine_version: string;
   profile: HaileProfile;
+  /** Policy pack the findings were evaluated under (module ≥ 2026.903.4; absent means hexagonal-v1). */
+  policy?: HailePolicy;
   symbols: HaileSymbol[];
   symbols_capped?: true;
   modules?: HaileModuleSummary[];

@@ -20,6 +20,18 @@ const CALLABLE = new Set(['function', 'method', 'route', 'component', 'job', 'te
 const MAX_INHERITED = 8;
 const MAX_HOPS = 2;
 
+/**
+ * Call edges worth inheriting through: a precise rung (scip / tsc /
+ * stack-graph), or a heuristic edge the resolver was sure of — a unique
+ * same-file or strictly-imported match. A pick among several candidates
+ * (confidence 0.4–0.6) names a plausible callee, not the one that runs, and
+ * a duty inherited through it would over-paint the caller.
+ */
+export const TRUSTED_HEURISTIC_CONFIDENCE = 0.75;
+export function edgeTrusted(e: Pick<GraphEdge, 'resolution' | 'confidence'>): boolean {
+  return e.resolution !== 'heuristic' || e.confidence >= TRUSTED_HEURISTIC_CONFIDENCE;
+}
+
 /** Last segment of a `via` (`repo.add` → `add`, `IProductService.Create` → `Create`). */
 function lastSeg(via: string | undefined): string {
   return via?.split(/[.:#]/).pop() ?? '';
@@ -56,6 +68,7 @@ export function inheritDuties(nodes: GraphNode[], edges: GraphEdge[]): void {
   for (const e of edges) {
     if (e.kind !== 'call' || e.src === e.dst) continue;
     if (!byId.has(e.src) || !byId.has(e.dst)) continue;
+    if (!edgeTrusted(e)) continue;
     let list = callees.get(e.src);
     if (!list) {
       list = [];

@@ -5,3 +5,5 @@ dist
 grammars/
 # Generated graph artifacts from fixture/dev runs
 test/**/.vibgrate/
+# Vitest 5 report/cache directory (blob, attachments, html reporter)
+.vitest/

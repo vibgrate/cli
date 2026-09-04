@@ -39,7 +39,8 @@ export function formatHaileLines(symbol: HaileSymbol | null | undefined): string
   if (symbol.file_layer) lines.push(`  file-layer ${symbol.file_layer}`);
   for (const finding of symbol.findings ?? []) {
     if (!finding || typeof finding.message !== 'string' || typeof finding.rule !== 'string') continue;
-    lines.push(`  boundary ${finding.severity === 'hard' ? 'violation' : 'warning'}: ${finding.message} (${finding.rule})`);
+    const at = typeof finding.line === 'number' && finding.line > 0 ? ` · line ${finding.line}` : '';
+    lines.push(`  boundary ${finding.severity === 'hard' ? 'violation' : 'warning'}: ${finding.message} (${finding.rule})${at}`);
   }
   return lines;
 }

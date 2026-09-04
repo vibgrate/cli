@@ -112,3 +112,17 @@ describe('inheritDuties: call-site liveness and same-language resolution', () =>
     expect(nodes[0]!.duties!.filter((d) => d.hop).map((d) => d.k)).toEqual(['persist']);
   });
 });
+
+describe('inheritDuties: edge trust', () => {
+  it('follows precise and sure edges, never a weak heuristic pick', () => {
+    const nodes = [
+      node('a', 'A.run', 'a.ts', [{ k: 'delegate', via: 'go', live: true, line: 1 }]),
+      node('b', 'B.go', 'b.ts', [{ k: 'persist', o: 'X', via: 'repo.save', live: true, line: 2 }]),
+      node('c', 'C.run', 'c.ts', [{ k: 'delegate', via: 'go', live: true, line: 1 }]),
+    ];
+    const weak = { ...edge('c', 'b'), confidence: 0.5 } as GraphEdge;
+    inheritDuties(nodes, [edge('a', 'b'), weak]);
+    expect(nodes[0]!.duties!.some((d) => d.hop === 1)).toBe(true);
+    expect(nodes[2]!.duties!.some((d) => d.hop)).toBe(false);
+  });
+});

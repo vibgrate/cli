@@ -524,7 +524,7 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | Command | Description |
 | --- | --- |
 | `vg ask "<question>"` | Query the map in natural language |
-| `vg build [path]` | Build / update the code map (incremental, deterministic) |
+| `vg build [path]` | Build / update the code map (incremental, deterministic); `--policy hexagonal-v1\|layered-v1` picks the boundary rules the architecture module evaluates (default from `.vibgrate/architecture.toml`; the two packs are compared in [docs/architecture-policies.md](./docs/architecture-policies.md)) |
 | `vg bundle` | Build an air-gapped bundle (grammars + graph + library catalog) |
 | `vg code ["<instruction>"]` | Graph-grounded coding agent — local or hosted model, every edit and command approved (`--auto` for CI, `--single` for a one-shot diff) |
 | `vg embed` | Precompute the semantic index for instant `vg ask` |
@@ -612,7 +612,7 @@ Local scoring does not require this — nothing leaves your machine until you pu
 | `vg push` | Upload scan results to Vibgrate Cloud |
 
 ```bash
-vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [--fail-on warn|error] \
+vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [--fail-on warn|error|architecture-finding|architecture-warning] \
   [--offline] [--package-manifest <file>] [--no-local-artifacts] [--max-privacy] \
   [--drift-budget <score>] [--drift-worsening <percent>] [--baseline <file>]
 ```

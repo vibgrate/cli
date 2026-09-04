@@ -6,6 +6,10 @@ import { describe, it, expect } from 'vitest';
 import { formatText } from '../../core-open/formatters/text.js';
 import type { ScanArtifact, BillingSummary } from '../../core-open/types.js';
 
+// Vitest 5 sets FORCE_COLOR for the reporter, so chalk wraps `formatMoney`
+// and splits substrings like `$12 / mo`. Assert on the visible text.
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+
 function makeArtifact(overrides: Partial<ScanArtifact> = {}): ScanArtifact {
   return {
     schemaVersion: '1.0',
@@ -49,7 +53,7 @@ function makeBilling(
 describe('free-plan upsell panel', () => {
   it('shows Team/Business monthly costs and the login→push flow when free', () => {
     // 3 standard → 3 billable, first band: Team floor(3×$4)=$12, Business floor(3×$10)=$30.
-    const text = formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), { free: true });
+    const text = stripAnsi(formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), { free: true }));
     expect(text).toContain('KEEP TRACKING YOUR DRIFTSCORE');
     expect(text).toContain('Team');
     expect(text).toContain('$12 / mo');
@@ -67,16 +71,16 @@ describe('free-plan upsell panel', () => {
   });
 
   it('defaults the login→push hint to `vg` when no invocation is given', () => {
-    const text = formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), { free: true });
+    const text = stripAnsi(formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), { free: true }));
     expect(text).toContain('vg login');
     expect(text).toContain('vg push');
   });
 
   it('uses the npx invocation in the login→push hint when the user ran via npx', () => {
-    const text = formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), {
+    const text = stripAnsi(formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), {
       free: true,
       invocation: 'npx @vibgrate/cli',
-    });
+    }));
     expect(text).toContain('npx @vibgrate/cli login');
     expect(text).toContain('npx @vibgrate/cli push');
     // ...and not the bare `vg` form that would fail for an npx user.
@@ -91,7 +95,6 @@ describe('free-plan upsell panel', () => {
       free: true,
       invocation: 'npx @vibgrate/cli',
     });
-    const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
     // Isolate just the upsell panel: from its titled top border down to its
     // closing corner (the report has other boxes with the same glyphs).
     const all = text.split('\n').map(stripAnsi);
@@ -111,35 +114,35 @@ describe('free-plan upsell panel', () => {
 
   it('rounds a fractional single-repo estate down to whole dollars', () => {
     // 2 micro → 0.2 billable: Team floor(0.2×$4)=$0, Business floor(0.2×$10)=$2.
-    const text = formatText(makeArtifact({ billing: makeBilling({ micro: 2 }) }), { free: true });
+    const text = stripAnsi(formatText(makeArtifact({ billing: makeBilling({ micro: 2 }) }), { free: true }));
     expect(text).toContain('$0 / mo');
     expect(text).toContain('$2 / mo');
     expect(text).toContain('0.2 billable projects');
   });
 
   it('omits the panel when the user is authenticated (has DSN)', () => {
-    const text = formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), { free: false });
+    const text = stripAnsi(formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), { free: false }));
     expect(text).not.toContain('KEEP TRACKING YOUR DRIFTSCORE');
   });
 
   it('does not surface the panel by default (no options passed)', () => {
-    const text = formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }));
+    const text = stripAnsi(formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) })));
     expect(text).not.toContain('KEEP TRACKING YOUR DRIFTSCORE');
   });
 
   it('omits the panel when there is no billing roll-up even if free', () => {
-    const text = formatText(makeArtifact(), { free: true });
+    const text = stripAnsi(formatText(makeArtifact(), { free: true }));
     expect(text).not.toContain('KEEP TRACKING YOUR DRIFTSCORE');
   });
 });
 
 describe('authenticated free-plan upsell panel', () => {
   it('shows the pricing block with an upgrade CTA, not the login flow', () => {
-    const text = formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), {
+    const text = stripAnsi(formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), {
       free: true,
       authenticated: true,
       upgradeUrl: 'https://dash.vibgrate.com/ws42',
-    });
+    }));
     expect(text).toContain('KEEP TRACKING YOUR DRIFTSCORE');
     // Same banded pricing as the signed-out panel.
     expect(text).toContain('$12 / mo');

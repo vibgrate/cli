@@ -7,7 +7,7 @@ import { hashString } from './hash.js';
 import { redactSecrets } from '../core-open/utils/redact.js';
 import { extractAstRolesFromTree } from './ast-roles.js';
 import { scanEffects } from './effects.js';
-import { extractDuties, fileBindings, type Bindings } from './duties.js';
+import { extractDutiesWithCandidates, fileBindings, type Bindings } from './duties.js';
 import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport, RawTypeRef } from './types.js';
 
 /**
@@ -361,10 +361,13 @@ export async function parseSource(
       if (!CALLABLE_DEF_KINDS.has(d.kind)) continue;
       const callees = calleeNodesByDef.get(d._start);
       if (!callees?.length) continue;
-      const duties = extractDuties({ def: d._node, callees, text, langId: effLangId, bindings, calleeOf });
-      if (duties) {
+      const { duties, candidates } = extractDutiesWithCandidates({ def: d._node, callees, text, langId: effLangId, bindings, calleeOf });
+      if (duties || candidates) {
         const target = result.defs.find((r) => r.qualifiedName === d.qualifiedName && r.startLine === d.startLine);
-        if (target) target.duties = duties;
+        if (target) {
+          if (duties) target.duties = duties;
+          if (candidates) target.dutyCandidates = candidates;
+        }
       }
     }
   }

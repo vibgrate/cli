@@ -30,7 +30,9 @@ import { resolveDsn } from '../credentials.js';
 import { emitIngestIdLine, emitDriftScoreLine } from '../utils/ingest-id-output.js';
 import { uploadScanArtifact } from '../utils/upload.js';
 import { buildGraph } from '../../engine/build.js';
-import { writeArtifacts } from '../../engine/artifacts.js';
+import { writeArtifacts, resolveGraphPath } from '../../engine/artifacts.js';
+import { readHaileSidecar } from '../../engine/haile/sidecar.js';
+import { isUsableHaileSymbol } from '../../engine/haile/format.js';
 import { writeSnapshot } from '../../engine/freshness.js';
 import { detectAiAssistant, printAiContextPrompt } from '../ai-context-prompt.js';
 import { resolveCliInvocation } from '../../util/cli-invocation.js';
@@ -328,12 +330,40 @@ function parseNonNegativeNumber(value: string | undefined, label: string): numbe
   return parsed;
 }
 
+type ArchitectureFinding = { file: string; line?: number; symbol: string; severity: string; message: string; rule: string; policy: string };
+
+/**
+ * Boundary findings of the freshly built map, file-ordered, with the policy
+ * pack the module evaluated them under (stamped on the sidecar; older
+ * sidecars are `hexagonal-v1`). `null` when the architecture module
+ * produced no sidecar for it.
+ */
+function architectureFindings(rootDir: string, hardOnly: boolean): { policy: string; rows: ArchitectureFinding[] } | null {
+  const sidecar = readHaileSidecar(resolveGraphPath(rootDir));
+  if (!sidecar) return null;
+  const policy = typeof sidecar.policy === 'string' ? sidecar.policy : 'hexagonal-v1';
+  const out: ArchitectureFinding[] = [];
+  for (const s of sidecar.symbols) {
+    if (!isUsableHaileSymbol(s)) continue;
+    for (const f of s.findings ?? []) {
+      if (!f || typeof f.rule !== 'string' || typeof f.message !== 'string') continue;
+      if (hardOnly && f.severity !== 'hard') continue;
+      out.push({ file: s.file_path, ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}), symbol: s.qualified_name || s.name, severity: f.severity, message: f.message, rule: f.rule, policy });
+    }
+  }
+  out.sort((a, b) => a.file.localeCompare(b.file) || (a.line ?? 0) - (b.line ?? 0) || a.symbol.localeCompare(b.symbol));
+  return { policy, rows: out };
+}
+
 export const scanCommand = new Command('scan')
   .description('Scan a project for upgrade drift')
   .argument('[path]', 'Path to scan', '.')
   .option('--out <file>', 'Output file path')
   .option('--format <format>', 'Output format (text|json|sarif|md)', 'text')
-  .option('--fail-on <level>', 'Fail on warn or error')
+  .option(
+    '--fail-on <level>',
+    'Fail on warn or error. architecture-finding (hard boundary violations) or architecture-warning (violations and warnings) gate on the architecture module\'s boundary findings, judged under the policy pack in force: .vibgrate/architecture.toml (policy = "hexagonal-v1" | "layered-v1"), VIBGRATE_ARCHITECTURE_POLICY, or vg build --policy; default hexagonal-v1. The pack is named in the output. See docs/architecture-policies.md',
+  )
   .option('--baseline <file>', 'Compare against baseline')
   .option('--changed-only', 'Only scan changed files')
   .option(
@@ -668,6 +698,32 @@ export const scanCommand = new Command('scan')
     // changes the exit code; use `vg drift --fail-on standards` to gate CI.
     if (opts.full) {
       reportStandards(rootDir);
+    }
+
+    // Architecture gate: boundary findings from the module's policy pack,
+    // read off the sidecar this scan's code map just produced. The map is
+    // the evidence, so the gate needs it (no --no-graph / --max-privacy).
+    if (opts.failOn === 'architecture-finding' || opts.failOn === 'architecture-warning') {
+      if (!wantGraph) {
+        console.error(chalk.red('\n--fail-on architecture-finding needs the code map: remove --no-graph / --max-privacy / --no-local-artifacts.'));
+        process.exit(2);
+      }
+      const hardOnly = opts.failOn === 'architecture-finding';
+      const gate = architectureFindings(rootDir, hardOnly);
+      if (gate === null) {
+        console.error(chalk.red('\n--fail-on architecture-finding: the architecture module did not classify this map (install it with `vg module install haile`).'));
+        process.exit(2);
+      }
+      const { policy, rows } = gate;
+      if (rows.length) {
+        console.error(chalk.red(`\nFailing: ${rows.length} architecture ${hardOnly ? 'boundary violation' : 'boundary finding'}${rows.length === 1 ? '' : 's'} (${policy}).`));
+        for (const r of rows.slice(0, 50)) console.error(chalk.dim(`  ${r.file}${r.line ? `:${r.line}` : ''}  ${r.symbol}  ${r.severity === 'hard' ? 'violation' : 'warning'}: ${r.message} (${r.rule})`));
+        if (rows.length > 50) console.error(chalk.dim(`  … ${rows.length - 50} more`));
+        process.exit(2);
+      }
+      // A passing gate still names the pack: a layered app judged as a
+      // hexagon (or the reverse) is the mistake this line exists to catch.
+      if (!opts.quiet) console.error(chalk.dim(`\narchitecture gate: no ${hardOnly ? 'boundary violations' : 'boundary findings'} under ${policy}.`));
     }
 
     // Check fail-on thresholds

@@ -28,6 +28,8 @@ import { ProgressBar } from '../util/progress.js';
 import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.js';
 
 interface BuildCmdOpts {
+  /** Boundary policy pack for the architecture sidecar (`--policy`). */
+  policy?: string;
   only?: string;
   exclude?: string[];
   html?: boolean;
@@ -62,6 +64,7 @@ export function registerBuild(program: Command): void {
     .option('--jobs <n>', 'worker count (1 = single-threaded)')
     .option('--scip <file>', 'ingest a SCIP index for precise resolution (default: auto-detect index.scip)')
     .option('--no-scip', 'ignore any SCIP index')
+    .option('--policy <pack>', 'boundary policy pack for the architecture module: hexagonal-v1 | layered-v1 (default: .vibgrate/architecture.toml, else hexagonal-v1)')
     .option('--no-tsc', 'skip the in-process TypeScript resolver (heuristic floor only)')
     .option('--fast', 'skip precise tsc resolve (heuristic only — faster XL cold builds)')
     .option('--no-index', 'do not write the SQLite serve index under .vibgrate/cache/')
@@ -164,6 +167,7 @@ export async function runBuild(
     html: opts.html,
     report: opts.report,
     graphPath: global.graph,
+    ...(opts.policy ? { policy: opts.policy } : {}),
   });
 
   if (haile?.status === 'unavailable' && !global.json && !global.quiet) {

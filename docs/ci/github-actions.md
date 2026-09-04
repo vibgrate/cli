@@ -43,6 +43,7 @@ vibgrate-vulns.sarif --fail-on error`, then upload the file yourself.
 The CI template uses existing scan-time gates:
 
 - `--fail-on error` to fail on error-level findings
+- `--fail-on architecture-finding` to fail on a hard boundary finding from the architecture module (an HTTP handler that writes the store, domain code that does I/O); `architecture-warning` also fails on warnings. Needs the code map the scan builds and the module (`vg module install haile`); the rules come from `.vibgrate/architecture.toml` (`policy = "hexagonal-v1"` or `"layered-v1"`). Each failing line is `file:line  symbol  violation: … (rule)`
 - `--drift-budget <score>` to fail when drift score exceeds your budget
 
 Example gate command:

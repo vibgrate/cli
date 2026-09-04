@@ -4,6 +4,7 @@ import { discover, mergeExcludes, type DiscoveredFile } from './discover.js';
 import { parseFiles } from './pool.js';
 import { resolve } from './resolve.js';
 import { inheritDuties } from './duties-inherit.js';
+import { bindDutyCandidates } from './duties-bind.js';
 import { buildModuleResolver } from './module-resolver.js';
 import { assembleTsResult, tsWalkFiles, type TsFilePartial } from './ts-resolver.js';
 import { decodeScipIndex, scipEdges } from './scip.js';
@@ -467,6 +468,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   // delegating one-liner controller still reports the write behind it. Runs
   // on the final edge set, so a call only the tsc / scip rung could resolve
   // (`fetchApi<T>("/cart")`) carries its callee's duties too.
+  bindDutyCandidates(resolved.nodes, edges, resolved.dutyCandidates);
   inheritDuties(resolved.nodes, edges);
   // Test linkage copies the nodes, so the duties have to be in place first.
   // Test-awareness: static test→code linkage, then runtime coverage if present.
