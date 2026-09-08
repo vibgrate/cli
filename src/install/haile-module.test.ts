@@ -17,7 +17,7 @@ import { haileModuleDir, resetHaileProviderCache } from '../engine/haile/haile-p
 
 let tmp: string;
 let savedEnv: Record<string, string | undefined>;
-const ENV = ['XDG_CACHE_HOME', 'VIBGRATE_MODULE_DIR', 'VIBGRATE_NO_KERNEL', 'VIBGRATE_MODULE_REGISTRY', 'VIBGRATE_HAILE_PATH'] as const;
+const ENV = ['XDG_CACHE_HOME', 'VIBGRATE_MODULE_DIR', 'VIBGRATE_NO_KERNEL', 'VIBGRATE_MODULE_REGISTRY', 'VIBGRATE_HAILE_PATH', 'VIBGRATE_ARCH_PATH'] as const;
 
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
@@ -27,6 +27,7 @@ beforeEach(() => {
   delete process.env.VIBGRATE_NO_KERNEL;
   delete process.env.VIBGRATE_MODULE_REGISTRY;
   delete process.env.VIBGRATE_HAILE_PATH;
+  delete process.env.VIBGRATE_ARCH_PATH;
   resetHaileProviderCache();
 });
 
@@ -101,7 +102,7 @@ describe('ensureHaileModule (default-install posture)', () => {
     process.env.VIBGRATE_NO_KERNEL = '1';
     expect((await ensureHaileModule({ fetchImpl: failingFetch })).status).toBe('disabled');
     delete process.env.VIBGRATE_NO_KERNEL;
-    writeConsent({ ...readConsent(), haile: 'denied' });
+    writeConsent({ ...readConsent(), arch: 'denied' });
     expect((await ensureHaileModule({ fetchImpl: failingFetch })).status).toBe('declined');
   });
 
@@ -132,7 +133,7 @@ describe('kickHaileReadiness (per-invocation background provision)', () => {
     kickHaileReadiness({ fetchImpl: failingFetch });
     expect(fs.existsSync(stampPath())).toBe(false);
     delete process.env.VIBGRATE_NO_KERNEL;
-    writeConsent({ ...readConsent(), haile: 'denied' });
+    writeConsent({ ...readConsent(), arch: 'denied' });
     kickHaileReadiness({ fetchImpl: failingFetch });
     expect(fs.existsSync(stampPath())).toBe(false);
   });
@@ -159,6 +160,7 @@ describe('haileModuleStatus (what the editor may offer)', () => {
     process.env.VIBGRATE_NO_KERNEL = '1';
     expect(haileModuleStatus()).toEqual({ status: 'disabled' });
     delete process.env.VIBGRATE_NO_KERNEL;
+    // A denial recorded under the pre-rename consent key keeps holding.
     writeConsent({ ...readConsent(), haile: 'denied' });
     expect(haileModuleStatus()).toEqual({ status: 'declined' });
   });

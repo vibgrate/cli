@@ -2,7 +2,7 @@
  * IP BOUNDARY — this file must not contain a lexicon.
  *
  * Classification lives in the separately installed architecture module.
- * The public CLI loads that module from the cache (or VIBGRATE_HAILE_PATH)
+ * The public CLI loads that module from the cache (or VIBGRATE_ARCH_PATH)
  * and only reads the classify file it writes.
  *
  * Do not add token weights, path rules, softmax, or purpose floors here.

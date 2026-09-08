@@ -1,0 +1,11 @@
+{
+  "session": { "id": "codex-legacy-1", "timestamp": "2026-09-01T12:00:00Z", "cwd": "/home/user/demo", "instructions": "" },
+  "items": [
+    { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "Run the linter" }] },
+    { "type": "function_call", "name": "shell", "call_id": "call_1", "arguments": "{\"command\":[\"bash\",\"-lc\",\"python3 lint.py\"]}" },
+    { "type": "function_call_output", "call_id": "call_1", "output": "{\"output\":\"bash: python3: command not found\\nexit code 127\",\"metadata\":{\"exit_code\":127}}" },
+    { "type": "function_call", "name": "shell", "call_id": "call_2", "arguments": "{\"command\":[\"bash\",\"-lc\",\"uv run python lint.py\"]}" },
+    { "type": "function_call_output", "call_id": "call_2", "output": "{\"output\":\"All checks passed\\nexit code 0\",\"metadata\":{\"exit_code\":0}}" },
+    { "type": "reasoning", "summary": [] }
+  ]
+}

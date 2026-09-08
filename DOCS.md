@@ -56,6 +56,15 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg tests](#vg-tests)
   - [vg tree](#vg-tree)
   - [vg unknowns](#vg-unknowns)
+- [Context compression](#context-compression)
+  - [vg serve --compress](#vg-serve---compress)
+  - [vg install --compress / vg uninstall](#vg-install---compress--vg-uninstall)
+  - [vg savings / vg show savings](#vg-savings--vg-show-savings)
+  - [vg install --learn](#vg-install---learn)
+  - [vg serve memory](#vg-serve-memory)
+  - [vg serve compress / vg serve retrieve](#vg-serve-compress--vg-serve-retrieve)
+  - [Configuration reference (`VG_*`)](#configuration-reference-vg_)
+  - [SDK](#sdk)
 - [Holistic Code Specification (vg hcs)](#holistic-code-specification-vg-hcs)
   - [vg hcs extract](#vg-hcs-extract)
   - [vg hcs digest](#vg-hcs-digest)
@@ -1505,8 +1514,11 @@ Reads the counts-only usage ledger recorded when you run `vg serve --savings` (o
 |------|---------|-------------|
 | `--days <n>` | `30` | Reporting window in days |
 | `--clear` | — | Delete the recorded usage data for this repo (the ledger under `.vibgrate/cache/`, plus the opt-in stats-share upload state and per-install id) |
+| `--reset` | — | Delete the context-compression ledger (global, under the Vibgrate data directory) |
 
 Add `--json` for machine-readable output.
+
+**Context compression.** When `vg serve --compress`, `vg code` or the SDK wrappers have saved anything, the report gains a second section: requests, tokens before / after and estimated dollars for today, the last 7 days and the last 30 days, split by model, client and project, plus the size of the retrievable store. The ledger is an append-only JSONL file with numbers only — never message content — kept for 30 days. See [Context compression](#context-compression).
 
 ---
 
@@ -1650,6 +1662,329 @@ Surfaces the symbols and imports the resolver could not tie to a definition, ord
 | `-n, --limit <n>` | `20` | How many to show |
 
 Add `--json` for machine-readable output.
+
+---
+
+## Context compression
+
+Every turn, an AI coding agent re-sends its whole conversation to the model — the test log it already read, the JSON payload it already parsed, the grep output it already acted on. Vibgrate CLI compresses that context **before** it reaches the model and keeps every original retrievable on your machine, so the model can pull back exactly the lines it needs instead of re-paying for all of them.
+
+Compression is not a second product with its own commands. It is a mode of the
+local runtime you already start (`vg serve`), a flag on the installer you
+already use (`vg install`), and a section of the report you already read
+(`vg savings`). Inside `vg code` it is on by default.
+
+```bash
+vg serve --compress          # serve the map *and* compress context, one process
+vg install claude --compress # point Claude Code at it (undo: `vg uninstall claude`)
+vg savings                   # what it saved: today / 7 days / 30 days
+```
+
+**How a request is compressed.** The pipeline walks each message and each content block and decides per block:
+
+1. **Exclusions first.** System prompts, user text, assistant text, blocks with `cache_control`, blocks already carrying a marker, retrieval results, error outputs, file reads (`Read`, `cat`, `head`, …) and edits are left alone by default. In `cache` mode only the newest turn (the part after the last assistant message) is eligible, so your provider's prompt cache keeps hitting; `token` mode makes every eligible block a candidate. The last `protectRecent` messages keep their code intact.
+2. **Route by shape.** A detector classifies the block — `json`, `source_code`, `search_results`, `build_output`, `git_diff`, `html`, `tabular`, `structured_config`, `plain_text` — with a confidence floor per type, and hands it to the matching compressor.
+3. **Lossless first.** Repeated lines, grep and directory headings, path headings, diff index lines and config boilerplate fold into byte-reversible markers that `unfold` restores exactly. Lossy compression runs on top only when it beats the fold by at least `VG_COMPRESS_LOSSY_MIN_EXTRA_SAVINGS` (default 15%).
+4. **Lossy, shape-aware.** JSON arrays keep a head / middle / tail sample plus every error-looking item, rare-status outliers and items matching your question, and render the dropped rows as a compact schema line. Logs collapse near-duplicates and keep errors, stack traces, first and last lines. Grep output is capped per file with matches for your question kept. Diffs keep every changed line and cap context. Source code keeps signatures, imports, exports and docstrings and collapses long bodies (verified to still parse with the bundled grammars). Prose is compressed extractively — a deterministic sentence score, no model.
+5. **Guarded.** Anchors (errors, ids, hashes, URLs, test names) may never be dropped; a result that is not smaller, or that fails the recoverability check, is rejected and the original forwarded. A compressor that throws is a passthrough. A per-request deadline (`VG_COMPRESS_DEADLINE_MS`) forwards the original if compression runs long.
+6. **Retrievable.** Each lossy block stores its original (secrets redacted) in a local store with a 30-minute TTL and adds a marker — `<<vg-ccr:HASH N_rows_offloaded>>` inside arrays, or a trailing `Retrieve original: hash=… (before → after tokens)` line. When a request carries markers, the proxy adds a `vg_retrieve` tool; if the model calls it, the proxy answers from the store without a client round-trip (up to 3 rounds per request) and, for streaming clients, keeps the connection alive with heartbeats while it does.
+
+Across turns the pipeline also replaces verbatim repeats of earlier tool output with a pointer (cross-turn dedup), marks file reads that a later edit made stale (read lifecycle), holds fresh reads byte-exact for a few turns before they become eligible (maturation), and — opt-in — compacts prior-turn reasoning on models that bill it.
+
+**Savings profiles.** `coding` (default) is cache-mode with reads and edits byte-exact; `balanced` lets older reads compress; `aggressive` is token-mode over everything eligible, for long autonomous runs; `general` is for non-coding chat. Pick one with `--profile` or `VG_COMPRESS_PROFILE`.
+
+**Privacy.** Everything runs on your machine. The proxy binds to loopback unless you pass a token, forwards your provider credentials untouched, strips its own headers before forwarding, never logs message bodies unless you ask (`VG_PROXY_LOG_MESSAGES`), and redacts secret shapes before anything — stored originals, ledgers, logs, memory — is written to disk. Files are created `0600`. There is no beacon and no update check unless you opt in, and `DO_NOT_TRACK` / `VIBGRATE_TELEMETRY=0` win over any opt-in.
+
+---
+
+### vg serve --compress
+
+`vg serve` is the local runtime: it serves your code map to an AI over MCP.
+`--compress` adds a second listener to the *same process* — an Anthropic- and
+OpenAI-compatible endpoint that shrinks context on its way to the model. One
+runtime, two listeners; there is no separate server to start, supervise or stop.
+
+It speaks the Anthropic Messages API (`/v1/messages`), OpenAI Chat Completions
+(`/v1/chat/completions`) and Responses (`/v1/responses`), streaming and
+non-streaming, and passes `count_tokens`, `embeddings` and `models` through
+untouched.
+
+```bash
+vg serve --compress                          # MCP on stdio + compression on 127.0.0.1:8787
+vg serve --http --compress                   # MCP over HTTP as well
+vg serve --compress --profile aggressive     # compress harder
+vg serve --compress-only                     # compression only, no code map needed
+vg serve --compress -- claude --model o4-mini   # one session, environment only
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--compress` | off | Turn on context compression: the listener, plus the compression MCP tools |
+| `--compress-port <n>` | `8787` | Port for the compression listener (independent of `--port`, which is MCP's) |
+| `--compress-only` | off | Compression **without** a code map: none is built, none is required, and only the tools that answer without one are listed |
+| `--compress-mode <m>` | `cache` | `cache` (newest turn only, prompt-cache safe) or `token` (maximum removal) |
+| `--profile <p>` | `coding` | `coding` / `balanced` / `aggressive` / `general` |
+| `[-- <agent> …]` | — | Run one agent session through the listener, then restore the environment |
+
+Everything else is a setting rather than a flag. There are around 130 `VG_*`
+knobs — upstream URLs, spend caps, rate limits, tokens for off-loopback
+binding, output shaping, logging — and putting each on the command line would
+turn `--help` into a manual. Read them with `vg serve config` and change one
+with `vg serve config set KEY VALUE`; hot knobs take effect on the next request.
+
+**Why `--compress` gates the MCP tools too.** Every tool schema an MCP server
+advertises is re-sent on every agent step, so a capability listed "just in case"
+is a standing tax on people who never use it. `compress_content`,
+`retrieve_original` and `compression_stats` are therefore listed only when you
+asked for compression. They remain callable either way.
+
+**Sharing a listener.** If a healthy listener is already on the port, a second
+`vg serve --compress` attaches to it instead of failing — several assistants
+each spawning their own `vg serve` is the normal case, not an error.
+
+Subcommands: `vg serve status [--json]` (what is listening, which agents are
+routed, Copilot sign-in state), `vg serve stop`, `vg serve config [--json]`
+with `set <KEY> <VALUE>` / `unset <KEY>`.
+
+Local endpoints (loopback only, `404` elsewhere): `/` (the savings page, see
+`vg show savings`), `/health`, `/ready`, `/version`, `/api/stats`,
+`/api/savings`, `/api/settings` (GET / POST), `/api/ccr/<hash>`,
+`/api/proxy/clients`, `/api/proxy/shutdown`, `/metrics` (Prometheus text).
+Sidecar endpoints for your own code: `POST /v1/compress` (a request body in →
+the same body compressed, plus accounting) and `POST /v1/retrieve`.
+
+Every response carries `x-vg-tokens-before`, `x-vg-tokens-after`,
+`x-vg-tokens-saved`, `x-vg-usd-saved` and `x-vg-transforms` headers so a client
+can see what happened to its request.
+
+---
+
+### vg install --compress / vg uninstall
+
+`vg install` is the one verb that writes an AI assistant's configuration, so
+routing an assistant through compression is a flag on it — not a separate verb
+that edits the same files a second way. `vg uninstall` is the one revert.
+
+```bash
+vg install claude --compress             # write Claude Code's base URL, repo-local
+vg install codex --compress --compress-scope user   # write the home config instead
+vg install copilot-cli --compress --login           # device-flow sign-in, then route
+vg serve status                          # what is routed right now, and by whom
+vg uninstall cursor                      # put its config back, byte-for-byte
+```
+
+**Supported agents:** `claude`, `codex`, `cursor`, `aider`, `copilot`,
+`opencode`, `cline`, `continue`, `goose`, `openhands`, `gemini`, `qwen`,
+`kimi`, `grok`, `crush`, `amp`, `droid`, `kiro`, `vibe`, `zcode`,
+`vscode-claude`. Agents that read a config file (Codex `config.toml`, Cline /
+Cursor / Kimi JSON, Continue / Goose / OpenHands YAML, Claude Code
+`settings.json`) get an atomic edit with a `.vg-backup` beside it, a marker
+recording exactly which fields changed, and an owner file so two concurrent
+sessions never undo each other. An assistant with no base-URL config is
+reported as unsupported, not silently skipped.
+
+| Flag | Description |
+|------|-------------|
+| `--compress [url]` | Route this assistant; the URL defaults to `VG_PROXY_URL`, else the host/port knobs |
+| `--compress-scope <s>` | `project` (repo-local, the team-shareable default) or `user` (home config) |
+| `--login` | Copilot only: GitHub device-flow sign-in before writing. The token is stored `0600` at `VG_COPILOT_AUTH_FILE` and never printed |
+| `--force` (on `uninstall`) | Restore a file another live session still holds |
+
+**One session instead of durable config.** `vg serve --compress -- <agent>`
+runs a single agent through the listener using the environment only: nothing is
+written, and everything is restored when the child exits. The child inherits
+your terminal, gets `VG_WRAP_ACTIVE=1`, receives forwarded `SIGTERM` /
+`SIGHUP`, and its exit code becomes vg's.
+
+---
+
+### vg savings / vg show savings
+
+`vg savings` reports tokens and dollars saved — a compression section alongside
+the grep-baseline numbers for map queries. `vg show savings` opens the same
+numbers as a live local page, next to `vg show chart` for the code graph.
+
+```bash
+vg savings                       # today / 7 days / 30 days, by model, client, project
+vg savings --compression         # just the compression section
+vg savings --benchmark           # measure the compressors on built-in fixtures
+vg show savings --open           # the live page in your browser
+```
+
+`--benchmark` runs the pipeline over one fixture per content type and reports
+p50 / p95 latency and the kept ratio. Nothing is sent anywhere; this is how to
+check that a change to the compressors did not regress before you rely on it.
+`--iterations <n>`, `--fixture <name>` and `--model <id>` tune the run.
+
+The page is served inline by the compression listener — no external assets —
+and shows savings for today / 7 days / 30 days, the split by model, client and
+project, recent requests with their transforms, the output-verbosity estimate
+with its confidence interval, the retrievable store, and an editor for the
+hot-reloadable settings.
+
+---
+
+### vg install --learn
+
+Turn your past agent sessions into guardrails the assistant reads next time.
+The outcome is "agent instructions written", which is `vg install`'s job, so it
+is a mode of the installer rather than a verb of its own.
+
+```bash
+vg install claude --learn                    # preview: the block it would write, as a diff
+vg install claude --learn --apply            # write it
+vg install codex --learn --since 14d --learn-target AGENTS.md --apply
+```
+
+It scans the session logs of Claude Code, Codex, Gemini CLI, Grok, OpenCode,
+Cursor, Copilot and Aider for this project — narrowed to the assistants you
+named — detects loops (the same failing command run again and again, edit /
+undo cycles, retry storms), repeated errors and missing-context patterns, and
+renders a short block between `<!-- vg:learn:begin -->` and
+`<!-- vg:learn:end -->` markers. Re-running replaces the block and leaves the
+rest of the file untouched. The analyzer is deterministic and needs no model;
+set `VG_LEARN_CLI` to hand the digest to a local CLI of your choice instead.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--learn` | — | Preview the guardrails; nothing is written |
+| `--apply` | — | Write the block (and save the learned output-verbosity profile) |
+| `--since <window>` | `7d` | How far back to scan |
+| `--min-evidence <n>` | `2` | Occurrences before a non-loop pattern becomes a rule |
+| `--learn-target <file>` | the assistant's own | `CLAUDE.local.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `GROK.md`, or any path |
+| `--all-projects` | — | Scan sessions from every project, not just this repo |
+
+---
+
+### vg serve memory
+
+Project-scoped memory shared across your AI agents: facts, preferences, rules,
+decisions, gotchas, commands and snippets, with an evidence count so a rule is
+promoted only after it has been seen enough times (`VG_MEMORY_MIN_EVIDENCE`,
+default 3). It nests under `vg serve` because serve is what injects it — the
+code graph remains vg's memory of the *code*; this is the small store of things
+a session learned that the map cannot know.
+
+```bash
+vg serve memory add "Run tests with pnpm test, never npm" --kind rule --tags testing
+vg serve memory search "how do we run tests"
+vg serve memory list --scope project
+vg serve memory export > memories.jsonl
+vg serve memory import memories.jsonl
+```
+
+Scopes are `project` (keyed by the git top-level, never injected when there is
+no repository), `user` and `global`. Storage is a JSONL file per scope under
+Vibgrate's data directory (`0600`), searched with a lexical ranker — no model,
+works offline. `vg serve --memory` injects the top `VG_MEMORY_TOP_K` matches
+into each request and exposes `memory_search` / `memory_save` to the model.
+Text is redacted for secret shapes before it is stored.
+
+---
+
+### vg serve compress / vg serve retrieve
+
+The debug paths. In normal use nobody runs these: the listener already
+compressed the tool output, and a model that needs an original calls
+`retrieve_original` (or the `vg_retrieve` tool the listener injects). They are
+here for when you want to see exactly what the pipeline does to a payload.
+
+```bash
+cat test-output.log | vg serve compress --tool Bash
+vg serve compress transcript.json --model claude-sonnet-4-5 --mode token
+vg serve compress big-array.json --dry-run --stats --json
+
+vg serve retrieve 3f9a1c2b7e4d                  # whole original
+vg serve retrieve 3f9a1c2b7e4d --grep "Error"   # matching lines only
+vg serve retrieve 3f9a1c2b7e4d --lines 120-180
+vg serve retrieve 3f9a1c2b7e4d --json-path "[3].status"
+vg serve retrieve --list                        # what is retrievable right now
+vg serve retrieve --purge                       # drop expired entries
+```
+
+`vg serve compress` detects its input automatically: a JSON array of chat
+messages (OpenAI or Anthropic shape) or a request body with `messages` goes
+through the message pipeline and comes back in the same shape; anything else is
+treated as one tool output and routed by content type. Compressed content goes
+to stdout, accounting to stderr; `--json` returns both in one object. Its other
+flags — `--format`, `--profile`, `--mode`, `--lossless`, `--no-ccr`, `--query`,
+`--tool`, `--target-ratio`, `--dry-run`, `--stats` — mirror the pipeline's own
+options.
+
+`vg serve retrieve` accepts a bare hash, a whole `<<vg-ccr:…>>` marker, or a
+`hash=…` fragment. Entries expire after `VG_CCR_TTL_SECONDS` (default 1800); an
+expired hash exits `3`. `--max-tokens` caps the slice; `--head` / `--tail` take
+the first / last N lines. Add `--json` for `{ content, found, truncated, … }`.
+
+---
+
+### Configuration reference (`VG_*`)
+
+Every setting is an environment variable; `vg serve config` prints them all with their current value and source, and `vg serve config set KEY VALUE` persists one in `settings.json` (applied only when the variable is not already set in the environment). Precedence: flag → environment → `settings.json` → profile default. Knobs marked *hot* take effect on the next request without a restart.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `VG_COMPRESS` | `true` | Master switch (off = passthrough) *hot* |
+| `VG_COMPRESS_MODE` | `cache` | `cache` or `token` *hot* |
+| `VG_COMPRESS_PROFILE` | `coding` | Savings profile *hot* |
+| `VG_COMPRESS_MIN_TOKENS` | `500` | Per-message floor before anything is attempted *hot* |
+| `VG_COMPRESS_PROTECT_RECENT` | `3` | Keep code intact in the last N messages *hot* |
+| `VG_COMPRESS_PROTECT_READS` | `true` | File reads stay byte-exact *hot* |
+| `VG_COMPRESS_PROTECT_TOOL_RESULTS` | — | Tool names never lossy-compressed *hot* |
+| `VG_COMPRESS_EXCLUDE_TOOLS` | — | Tool names skipped entirely *hot* |
+| `VG_COMPRESS_LOSSLESS` | `false` | Folds only *hot* |
+| `VG_COMPRESS_LOSSY_MIN_EXTRA_SAVINGS` | `0.15` | How much lossy must beat lossless by *hot* |
+| `VG_COMPRESS_DEDUPE` | `true` | Cross-turn dedup *hot* |
+| `VG_COMPRESS_READ_LIFECYCLE` | `true` | Mark reads a later edit made stale *hot* |
+| `VG_COMPRESS_THINKING_COMPACT` | `false` | Compact prior-turn reasoning where it is billed *hot* |
+| `VG_COMPRESS_TOOL_PROFILES` | — | JSON map: tool → `{skipCompression, losslessOnly, maxItemsAfterCrush, bias, preserveKeywords}` *hot* |
+| `VG_COMPRESS_DEADLINE_MS` | `2000` | Per-request budget; over it, the original is forwarded *hot* |
+| `VG_MODEL_LIMITS` / `VG_MODEL_ALIAS_MAP` / `VG_MODEL_PRICES` | — | Context-window, alias and pricing overrides (also `models.json` in the data dir) *hot* |
+| `VG_CCR` | `true` | Keep originals retrievable *hot* |
+| `VG_CCR_TTL_SECONDS` | `1800` | How long an original stays retrievable |
+| `VG_CCR_MAX_ENTRIES` | `1000` | Store size (LRU) |
+| `VG_CCR_BACKEND` | `disk` | `disk` (shared across processes) or `memory` |
+| `VG_PROXY_HOST` / `VG_PROXY_PORT` / `VG_PROXY_TOKEN` | `127.0.0.1` / `8787` / — | Bind and auth |
+| `VG_PROXY_ANTHROPIC_API_URL` / `VG_PROXY_OPENAI_API_URL` | provider defaults | Upstreams |
+| `VG_PROXY_ALLOWED_BASE_URLS` | — | Allow-list of upstream base URLs |
+| `VG_PROXY_RPM` / `VG_PROXY_TPM` / `VG_PROXY_BUDGET` | `0` | Limits (0 = off) *hot* |
+| `VG_PROXY_MODEL_ROUTES` | — | `requested=served,…` model rewrites *hot* |
+| `VG_PROXY_TOOL_SEARCH` | `true` | Defer large tool lists behind a search tool *hot* |
+| `VG_PROXY_SYSTEM_COMPACT` | `true` | Compact boilerplate in long system prompts *hot* |
+| `VG_PROXY_LOG_FILE` / `VG_PROXY_LOG_MESSAGES` | — / `false` | Request log; bodies only when asked *hot* |
+| `VG_PROXY_METRICS` | `true` | Expose `/metrics` |
+| `VG_OUTPUT_SHAPER` | `false` | Verbosity steering + effort clamp *hot* |
+| `VG_OUTPUT_VERBOSITY_LEVEL` | `L2` | `L1` (lightest) … `L4` *hot* |
+| `VG_OUTPUT_HOLDOUT` | `0.1` | Fraction of turns left unsteered to measure the saving *hot* |
+| `VG_MEMORY` / `VG_MEMORY_TOP_K` / `VG_MEMORY_MIN_EVIDENCE` | `false` / `5` / `3` | Memory injection *hot* |
+| `VG_LEARN_TARGET` / `VG_LEARN_CLI` | `CLAUDE.local.md` / — | `vg install --learn` defaults |
+| `VG_WRAP_PROXY_TIMEOUT` / `VG_WRAP_QUIET` | `15` / `false` | One-session run behaviour |
+| `VG_CONTEXT_DIR` | data dir `/context` | Where all of this state lives |
+
+The full list — about 130 variables including the per-subsystem tuning knobs — is what `vg serve config` prints.
+
+---
+
+### SDK
+
+The same pipeline is available programmatically from `@vibgrate/cli`, offline, with no proxy running.
+
+```typescript
+import { compress, withCompression, compressionMiddleware, CompressionStore } from '@vibgrate/cli';
+
+// One call over a message array (OpenAI or Anthropic shape; same shape back).
+const result = await compress(messages, { model: 'claude-sonnet-4-5', mode: 'token' });
+console.log(result.tokensBefore, result.tokensAfter, result.transformsApplied);
+
+// Wrap an SDK client: compresses on the way in, answers vg_retrieve calls itself.
+const anthropic = withCompression(new Anthropic(), { profile: 'coding' });
+const openai = withCompression(new OpenAI());
+
+// Vercel AI SDK middleware shape.
+const model = wrapLanguageModel({ model: baseModel, middleware: compressionMiddleware() });
+```
+
+Also exported: `CompressionSession` (per-conversation state: frozen verdicts, dedup, read lifecycle), `SharedContext` (compressed hand-offs between agents), `ContentRouter` and the individual compressors, `detectContentType`, `tokenizerFor`, `modelInfo`, `priceFor`, `costUsd`, the savings ledger (`appendSavingsEvent`, `rollupSavings`) and `MemoryStore`.
 
 ---
 
@@ -1823,7 +2158,7 @@ vg daemon query "payment service"
 
 ### vg doctor
 
-One read-only diagnostic pass over setup: which config file won, which credential source won (secrets never printed), whether a code map exists and how fresh it is, hosted catalog reachability, what `vg install` would register as the MCP launch, telemetry opt-outs, and **local inference** (Code Mode recommendation from free RAM/VRAM, weight catalog pin status, warm host pool size, isolation / sampler env). Prints state; changes nothing.
+One read-only diagnostic pass over setup: which config file won, which credential source won (secrets never printed), whether a code map exists and how fresh it is, hosted catalog reachability, what `vg install` would register as the MCP launch, telemetry opt-outs, **local inference** (Code Mode recommendation from free RAM/VRAM, weight catalog pin status, warm host pool size, isolation / sampler env), and **context compression** (is a proxy running and on which port, the active profile and mode, retrievable-store size and expiry, memory scopes, which agents are currently wrapped, and any `VG_*` value that fails validation). Prints state; changes nothing.
 
 ```bash
 vg doctor

@@ -44,4 +44,31 @@ describe('dispatch', () => {
       '4.17.21',
     ]);
   });
+
+  describe('context compression adds no verb of its own', () => {
+    // FEATURE-DESIGN-PRINCIPLES P1. Each of these was a top-level command
+    // during development; a bare-word fall-through to `ask` would silently
+    // search for "proxy" instead of saying where the capability went.
+    const moved: Array<[string, RegExp]> = [
+      ['proxy', /vg serve --compress/],
+      ['wrap', /vg install <agent> --compress/],
+      ['unwrap', /vg uninstall <agent>/],
+      ['dashboard', /vg show savings/],
+      ['perf', /vg savings --benchmark/],
+      ['compress', /vg serve --compress/],
+      ['retrieve', /vg serve retrieve/],
+      ['memory', /vg serve memory/],
+      ['learn', /vg install <agent> --learn/],
+    ];
+    for (const [verb, hint] of moved) {
+      it(`points \`vg ${verb}\` at its new home`, () => {
+        expect(() => dispatch([verb], cwd)).toThrow(hint);
+        expect(() => dispatch([verb], cwd)).toThrow(new RegExp(`\`vg ${verb}\` has moved`));
+      });
+    }
+
+    it('still routes a real question containing one of those words to ask', () => {
+      expect(dispatch(['how does the proxy work?'], cwd)).toEqual(['ask', 'how does the proxy work?']);
+    });
+  });
 });

@@ -1,6 +1,6 @@
 # Architecture policy packs: `hexagonal-v1` and `layered-v1`
 
-The architecture module (`vg module install haile`) reads what each function or
+The Architecture module (`vg module install arch`) reads what each function or
 method does from its own source text — the store it writes, the query it runs,
 the HTTP call it makes, the response it returns — and then judges those duties
 against one **policy pack**: a small set of boundary rules for the style of

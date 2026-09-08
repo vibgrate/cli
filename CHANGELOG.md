@@ -14,6 +14,65 @@ backward compatible.
 
 ### Added
 
+- **Context compression for AI coding agents — with no new commands.**
+  `vg serve --compress` adds an Anthropic- and OpenAI-compatible listener
+  (loopback by default, token-guarded off-loopback) to the local runtime you
+  already start, shrinking tool output and older turns before they reach the
+  model: a content router picks a compressor per block (JSON arrays, logs and
+  build output, grep results, diffs, HTML, tables, config, AST-aware source
+  code, extractive prose), byte-reversible folds run first, lossy compression
+  only when it saves clearly more, and file reads and edits stay byte-exact.
+  Every compressed block keeps its original in a short-TTL local store — the
+  model can call `vg_retrieve`, and you can run `vg serve retrieve <hash>` with
+  `--grep` / `--lines` / `--head` / `--tail` / `--json-path`. `cache` mode
+  compresses only the newest turn so provider prompt caches keep hitting;
+  `token` mode compresses everything eligible. Profiles `coding` (default),
+  `balanced`, `aggressive`, `general`. Cross-turn dedup, stale-read lifecycle,
+  optional thinking compaction, output-verbosity steering with a stratified
+  holdout estimate, budget and rate limits, model routes, tool-schema
+  compaction and deferral, and a Prometheus `/metrics` endpoint. Every knob is
+  a documented `VG_*` variable (`vg serve config`; persisted with
+  `vg serve config set`).
+- **`vg install <agent> --compress` / `vg uninstall <agent>`** — route Claude
+  Code, Codex, Cursor, Aider, Copilot (with `--login` device-flow sign-in),
+  OpenCode, Cline, Continue, Goose, OpenHands, Gemini CLI, Kimi, Grok, Qwen,
+  Crush, Amp, Droid, Kiro, Zed and VS Code through the listener: config edits
+  with backups, per-process ownership so concurrent sessions never undo each
+  other, and a byte-exact revert. `--compress-scope user` writes the home
+  config instead of the repo. `vg serve --compress -- <agent>` is the
+  per-session form — environment only, nothing written. `vg serve status`
+  shows what is routed.
+- **`vg code` compresses its own tool results** — bulky `run_command`,
+  `search_code` and `web_fetch` output is compressed once on the way into the
+  transcript instead of being re-billed on every later step. Reads an edit is
+  computed from, and failed results, are never touched (`VG_CODE_COMPRESS=0`
+  turns it off).
+- **`vg savings`** now reports context-compression savings — requests, tokens
+  and estimated dollars for today / 7 days / 30 days, by model, client and
+  project — alongside the grep-baseline figures; `--reset` clears the ledger
+  and `--benchmark` measures the compressors on built-in fixtures.
+  `vg show savings` opens the same numbers as a live local page.
+- **`vg serve memory`** — project-scoped memory shared across agents (`list`,
+  `search`, `add`, `delete`, `stats`, `export`, `import`), injected by the
+  listener and exposed as `memory_search` / `memory_save` with
+  `vg serve --memory`.
+- **`vg install <agent> --learn`** — scans your past agent sessions (Claude
+  Code, Codex, Gemini CLI, Grok, OpenCode, Cursor, Copilot, Aider) for repeated
+  failures, loops and missing context, and writes guardrails into the
+  assistant's instructions file between `<!-- vg:learn:begin -->` /
+  `<!-- vg:learn:end -->` markers. Preview by default; `--apply` writes, and
+  also saves the learned output-verbosity profile.
+- **`vg serve compress [file|-]`** — the same pipeline offline over a chat
+  transcript or a single tool output, as a debug path (`--lossless`,
+  `--profile`, `--mode`, `--dry-run`, `--stats`, `--json`).
+- **Vibgrate AI Context tools** `compress_content`, `retrieve_original`,
+  `compression_stats` — answered from the compression layer, not the code map,
+  and listed only under `vg serve --compress` so a default server does not
+  spend schema tokens on them. They stay callable either way.
+- **SDK**: `compress()`, `CompressionStore`, `withCompression()` for the
+  Anthropic / OpenAI SDK client shapes, `compressionMiddleware()` for the Vercel
+  AI SDK, `SharedContext` for multi-agent hand-offs, model registry and pricing.
+- **`vg doctor`** reports the compression listener, retrievable store, memory and agent routing.
 - **`vg hcs` — Holistic Code Specification command group** — `extract`,
   `digest`, `map`, `gate`, and `validate` over deterministic NDJSON fact
   streams. All HCS computation runs in the optional, separately-licensed
@@ -152,14 +211,16 @@ backward compatible.
   which is JavaScript and could previously be parsed as a huge phantom
   module). A test asserts the graph's lists cover the scanner's, so the two
   walkers can never silently disagree about what is third-party.
-- **`vg benchmark` now measures memory and throughput** — alongside the
-  existing cold/incremental build times, determinism check, and token
-  estimates, the benchmark reports peak RSS and peak heap sampled across the
-  cold build, the heap retained by the loaded graph, serialized `graph.json`
-  size and bytes-per-node, files/s and MB/s throughput, and the effective
-  resource limits (`VG_MAX_FILE_BYTES` etc.) the run built under — all
-  labelled approximate where GC timing makes them so. The graph artifact
-  itself stays byte-deterministic; only the measurements of producing it vary.
+- **The internal build suite now measures memory and throughput** — alongside
+  the existing cold/incremental build times, determinism check, and token
+  estimates, it reports peak RSS and peak heap sampled across the cold build,
+  the heap retained by the loaded graph, serialized `graph.json` size and
+  bytes-per-node, files/s and MB/s throughput, and the effective resource
+  limits (`VG_MAX_FILE_BYTES` etc.) the run built under — all labelled
+  approximate where GC timing makes them so. The graph artifact itself stays
+  byte-deterministic; only the measurements of producing it vary. This is
+  contributor tooling (`pnpm bench:suite`), not a `vg` subcommand — its
+  figures are comparable before/after on one machine, never a public number.
 - **The code map now keeps itself fresh** — `vg serve` (Vibgrate AI Context)
   and `vg ask` detect files that changed since the last build and rebuild the
   map incrementally before answering, so your AI always queries the code as it

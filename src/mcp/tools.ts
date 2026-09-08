@@ -68,6 +68,18 @@ export interface VgTool {
   description: string;
   inputSchema: Record<string, unknown>;
   handler: (graph: VgGraph, args: Record<string, unknown>, ctx: ToolContext) => unknown | Promise<unknown>;
+  /**
+   * The tool works without a code map (context-compression / memory tools).
+   * The server dispatches these even when no graph is built; `graph` is then an
+   * empty placeholder the handler must not read.
+   */
+  graphless?: boolean;
+  /**
+   * MCP tool annotations. Defaults to `{ readOnlyHint: true, openWorldHint: false }`
+   * — every graph tool is side-effect-free. Tools that write local user-owned
+   * state (a short-TTL store, memory) declare themselves honestly here.
+   */
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean };
 }
 
 /**

@@ -386,7 +386,7 @@ async function offerDeferredWindowsUpdate(cmd: string, assumeYes: boolean): Prom
 }
 
 /**
- * Check the optional local modules (relevance, hcs, haile) against the
+ * Check the optional local modules (relevance, hcs, arch) against the
  * registry and, unless checkOnly, bring the eligible ones to latest. Modules
  * pin to `dist-tags.latest` at first provision and never refresh on their
  * own, so `vg update` is where they catch up. Explicit opt-outs (a recorded

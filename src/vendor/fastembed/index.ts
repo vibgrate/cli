@@ -93,12 +93,46 @@ export async function ensureNativeDeps(): Promise<NativeDeps> {
     importNative('@anush008/tokenizers'),
     importNative('tar'),
   ]);
+  const ort = unwrapCjs(ortMod, 'InferenceSession');
+  quietNativeRuntime(ort);
   nativeDeps = {
-    ort: unwrapCjs(ortMod, 'InferenceSession'),
+    ort,
     tokenizers: unwrapCjs(tokMod, 'Tokenizer'),
     tar: unwrapCjs(tarMod, 'x'),
   };
   return nativeDeps;
+}
+
+/**
+ * Keep onnxruntime's own C++ logger off the user's terminal.
+ *
+ * `onnxruntime-node` creates its native environment on the first
+ * `InferenceSession`, with the severity read from the shared `env.logLevel`
+ * (library default: `warning`). Since onnxruntime 1.22 that environment runs
+ * PCI device discovery at creation, and on hosts whose sysfs PCI paths are
+ * not `bus:slot.func` shaped (Hyper-V / WSL2 / some cloud VMs) it prints a
+ * `[W:onnxruntime:…, device_discovery.cc … GetPciBusId] Skipping pci_bus_id …`
+ * line straight to stderr — a native `fprintf`, not a JS console call, so no
+ * amount of output handling on our side can catch it after the fact. It is
+ * harmless (the CPU provider needs no PCI id) but it lands in the middle of
+ * `vg ask` progress and was recorded verbatim into the website CLI demo.
+ *
+ * Lifting the severity to `error` before the environment exists drops every
+ * warning the runtime would print while still surfacing real failures. Only
+ * the library default is overridden: a host that deliberately set a lower
+ * level (an editor integration debugging the backend) keeps it.
+ */
+export function quietNativeRuntime(ort: { env?: { logLevel?: string } } | null | undefined): void {
+  const env = ort?.env;
+  if (!env || typeof env !== 'object') return;
+  if (env.logLevel === undefined || env.logLevel === 'warning') {
+    try {
+      env.logLevel = 'error';
+    } catch {
+      // A host-supplied build whose env rejects the assignment — nothing to
+      // do; the warning is cosmetic and inference proceeds unaffected.
+    }
+  }
 }
 
 /** The loaded modules — callable only after `ensureNativeDeps()` resolved. */

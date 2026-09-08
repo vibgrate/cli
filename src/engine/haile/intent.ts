@@ -6,6 +6,6 @@
  */
 export function renderIntent(): never {
   throw new Error(
-    'HAILE intent is not shipped in the public CLI. Install the architecture module (`vg module install haile`) or set VIBGRATE_HAILE_PATH.',
+    'HAILE intent is not shipped in the public CLI. Install the Architecture module (`vg module install arch`) or set VIBGRATE_ARCH_PATH.',
   );
 }

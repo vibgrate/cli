@@ -9,13 +9,19 @@ import { runBuild } from './build.js';
 import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode } from '../util/exit.js';
-import { c, info } from '../util/output.js';
+import { c, info, json } from '../util/output.js';
 import { originAllowed } from '../util/origin.js';
 import { printLogo } from '../util/logo.js';
 import { SessionStats, ServeStatusDisplay } from '../mcp/serve-stats.js';
 import { LedgerTail } from '../mcp/ledger-tail.js';
 import { LiveStatsBus, liveStatsDir } from '../mcp/live-stats.js';
 import { savingsLedgerPath } from '../engine/savings.js';
+import { compressionOverrides, registerServeCompression, startCompression } from './serve-compress.js';
+import { registerServeCompressCommand } from './compress.js';
+import { registerServeRetrieve } from './retrieve.js';
+import { registerServeMemory } from './memory.js';
+import { resolveProxyConfig } from '../proxy/config.js';
+import { isWrapAgent, WRAP_AGENTS, wrap } from '../wrap/index.js';
 
 /** How often the opt-in `--share-stats` flusher uploads new ledger entries. */
 const SHARE_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
@@ -36,11 +42,17 @@ const SHARE_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
  * `ensureServableGraph`) so the MCP `initialize` handshake is never delayed by
  * a multi-second rebuild — hosts time out the handshake when serve blocks too
  * long before connecting the transport.
+ *
+ * `--compress` adds context compression to the same process: an Anthropic- and
+ * OpenAI-compatible listener that shrinks bulky tool output before it reaches
+ * the model, plus the compression tools on the MCP side. One local runtime,
+ * two listeners — not a second server (FEATURE-DESIGN-PRINCIPLES P1).
  */
 export function registerServe(program: Command): void {
   const cmd = program
     .command('serve')
     .description('start Vibgrate AI Context — local-first MCP serving your code map, drift & version-correct docs to your AI')
+    .argument('[agent...]', 'with --compress: run this agent through the compression listener for one session, then restore (put its own flags after `--`)')
     .option('--http', 'serve over streamable HTTP instead of stdio')
     .option('--port <n>', 'port for --http', '7437')
     .option('--host <h>', 'host for --http', '127.0.0.1')
@@ -51,9 +63,38 @@ export function registerServe(program: Command): void {
     .option('--no-watch', 'disable the event-driven file watcher — freshness falls back to the periodic poll')
     .option('--surface <mode>', 'tool listing surface: "hot" lists only the navigation core (orient/search_symbols/query_graph/get_node); "full" lists all tools. Every tool stays callable either way. Env: VG_MCP_SURFACE')
     .option('--tools <names>', 'comma-separated tool names to list (listing only — all tools remain callable). Env: VG_MCP_TOOLS')
-    .action(async function (this: Command, opts: { http?: boolean; port?: string; host?: string; savings?: boolean; shareStats?: boolean; dedup?: boolean; refresh?: boolean; watch?: boolean; surface?: string; tools?: string }) {
+    .option('--compress', 'also compress context: an Anthropic/OpenAI-compatible listener for any agent, plus the compression MCP tools. Point an agent at it with `vg install <agent> --compress`')
+    // Not `--no-graph`: the global `--graph <file>` already owns that name, and
+    // commander would read the negation as "unset the map path".
+    .option('--compress-only', 'compression without the code map — do not build or serve one (implies --compress)')
+    .option('--compress-port <n>', 'port for the compression listener (default: VG_PROXY_PORT or 8787)')
+    .option('--compress-mode <mode>', 'cache (prefix-cache safe, default) | token (maximum removal)')
+    .option('--profile <name>', 'compression profile: coding | balanced | aggressive | general')
+    .option('--memory', 'expose cross-agent memory tools (memory_search / memory_save) scoped to this project. Env: VG_MEMORY=1')
+    .action(async function (this: Command, agentArgv: string[], opts: { http?: boolean; port?: string; host?: string; savings?: boolean; shareStats?: boolean; dedup?: boolean; refresh?: boolean; watch?: boolean; surface?: string; tools?: string; compress?: boolean; compressOnly?: boolean; compressPort?: string; compressMode?: string; profile?: string; memory?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
+      // `--compress-only` is the "I just want compression" path: no map is
+      // built, none is required, and the graph tools are not listed. It is the
+      // honest answer for a repo with no map yet, or an agent that only needs
+      // its context shrunk.
+      const compressOnly = opts.compressOnly === true;
+      const compress = opts.compress === true || compressOnly;
+      if (agentArgv.length && !compress) {
+        throw new CliError(
+          `\`vg serve ${agentArgv[0]}\` needs --compress — it runs an agent through the compression listener. Try \`vg serve --compress -- ${agentArgv.join(' ')}\``,
+          ExitCode.USAGE_ERROR,
+        );
+      }
+      // One-shot: `vg serve --compress -- claude …` runs a single agent session
+      // through the compression listener using its own environment, restores
+      // everything when the child exits, and never touches durable config.
+      // (`vg install <agent> --compress` is the durable form.)
+      if (agentArgv.length) {
+        await runAgentOnce(agentArgv, opts, global);
+        return;
+      }
+
       const graphPath = resolveGraphPath(root, global.graph);
       // A custom --graph is an explicit artifact — never rebuild over it.
       const refresh = opts.refresh !== false && !global.graph;
@@ -97,13 +138,24 @@ export function registerServe(program: Command): void {
           surface: (opts.surface ?? process.env.VG_MCP_SURFACE) === 'hot' ? 'hot' : 'full',
           tools: (opts.tools ?? process.env.VG_MCP_TOOLS)?.split(',').map((s) => s.trim()).filter(Boolean),
         },
+        // P2: the compression tools are flag-gated at registration, so a
+        // default `vg serve` never pays their schema tokens. They stay
+        // callable either way — only the listing is gated.
+        compressTools: compress,
+        memory: opts.memory === true || /^(1|true|yes|on)$/i.test(process.env.VG_MEMORY ?? ''),
+        graphless: compressOnly,
       };
+      // No map means nothing to refresh or watch.
+      if (compressOnly) {
+        serveOpts.refresh = false;
+        serveOpts.watch = false;
+      }
 
       // Check the map is up to date and, when it isn't, run the build before we
       // start serving — build a missing map from scratch, rebuild a stale one
       // incrementally. Skipped under `--no-refresh`/`--graph`, which serve the
-      // map exactly as built.
-      await ensureServableGraph(root, graphPath, global, refresh);
+      // map exactly as built, and under `--compress-only`, which has no map.
+      if (!compressOnly) await ensureServableGraph(root, graphPath, global, refresh);
 
       if (opts.shareStats === true && local) {
         info(c.dim('vg · --share-stats ignored under --local (air-gapped): recording locally, not uploading.'));
@@ -131,7 +183,32 @@ export function registerServe(program: Command): void {
       // CLI would leave this dashboard frozen at zero. Interactive-only: if a
       // publisher folded them too, the aggregate would count each call twice.
       if (stats && interactive) new LedgerTail(savingsLedgerPath(root), stats).start();
-      const freshness = refresh ? 'auto-refresh' : 'as built';
+
+      // The compression listener lives in this same process. It binds its own
+      // port so the URL an agent is configured with never depends on whether
+      // MCP happens to be on stdio or HTTP today.
+      if (compress) {
+        const overrides = compressionOverrides(opts);
+        if (global.offline) overrides.offline = true;
+        const cfg = resolveProxyConfig(overrides);
+        const listener = await startCompression(cfg, { stderr: !quiet && !global.json, pinned: Object.keys(overrides) });
+        if (!quiet) {
+          info(
+            listener.attached
+              ? c.dim(`vg · compressing via the listener already running at ${listener.url}`)
+              : `vg · compressing at ${c.bold(listener.url)} ${c.dim(`(${cfg.mode} mode, ${cfg.profile} profile)`)}`,
+          );
+          info(c.dim(`  Anthropic ${listener.url}/v1/messages · OpenAI ${listener.url}/v1/chat/completions · savings ${listener.url}/`));
+          info(c.dim('  point an agent at it with `vg install <agent> --compress`, or run one session with `vg serve --compress -- <agent>`'));
+        }
+        const closeListener = (): void => {
+          void listener.close().then(() => process.exit(0));
+        };
+        process.once('SIGINT', closeListener);
+        process.once('SIGTERM', closeListener);
+      }
+
+      const freshness = compressOnly ? 'no code map' : refresh ? 'auto-refresh' : 'as built';
       if (opts.http) {
         await serveHttp(graphPath, opts.host ?? '127.0.0.1', Number(opts.port) || 7437, serveOpts, freshness, () => display?.start());
       } else {
@@ -144,6 +221,47 @@ export function registerServe(program: Command): void {
       }
     });
   applyGlobalOptions(cmd);
+
+  // Everything that manages the compression half of the runtime nests here
+  // rather than becoming its own verb (FEATURE-DESIGN-PRINCIPLES P1).
+  registerServeCompression(cmd);
+  registerServeCompressCommand(cmd);
+  registerServeRetrieve(cmd);
+  registerServeMemory(cmd);
+}
+
+/**
+ * `vg serve --compress -- <agent> [args…]` — one session, environment only.
+ *
+ * The durable form is `vg install <agent> --compress`, which writes the
+ * agent's own config; this is the "just this run" path, so nothing survives
+ * the child exiting.
+ */
+async function runAgentOnce(
+  argv: string[],
+  opts: { compressPort?: string; profile?: string },
+  global: GlobalOpts,
+): Promise<void> {
+  const [agent, ...args] = argv;
+  if (!isWrapAgent(agent)) {
+    throw new CliError(
+      `cannot run "${agent}" through the compression listener — supported agents: ${WRAP_AGENTS.join(', ')}`,
+      ExitCode.USAGE_ERROR,
+    );
+  }
+  const port = opts.compressPort !== undefined ? Number.parseInt(opts.compressPort, 10) : undefined;
+  if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+    throw new CliError(`--compress-port must be 1..65535, got ${opts.compressPort}`, ExitCode.USAGE_ERROR);
+  }
+  const result = await wrap(agent, {
+    args,
+    port,
+    cwd: global.cwd,
+    profile: opts.profile,
+    quiet: global.quiet || global.json ? true : undefined,
+  });
+  if (global.json) json({ agent, exitCode: result.exitCode, url: result.proxyUrl, applied: result.applied, plan: result.plan });
+  if (result.exitCode !== 0) process.exitCode = result.exitCode;
 }
 
 /**

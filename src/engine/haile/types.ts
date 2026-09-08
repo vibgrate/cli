@@ -1,8 +1,18 @@
-/** HAILE sidecar types. Snake_case on the wire. Frozen for H0–H2. */
+/**
+ * Architecture sidecar types. Snake_case on the wire. Frozen for H0–H2.
+ *
+ * "Haile" is the internal codename of the architecture module; the public
+ * surface is "Architecture" (`vg module install arch`, `graph.arch.json`,
+ * `vg.arch.*` schema ids). The `*_LEGACY` ids are what `@vibgrate/haile`
+ * builds before the rename still stamp; the reader accepts both.
+ */
 
-export const HAILE_MAGIC = 'vg.haile.v1';
-export const HAILE_TAXONOMY = 'haile.taxonomy.v1';
-export const HAILE_IR = 'haile.ir.v1';
+export const HAILE_MAGIC = 'vg.arch.v1';
+export const HAILE_TAXONOMY = 'vg.arch.taxonomy.v1';
+export const HAILE_IR = 'vg.arch.ir.v1';
+export const HAILE_MAGIC_LEGACY = 'vg.haile.v1';
+export const HAILE_TAXONOMY_LEGACY = 'haile.taxonomy.v1';
+export const HAILE_IR_LEGACY = 'haile.ir.v1';
 export const HAILE_ENGINE_VERSION = 'haile-fast/2026.903.5';
 
 export const ROLES = [
@@ -155,7 +165,7 @@ export interface HaileModuleSummary {
 
 export interface HaileSidecar {
   magic: typeof HAILE_MAGIC;
-  taxonomy: typeof HAILE_TAXONOMY;
+  taxonomy: typeof HAILE_TAXONOMY | typeof HAILE_TAXONOMY_LEGACY;
   ir: typeof HAILE_IR;
   corpus_hash: string;
   engine_version: string;

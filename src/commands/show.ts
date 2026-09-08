@@ -9,16 +9,24 @@ import { ambiguityError } from './ambiguity.js';
 import { c, info, json } from '../util/output.js';
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { findHaileSymbol, formatHaileLines, haileJsonFields, readHaileSidecar } from '../engine/haile/index.js';
+import { registerShowChart } from './chart.js';
+import { registerShowSavings } from './show-savings.js';
 
 /**
  * `vg show <name>` (VG-CLI-SPEC §3.3) — the richest single-node view: what it
  * is, its callers and callees and other edges, its area and importance.
- * (Facts + grounding are attached in Phase 2.)
+ * `vg show chart` opens the local interactive map of the same graph;
+ * `vg show savings` opens the local page for what compression saved.
  */
 export function registerShow(program: Command): void {
   const cmd = program
     .command('show')
-    .description('explain a node: what it is, what it calls, what calls it')
+    .description('explain a node: what it is, what it calls, what calls it — or open the code map');
+
+  registerShowChart(cmd);
+  registerShowSavings(cmd);
+
+  cmd
     .argument('<name>', 'qualified name, short name, file:line, glob, or id')
     .option('--pick <n>', 'pick the nth candidate when ambiguous')
     .action(function (this: Command, name: string, opts: { pick?: string }) {
@@ -87,7 +95,7 @@ export function registerShow(program: Command): void {
           calls: callees.map((n) => n.qualifiedName),
           calledBy: callers.map((n) => n.qualifiedName),
           extends: supertypes,
-          haile: haileJsonFields(haile) ?? null,
+          arch: haileJsonFields(haile) ?? null,
         });
         return;
       }

@@ -1,0 +1,7 @@
+{"timestamp":"2026-09-01T13:00:00.000Z","type":"session_meta","payload":{"id":"codex-rollout-1","timestamp":"2026-09-01T13:00:00.000Z","cwd":"/home/user/demo","originator":"codex_cli_rs","cli_version":"0.40.0"}}
+{"timestamp":"2026-09-01T13:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Read the readme"}]}}
+{"timestamp":"2026-09-01T13:00:02.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call_a","arguments":"{\"cmd\":\"cat README.md\"}"}}
+{"timestamp":"2026-09-01T13:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_a","output":"cat: README.md: No such file or directory\nexit code 1"}}
+{"timestamp":"2026-09-01T13:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"read_file","call_id":"call_b","input":"{\"path\":\"/home/user/demo/readme.md\"}"}}
+{"timestamp":"2026-09-01T13:00:05.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_b","output":"# demo\nA small project.\n"}}
+{"timestamp":"2026-09-01T13:00:06.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The readme describes a small project."}]}}

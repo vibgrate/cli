@@ -1,0 +1,14 @@
+{
+  "sessionId": "gemini-session-1",
+  "projectPath": "/home/user/demo",
+  "startTime": "2026-09-01T14:00:00.000Z",
+  "lastUpdated": "2026-09-01T14:05:00.000Z",
+  "messages": [
+    { "role": "user", "timestamp": "2026-09-01T14:00:00.000Z", "parts": [{ "text": "List the source files" }] },
+    { "role": "model", "timestamp": "2026-09-01T14:00:02.000Z", "parts": [{ "functionCall": { "name": "run_shell_command", "args": { "command": "ls src/" } } }], "usageMetadata": { "promptTokenCount": 800, "candidatesTokenCount": 30 } },
+    { "role": "user", "timestamp": "2026-09-01T14:00:03.000Z", "parts": [{ "functionResponse": { "name": "run_shell_command", "response": { "output": "ls: cannot access 'src/': No such file or directory" } } }] },
+    { "role": "model", "timestamp": "2026-09-01T14:00:05.000Z", "parts": [{ "functionCall": { "name": "run_shell_command", "args": { "command": "ls lib/" } } }], "usageMetadata": { "promptTokenCount": 900, "candidatesTokenCount": 30 } },
+    { "role": "user", "timestamp": "2026-09-01T14:00:06.000Z", "parts": [{ "functionResponse": { "name": "run_shell_command", "response": { "output": "index.js\nutil.js" } } }] },
+    { "role": "model", "timestamp": "2026-09-01T14:00:08.000Z", "parts": [{ "text": "The sources live in lib/." }], "usageMetadata": { "promptTokenCount": 1000, "candidatesTokenCount": 12 } }
+  ]
+}

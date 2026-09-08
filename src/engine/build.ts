@@ -468,7 +468,10 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   // delegating one-liner controller still reports the write behind it. Runs
   // on the final edge set, so a call only the tsc / scip rung could resolve
   // (`fetchApi<T>("/cart")`) carries its callee's duties too.
-  bindDutyCandidates(resolved.nodes, edges, resolved.dutyCandidates);
+  // VIBGRATE_HAILE_BIND=0 is the gold gate's bind-off arm (scripts/haile-gold-gate.mjs
+  // --bind-off): candidates are dropped unbound so the gate can show the rung
+  // firing by its absence. Never set in normal use.
+  if (process.env.VIBGRATE_HAILE_BIND !== '0') bindDutyCandidates(resolved.nodes, edges, resolved.dutyCandidates);
   inheritDuties(resolved.nodes, edges);
   // Test linkage copies the nodes, so the duties have to be in place first.
   // Test-awareness: static test→code linkage, then runtime coverage if present.

@@ -9,7 +9,8 @@ import { mapFileStat } from '../engine/snapshot.js';
 import { loadGraphPreferIndex } from '../engine/index-db.js';
 import type { RefreshOutcome, refreshIfStale } from '../engine/refresh.js';
 import { RefreshScheduler, REFRESH_BUDGET_MS as SCHEDULER_BUDGET_MS } from '../engine/refresh-scheduler.js';
-import { TOOLS, budgetSuffix, listedToolNames, warmEmbedderInBackground, type ToolSurface } from './tools.js';
+import { TOOLS, budgetSuffix, listedToolNames, warmEmbedderInBackground, type ToolSurface, type VgTool } from './tools.js';
+import { COMPRESS_TOOLS, memoryVgTools } from './compress-tools.js';
 import { isRelevantChange } from '../engine/watch-filter.js';
 import { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import { renderToolResult } from './response.js';
@@ -111,7 +112,39 @@ export interface ServeOptions {
    * byte-identical across surfaces. See `listedToolNames` in ./tools.ts.
    */
   toolSurface?: ToolSurface;
+  /**
+   * Context-compression tools (`compress_content`, `retrieve_original`,
+   * `compression_stats`). Off unless `vg serve --compress` asked for
+   * compression: they need no code map, but every listed schema is billed on
+   * every agent step, so the default surface must not carry them (P2).
+   */
+  compressTools?: boolean;
+  /** Cross-agent memory tools (`memory_search`, `memory_save`) — opt-in (`--memory` / `VG_MEMORY=1`). */
+  memory?: boolean;
+  /**
+   * `vg serve --compress-only`: there is no code map, so list only the tools
+   * that answer without one. The graph tools stay dispatchable and return the
+   * usual "run `vg` to build a map" error if something calls them anyway.
+   */
+  graphless?: boolean;
 }
+
+/**
+ * The tools that ride alongside the code-map tools, both flag-gated at
+ * registration (FEATURE-DESIGN-PRINCIPLES P2 — every listed schema is a
+ * per-step token tax on every user, so a default `vg serve` must not pay for a
+ * capability it was not asked for): compression under `vg serve --compress`,
+ * memory under `--memory`.
+ */
+export function extraToolsFor(opts: ServeOptions, root: string): VgTool[] {
+  return [
+    ...(opts.compressTools === true ? COMPRESS_TOOLS : []),
+    ...(opts.memory ? memoryVgTools(root) : []),
+  ];
+}
+
+/** Placeholder handed to graph-less tools; they never read it. */
+const NO_GRAPH = { nodes: [], edges: [] } as unknown as VgGraph;
 
 export class GraphSource {
   private cachedMtimeMs = -1;
@@ -347,6 +380,14 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
   // (blake3 of content), so an edited node gets a new id and is never falsely
   // treated as already-seen — dedup is stale-safe by construction.
   const seen = new Set<string>();
+  // Graph-less tools ride alongside the code-map tools, both flag-gated at
+  // registration (FEATURE-DESIGN-PRINCIPLES P2 — every listed schema is a
+  // per-step token tax on every user, so a default `vg serve` must not pay for
+  // a capability it was not asked for): compression under `--compress`, memory
+  // under `--memory`. Dispatch resolves against the whole set; listing then
+  // follows the surface rules (hidden under `--surface hot` unless named).
+  const extraTools = extraToolsFor(opts, root);
+  const allTools: VgTool[] = [...TOOLS, ...extraTools];
   const server = new Server(
     { name: 'vg', version: VERSION },
     {
@@ -379,7 +420,13 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const listed = new Set(listedToolNames(opts.toolSurface));
+    // With no map, advertising the graph tools would be a lie that costs schema
+    // tokens on every step and fails on every call.
+    const listed = new Set(opts.graphless ? [] : listedToolNames(opts.toolSurface));
+    const explicit = (opts.toolSurface?.tools ?? []).map((t) => t.trim()).filter(Boolean);
+    for (const t of extraTools) {
+      if (explicit.length ? explicit.includes(t.name) : opts.toolSurface?.surface !== 'hot') listed.add(t.name);
+    }
     // Repo-size call budget on orient's listed description: the stop-discipline
     // where the model decides, priced once per list, not per step. Best-effort —
     // when no map is loadable yet the description ships without the line.
@@ -391,27 +438,32 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
       /* no map yet — plain description */
     }
     return {
-      tools: TOOLS.filter((t) => listed.has(t.name)).map((t) => ({
+      tools: allTools.filter((t) => listed.has(t.name)).map((t) => ({
         name: t.name,
         description: t.name === 'orient' && budget ? `${t.description}${budget}` : t.description,
         inputSchema: t.inputSchema,
-        annotations: { readOnlyHint: true, openWorldHint: false },
+        annotations: { readOnlyHint: true, openWorldHint: false, ...(t.annotations ?? {}) },
       })),
     };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const tool = TOOLS.find((t) => t.name === request.params.name);
+    const tool = allTools.find((t) => t.name === request.params.name);
     if (!tool) {
       return errorResult(`unknown tool "${request.params.name}"`);
     }
     let graph: VgGraph;
-    try {
-      graph = await source.get();
-    } catch {
-      return errorResult(
-        'no code map found. Run `vg` in the project to build .vibgrate/graph.json, then retry.',
-      );
+    if (tool.graphless) {
+      // Compression / memory tools answer with or without a map.
+      graph = NO_GRAPH;
+    } else {
+      try {
+        graph = await source.get();
+      } catch {
+        return errorResult(
+          'no code map found. Run `vg` in the project to build .vibgrate/graph.json, then retry.',
+        );
+      }
     }
     const startedAt = Date.now();
     try {
