@@ -26,7 +26,7 @@ import {
 } from './module-core.js';
 import { RELEVANCE_MODULE_NAME, installRelevanceModule, moduleInstalled } from './relevance-module.js';
 import { HCS_MODULE_NAME, hcsModuleInstalled, installHcsModule } from './hcs-module.js';
-import { ARCH_MODULE_ID, ARCH_MODULE_LEGACY_ID, HAILE_MODULE_NAME, haileModuleInstalled, installHaileModule } from './haile-module.js';
+import { ARCH_MODULE_ID, HAILE_MODULE_NAME, archConsent, haileModuleInstalled, installHaileModule } from './haile-module.js';
 
 export interface ModuleUpdateReport {
   /** Consent/registry id (`relevance`, `hcs`, `arch`). */
@@ -51,9 +51,9 @@ export interface ModuleUpdateReport {
 
 interface ManagedModuleRef {
   id: string;
-  /** Older consent key still honoured for this module (the codename before a public rename). */
-  legacyId?: string;
   npmName: string;
+  /** Consent read for this module; defaults to the consent file entry under `id`. */
+  consent?(): 'granted' | 'denied' | undefined;
   installedNow(): { installed: boolean; version?: string };
   install(opts: InstallOptions): Promise<InstallResult>;
   /** ON-by-default modules are installed by `vg update` even when absent. */
@@ -63,7 +63,7 @@ interface ManagedModuleRef {
 const MODULES: ManagedModuleRef[] = [
   { id: 'relevance', npmName: RELEVANCE_MODULE_NAME, installedNow: moduleInstalled, install: installRelevanceModule, defaultOn: true },
   { id: 'hcs', npmName: HCS_MODULE_NAME, installedNow: hcsModuleInstalled, install: installHcsModule, defaultOn: false },
-  { id: ARCH_MODULE_ID, legacyId: ARCH_MODULE_LEGACY_ID, npmName: HAILE_MODULE_NAME, installedNow: haileModuleInstalled, install: installHaileModule, defaultOn: true },
+  { id: ARCH_MODULE_ID, consent: archConsent, npmName: HAILE_MODULE_NAME, installedNow: haileModuleInstalled, install: installHaileModule, defaultOn: true },
 ];
 
 /** True when `candidate` is a strictly newer version than `installed`. */
@@ -89,8 +89,7 @@ export async function updateLocalModules(
         reports.push({ ...base, status: 'disabled' });
         continue;
       }
-      const consent = readConsent();
-      if ((consent[mod.id] ?? (mod.legacyId ? consent[mod.legacyId] : undefined)) === 'denied') {
+      if ((mod.consent ? mod.consent() : readConsent()[mod.id]) === 'denied') {
         reports.push({ ...base, status: 'declined' });
         continue;
       }

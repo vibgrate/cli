@@ -12,9 +12,7 @@ import {
   HAILE_ENGINE_VERSION,
   HAILE_IR,
   HAILE_MAGIC,
-  HAILE_MAGIC_LEGACY,
   HAILE_TAXONOMY,
-  HAILE_TAXONOMY_LEGACY,
   type HailePolicy,
 } from './types.js';
 import { architecturePolicyFor } from './policy-config.js';
@@ -30,13 +28,13 @@ export function haileSidecarPathFor(graphPath: string): string {
   return sidecarPathWithSuffix(graphPath, '.arch.json');
 }
 
-/** `graph.haile.json` — the pre-rename name. Read for one release, never written. */
-export function legacyHaileSidecarPathFor(graphPath: string): string {
+/** Stale pre-rename sidecar (`graph.haile.json`) — removed on rebuild, never read or written. */
+function stalePreRenameSidecarPathFor(graphPath: string): string {
   return sidecarPathWithSuffix(graphPath, '.haile.json');
 }
 
 export function deleteHaileSidecarFor(graphPath: string): void {
-  for (const file of [haileSidecarPathFor(graphPath), legacyHaileSidecarPathFor(graphPath)]) {
+  for (const file of [haileSidecarPathFor(graphPath), stalePreRenameSidecarPathFor(graphPath)]) {
     try {
       fs.rmSync(file, { force: true });
     } catch {
@@ -45,7 +43,7 @@ export function deleteHaileSidecarFor(graphPath: string): void {
   }
 }
 
-/** Installed module entry: VIBGRATE_ARCH_PATH (or the legacy VIBGRATE_HAILE_PATH) or the modules cache. */
+/** Installed module entry: VIBGRATE_ARCH_PATH or the modules cache. */
 function resolveHaileModuleEntry(): string | null {
   if (kernelDisabled()) return null;
   const custom = haileModulePathOverride();
@@ -125,15 +123,11 @@ export function readHaileSidecar(
   expect?: { corpusHash?: string; engineVersion?: string },
 ): HaileSidecar | null {
   try {
-    let file = haileSidecarPathFor(graphPath);
-    if (!fs.existsSync(file)) {
-      // A graph classified before the rename; the next build replaces it.
-      file = legacyHaileSidecarPathFor(graphPath);
-      if (!fs.existsSync(file)) return null;
-    }
+    const file = haileSidecarPathFor(graphPath);
+    if (!fs.existsSync(file)) return null;
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as HaileSidecar;
-    if (parsed.magic !== HAILE_MAGIC && parsed.magic !== HAILE_MAGIC_LEGACY) return null;
-    if (parsed.taxonomy !== HAILE_TAXONOMY && parsed.taxonomy !== HAILE_TAXONOMY_LEGACY) return null;
+    if (parsed.magic !== HAILE_MAGIC) return null;
+    if (parsed.taxonomy !== HAILE_TAXONOMY) return null;
     if (expect?.corpusHash && parsed.corpus_hash !== expect.corpusHash) return null;
     if (expect?.engineVersion && parsed.engine_version !== expect.engineVersion) return null;
     if (!Array.isArray(parsed.symbols)) return null;

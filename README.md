@@ -598,6 +598,7 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | `vg serve` | Start **Vibgrate AI Context** (local-first MCP: code map + drift + version-correct docs) |
 | `vg share` | Make the graph committable + auto-updating for your team |
 | `vg show <file>` | Explain a node: what it is, what it calls, what calls it |
+| `vg show arch` | Open a local, interactive architecture map of the code graph — by job, by cluster, who calls whom, missing steps, rule breaks (loopback; `--focus <symbol>`, `--no-open`) |
 | `vg status` | Cache/freshness, counts, staleness |
 | `vg tests <file>` | Which tests cover a node |
 | `vg tree <file>` | Call tree rooted at a node |
@@ -619,7 +620,7 @@ Compression adds no new command. It is a mode of `vg serve`, a flag on
 | `vg install <agent> --learn` | Turn your past agent sessions into guardrails in its instructions file: repeated failures, loops, missing context (`--apply` writes) |
 | `vg savings` | Tokens and dollars saved, today / 7 days / 30 days, by model, client and project |
 | `vg savings --benchmark` | Offline compression benchmark on built-in fixtures: latency and ratio per content type |
-| `vg show savings` | Open the same numbers as a local page, live, next to `vg show chart` |
+| `vg show savings` | Open the same numbers as a local page, live, next to `vg show arch` |
 | `vg serve status` / `vg serve stop` | What is listening and which agents are routed; stop a background listener |
 | `vg serve config` | Every `VG_*` knob and where its value came from; `set` / `unset` write `settings.json` |
 | `vg serve memory` | Cross-agent project memory: `list`, `search`, `add`, `delete`, `stats`, `export`, `import` |

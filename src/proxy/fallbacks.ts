@@ -578,9 +578,17 @@ export function fallbackDeps(overrides: Partial<ProxyDeps> = {}): ProxyDeps {
 
 type AnyModule = Record<string, unknown>;
 
-async function tryImport(spec: string): Promise<AnyModule | null> {
+/**
+ * Each optional layer is loaded through a *literal* `import('…')` so the
+ * bundler can see it and emit the chunk. A dynamic import whose specifier is
+ * a runtime string is invisible to esbuild/tsup: the published `dist/` then has no
+ * `compress/pipeline.js` to resolve, every layer lands in `missing`, and the
+ * shipped listener silently forwards requests untouched (0% saved) while the
+ * same code from source compresses. Keep the thunk shape.
+ */
+async function tryImport(load: () => Promise<unknown>): Promise<AnyModule | null> {
   try {
-    return (await import(/* @vite-ignore */ spec)) as AnyModule;
+    return (await load()) as AnyModule;
   } catch {
     return null;
   }
@@ -598,22 +606,22 @@ export async function loadDefaultDeps(opts: { env?: NodeJS.ProcessEnv; memory?: 
   const over: Partial<ProxyDeps> = {};
   if (opts.now) over.now = opts.now;
 
-  const pipeline = await tryImport('../compress/pipeline.js');
+  const pipeline = await tryImport(() => import('../compress/pipeline.js'));
   if (pipeline && typeof pipeline.compressMessages === 'function') {
     const fn = pipeline.compressMessages as (m: Message[], o?: CompressOptions, d?: unknown) => Promise<CompressResult>;
     over.compressMessages = (m, o) => fn(m, o, { env, now: over.now });
     bound.push('pipeline');
   } else missing.push('pipeline');
 
-  const store = await tryImport('../compress/ccr/store.js');
+  const store = await tryImport(() => import('../compress/ccr/store.js'));
   if (store && typeof store.defaultStore === 'function') {
     over.store = (store.defaultStore as (e?: NodeJS.ProcessEnv) => StoreLike)(env);
     bound.push('ccr-store');
   } else missing.push('ccr-store');
 
-  const tool = await tryImport('../compress/ccr/tool.js');
-  const handler = await tryImport('../compress/ccr/handler.js');
-  const markers = await tryImport('../compress/ccr/markers.js');
+  const tool = await tryImport(() => import('../compress/ccr/tool.js'));
+  const handler = await tryImport(() => import('../compress/ccr/handler.js'));
+  const markers = await tryImport(() => import('../compress/ccr/markers.js'));
   if (tool && handler && typeof tool.retrieveToolAnthropic === 'function' && typeof handler.executeRetrieve === 'function') {
     over.retrieveToolName = String(tool.RETRIEVE_TOOL_NAME ?? RETRIEVE_TOOL_NAME_FALLBACK);
     over.retrieveTool = (format) =>
@@ -637,7 +645,7 @@ export async function loadDefaultDeps(opts: { env?: NodeJS.ProcessEnv; memory?: 
     bound.push('ccr-markers');
   } else missing.push('ccr-markers');
 
-  const streaming = await tryImport('../compress/ccr/streaming.js');
+  const streaming = await tryImport(() => import('../compress/ccr/streaming.js'));
   if (streaming && typeof streaming.reconstructAnthropicResponse === 'function') {
     over.reconstructAnthropic = streaming.reconstructAnthropicResponse as ProxyDeps['reconstructAnthropic'];
     over.reconstructOpenAIChat = streaming.reconstructOpenAIChatResponse as ProxyDeps['reconstructOpenAIChat'];
@@ -645,7 +653,7 @@ export async function loadDefaultDeps(opts: { env?: NodeJS.ProcessEnv; memory?: 
     bound.push('ccr-streaming');
   } else missing.push('ccr-streaming');
 
-  const ledger = await tryImport('../compress/ledger.js');
+  const ledger = await tryImport(() => import('../compress/ledger.js'));
   if (ledger && typeof ledger.appendSavingsEvent === 'function') {
     over.appendSavingsEvent = ledger.appendSavingsEvent as ProxyDeps['appendSavingsEvent'];
     over.readSavingsEvents = ledger.readSavingsEvents as ProxyDeps['readSavingsEvents'];
@@ -653,20 +661,20 @@ export async function loadDefaultDeps(opts: { env?: NodeJS.ProcessEnv; memory?: 
     bound.push('ledger');
   } else missing.push('ledger');
 
-  const tokenizers = await tryImport('../compress/tokenizers.js');
+  const tokenizers = await tryImport(() => import('../compress/tokenizers.js'));
   if (tokenizers && typeof tokenizers.tokenizerFor === 'function') {
     over.tokenizerFor = tokenizers.tokenizerFor as ProxyDeps['tokenizerFor'];
     bound.push('tokenizers');
   } else missing.push('tokenizers');
 
-  const pricing = await tryImport('../compress/pricing.js');
+  const pricing = await tryImport(() => import('../compress/pricing.js'));
   if (pricing && typeof pricing.costUsd === 'function') {
     over.priceFor = pricing.priceFor as ProxyDeps['priceFor'];
     over.costUsd = pricing.costUsd as ProxyDeps['costUsd'];
     bound.push('pricing');
   } else missing.push('pricing');
 
-  const router = await tryImport('../compress/router.js');
+  const router = await tryImport(() => import('../compress/router.js'));
   if (router && typeof router.warmRouter === 'function') {
     over.warmRouter = router.warmRouter as () => Promise<void>;
     if (typeof router.createRouter === 'function') {
@@ -684,7 +692,7 @@ export async function loadDefaultDeps(opts: { env?: NodeJS.ProcessEnv; memory?: 
   } else missing.push('router');
 
   if (opts.memory) {
-    const memory = await tryImport('../memory/index.js');
+    const memory = await tryImport(() => import('../memory/index.js'));
     if (memory && typeof memory.MemoryStore === 'function' && typeof memory.buildMemoryInjection === 'function') {
       const Store = memory.MemoryStore as new (o: Record<string, unknown>) => { search(q: string, o?: Record<string, unknown>): Array<{ memory: unknown; score: number }> };
       const ms = new Store({ projectRoot: opts.projectRoot, env, now: over.now });

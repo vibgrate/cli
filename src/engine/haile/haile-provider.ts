@@ -5,7 +5,7 @@
  * the modules cache and sanitises every result at its own trust boundary.
  *
  *   - VIBGRATE_NO_KERNEL=1 disables the seam.
- *   - VIBGRATE_ARCH_PATH (legacy alias: VIBGRATE_HAILE_PATH) points at a provider module (file, or a directory
+ *   - VIBGRATE_ARCH_PATH points at a provider module (file, or a directory
  *     containing index.js).
  *   - Otherwise `$VIBGRATE_MODULE_DIR|~/.cache/vibgrate/modules/haile/index.js`.
  *
@@ -66,12 +66,9 @@ export function haileModuleDir(): string {
   return path.join(modulesBaseDir(), 'haile');
 }
 
-/**
- * Explicit module location from the environment. `VIBGRATE_ARCH_PATH` is the
- * public name; `VIBGRATE_HAILE_PATH` is honoured as the pre-rename alias.
- */
+/** Explicit module location from the environment (`VIBGRATE_ARCH_PATH`). */
 export function haileModulePathOverride(): string | undefined {
-  const v = process.env.VIBGRATE_ARCH_PATH?.trim() || process.env.VIBGRATE_HAILE_PATH?.trim();
+  const v = process.env.VIBGRATE_ARCH_PATH?.trim();
   return v || undefined;
 }
 

@@ -11,7 +11,7 @@ import { pidAlive, probeProxy, readProxyState } from '../proxy/lifecycle.js';
  * dollars saved, and the effective settings.
  *
  * Not a new top-level verb (FEATURE-DESIGN-PRINCIPLES P1), and not a second
- * "dashboard": `vg show chart` is the browser view of the code graph, this is
+ * "dashboard": `vg show arch` is the browser view of the code graph, this is
  * the browser view of what `vg savings` reports in the terminal. Opening uses
  * the platform opener only when asked; nothing is launched implicitly.
  */

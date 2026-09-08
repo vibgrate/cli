@@ -16,7 +16,6 @@ import {
 } from '../install/hcs-module.js';
 import {
   ARCH_MODULE_ID,
-  ARCH_MODULE_LEGACY_ID,
   HAILE_DISCLOSURE,
   HAILE_MODULE_NAME,
   archConsent,
@@ -86,14 +85,6 @@ const MODULES: Record<string, ManagedModule> = {
 
 const SUPPORTED = Object.keys(MODULES).join(', ');
 
-/** Older module names still accepted on the command line (never listed in help). */
-const MODULE_ALIASES: Record<string, string> = { [ARCH_MODULE_LEGACY_ID]: ARCH_MODULE_ID };
-
-/** The public id for a module name typed by the user, resolving pre-rename aliases. */
-export function canonicalModuleName(name: string): string {
-  return MODULE_ALIASES[name] ?? name;
-}
-
 export function registerModule(program: Command): void {
   const cmd = program.command('module').description(`manage optional local modules (${SUPPORTED})`);
 
@@ -103,9 +94,8 @@ export function registerModule(program: Command): void {
     .argument('<name>', `module name (supported: ${SUPPORTED})`)
     .option('--yes', 'skip the confirmation prompt')
     .option('--force', 'reinstall even when already present')
-    .action(async function (this: Command, typed: string, opts: { yes?: boolean; force?: boolean }) {
+    .action(async function (this: Command, name: string, opts: { yes?: boolean; force?: boolean }) {
       const global = readGlobal(this);
-      const name = canonicalModuleName(typed);
       const mod = requireModule(name);
       if (kernelDisabled()) {
         throw new CliError(`VIBGRATE_NO_KERNEL is set — unset it to install the ${name} module`, ExitCode.USAGE_ERROR);
@@ -135,7 +125,7 @@ export function registerModule(program: Command): void {
     .description('remove an installed module')
     .argument('<name>', `module name (supported: ${SUPPORTED})`)
     .action(async function (this: Command, name: string) {
-      requireModule(canonicalModuleName(name)).remove();
+      requireModule(name).remove();
       out('removed');
     });
 

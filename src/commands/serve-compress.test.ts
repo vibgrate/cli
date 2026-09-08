@@ -65,7 +65,7 @@ describe('vg serve — the compression half', () => {
   });
 
   it('adds nothing to the everyday surface', () => {
-    // Same guard as `vg show chart`: the capability must not reappear as a
+    // Same guard as `vg show arch`: the capability must not reappear as a
     // top-level verb, and the verbs it hangs off must still be there.
     for (const verb of ['proxy', 'wrap', 'unwrap', 'dashboard', 'perf', 'compress', 'retrieve', 'memory', 'learn']) {
       expect(KNOWN_COMMANDS.has(verb), verb).toBe(false);

@@ -1,5 +1,5 @@
 /**
- * Local loopback server for `vg show chart`.
+ * Local loopback server for `vg show arch`.
  *
  * Serves the map page plus JSON that matches `vg show --json` for a node.
  * Never binds a public interface unless the operator passes --host.
