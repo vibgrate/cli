@@ -1,5 +1,5 @@
 /**
- * Generic installer for optional local modules (relevance, hcs, haile, …).
+ * Generic installer for optional local modules (relevance, hcs, arch, …).
  *
  * A module is a separately licensed, separately distributed local package that
  * the CLI loads through a provider seam. This core manages the shared

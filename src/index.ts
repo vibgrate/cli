@@ -143,3 +143,20 @@ export { buildCodeContext } from './code/context.js';
 export type { BuildContextOptions } from './code/context.js';
 export { searchSymbols } from './engine/search.js';
 export type { SearchResult, SymbolHit, TextHit } from './engine/search.js';
+
+// Context compression — the same pipeline `vg serve --compress` runs, as a
+// library: `compress(messages, options)`, `withCompression(client)` for the
+// Anthropic / OpenAI SDK client shapes, `compressionMiddleware()` for the
+// Vercel AI SDK, `CompressionStore`, `CompressionSession`, `SharedContext`,
+// `ContentRouter` and every compressor, the savings ledger, tokenizers, the
+// model registry and pricing. Offline and deterministic; nothing here touches
+// the network.
+export * from './compress/index.js';
+// The surrounding subsystems keep their own namespaces (a few helper names —
+// `analyze`, `cosine`, `resolveProject` — would otherwise collide with the
+// graph API above): `memory.MemoryStore`, `learn.scanSessions`,
+// `wrap.wrap(...)`, `proxy.startProxy(...)`.
+export * as memory from './memory/index.js';
+export * as learn from './learn/index.js';
+export * as wrap from './wrap/index.js';
+export * as proxy from './proxy/index.js';

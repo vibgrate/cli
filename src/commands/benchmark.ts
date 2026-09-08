@@ -8,10 +8,14 @@ import type { VgGraph } from '../schema.js';
 
 /**
  * Internal build/memory/token suite for unit tests and release tooling.
- * Not registered as a public `vg` subcommand.
+ * Not registered as a public `vg` subcommand — the everyday CLI surface is a
+ * budget, and this is contributor tooling. Run it via the bench harness:
+ *
+ *   pnpm --filter @vibgrate/cli-public bench:suite [-- --root <dir>] [-- --json]
  *
  * Timings and memory figures are environment-dependent (the graph artifact
- * stays deterministic; the measurements of producing it are not).
+ * stays deterministic; the measurements of producing it are not), so they are
+ * comparable before/after on one machine and are never a public number.
  */
 const PIN = '2020-01-01T00:00:00.000Z';
 

@@ -711,7 +711,7 @@ export const scanCommand = new Command('scan')
       const hardOnly = opts.failOn === 'architecture-finding';
       const gate = architectureFindings(rootDir, hardOnly);
       if (gate === null) {
-        console.error(chalk.red('\n--fail-on architecture-finding: the architecture module did not classify this map (install it with `vg module install haile`).'));
+        console.error(chalk.red('\n--fail-on architecture-finding: the architecture module did not classify this map (install it with `vg module install arch`).'));
         process.exit(2);
       }
       const { policy, rows } = gate;

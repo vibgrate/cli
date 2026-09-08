@@ -74,8 +74,8 @@ describe('updateLocalModules (vg update)', () => {
     const r = byId(await updateLocalModules({ fetchImpl: registryFetch('1.1.0', gz) }));
     expect(r.relevance).toMatchObject({ status: 'updated', from: '1.0.0', to: '1.1.0' });
     expect(moduleInstalled()).toMatchObject({ installed: true, version: '1.1.0' });
-    // haile is ON by default → installed even though it was absent.
-    expect(r.haile).toMatchObject({ status: 'installed', to: '1.1.0' });
+    // arch is ON by default → installed even though it was absent.
+    expect(r.arch).toMatchObject({ status: 'installed', to: '1.1.0' });
     expect(haileModuleInstalled().installed).toBe(true);
     // hcs provisions on use, not on update.
     expect(r.hcs).toMatchObject({ status: 'not-installed' });
@@ -94,7 +94,7 @@ describe('updateLocalModules (vg update)', () => {
     await installRelevanceModule({ fetchImpl: registryFetch('1.0.0', gz) });
     const r = byId(await updateLocalModules({ fetchImpl: registryFetch('1.1.0', gz), checkOnly: true }));
     expect(r.relevance).toMatchObject({ status: 'update-available', from: '1.0.0', to: '1.1.0' });
-    expect(r.haile).toMatchObject({ status: 'install-available', to: '1.1.0' });
+    expect(r.arch).toMatchObject({ status: 'install-available', to: '1.1.0' });
     expect(moduleInstalled().version).toBe('1.0.0');
     expect(haileModuleInstalled().installed).toBe(false);
   });
@@ -104,9 +104,10 @@ describe('updateLocalModules (vg update)', () => {
     expect((await updateLocalModules({ fetchImpl: failingFetch })).every((r) => r.status === 'disabled')).toBe(true);
     delete process.env.VIBGRATE_NO_KERNEL;
 
+    // Denial recorded under the pre-rename consent key still declines the public id.
     writeConsent({ ...readConsent(), haile: 'denied' });
     const r = byId(await updateLocalModules({ fetchImpl: failingFetch }));
-    expect(r.haile.status).toBe('declined');
+    expect(r.arch.status).toBe('declined');
     // relevance is default-on but the registry is down → failed, not thrown.
     expect(r.relevance.status).toBe('failed');
   });

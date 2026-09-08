@@ -1,0 +1,1 @@
+{ "id": "msg-2", "sessionID": "ses-1", "role": "assistant", "time": { "created": 1788278410000, "completed": 1788278430000 }, "tokens": { "input": 700, "output": 40 } }

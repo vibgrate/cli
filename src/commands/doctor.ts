@@ -21,6 +21,12 @@ import { VERSION } from '../version.js';
 import { c, info, json } from '../util/output.js';
 import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.js';
 import { rootOf } from './util.js';
+import { proxyDiagnostics, type ProxyDiagnosis } from '../proxy/index.js';
+import { wrapDiagnostics, type WrapDiagnostic } from '../wrap/index.js';
+import { memoryDiagnostics, type MemoryDiagnostics } from '../memory/index.js';
+import { activeProfile, env as knobEnv, validateEnv } from '../compress/config.js';
+import { defaultStore, type StoreStats } from '../compress/ccr/store.js';
+import { contextDir } from '../compress/paths.js';
 
 /**
  * `vg doctor` — one read-only diagnostic pass over everything a support thread
@@ -74,6 +80,59 @@ interface Diagnosis {
   telemetry: { optOut: string | null; ci: boolean; endpoint: string };
   /** Approach B local inference snapshot (P4). */
   localInference: LocalInferenceStatus;
+  /** Context compression: proxy, retrievable store, memory, wrapped agents, knob validation. */
+  compression: CompressionDiagnosis;
+}
+
+interface CompressionDiagnosis {
+  contextDir: string;
+  profile: string;
+  mode: string;
+  proxy: ProxyDiagnosis[];
+  store: StoreStats | null;
+  memory: MemoryDiagnostics | null;
+  wrap: WrapDiagnostic[];
+  /** `VG_*` values that fail validation (never the values themselves). */
+  problems: string[];
+}
+
+/** Everything about context compression, gathered without changing anything. Never throws. */
+async function diagnoseCompression(root: string, local: boolean): Promise<CompressionDiagnosis> {
+  const env = process.env;
+  let proxy: ProxyDiagnosis[] = [];
+  try {
+    proxy = await proxyDiagnostics(env, { probe: !local });
+  } catch (err) {
+    proxy = [{ name: 'proxy', status: 'warn', summary: `diagnostics failed: ${(err as Error).message}` }];
+  }
+  let store: StoreStats | null = null;
+  try {
+    store = defaultStore(env).stats();
+  } catch {
+    store = null;
+  }
+  let memory: MemoryDiagnostics | null = null;
+  try {
+    memory = memoryDiagnostics(env, { cwd: root });
+  } catch {
+    memory = null;
+  }
+  let wrap: WrapDiagnostic[] = [];
+  try {
+    wrap = wrapDiagnostics(env, { cwd: root });
+  } catch {
+    wrap = [];
+  }
+  return {
+    contextDir: contextDir(env),
+    profile: activeProfile(undefined, env).name,
+    mode: knobEnv.enum<string>('VG_COMPRESS_MODE', env),
+    proxy,
+    store,
+    memory,
+    wrap,
+    problems: validateEnv(env),
+  };
 }
 
 async function runDoctor(global: GlobalOpts): Promise<void> {
@@ -105,6 +164,7 @@ async function runDoctor(global: GlobalOpts): Promise<void> {
     system: sys,
     repo: graph ? { fileCount: graph.nodes?.length ?? 0 } : undefined,
   });
+  const compression = await diagnoseCompression(root, local);
 
   const d: Diagnosis = {
     version: VERSION,
@@ -128,6 +188,7 @@ async function runDoctor(global: GlobalOpts): Promise<void> {
     mcpLaunch: { command: launch.command, args: launch.args, note: launch.note ?? null },
     telemetry: { optOut, ci: isCI(), endpoint: statsEndpoint() },
     localInference,
+    compression,
   };
 
   if (global.json) {
@@ -220,6 +281,36 @@ async function runDoctor(global: GlobalOpts): Promise<void> {
     info(c.dim(`  hint       ${h}`));
   }
   info(c.dim('  tip        `vg models mode --apply-recommend` pins the recommended Code Mode'));
+
+  printCompression(d.compression);
+}
+
+function printCompression(x: CompressionDiagnosis): void {
+  const paint = (status: string, text: string): string =>
+    status === 'ok' || status === 'pass' ? c.green(text) : status === 'fail' ? c.red(text) : status === 'warn' ? c.yellow(text) : c.dim(text);
+  info('');
+  info(`  compress   profile ${c.bold(x.profile)} · mode ${c.bold(x.mode)} ${c.dim(`· state in ${x.contextDir}`)}`);
+  for (const p of x.proxy) {
+    info(`  ${p.name.padEnd(10)} ${paint(p.status, p.summary)}${p.hint ? c.dim(` — ${p.hint}`) : ''}`);
+  }
+  if (x.store) {
+    info(
+      `  store      ${x.store.entries} retrievable entr${x.store.entries === 1 ? 'y' : 'ies'} ${c.dim(`· ${x.store.backend} · ttl ${x.store.ttlSeconds}s · cap ${x.store.maxEntries}`)}` +
+        (x.store.redacted ? c.dim(` · ${x.store.redacted} redacted at ingest`) : ''),
+    );
+  }
+  if (x.memory) {
+    const m = x.memory;
+    info(
+      `  memory     ${m.enabled ? c.green('on') : c.dim('off')} · ${m.counts.total} memor${m.counts.total === 1 ? 'y' : 'ies'} ${c.dim(`(project ${m.counts.project} · user ${m.counts.user} · global ${m.counts.global})`)} · project ${m.project.resolved ? c.green(m.project.key) : c.dim('none (not a git checkout — nothing injected)')}`,
+    );
+    for (const p of m.problems.slice(0, 3)) info(c.yellow(`             ${p}`));
+  }
+  for (const w of x.wrap) {
+    info(`  ${w.name.padEnd(10)} ${paint(w.status, w.summary)}${w.hint ? c.dim(` — ${w.hint}`) : ''}`);
+  }
+  for (const p of x.problems) info(`  config     ${c.yellow(p)}`);
+  if (!x.proxy.some((p) => p.status === 'ok')) info(c.dim('  tip        `vg serve --compress` starts the listener; `vg install <agent> --compress` points an agent at it; `vg savings` shows what it saved'));
 }
 
 function diagnoseCredentials(root: string): Diagnosis['credentials'] {

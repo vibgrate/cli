@@ -1,5 +1,7 @@
 import { Command } from 'commander';
 import { clearSavings, readSavings, readUsage, readModelSavings, type UsageReport, type ModelSaving } from '../engine/savings.js';
+import { readSavingsEvents, rollupSavings, resetSavings, type SavingsRollup } from '../compress/ledger.js';
+import { defaultStore, type StoreStats } from '../compress/ccr/store.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { c, info, json } from '../util/output.js';
@@ -8,17 +10,60 @@ import { c, info, json } from '../util/output.js';
  * `vg savings` (VG-DEVELOPMENT-PLAN §5) — a local, privacy-safe, honestly
  * estimated report of context tokens / $ saved vs a grep/read baseline.
  * Nothing leaves the machine. Recording is opt-in via `vg serve --savings`.
+ *
+ * A second section reports what context compression saved (the proxy, the
+ * SDK wrappers and the `compress_content` tool all append to one global,
+ * numbers-only ledger): today / 7 days / 30 days, by model, client and project.
  */
 export function registerSavings(program: Command): void {
   const cmd = program
     .command('savings')
-    .description('local, privacy-safe report of tokens/$ saved vs a grep baseline (estimates)')
+    .description('local, privacy-safe report of tokens/$ saved — grep baseline for map queries, and context compression by window/model/client (estimates)')
     .option('--days <n>', 'window in days', '30')
     .option('--clear', 'delete the recorded usage data for this repo')
-    .action(function (this: Command) {
+    .option('--reset', 'delete the context-compression ledger (global)')
+    .option('--compression', 'show only the context-compression section')
+    .option('--benchmark', 'measure the compression pipeline offline over built-in fixtures instead of reporting recorded savings')
+    .option('--iterations <n>', 'with --benchmark: runs per fixture', '5')
+    .option('--fixture <name>', 'with --benchmark: only this fixture or content type (json, build_output, search_results, git_diff, source_code, html, plain_text, tabular)')
+    .option('--model <id>', 'with --benchmark: model id used for tokenizer selection', 'claude-sonnet-4-5')
+    .action(async function (this: Command) {
       const global = readGlobal(this);
       const days = Number(this.opts().days) || 30;
       const root = rootOf(global);
+
+      // Measurement mode (P4): a pinned corpus, reproducible, no network.
+      if (this.opts().benchmark) {
+        const { runSavingsBenchmark } = await import('./savings-benchmark.js');
+        await runSavingsBenchmark(this.opts(), global);
+        return;
+      }
+
+      if (this.opts().reset) {
+        const existed = resetSavings();
+        if (global.json) {
+          json({ ok: true, reset: existed });
+          return;
+        }
+        info(
+          existed
+            ? `${c.cyan('vg savings')} ${c.dim('--reset')} · context-compression ledger deleted`
+            : `${c.cyan('vg savings')} ${c.dim('--reset')} · no compression ledger yet — nothing to delete`,
+        );
+        return;
+      }
+
+      if (this.opts().compression) {
+        const now = Date.now();
+        const compression = compressionReport(now);
+        if (global.json) {
+          json({ compression });
+          return;
+        }
+        info(`${c.cyan('vg savings')} · context compression ${c.dim('(local, nothing left your machine)')}`);
+        printCompression(compression);
+        return;
+      }
 
       if (this.opts().clear) {
         const existed = clearSavings(root);
@@ -38,9 +83,10 @@ export function registerSavings(program: Command): void {
       const report = readSavings(root, days, now);
       const usage = readUsage(root, days, now);
       const models = readModelSavings(root, days, now);
+      const compression = compressionReport(now);
 
       if (global.json) {
-        json({ ...report, usage, models });
+        json({ ...report, usage, models, compression });
         return;
       }
 
@@ -53,6 +99,7 @@ export function registerSavings(program: Command): void {
               : '  recording is off. Enable it for MCP with `vg serve --savings`, and for CLI calls by passing `--client=<ai>` to vg.',
           ),
         );
+        printCompression(compression);
         return;
       }
 
@@ -69,8 +116,74 @@ export function registerSavings(program: Command): void {
       printSplit(usage);
       // Per-model savings (VG Code attributes each call to its model).
       printModels(models);
+      // Context compression (proxy / SDK / MCP compress_content).
+      printCompression(compression);
     });
   applyGlobalOptions(cmd);
+}
+
+export interface CompressionReport {
+  enabled: boolean;
+  windows: Record<'today' | '7d' | '30d' | 'all', SavingsRollup>;
+  store: StoreStats | { entries: number; bytes: number };
+}
+
+/** Rollups over the global compression ledger plus the retrievable-store size. Never throws. */
+export function compressionReport(now: number): CompressionReport {
+  let events: ReturnType<typeof readSavingsEvents> = [];
+  try {
+    events = readSavingsEvents(undefined, { now });
+  } catch {
+    /* no ledger yet */
+  }
+  let store: CompressionReport['store'] = { entries: 0, bytes: 0 };
+  try {
+    store = defaultStore().stats();
+  } catch {
+    /* store dir not created yet */
+  }
+  return { enabled: events.length > 0, windows: rollupSavings(events, now), store };
+}
+
+function printCompression(r: CompressionReport): void {
+  info('');
+  info(c.bold('  context compression') + c.dim('  (vg serve --compress / vg code / SDK; tokens and $ are estimates)'));
+  if (!r.enabled) {
+    info(c.dim('    nothing recorded yet — start `vg serve --compress` and point an agent at it with `vg install <agent> --compress`'));
+    return;
+  }
+  info(c.dim('    ' + 'window'.padEnd(8) + ['requests', 'before', 'after', 'saved', 'saved %', 'saved $'].map((h) => h.padStart(11)).join('')));
+  for (const w of ['today', '7d', '30d', 'all'] as const) {
+    const x = r.windows[w];
+    const pct = x.tokensBefore > 0 ? `${Math.round((x.tokensSaved / x.tokensBefore) * 100)}%` : '—';
+    info(
+      '    ' +
+        w.padEnd(8) +
+        String(x.requests).padStart(11) +
+        fmt(x.tokensBefore).padStart(11) +
+        fmt(x.tokensAfter).padStart(11) +
+        fmt(x.tokensSaved).padStart(11) +
+        pct.padStart(11) +
+        `$${x.usdSaved.toFixed(2)}`.padStart(11),
+    );
+  }
+  const month = r.windows['30d'];
+  const dims: Array<[string, Record<string, { requests: number; tokensSaved: number; usdSaved: number }>]> = [
+    ['by model', month.byModel],
+    ['by client', month.byClient],
+    ['by project', month.byProject],
+  ];
+  for (const [label, rows] of dims) {
+    const keys = Object.keys(rows).sort((a, b) => rows[b].tokensSaved - rows[a].tokensSaved || a.localeCompare(b));
+    if (!keys.length) continue;
+    info(c.dim(`    ${label} (30d)`));
+    const w = Math.max(12, ...keys.map((k) => k.length));
+    for (const k of keys.slice(0, 10)) {
+      const x = rows[k];
+      info(`      ${k.padEnd(w)} ${String(x.requests).padStart(8)} req ${fmt(x.tokensSaved).padStart(9)} saved  $${x.usdSaved.toFixed(2)}`);
+    }
+  }
+  info(c.dim(`    retrievable store: ${r.store.entries} entr${r.store.entries === 1 ? 'y' : 'ies'} · ${fmt(r.store.bytes)} bytes · vg retrieve --list`));
 }
 
 function fmt(n: number): string {

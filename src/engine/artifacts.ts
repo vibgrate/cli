@@ -150,7 +150,7 @@ const DEFAULT_GITIGNORE = [
   'graph.json',
   'graph.snap',
   'graph.tags.snap',
-  'graph.haile.json',
+  'graph.arch.json',
   // Binary semantic index next to the map (never model-named; never under cache/).
   'embeddings',
   'graph.html',

@@ -15,8 +15,11 @@ import {
   removeHcsModule,
 } from '../install/hcs-module.js';
 import {
+  ARCH_MODULE_ID,
+  ARCH_MODULE_LEGACY_ID,
   HAILE_DISCLOSURE,
   HAILE_MODULE_NAME,
+  archConsent,
   haileModuleInstalled,
   installHaileModule,
   removeHaileModule,
@@ -32,6 +35,8 @@ import { readGlobal, applyGlobalOptions } from '../cli-options.js';
 interface ManagedModule {
   npmName: string;
   disclosure: string;
+  /** Consent read for `vg module status`; defaults to the consent file entry under the module id. */
+  consent?(): 'granted' | 'denied' | undefined;
   install(opts: InstallOptions): Promise<InstallResult>;
   remove(): void;
   installed(): { installed: boolean; version?: string };
@@ -64,9 +69,10 @@ const MODULES: Record<string, ManagedModule> = {
       return engine ? engine.version() : null;
     },
   },
-  haile: {
+  [ARCH_MODULE_ID]: {
     npmName: HAILE_MODULE_NAME,
     disclosure: HAILE_DISCLOSURE,
+    consent: archConsent,
     install: installHaileModule,
     remove: removeHaileModule,
     installed: haileModuleInstalled,
@@ -80,6 +86,14 @@ const MODULES: Record<string, ManagedModule> = {
 
 const SUPPORTED = Object.keys(MODULES).join(', ');
 
+/** Older module names still accepted on the command line (never listed in help). */
+const MODULE_ALIASES: Record<string, string> = { [ARCH_MODULE_LEGACY_ID]: ARCH_MODULE_ID };
+
+/** The public id for a module name typed by the user, resolving pre-rename aliases. */
+export function canonicalModuleName(name: string): string {
+  return MODULE_ALIASES[name] ?? name;
+}
+
 export function registerModule(program: Command): void {
   const cmd = program.command('module').description(`manage optional local modules (${SUPPORTED})`);
 
@@ -89,8 +103,9 @@ export function registerModule(program: Command): void {
     .argument('<name>', `module name (supported: ${SUPPORTED})`)
     .option('--yes', 'skip the confirmation prompt')
     .option('--force', 'reinstall even when already present')
-    .action(async function (this: Command, name: string, opts: { yes?: boolean; force?: boolean }) {
+    .action(async function (this: Command, typed: string, opts: { yes?: boolean; force?: boolean }) {
       const global = readGlobal(this);
+      const name = canonicalModuleName(typed);
       const mod = requireModule(name);
       if (kernelDisabled()) {
         throw new CliError(`VIBGRATE_NO_KERNEL is set — unset it to install the ${name} module`, ExitCode.USAGE_ERROR);
@@ -120,7 +135,7 @@ export function registerModule(program: Command): void {
     .description('remove an installed module')
     .argument('<name>', `module name (supported: ${SUPPORTED})`)
     .action(async function (this: Command, name: string) {
-      requireModule(name).remove();
+      requireModule(canonicalModuleName(name)).remove();
       out('removed');
     });
 
@@ -144,7 +159,7 @@ export function registerModule(program: Command): void {
           loadable: loadedVersion !== null,
           providerVersion: loadedVersion,
           disabled: kernelDisabled(),
-          consent: consent[name] ?? 'unset',
+          consent: (mod.consent ? mod.consent() : consent[name]) ?? 'unset',
         };
       }
       if (global.json) {

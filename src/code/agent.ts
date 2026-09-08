@@ -80,6 +80,7 @@ import {
   type RunProvenance,
 } from './run-provenance.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
+import { createToolOutputCompressor, type ToolOutputCompressor } from './compress-tool-output.js';
 import { repositoryIdFromRoot } from '../runtime/paths.js';
 import type { SymbolSpan } from './apply.js';
 import type { CodeFs } from './session.js';
@@ -466,6 +467,12 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     ? AGENT_TOOLS
     : AGENT_TOOLS.filter((t) => t.name !== 'spawn_subagent');
   const allTools = [...agentToolSpecs, ...(options.externalTools?.specs ?? [])];
+  // In-loop context compression: a bulky tool result is re-billed on every
+  // later step, so it is shrunk once here on the way into the transcript.
+  // Reads that an edit is computed from stay byte-exact; see
+  // ./compress-tool-output.ts. Fails open — a compressor problem never stops
+  // a coding session.
+  const outputCompressor = await createLoopCompressor(instruction);
   // The relevance module ranks the seeds when installed (auto-provisioned);
   // null → the mechanical fallback. Computed once per run and reused by the
   // capsule-delta recompile below.
@@ -1166,8 +1173,12 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       }
 
       trajectory.recordTool(call.name, step, toolResult.mutated);
+      // The event carries the full result — the panel and the transcript log
+      // show what the tool actually said. Only the copy the model re-reads on
+      // every subsequent step is compressed.
       onEvent({ type: 'tool-result', name: call.name, content, mutated: toolResult.mutated, ...(toolResult.failed ? { failed: true } : {}) });
-      messages.push({ role: 'tool', content, toolCallId: call.id, name: call.name });
+      const forModel = outputCompressor.compress(call.name, content, { failed: toolResult.failed, query: instruction });
+      messages.push({ role: 'tool', content: forModel, toolCallId: call.id, name: call.name });
 
       if (toolResult.finished) {
         // Auto-verify: on failure, keep going so the model fixes it.
@@ -1503,6 +1514,35 @@ function writeAgentAudit(
     );
   } catch {
     /* audit is best-effort — never fail a run on a logging problem */
+  }
+}
+
+/**
+ * Bind the compression engine to this run's tool-result seam.
+ *
+ * The router, tokenizer and retrievable store are imported lazily so a session
+ * with compression turned off (`VG_CODE_COMPRESS=0`) never loads them, and a
+ * failure to load them degrades to "no compression" rather than to a broken
+ * agent — the whole layer is optional by construction.
+ */
+async function createLoopCompressor(instruction: string): Promise<ToolOutputCompressor> {
+  try {
+    const [{ createRouter }, { tokenizerFor }, { defaultStore }] = await Promise.all([
+      import('../compress/router.js'),
+      import('../compress/tokenizers.js'),
+      import('../compress/ccr/store.js'),
+    ]);
+    const router = createRouter({ profile: 'coding' });
+    const tokenizer = tokenizerFor('claude-sonnet-4-5');
+    const store = defaultStore();
+    return createToolOutputCompressor({
+      compress: ({ content, toolName, query }) => {
+        const res = router.compress({ content, query: query ?? instruction, toolName, tokenizer, ccr: store, injectMarker: true, losslessOnly: false });
+        return { content: res.content, tokensSaved: Math.max(0, tokenizer.count(content) - tokenizer.count(res.content)) };
+      },
+    });
+  } catch {
+    return createToolOutputCompressor({ compress: ({ content }) => ({ content, tokensSaved: 0 }), env: { VG_CODE_COMPRESS: '0' } });
   }
 }
 

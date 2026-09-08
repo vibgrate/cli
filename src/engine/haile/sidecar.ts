@@ -1,40 +1,54 @@
-/** graph.haile.json reader + module launcher. Never classifies in-process. */
+/** graph.arch.json reader + module launcher. Never classifies in-process. */
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { VgGraph } from '../../schema.js';
 import { kernelDisabled } from '../../install/module-core.js';
-import { haileModuleDir } from './haile-provider.js';
+import { haileModuleDir, haileModulePathOverride } from './haile-provider.js';
 import type { HaileModuleSummary, HaileProfile, HaileSidecar, HaileSymbol } from './types.js';
 import {
   DEFAULT_PROFILE,
   HAILE_ENGINE_VERSION,
   HAILE_IR,
   HAILE_MAGIC,
+  HAILE_MAGIC_LEGACY,
   HAILE_TAXONOMY,
+  HAILE_TAXONOMY_LEGACY,
   type HailePolicy,
 } from './types.js';
 import { architecturePolicyFor } from './policy-config.js';
 
+function sidecarPathWithSuffix(graphPath: string, suffix: string): string {
+  if (graphPath.endsWith('.json')) return `${graphPath.slice(0, -5)}${suffix}`;
+  if (graphPath.endsWith('.snap')) return `${graphPath.slice(0, -5)}${suffix}`;
+  return `${graphPath}${suffix}`;
+}
+
+/** `graph.arch.json` next to the graph — the public sidecar name. */
 export function haileSidecarPathFor(graphPath: string): string {
-  if (graphPath.endsWith('.json')) return `${graphPath.slice(0, -5)}.haile.json`;
-  if (graphPath.endsWith('.snap')) return `${graphPath.slice(0, -5)}.haile.json`;
-  return `${graphPath}.haile.json`;
+  return sidecarPathWithSuffix(graphPath, '.arch.json');
+}
+
+/** `graph.haile.json` — the pre-rename name. Read for one release, never written. */
+export function legacyHaileSidecarPathFor(graphPath: string): string {
+  return sidecarPathWithSuffix(graphPath, '.haile.json');
 }
 
 export function deleteHaileSidecarFor(graphPath: string): void {
-  try {
-    fs.rmSync(haileSidecarPathFor(graphPath), { force: true });
-  } catch {
-    /* best-effort */
+  for (const file of [haileSidecarPathFor(graphPath), legacyHaileSidecarPathFor(graphPath)]) {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {
+      /* best-effort */
+    }
   }
 }
 
-/** Installed module entry: VIBGRATE_HAILE_PATH or the modules cache. */
+/** Installed module entry: VIBGRATE_ARCH_PATH (or the legacy VIBGRATE_HAILE_PATH) or the modules cache. */
 function resolveHaileModuleEntry(): string | null {
   if (kernelDisabled()) return null;
-  const custom = process.env.VIBGRATE_HAILE_PATH?.trim();
+  const custom = haileModulePathOverride();
   if (custom) {
     const p = path.resolve(custom);
     try {
@@ -111,11 +125,15 @@ export function readHaileSidecar(
   expect?: { corpusHash?: string; engineVersion?: string },
 ): HaileSidecar | null {
   try {
-    const file = haileSidecarPathFor(graphPath);
-    if (!fs.existsSync(file)) return null;
+    let file = haileSidecarPathFor(graphPath);
+    if (!fs.existsSync(file)) {
+      // A graph classified before the rename; the next build replaces it.
+      file = legacyHaileSidecarPathFor(graphPath);
+      if (!fs.existsSync(file)) return null;
+    }
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as HaileSidecar;
-    if (parsed.magic !== HAILE_MAGIC) return null;
-    if (parsed.taxonomy !== HAILE_TAXONOMY) return null;
+    if (parsed.magic !== HAILE_MAGIC && parsed.magic !== HAILE_MAGIC_LEGACY) return null;
+    if (parsed.taxonomy !== HAILE_TAXONOMY && parsed.taxonomy !== HAILE_TAXONOMY_LEGACY) return null;
     if (expect?.corpusHash && parsed.corpus_hash !== expect.corpusHash) return null;
     if (expect?.engineVersion && parsed.engine_version !== expect.engineVersion) return null;
     if (!Array.isArray(parsed.symbols)) return null;

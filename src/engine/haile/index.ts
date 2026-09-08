@@ -9,6 +9,7 @@ export {
   haileSidecarPathFor,
   readHaileSidecar,
   serializeSidecar,
+  legacyHaileSidecarPathFor,
   writeHaileSidecarFor,
   writeSidecarDocument,
 } from './sidecar.js';
@@ -24,6 +25,9 @@ export {
   DEFAULT_SYMBOL_CAP,
   HAILE_ENGINE_VERSION,
   HAILE_IR,
+  HAILE_IR_LEGACY,
+  HAILE_MAGIC_LEGACY,
+  HAILE_TAXONOMY_LEGACY,
   HAILE_MAGIC,
   HAILE_TAXONOMY,
   PURPOSES,

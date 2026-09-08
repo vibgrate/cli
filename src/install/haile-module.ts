@@ -28,16 +28,29 @@ import {
 } from './module-core.js';
 
 export const HAILE_MODULE_NAME = '@vibgrate/haile';
+/** Public module id (`vg module install arch`). "haile" is the internal codename and stays the npm name. */
+export const ARCH_MODULE_ID = 'arch';
+/** Pre-rename module id, still accepted by `vg module` and as a consent key. */
+export const ARCH_MODULE_LEGACY_ID = 'haile';
 
 const HAILE_MODULE: ModuleDescriptor = {
-  id: 'haile',
+  id: ARCH_MODULE_ID,
   npmName: HAILE_MODULE_NAME,
   dir: haileModuleDir,
   onChanged: resetHaileProviderCache,
 };
 
+/**
+ * Consent recorded under the public id, falling back to the codename key a
+ * pre-rename `vg` wrote — an opt-out made before the rename keeps holding.
+ */
+export function archConsent(): 'granted' | 'denied' | undefined {
+  const consent = readConsent();
+  return consent[ARCH_MODULE_ID] ?? consent[ARCH_MODULE_LEGACY_ID];
+}
+
 export const HAILE_DISCLOSURE =
-  'vg can install the optional Vibgrate architecture module (proprietary license, runs fully locally ' +
+  'vg can install the optional Architecture module (proprietary license, runs fully locally ' +
   'in a WASM sandbox — no network). Disable any time with VIBGRATE_NO_KERNEL=1.';
 
 export function haileModuleInstalled(): { installed: boolean; version?: string } {
@@ -57,7 +70,7 @@ export async function ensureHaileModule(io: { fetchImpl?: typeof fetch } = {}): 
     if (kernelDisabled()) return { status: 'disabled' };
     const existing = haileModuleInstalled();
     if (existing.installed) return { status: 'already-installed', version: existing.version };
-    if (readConsent().haile === 'denied') return { status: 'declined' };
+    if (archConsent() === 'denied') return { status: 'declined' };
     return await installHaileModule({ fetchImpl: io.fetchImpl });
   } catch {
     return { status: 'unavailable', detail: 'auto-install failed' };
@@ -87,7 +100,7 @@ export type HaileModuleStatus =
 export function haileModuleStatus(now = Date.now()): HaileModuleStatus {
   try {
     if (kernelDisabled()) return { status: 'disabled' };
-    if (readConsent().haile === 'denied') return { status: 'declined' };
+    if (archConsent() === 'denied') return { status: 'declined' };
     const existing = haileModuleInstalled();
     if (existing.installed) return { status: 'present', version: existing.version };
     const stamp = path.join(path.dirname(haileModuleDir()), 'haile.last-attempt');
@@ -109,7 +122,7 @@ export function haileModuleStatus(now = Date.now()): HaileModuleStatus {
 export function kickHaileReadiness(io: { fetchImpl?: typeof fetch } = {}): void {
   try {
     if (kernelDisabled()) return;
-    if (readConsent().haile === 'denied') return;
+    if (archConsent() === 'denied') return;
     const existing = haileModuleInstalled();
     if (existing.installed) return;
     const modulesRoot = path.dirname(haileModuleDir());

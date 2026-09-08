@@ -93,9 +93,57 @@ This writes the MCP config for your chosen tool(s) and installs a skill that tea
 
 Browse all 21+ supported assistants and their skill descriptions at **[vibgrate.com/skills](https://vibgrate.com/skills)**.
 
+## Cut what your assistant re-reads: context compression
+
+Every turn, your AI assistant re-sends the whole conversation — including the
+20,000-line test log, the 400-row JSON payload, and the grep output it has
+already acted on. You pay for that context again on every step. Vibgrate CLI
+compresses tool output and older turns **before** they reach the model, keeps
+the originals retrievable on your machine, and reports what it saved.
+
+```bash
+vg serve --compress             # your local runtime, now compressing as well as serving the map
+vg install claude --compress    # point Claude Code at it (undo with `vg uninstall claude`)
+vg savings                      # tokens and estimated dollars saved, today / 7 days / 30 days
+```
+
+There is no separate command to learn: compression is a mode of the server you
+already run and a flag on the installer you already use. If you want only the
+compression — no code map, nothing to build first — `vg serve --compress-only`
+is the whole setup. For a single session
+without writing any config, `vg serve --compress -- claude` runs one agent
+through it and restores your environment when it exits. Inside `vg code` it is
+already on — bulky tool results are compressed before they re-enter the loop.
+
+What it does, in the order it runs:
+
+- **Routes each block by what it is** — JSON arrays, logs and build output, grep
+  results, diffs, HTML, tables, config files, source code, prose — and applies
+  the compressor built for that shape. Errors, ids, stack traces and the lines
+  that match what you asked are always kept.
+- **Lossless first.** Repeated lines, grep headings and diff index lines fold
+  into byte-reversible markers. Lossy compression runs only when it saves
+  clearly more, and never on file reads or edits, so read-then-edit stays exact.
+- **Nothing is lost.** Compressed blocks carry a marker; the model (or you, with
+  `vg serve retrieve <hash>`) can pull back the original or just the slice it needs.
+  Originals live in a short-lived local store — nothing is uploaded.
+- **Prefix-cache aware.** The default `cache` mode compresses only the newest
+  turn so your provider's prompt cache keeps hitting; `token` mode compresses
+  everything eligible for the largest saving.
+- **Works with any agent.** `vg install <agent> --compress` supports Claude Code,
+  Codex, Cursor, Aider, Copilot, OpenCode, Cline, Continue, Goose, OpenHands,
+  Gemini CLI, Kimi, Grok and more; `vg uninstall <agent>` restores their config
+  byte-for-byte. Or use the SDK wrappers for the Anthropic, OpenAI and Vercel AI
+  SDK shapes.
+
+Everything runs locally and offline. The listener binds to loopback, forwards
+your provider credentials untouched, redacts secret shapes before anything is
+written to disk, and never phones home. `vg serve config` lists every knob and
+`vg serve config set KEY VALUE` changes one.
+
 ## Tools
 
-`vg serve` exposes 19 MCP tools:
+`vg serve` exposes 24 MCP tools (plus two memory tools with `--memory`):
 
 - **orient** — start here: project overview, entry points, where to look first.
 - **search_symbols** — find a symbol by name or literal string.
@@ -116,6 +164,12 @@ Browse all 21+ supported assistants and their skill descriptions at **[vibgrate.
 - **list_models** — local models on disk (Ollama / LM Studio / gguf).
 - **resolve_library** — resolve a library to its canonical id and the version your project uses.
 - **library_docs** — version-correct usage docs for a library, sliced to a token budget.
+- **compress_content** / **retrieve_original** / **compression_stats** (with `--compress`) — shrink a tool output before it enters the context, expand a marker back to the original or just the slice you need, and report what compression saved.
+- **memory_search** / **memory_save** (with `--memory`) — project-scoped memory shared across your AI agents.
+
+The last two groups are listed only when you ask for them. Every advertised
+tool schema is re-sent on every agent step, so a capability nobody enabled is a
+standing cost; both groups stay callable either way.
 
 Prefer the hosted server over your team's scan data? **[Vibgrate Cloud MCP](https://vibgrate.com/mcp)** connects your assistant to Vibgrate Cloud (OAuth 2.1, 51 tools).
 
@@ -539,7 +593,7 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | `vg models` | Code Modes (Spark / Flow / Forge) + local fleet (Ollama / LM Studio / gguf); `install` / `pull` by default (`--dry-run` to preview) |
 | `vg module` | Manage optional local modules (`relevance`, `hcs`): `status`, `install`, `remove` |
 | `vg path <from> <to>` | How A connects to B (shortest path) |
-| `vg savings` | Local report of tokens/$ saved vs a grep baseline (estimates) |
+| `vg savings` | Local report of tokens/$ saved — the grep baseline for map queries, and context compression by window, model and client (estimates) |
 | `vg watch` | Rebuild the map when files change |
 | `vg serve` | Start **Vibgrate AI Context** (local-first MCP: code map + drift + version-correct docs) |
 | `vg share` | Make the graph committable + auto-updating for your team |
@@ -548,6 +602,29 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | `vg tests <file>` | Which tests cover a node |
 | `vg tree <file>` | Call tree rooted at a node |
 | `vg unknowns` | What the graph cannot resolve, ranked by blast radius |
+
+### Context compression
+
+Compression adds no new command. It is a mode of `vg serve`, a flag on
+`vg install`, and a section of `vg savings`.
+
+**Typical path:** `vg serve --compress` → `vg install claude --compress` → `vg savings`
+
+| Command | Description |
+| --- | --- |
+| `vg serve --compress` | Serve the code map **and** compress context: an Anthropic- and OpenAI-compatible listener on loopback for any agent |
+| `vg serve --compress -- <agent>` | Run one agent session through it, environment only — nothing written, nothing left behind |
+| `vg install <agent> --compress` | Point an agent at it durably by writing its own base-URL config (marker-tracked and reversible) |
+| `vg uninstall <agent>` | Put that config back byte-for-byte, along with everything else `vg install` wrote |
+| `vg install <agent> --learn` | Turn your past agent sessions into guardrails in its instructions file: repeated failures, loops, missing context (`--apply` writes) |
+| `vg savings` | Tokens and dollars saved, today / 7 days / 30 days, by model, client and project |
+| `vg savings --benchmark` | Offline compression benchmark on built-in fixtures: latency and ratio per content type |
+| `vg show savings` | Open the same numbers as a local page, live, next to `vg show chart` |
+| `vg serve status` / `vg serve stop` | What is listening and which agents are routed; stop a background listener |
+| `vg serve config` | Every `VG_*` knob and where its value came from; `set` / `unset` write `settings.json` |
+| `vg serve memory` | Cross-agent project memory: `list`, `search`, `add`, `delete`, `stats`, `export`, `import` |
+| `vg serve compress [file]` | Run the pipeline over a file by hand — the debug path, not part of normal use |
+| `vg serve retrieve <hash>` | Expand a compression marker back to the original, or a slice of it (`--grep`, `--lines`, `--head`, `--tail`, `--json-path`) |
 
 ### Holistic Code Specification (`vg hcs`)
 
@@ -572,7 +649,7 @@ All HCS computation runs in an optional, separately-licensed engine module that 
 | Command | Description |
 | --- | --- |
 | `vg daemon` | Local workspace daemon for multi-root graph sessions (IDE / agents): `status`, `ensure`, `publish`, `query`, `impact`, … |
-| `vg doctor` | Read-only diagnosis: config, credentials (redacted), map freshness, hosted reachability, MCP launch |
+| `vg doctor` | Read-only diagnosis: config, credentials (redacted), map freshness, hosted reachability, MCP launch, compression proxy and store |
 | `vg llm-host` | Isolated local inference host process (`serve`, `status`) for enterprise process isolation |
 | `vg lsp` | Language server (stdio) — engine behind Vibgrate for VS Code and other thin IDE clients |
 | `vg policy` | Show production context-policy pin; `vg policy verify <file>` for signed learning patches |

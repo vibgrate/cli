@@ -105,6 +105,10 @@ export const KNOWN_COMMANDS = new Set([
   'watch',
   'hook',
   'help',
+  // Context compression adds no verb of its own (FEATURE-DESIGN-PRINCIPLES
+  // P1): it is `vg serve --compress` + `vg install <agent> --compress`, with
+  // the reports on `vg savings` / `vg show savings` and the offline debug
+  // paths nested under `vg serve`.
   // Drift-reporting verbs (merged from the Vibgrate CLI).
   'init',
   'scan',
@@ -308,10 +312,21 @@ export function dispatch(argv: string[], cwd: string): string[] {
   return ['ask', ...args];
 }
 
-/** Verbs folded into the build lifecycle — guide the user to the new form. */
+/** Verbs folded into an existing family — guide the user to the new form. */
 const MOVED_COMMANDS: Record<string, string> = {
   verify: 'vg build --verify',
   attest: 'vg build --attest',
+  // Context compression: one runtime (`vg serve`), one install verb, one
+  // report — never a parallel product surface (FEATURE-DESIGN-PRINCIPLES P1).
+  proxy: 'vg serve --compress',
+  wrap: 'vg install <agent> --compress',
+  unwrap: 'vg uninstall <agent>',
+  dashboard: 'vg show savings',
+  perf: 'vg savings --benchmark',
+  compress: 'vg serve --compress',
+  retrieve: 'vg serve retrieve',
+  memory: 'vg serve memory',
+  learn: 'vg install <agent> --learn',
 };
 
 /** The first real positional, skipping value-taking global flags and their values. */

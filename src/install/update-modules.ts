@@ -1,5 +1,5 @@
 /**
- * Bring the optional local modules (relevance, hcs, haile) up to the
+ * Bring the optional local modules (relevance, hcs, arch) up to the
  * registry's latest as part of `vg update`.
  *
  * Modules are pinned to whatever `dist-tags.latest` was when they were first
@@ -12,7 +12,7 @@
  *   - An installed module with a newer published version is reinstalled
  *     (force) at latest.
  *   - A missing module is installed only when its posture is ON by default
- *     (relevance, haile). HCS provisions on first use of `vg hcs` instead.
+ *     (relevance, arch). HCS provisions on first use of `vg hcs` instead.
  *   - Every failure is reported, never thrown: a module problem must not
  *     fail a successful CLI update.
  */
@@ -26,10 +26,10 @@ import {
 } from './module-core.js';
 import { RELEVANCE_MODULE_NAME, installRelevanceModule, moduleInstalled } from './relevance-module.js';
 import { HCS_MODULE_NAME, hcsModuleInstalled, installHcsModule } from './hcs-module.js';
-import { HAILE_MODULE_NAME, haileModuleInstalled, installHaileModule } from './haile-module.js';
+import { ARCH_MODULE_ID, ARCH_MODULE_LEGACY_ID, HAILE_MODULE_NAME, haileModuleInstalled, installHaileModule } from './haile-module.js';
 
 export interface ModuleUpdateReport {
-  /** Consent/registry id (`relevance`, `hcs`, `haile`). */
+  /** Consent/registry id (`relevance`, `hcs`, `arch`). */
   id: string;
   npmName: string;
   status:
@@ -51,6 +51,8 @@ export interface ModuleUpdateReport {
 
 interface ManagedModuleRef {
   id: string;
+  /** Older consent key still honoured for this module (the codename before a public rename). */
+  legacyId?: string;
   npmName: string;
   installedNow(): { installed: boolean; version?: string };
   install(opts: InstallOptions): Promise<InstallResult>;
@@ -61,7 +63,7 @@ interface ManagedModuleRef {
 const MODULES: ManagedModuleRef[] = [
   { id: 'relevance', npmName: RELEVANCE_MODULE_NAME, installedNow: moduleInstalled, install: installRelevanceModule, defaultOn: true },
   { id: 'hcs', npmName: HCS_MODULE_NAME, installedNow: hcsModuleInstalled, install: installHcsModule, defaultOn: false },
-  { id: 'haile', npmName: HAILE_MODULE_NAME, installedNow: haileModuleInstalled, install: installHaileModule, defaultOn: true },
+  { id: ARCH_MODULE_ID, legacyId: ARCH_MODULE_LEGACY_ID, npmName: HAILE_MODULE_NAME, installedNow: haileModuleInstalled, install: installHaileModule, defaultOn: true },
 ];
 
 /** True when `candidate` is a strictly newer version than `installed`. */
@@ -87,7 +89,8 @@ export async function updateLocalModules(
         reports.push({ ...base, status: 'disabled' });
         continue;
       }
-      if (readConsent()[mod.id] === 'denied') {
+      const consent = readConsent();
+      if ((consent[mod.id] ?? (mod.legacyId ? consent[mod.legacyId] : undefined)) === 'denied') {
         reports.push({ ...base, status: 'declined' });
         continue;
       }

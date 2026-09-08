@@ -7,15 +7,17 @@ import { adaptGraph, isCallableKind } from './adapter.js';
 import { classifyCallable } from './classify.js';
 import { formatHaileLines } from './format.js';
 import {
+  deleteHaileSidecarFor,
   emptySidecar,
   haileSidecarPathFor,
+  legacyHaileSidecarPathFor,
   readHaileSidecar,
   serializeSidecar,
   writeHaileSidecarFor,
   writeSidecarDocument,
 } from './sidecar.js';
 import type { HaileSymbol } from './types.js';
-import { HAILE_ENGINE_VERSION, HAILE_MAGIC, HAILE_TAXONOMY } from './types.js';
+import { HAILE_ENGINE_VERSION, HAILE_IR_LEGACY, HAILE_MAGIC, HAILE_MAGIC_LEGACY, HAILE_TAXONOMY, HAILE_TAXONOMY_LEGACY } from './types.js';
 
 function node(partial: Partial<GraphNode> & Pick<GraphNode, 'id' | 'kind' | 'name' | 'file'>): GraphNode {
   return {
@@ -148,13 +150,43 @@ describe('H1 classify file', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('names the sidecar graph.arch.json and stamps vg.arch.* wire ids', () => {
+    expect(haileSidecarPathFor('/r/.vibgrate/graph.json')).toBe('/r/.vibgrate/graph.arch.json');
+    expect(haileSidecarPathFor('/r/.vibgrate/graph.snap')).toBe('/r/.vibgrate/graph.arch.json');
+    expect(legacyHaileSidecarPathFor('/r/.vibgrate/graph.json')).toBe('/r/.vibgrate/graph.haile.json');
+    const doc = emptySidecar('abc');
+    expect(doc.magic).toBe('vg.arch.v1');
+    expect(doc.taxonomy).toBe('vg.arch.taxonomy.v1');
+    expect(doc.ir).toBe('vg.arch.ir.v1');
+  });
+
+  it('still reads a pre-rename graph.haile.json with the legacy wire ids, and deletes both names', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'haile-'));
+    const graphPath = path.join(dir, 'graph.json');
+    fs.writeFileSync(graphPath, '{}');
+    const legacy = { ...emptySidecar('abc123'), magic: HAILE_MAGIC_LEGACY, taxonomy: HAILE_TAXONOMY_LEGACY, ir: HAILE_IR_LEGACY, symbols: [sampleSymbol()] };
+    fs.writeFileSync(legacyHaileSidecarPathFor(graphPath), serializeSidecar(legacy as never));
+    expect(fs.existsSync(haileSidecarPathFor(graphPath))).toBe(false);
+    expect(readHaileSidecar(graphPath, { corpusHash: 'abc123' })?.symbols).toHaveLength(1);
+    // The new name wins once a module build has written it.
+    const fresh = emptySidecar('abc123');
+    writeSidecarDocument(fresh, graphPath);
+    expect(readHaileSidecar(graphPath, { corpusHash: 'abc123' })?.symbols).toHaveLength(0);
+    deleteHaileSidecarFor(graphPath);
+    expect(fs.existsSync(haileSidecarPathFor(graphPath))).toBe(false);
+    expect(fs.existsSync(legacyHaileSidecarPathFor(graphPath))).toBe(false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('writeHaileSidecarFor refuses when the architecture module is not installed', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'haile-'));
     const graphPath = path.join(dir, 'graph.json');
     fs.writeFileSync(graphPath, '{}');
     const prevPath = process.env.VIBGRATE_HAILE_PATH;
+    const prevArchPath = process.env.VIBGRATE_ARCH_PATH;
     const prevNo = process.env.VIBGRATE_NO_KERNEL;
     delete process.env.VIBGRATE_HAILE_PATH;
+    delete process.env.VIBGRATE_ARCH_PATH;
     process.env.VIBGRATE_NO_KERNEL = '1';
     try {
       const graph = tinyGraph([node({ id: 'n1', kind: 'function', name: 'main', file: 'main.rs' })]);
@@ -162,6 +194,8 @@ describe('H1 classify file', () => {
     } finally {
       if (prevPath === undefined) delete process.env.VIBGRATE_HAILE_PATH;
       else process.env.VIBGRATE_HAILE_PATH = prevPath;
+      if (prevArchPath === undefined) delete process.env.VIBGRATE_ARCH_PATH;
+      else process.env.VIBGRATE_ARCH_PATH = prevArchPath;
       if (prevNo === undefined) delete process.env.VIBGRATE_NO_KERNEL;
       else process.env.VIBGRATE_NO_KERNEL = prevNo;
       fs.rmSync(dir, { recursive: true, force: true });

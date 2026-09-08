@@ -1,0 +1,1 @@
+{ "id": "prt-3", "sessionID": "ses-1", "messageID": "msg-2", "type": "tool", "tool": "bash", "callID": "toolu_oc_2", "state": { "status": "completed", "input": { "command": "uv run python app.py" }, "output": "hello from app" }, "time": { "created": 1788278420000 } }

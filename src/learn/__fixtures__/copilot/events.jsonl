@@ -1,0 +1,9 @@
+{"type":"session.start","timestamp":"2026-09-01T17:00:00.000Z","data":{"sessionId":"copilot-1","context":{"cwd":"/home/user/demo"}}}
+{"type":"user.message","timestamp":"2026-09-01T17:00:01.000Z","data":{"content":"Delete the temp directory"}}
+{"type":"assistant.message","timestamp":"2026-09-01T17:00:02.000Z","data":{"content":"","toolRequests":[{"toolCallId":"cp-1","name":"bash","arguments":{"command":"rm -rf /tmp/demo-cache"}}]}}
+{"type":"tool.execution_start","timestamp":"2026-09-01T17:00:02.500Z","data":{"toolCallId":"cp-1","toolName":"bash","arguments":{"command":"rm -rf /tmp/demo-cache"}}}
+{"type":"tool.execution_complete","timestamp":"2026-09-01T17:00:03.000Z","data":{"toolCallId":"cp-1","success":false,"error":"Permission denied: the user declined this command (auto-denied by policy)"}}
+{"type":"assistant.message","timestamp":"2026-09-01T17:00:05.000Z","data":{"content":"","toolRequests":[{"toolCallId":"cp-2","name":"bash","arguments":{"command":"ls /tmp/demo-cache"}}]}}
+{"type":"tool.execution_start","timestamp":"2026-09-01T17:00:05.500Z","data":{"toolCallId":"cp-2","toolName":"bash","arguments":{"command":"ls /tmp/demo-cache"}}}
+{"type":"tool.execution_complete","timestamp":"2026-09-01T17:00:06.000Z","data":{"toolCallId":"cp-2","success":true,"result":{"content":"a.json\nb.json"}}}
+{"type":"assistant.message","timestamp":"2026-09-01T17:00:08.000Z","data":{"content":"The directory holds two cache files; deletion was denied."}}
