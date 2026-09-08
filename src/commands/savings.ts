@@ -183,7 +183,7 @@ function printCompression(r: CompressionReport): void {
       info(`      ${k.padEnd(w)} ${String(x.requests).padStart(8)} req ${fmt(x.tokensSaved).padStart(9)} saved  $${x.usdSaved.toFixed(2)}`);
     }
   }
-  info(c.dim(`    retrievable store: ${r.store.entries} entr${r.store.entries === 1 ? 'y' : 'ies'} · ${fmt(r.store.bytes)} bytes · vg retrieve --list`));
+  info(c.dim(`    retrievable store: ${r.store.entries} entr${r.store.entries === 1 ? 'y' : 'ies'} · ${fmt(r.store.bytes)} bytes · vg serve retrieve --list`));
 }
 
 function fmt(n: number): string {

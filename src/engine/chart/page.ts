@@ -1,4 +1,4 @@
-/** Self-contained map page served by `vg show chart`. No CDN, no build step. */
+/** Self-contained map page served by `vg show arch`. No CDN, no build step. */
 export function chartPage(): string {
   return `<!DOCTYPE html>
 <html lang="en">

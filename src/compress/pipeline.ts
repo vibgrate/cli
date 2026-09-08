@@ -214,9 +214,16 @@ export function getDefaultRouter(): Compressor | null {
   return loadedRouter ?? null;
 }
 
-async function importOptional<T>(spec: string): Promise<T | null> {
+/**
+ * Literal `import('…')` thunks only: the bundler must see each specifier to
+ * emit its chunk. A dynamic import whose specifier is a runtime string is
+ * invisible to esbuild/tsup, so the published `dist/` had no router to bind
+ * and every block recorded `no_compression` while the same code from source
+ * compressed. Keep the thunk shape (guarded by src/proxy/fallbacks.test.ts).
+ */
+async function importOptional<T>(load: () => Promise<unknown>): Promise<T | null> {
   try {
-    return (await import(spec)) as T;
+    return (await load()) as T;
   } catch {
     return null;
   }
@@ -225,7 +232,7 @@ async function importOptional<T>(spec: string): Promise<T | null> {
 /** Load the core modules once (router, tokenizer family, model registry). Never throws. */
 export async function loadDefaultDeps(): Promise<{ router: Compressor | null }> {
   if (loadedRouter === undefined) {
-    const mod = await importOptional<{ createRouter?: () => Compressor; warmRouter?: () => Promise<void> }>('./router.js');
+    const mod = await importOptional<{ createRouter?: () => Compressor; warmRouter?: () => Promise<void> }>(() => import('./router.js'));
     if (mod && typeof mod.createRouter === 'function') {
       try {
         if (typeof mod.warmRouter === 'function') await mod.warmRouter().catch(() => undefined);
@@ -236,11 +243,11 @@ export async function loadDefaultDeps(): Promise<{ router: Compressor | null }> 
     } else loadedRouter = null;
   }
   if (loadedTokenizerFor === undefined) {
-    const mod = await importOptional<{ tokenizerFor?: (model?: string) => Tokenizer }>('./tokenizers.js');
+    const mod = await importOptional<{ tokenizerFor?: (model?: string) => Tokenizer }>(() => import('./tokenizers.js'));
     loadedTokenizerFor = mod && typeof mod.tokenizerFor === 'function' ? mod.tokenizerFor : null;
   }
   if (loadedModelInfo === undefined) {
-    const mod = await importOptional<{ modelInfo?: (model: string, env?: NodeJS.ProcessEnv) => { billsThinking?: boolean } }>('./models.js');
+    const mod = await importOptional<{ modelInfo?: (model: string, env?: NodeJS.ProcessEnv) => { billsThinking?: boolean } }>(() => import('./models.js'));
     loadedModelInfo = mod && typeof mod.modelInfo === 'function' ? mod.modelInfo : null;
   }
   return { router: loadedRouter ?? null };

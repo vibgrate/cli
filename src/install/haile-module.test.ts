@@ -17,7 +17,7 @@ import { haileModuleDir, resetHaileProviderCache } from '../engine/haile/haile-p
 
 let tmp: string;
 let savedEnv: Record<string, string | undefined>;
-const ENV = ['XDG_CACHE_HOME', 'VIBGRATE_MODULE_DIR', 'VIBGRATE_NO_KERNEL', 'VIBGRATE_MODULE_REGISTRY', 'VIBGRATE_HAILE_PATH', 'VIBGRATE_ARCH_PATH'] as const;
+const ENV = ['XDG_CACHE_HOME', 'VIBGRATE_MODULE_DIR', 'VIBGRATE_NO_KERNEL', 'VIBGRATE_MODULE_REGISTRY', 'VIBGRATE_ARCH_PATH'] as const;
 
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
@@ -26,7 +26,6 @@ beforeEach(() => {
   delete process.env.VIBGRATE_MODULE_DIR;
   delete process.env.VIBGRATE_NO_KERNEL;
   delete process.env.VIBGRATE_MODULE_REGISTRY;
-  delete process.env.VIBGRATE_HAILE_PATH;
   delete process.env.VIBGRATE_ARCH_PATH;
   resetHaileProviderCache();
 });
@@ -160,8 +159,10 @@ describe('haileModuleStatus (what the editor may offer)', () => {
     process.env.VIBGRATE_NO_KERNEL = '1';
     expect(haileModuleStatus()).toEqual({ status: 'disabled' });
     delete process.env.VIBGRATE_NO_KERNEL;
-    // A denial recorded under the pre-rename consent key keeps holding.
+    // A denial recorded under the pre-rename consent key is migrated to `arch` once, then the old key is gone.
     writeConsent({ ...readConsent(), haile: 'denied' });
     expect(haileModuleStatus()).toEqual({ status: 'declined' });
+    expect(readConsent()).toMatchObject({ arch: 'denied' });
+    expect(readConsent()).not.toHaveProperty('haile');
   });
 });

@@ -39,9 +39,9 @@ export function registerServeMemory(serve: Command): void {
         json({ project: store.project, user: store.userKey, count: rows.length, memories: rows });
         return;
       }
-      info(`${c.cyan('vg memory list')} · ${rows.length} memories ${c.dim(`(project ${store.projectResolved ? store.projectKey : 'unresolved — project scope hidden from injection'})`)}`);
+      info(`${c.cyan('vg serve memory list')} · ${rows.length} memories ${c.dim(`(project ${store.projectResolved ? store.projectKey : 'unresolved — project scope hidden from injection'})`)}`);
       if (rows.length === 0) {
-        info(c.dim('  nothing remembered yet — `vg memory add "…"` or let an agent call memory_save'));
+        info(c.dim('  nothing remembered yet — `vg serve memory add "…"` or let an agent call memory_save'));
         return;
       }
       for (const m of rows) info(`  ${renderRow(m)}`);
@@ -63,7 +63,7 @@ export function registerServeMemory(serve: Command): void {
         json({ query, count: hits.length, hits: hits.map((h) => ({ score: h.score, memory: h.memory })) });
         return;
       }
-      info(`${c.cyan('vg memory search')} · ${hits.length} hits for ${c.bold(query)}`);
+      info(`${c.cyan('vg serve memory search')} · ${hits.length} hits for ${c.bold(query)}`);
       for (const h of hits) info(`  ${c.dim(h.score.toFixed(3))}  ${renderRow(h.memory)}`);
     });
   applyGlobalOptions(search);
@@ -88,7 +88,7 @@ export function registerServeMemory(serve: Command): void {
         json({ ok: true, memory: m, file: store.filePath(scope) });
         return;
       }
-      info(`${c.cyan('vg memory add')} · ${m.evidence > 1 ? `reinforced (evidence ${m.evidence})` : 'remembered'} ${c.dim(`[${m.id}]`)} ${c.dim(`→ ${store.filePath(scope)}`)}`);
+      info(`${c.cyan('vg serve memory add')} · ${m.evidence > 1 ? `reinforced (evidence ${m.evidence})` : 'remembered'} ${c.dim(`[${m.id}]`)} ${c.dim(`→ ${store.filePath(scope)}`)}`);
     });
   applyGlobalOptions(add);
 
@@ -99,13 +99,13 @@ export function registerServeMemory(serve: Command): void {
       const global = readGlobal(this);
       const store = openStore(global);
       const m = store.get(id);
-      if (!m) throw notFound(`no memory with id ${id} — run \`vg memory list\` to see ids`);
+      if (!m) throw notFound(`no memory with id ${id} — run \`vg serve memory list\` to see ids`);
       store.delete(m.id);
       if (global.json) {
         json({ ok: true, deleted: m.id });
         return;
       }
-      info(`${c.cyan('vg memory delete')} · forgot ${c.dim(`[${m.id}]`)} ${m.text.slice(0, 80)}`);
+      info(`${c.cyan('vg serve memory delete')} · forgot ${c.dim(`[${m.id}]`)} ${m.text.slice(0, 80)}`);
     });
   applyGlobalOptions(del);
 
@@ -120,7 +120,7 @@ export function registerServeMemory(serve: Command): void {
         json(s);
         return;
       }
-      info(`${c.cyan('vg memory stats')} · ${s.total} memories · evidence ${s.evidence}`);
+      info(`${c.cyan('vg serve memory stats')} · ${s.total} memories · evidence ${s.evidence}`);
       info(`  project    ${s.project.resolved ? `${s.project.key} ${c.dim(`(${s.project.root ?? ''})`)}` : c.yellow('unresolved — project scope never injected')}`);
       info(`  user       ${s.user}`);
       info(`  by scope   project ${s.byScope.project} · user ${s.byScope.user} · global ${s.byScope.global}`);
@@ -143,7 +143,7 @@ export function registerServeMemory(serve: Command): void {
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, jsonl, { mode: 0o600 });
         if (global.json) json({ ok: true, file: target, count });
-        else info(`${c.cyan('vg memory export')} · wrote ${count} memories → ${target}`);
+        else info(`${c.cyan('vg serve memory export')} · wrote ${count} memories → ${target}`);
         return;
       }
       if (global.json) {
@@ -173,7 +173,7 @@ export function registerServeMemory(serve: Command): void {
         json({ ok: true, file: target, ...r });
         return;
       }
-      info(`${c.cyan('vg memory import')} · added ${r.added}, skipped ${r.skipped} ${c.dim(`from ${target}`)}`);
+      info(`${c.cyan('vg serve memory import')} · added ${r.added}, skipped ${r.skipped} ${c.dim(`from ${target}`)}`);
     });
   applyGlobalOptions(imp);
 
@@ -193,7 +193,7 @@ export function registerServeMemory(serve: Command): void {
         json({ ok: true, scope: scope ?? 'all', cleared: n });
         return;
       }
-      info(`${c.cyan('vg memory clear')} · forgot ${n} ${scope ?? ''} memories`.replace(/\s+/g, ' '));
+      info(`${c.cyan('vg serve memory clear')} · forgot ${n} ${scope ?? ''} memories`.replace(/\s+/g, ' '));
     });
   applyGlobalOptions(clear);
 

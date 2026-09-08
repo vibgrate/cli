@@ -205,7 +205,7 @@ async function readInput(file: string | undefined): Promise<string> {
       throw new CliError(`cannot read ${abs}: ${(err as Error).message}`, ExitCode.ERROR);
     }
   }
-  if (process.stdin.isTTY) throw usageError('no input: pass a file, or pipe content on stdin (`cat out.log | vg compress`)');
+  if (process.stdin.isTTY) throw usageError('no input: pass a file, or pipe content on stdin (`cat out.log | vg serve compress`)');
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   return Buffer.concat(chunks).toString('utf8');
@@ -232,11 +232,11 @@ function printTextSummary(s: {
   tokenizer: string;
 }): void {
   info(
-    `${c.cyan('vg compress')} · ${s.detected} → ${c.bold(s.strategy)}${s.chain.length ? c.dim(` (${s.chain.join(' → ')})`) : ''}` +
+    `${c.cyan('vg serve compress')} · ${s.detected} → ${c.bold(s.strategy)}${s.chain.length ? c.dim(` (${s.chain.join(' → ')})`) : ''}` +
       ` · ${s.tokensBefore} → ${s.tokensAfter} tokens ${c.green(`(${pct(s.keptRatio)} smaller)`)} ${c.dim(`· ${s.tokenizer}`)}` +
       (s.dryRun ? c.dim(' · dry run, nothing stored') : ''),
   );
-  if (s.ccrHashes.length) info(c.dim(`  originals retrievable: ${s.ccrHashes.map((h) => `vg retrieve ${h}`).join(' · ')}`));
+  if (s.ccrHashes.length) info(c.dim(`  originals retrievable: ${s.ccrHashes.map((h) => `vg serve retrieve ${h}`).join(' · ')}`));
 }
 
 function printPipelineSummary(
@@ -245,11 +245,11 @@ function printPipelineSummary(
   dryRun: boolean,
 ): void {
   info(
-    `${c.cyan('vg compress')} · ${format} · ${r.tokensBefore} → ${r.tokensAfter} tokens ` +
+    `${c.cyan('vg serve compress')} · ${format} · ${r.tokensBefore} → ${r.tokensAfter} tokens ` +
       (r.compressed ? c.green(`(${pct(r.keptRatio)} smaller)`) : c.dim('(nothing eligible — original returned)')) +
       (dryRun ? c.dim(' · dry run, nothing stored') : ''),
   );
   if (r.transformsApplied.length) info(c.dim(`  transforms: ${r.transformsApplied.join(', ')}`));
-  if (r.ccrHashes.length) info(c.dim(`  originals retrievable: ${r.ccrHashes.length} (vg retrieve <hash>)`));
+  if (r.ccrHashes.length) info(c.dim(`  originals retrievable: ${r.ccrHashes.length} (vg serve retrieve <hash>)`));
   for (const w of r.warnings.slice(0, 5)) info(c.yellow(`  warning: ${w}`));
 }

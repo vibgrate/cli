@@ -12,6 +12,26 @@ backward compatible.
 
 ## [Unreleased]
 
+### Changed
+
+- **`vg show chart` is now `vg show arch`.** The local interactive map of the
+  code graph takes the Architecture module's public name — it is the map that
+  paints roles, purposes and boundary-rule breaks from `graph.arch.json` when
+  the module is loaded, and the raw graph when it is not. Same options
+  (`--port`, `--host`, `--focus`, `--no-open`), same loopback server, same
+  `/api/*` endpoints. `vg show chart` keeps working as a silent alias for one
+  release and is no longer listed in `vg show --help`.
+
+### Fixed
+
+- **Context compression was a silent passthrough in the published build.** The
+  listener, `vg savings --benchmark`, and the `vg code` tool-result compression
+  bound their layers through a runtime-string dynamic import that the bundler
+  could not follow, so the shipped `dist/` reported every layer as missing and
+  forwarded requests untouched (0% saved) while the same code run from source
+  compressed. The imports are now literal, the chunks ship, and a test keeps
+  them that way.
+
 ### Added
 
 - **Context compression for AI coding agents — with no new commands.**

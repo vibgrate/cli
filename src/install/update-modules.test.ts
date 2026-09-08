@@ -104,8 +104,7 @@ describe('updateLocalModules (vg update)', () => {
     expect((await updateLocalModules({ fetchImpl: failingFetch })).every((r) => r.status === 'disabled')).toBe(true);
     delete process.env.VIBGRATE_NO_KERNEL;
 
-    // Denial recorded under the pre-rename consent key still declines the public id.
-    writeConsent({ ...readConsent(), haile: 'denied' });
+    writeConsent({ ...readConsent(), arch: 'denied' });
     const r = byId(await updateLocalModules({ fetchImpl: failingFetch }));
     expect(r.arch.status).toBe('declined');
     // relevance is default-on but the registry is down → failed, not thrown.

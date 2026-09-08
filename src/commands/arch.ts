@@ -1,8 +1,12 @@
 /**
- * `vg show chart` — local interactive code map.
+ * `vg show arch` — local interactive map of the code graph, painted by
+ * architecture (roles, purposes, rule breaks) when the Architecture module
+ * has written its sidecar, and the raw graph when it has not.
  *
  * Not a new top-level verb (FEATURE-DESIGN-PRINCIPLES P1). Nested under
  * `vg show` so the terminal, the map, and `vg show --json` stay one surface.
+ * `vg show chart` is the pre-rename spelling, kept as a silent alias for one
+ * release (never listed in help).
  */
 import { spawn } from 'node:child_process';
 import type { Command } from 'commander';
@@ -16,10 +20,14 @@ import { rootOf } from './util.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { c, info, json } from '../util/output.js';
 
-export function registerShowChart(show: Command): void {
-  const chart = show
-    .command('chart')
-    .description('open a local interactive map of the code graph')
+export function registerShowArch(show: Command): void {
+  configure(show.command('arch').description('open a local interactive architecture map of the code graph'));
+  // Pre-rename alias: same options, same action, hidden from `vg show --help`.
+  configure(show.command('chart', { hidden: true }).description('alias of `vg show arch`'));
+}
+
+function configure(chart: Command): void {
+  chart
     .option('--port <n>', 'port', String(DEFAULT_CHART_PORT))
     .option('--host <h>', 'bind address (loopback by default)', DEFAULT_CHART_HOST)
     .option('--focus <name>', 'open the map on this symbol')
@@ -64,7 +72,7 @@ export function registerShowChart(show: Command): void {
           missingSteps: payload.meta.missingSteps,
         });
       } else {
-        info(`${c.cyan('vg · chart')}  ${url}`);
+        info(`${c.cyan('vg · arch')}  ${url}`);
         info(
           c.dim(
             payload.meta.architectureLoaded

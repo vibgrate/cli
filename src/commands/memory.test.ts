@@ -130,7 +130,7 @@ describe('vg memory', () => {
   it('prints human output to stderr and nothing to stdout without --json', async () => {
     const r = await run(['add', 'human readable memory']);
     expect(r.json).toBe('');
-    expect(r.err).toContain('vg memory add');
+    expect(r.err).toContain('vg serve memory add');
     const l = await run(['list']);
     expect(l.json).toBe('');
     expect(l.err).toContain('human readable memory');

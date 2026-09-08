@@ -1,11 +1,13 @@
-# `vg show chart`
+# `vg show arch`
 
-Open a local, interactive map of the code graph after `vg build`.
+Open a local, interactive architecture map of the code graph after `vg build`.
+
+`vg show chart` — the spelling this shipped under before the Architecture module got its public name — still works as a silent alias for one release; it is not listed in `vg show --help`.
 
 ```bash
 vg build
-vg show chart
-# vg · chart  http://127.0.0.1:7420
+vg show arch
+# vg · arch  http://127.0.0.1:7420
 ```
 
 Loopback only by default (`127.0.0.1:7420`). `--port`, `--host`, `--focus`, and `--no-open` are available. `--json` prints the URL and counts, then keeps serving until you stop it.
@@ -28,7 +30,7 @@ A rose mark is a finding with `line > 0`. A yellow mark is a missing step. They 
 `/api/path` uses the same shortest-path engine as `vg path`.
 `/api/reach/:id` walks callers (`dir=up`) or callees (`dir=down`).
 
-Deep links use `#n=<id>&view=job`. `vg show chart --focus scanDir` opens that hash.
+Deep links use `#n=<id>&view=job`. `vg show arch --focus scanDir` opens that hash.
 
 ## What this is not
 

@@ -1592,7 +1592,30 @@ vg show <name>
 | `<name>` | Qualified name, short name, `file:line`, glob, or id |
 | `--pick <n>` | Pick the nth candidate when ambiguous |
 
-Outputs the qualified name, kind, file location, signature, importance score, area, extends relationships, callees, and callers.
+Outputs the qualified name, kind, file location, signature, importance score, area, extends relationships, callees, and callers. For functions and methods it also prints the architecture classification the Architecture module wrote at build time — role, purposes, a one-line description, and any boundary violation — when that module is loaded (`vg module install arch`; installed by default).
+
+#### vg show arch
+
+Open a local, interactive architecture map of the same graph in your browser.
+
+```bash
+vg show arch                     # vg · arch  http://127.0.0.1:7420
+vg show arch --focus UserService # open on one symbol
+vg show arch --no-open --json    # print the URL and counts; keep serving
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port <n>` | `7420` | Port |
+| `--host <h>` | `127.0.0.1` | Bind address (loopback by default; binding elsewhere prints a warning) |
+| `--focus <name>` | — | Open the map on this symbol |
+| `--no-open` | — | Print the URL without opening a browser |
+
+The map draws the same facts as `vg show`, `vg path`, and `vg impact` so a human can walk them: **by job** (handlers, guards, services, models — Architecture module on), **by cluster** (the graph areas), **who calls whom**, **missing steps** (a call exists in source but not on the map), and **problems** (architecture-rule breaks anchored on a line). With the Architecture module off it is the raw graph — never a guess. The page is served inline from loopback with no external assets, and `q` / Ctrl-C stops it. `vg show chart` is the pre-rename spelling and still works as a silent alias for one release. See [docs/show-arch.md](./docs/show-arch.md).
+
+#### vg show savings
+
+Print (and with `--open`, open) the URL of the local savings page served by `vg serve --compress` — see [vg savings / vg show savings](#vg-savings--vg-show-savings).
 
 ---
 
@@ -1802,7 +1825,7 @@ your terminal, gets `VG_WRAP_ACTIVE=1`, receives forwarded `SIGTERM` /
 
 `vg savings` reports tokens and dollars saved — a compression section alongside
 the grep-baseline numbers for map queries. `vg show savings` opens the same
-numbers as a live local page, next to `vg show chart` for the code graph.
+numbers as a live local page, next to `vg show arch` for the code graph.
 
 ```bash
 vg savings                       # today / 7 days / 30 days, by model, client, project

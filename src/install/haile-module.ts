@@ -24,14 +24,15 @@ import {
   kernelDisabled,
   moduleInstalledAt,
   readConsent,
+  writeConsent,
   removeModule,
 } from './module-core.js';
 
 export const HAILE_MODULE_NAME = '@vibgrate/haile';
 /** Public module id (`vg module install arch`). "haile" is the internal codename and stays the npm name. */
 export const ARCH_MODULE_ID = 'arch';
-/** Pre-rename module id, still accepted by `vg module` and as a consent key. */
-export const ARCH_MODULE_LEGACY_ID = 'haile';
+/** Consent key a pre-rename `vg` wrote; migrated to `arch` on first read, then never consulted again. */
+const PRE_RENAME_CONSENT_KEY = 'haile';
 
 const HAILE_MODULE: ModuleDescriptor = {
   id: ARCH_MODULE_ID,
@@ -41,12 +42,18 @@ const HAILE_MODULE: ModuleDescriptor = {
 };
 
 /**
- * Consent recorded under the public id, falling back to the codename key a
- * pre-rename `vg` wrote — an opt-out made before the rename keeps holding.
+ * Consent for the architecture module. A decision recorded under the
+ * pre-rename key is moved to `arch` the first time it is seen, so an opt-out
+ * made before the rename keeps holding without the old key staying live.
  */
 export function archConsent(): 'granted' | 'denied' | undefined {
   const consent = readConsent();
-  return consent[ARCH_MODULE_ID] ?? consent[ARCH_MODULE_LEGACY_ID];
+  if (consent[ARCH_MODULE_ID] === undefined && consent[PRE_RENAME_CONSENT_KEY] !== undefined) {
+    const { [PRE_RENAME_CONSENT_KEY]: moved, ...rest } = consent;
+    writeConsent({ ...rest, [ARCH_MODULE_ID]: moved });
+    return moved;
+  }
+  return consent[ARCH_MODULE_ID];
 }
 
 export const HAILE_DISCLOSURE =

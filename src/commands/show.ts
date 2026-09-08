@@ -9,13 +9,13 @@ import { ambiguityError } from './ambiguity.js';
 import { c, info, json } from '../util/output.js';
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { findHaileSymbol, formatHaileLines, haileJsonFields, readHaileSidecar } from '../engine/haile/index.js';
-import { registerShowChart } from './chart.js';
+import { registerShowArch } from './arch.js';
 import { registerShowSavings } from './show-savings.js';
 
 /**
  * `vg show <name>` (VG-CLI-SPEC §3.3) — the richest single-node view: what it
  * is, its callers and callees and other edges, its area and importance.
- * `vg show chart` opens the local interactive map of the same graph;
+ * `vg show arch` opens the local interactive architecture map of the same graph;
  * `vg show savings` opens the local page for what compression saved.
  */
 export function registerShow(program: Command): void {
@@ -23,7 +23,7 @@ export function registerShow(program: Command): void {
     .command('show')
     .description('explain a node: what it is, what it calls, what calls it — or open the code map');
 
-  registerShowChart(cmd);
+  registerShowArch(cmd);
   registerShowSavings(cmd);
 
   cmd

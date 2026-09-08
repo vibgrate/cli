@@ -151,11 +151,9 @@ describe('HAILE classify file via writeArtifacts', () => {
     const root = tmpDir();
     const prev = process.env.VIBGRATE_GRAPH_IN_REPO;
     const prevNo = process.env.VIBGRATE_NO_KERNEL;
-    const prevPath = process.env.VIBGRATE_HAILE_PATH;
     const prevArchPath = process.env.VIBGRATE_ARCH_PATH;
     process.env.VIBGRATE_GRAPH_IN_REPO = '1';
     process.env.VIBGRATE_NO_KERNEL = '1';
-    delete process.env.VIBGRATE_HAILE_PATH;
     delete process.env.VIBGRATE_ARCH_PATH;
     try {
       const written = writeArtifacts(tinyGraph(), { root, html: false, report: false });
@@ -170,8 +168,6 @@ describe('HAILE classify file via writeArtifacts', () => {
       else process.env.VIBGRATE_GRAPH_IN_REPO = prev;
       if (prevNo === undefined) delete process.env.VIBGRATE_NO_KERNEL;
       else process.env.VIBGRATE_NO_KERNEL = prevNo;
-      if (prevPath === undefined) delete process.env.VIBGRATE_HAILE_PATH;
-      else process.env.VIBGRATE_HAILE_PATH = prevPath;
       if (prevArchPath === undefined) delete process.env.VIBGRATE_ARCH_PATH;
       else process.env.VIBGRATE_ARCH_PATH = prevArchPath;
     }

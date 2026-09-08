@@ -49,13 +49,13 @@ export function registerServeRetrieve(serve: Command): void {
       if (opts.purge) {
         const removed = store.purgeExpired();
         if (global.json) json({ ok: true, removed });
-        else info(`${c.cyan('vg retrieve')} ${c.dim('--purge')} · ${removed} expired entr${removed === 1 ? 'y' : 'ies'} removed`);
+        else info(`${c.cyan('vg serve retrieve')} ${c.dim('--purge')} · ${removed} expired entr${removed === 1 ? 'y' : 'ies'} removed`);
         return;
       }
       if (opts.stats) {
         const stats = store.stats();
         if (global.json) json(stats);
-        else info(`${c.cyan('vg retrieve')} ${c.dim('--stats')} · ${JSON.stringify(stats)}`);
+        else info(`${c.cyan('vg serve retrieve')} ${c.dim('--stats')} · ${JSON.stringify(stats)}`);
         return;
       }
       if (opts.list) {
@@ -73,14 +73,14 @@ export function registerServeRetrieve(serve: Command): void {
           json({ entries });
           return;
         }
-        info(`${c.cyan('vg retrieve')} ${c.dim('--list')} · ${entries.length} retrievable entr${entries.length === 1 ? 'y' : 'ies'}`);
+        info(`${c.cyan('vg serve retrieve')} ${c.dim('--list')} · ${entries.length} retrievable entr${entries.length === 1 ? 'y' : 'ies'}`);
         for (const e of entries) {
           info(`  ${e.hash}  ${e.strategy.padEnd(14)} ${String(e.originalTokens).padStart(8)} → ${String(e.compressedTokens).padStart(6)} tok  ${c.dim(`${e.toolName ?? ''} expires ${e.expiresAt}`)}`);
         }
         return;
       }
 
-      if (!hash) throw usageError('pass the hash from a marker: `vg retrieve <hash>` (or `--list` to see what is retrievable)');
+      if (!hash) throw usageError('pass the hash from a marker: `vg serve retrieve <hash>` (or `--list` to see what is retrievable)');
       const clean = normalizeHash(hash);
       if (!clean) throw usageError(`not a marker hash: ${JSON.stringify(hash)} — expected 12 or 24 hex characters`);
 
@@ -92,7 +92,7 @@ export function registerServeRetrieve(serve: Command): void {
       const result = store.retrieve(clean, { grep: opts.grep, lines, head, tail, jsonPath: opts.jsonPath, maxTokens });
       if (!result.found) {
         throw new CliError(
-          `nothing retrievable for ${clean}${result.status ? ` (${result.status})` : ''} — entries expire after their TTL; run \`vg retrieve --list\` to see what is still held`,
+          `nothing retrievable for ${clean}${result.status ? ` (${result.status})` : ''} — entries expire after their TTL; run \`vg serve retrieve --list\` to see what is still held`,
           ExitCode.NOT_FOUND,
         );
       }
