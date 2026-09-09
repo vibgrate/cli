@@ -31,4 +31,21 @@ describe('chart page chrome', () => {
     expect(html).not.toContain('confidence');
     expect(html).not.toContain('node_id');
   });
+
+  it('lets the map scroll and zoom instead of clipping to a fixed viewport', () => {
+    const html = chartPage();
+    expect(html).not.toContain('viewBox="0 0 1120 760"');
+    expect(html).toMatch(/\.canvas\s*\{[^}]*overflow:\s*auto/);
+    expect(html).toContain('id="canvas"');
+    expect(html).toContain('id="zoom-in"');
+    expect(html).toContain('id="zoom-out"');
+    expect(html).toContain('id="zoom-fit"');
+    expect(html).toContain('aria-label="Zoom in"');
+    expect(html).toContain('Scroll or drag');
+    expect(html).toContain('function sizeMap(');
+    expect(html).toContain('function zoomBy(');
+    expect(html).toContain('e.ctrlKey || e.metaKey');
+    expect(html).toContain('c.scrollBy');
+    expect(html).toContain('svg.style.height');
+  });
 });

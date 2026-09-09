@@ -75,10 +75,11 @@ export function formatText(result: RunReviewResult): string {
   );
   lines.push(
     c.dim(
-      `  ${receipt.versions.policy} · model ${receipt.versions.model} · graph ${receipt.versions.graph_schema} · ${receipt.digests.receipt.slice(0, 19)}…`,
+      `  ${receipt.versions.policy} · model ${receipt.versions.model} · graph ${receipt.versions.graph_schema} · ${receipt.digests.receipt.slice(0, 19)}…`
+        + ` · ${receipt.signature ? `signed ${receipt.signature.keyid}` : 'unsigned'}`,
     ),
   );
-  lines.push(c.dim('  explain one: `vg review explain <finding-id>` · machine result: `vg review --format json`'));
+  lines.push(c.dim('  explain one: `vg review explain <finding-id>` · machine result: `vg review --format json` · check one: `vg review verify <receipt.json>`'));
   // The product does not certify. Say so where a human reads the result.
   lines.push(c.dim('  Review reports change integrity. It is not a proof of security and absence of findings is not a certification.'));
   return lines.join('\n');
@@ -124,7 +125,7 @@ export function formatMarkdown(result: RunReviewResult): string {
   lines.push(`<sub>${escapeCell(reasons.join('; '))}</sub>`);
   lines.push('');
   lines.push(
-    `<sub>policy \`${receipt.versions.policy}\` · model \`${receipt.versions.model}\` · receipt \`${receipt.digests.receipt.slice(0, 23)}…\`</sub>`,
+    `<sub>policy \`${receipt.versions.policy}\` · model \`${receipt.versions.model}\` · receipt \`${receipt.digests.receipt.slice(0, 23)}…\` · ${receipt.signature ? `signed \`${receipt.signature.keyid}\`` : 'unsigned'}</sub>`,
   );
   lines.push('');
   lines.push(

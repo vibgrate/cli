@@ -164,7 +164,12 @@ export interface CapsulePolicyFact {
   evidence_id: string;
   id: string;
   rule: string;
-  source: 'review.toml' | 'derived';
+  /**
+   * Where the profile these rules enforce was declared: `.vibgrate/review.toml`,
+   * an agent-instruction file such as CLAUDE.md or AGENTS.md (`intent`), or
+   * nothing — `derived` from the shape the repository is observed to have.
+   */
+  source: 'review.toml' | 'intent' | 'derived';
 }
 
 export interface CapsuleVerificationFact {
@@ -253,6 +258,29 @@ export const REVIEW_DECISIONS: readonly ReviewDecision[] = [
 
 export type ReviewEnforcement = 'advisory' | 'enforced';
 
+/**
+ * The DSSE payload type the receipt signature is computed under. The signed
+ * message is the DSSE Pre-Authentication Encoding of `digests.receipt` with
+ * this type — so the signature binds both the digest and what it claims to be.
+ */
+export const RECEIPT_SIGNATURE_PAYLOAD_TYPE = 'application/vnd.vibgrate.review-receipt-digest.v1' as const;
+
+/**
+ * A detached Ed25519 signature over `digests.receipt` (see `sign.ts`). The
+ * public key is embedded so a receipt self-verifies for integrity; trust in
+ * *who* signed it comes only from pinning that key (`vg review verify --pub`).
+ */
+export interface ReviewSignature {
+  alg: 'ed25519';
+  payload_type: typeof RECEIPT_SIGNATURE_PAYLOAD_TYPE;
+  /** Truncated sha256 of the signer's SPKI DER — the same key id `vg build --attest` and `vg evidence` use. */
+  keyid: string;
+  /** base64 */
+  sig: string;
+  /** SPKI PEM. */
+  public_key: string;
+}
+
 export interface ReviewReceipt {
   schema_version: typeof RECEIPT_SCHEMA;
   receipt_id: string;
@@ -302,7 +330,8 @@ export interface ReviewReceipt {
     schema_valid: boolean;
     evidence_ids_valid: boolean;
   };
-  signature: string | null;
+  /** `null` only under `--no-sign`. */
+  signature: ReviewSignature | null;
 }
 
 /** The Cloud ingest envelope (spec §6.1). */

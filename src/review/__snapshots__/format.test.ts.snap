@@ -1,0 +1,190 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`formatExplain > renders the evidence behind one finding 1`] = `
+"arch-01 high boundary_bypass
+
+  A changed routing file depends directly on data-access, skipping middleware, services (src/routes/x.ts → src/repositories/r.ts).
+
+  remediation: Route the operation through the application service layer instead of calling data-access directly.
+  alignment:   regression
+  confidence:  0.93
+  protected:   no
+  produced by: scanner
+
+  evidence
+    edge:1 graph_edge src/routes/x.ts:12-20
+      import → src/repositories/r.ts
+    policy:layering:1 policy 
+      outer layers flow one way"
+`;
+
+exports[`formatMarkdown > renders the PR summary 1`] = `
+"## Vibgrate Review — \`fail\`
+
+\`aaaaaaaa\` → \`bbbbbbbb\` · enforcement \`advisory\`
+
+| architecture | security | protected | unknowns |
+|---:|---:|---:|---:|
+| 2 | 2 | 1 | 1 |
+
+| id | kind | severity | alignment | claim |
+|---|---|---|---|---|
+| \`arch-01\` | boundary_bypass | high | regression | A changed routing file depends directly on data-access, skipping middleware, services (src/routes/x.ts → src/repositories/r.ts). |
+| \`arch-02\` | duplicate_implementation | medium | unknown | computeBillSum in src/orders.ts is structurally 81% the same as calculateTotal in src/billing.ts:10 \\| see both. |
+| \`sec-01\` | guard_removed **(protected)** | high | regression | An authorization or validation guard was removed from src/routes/x.ts and no equivalent guard remains in the file. |
+| \`sec-02\` | unguarded_entrypoint | low | regression | POST /ping has no authorization guard in scope, while 2 of 3 mutating routes in src/routes do (no-guard-in-scope). |
+
+**Unknowns**
+
+- Guard presence along the changed call paths was not observed — no runtime authorization test was supplied.
+
+<sub>1 protected finding(s) are unresolved: guard_removed</sub>
+
+<sub>policy \`vg-policy-0.1.0\` · model \`none\` · receipt \`sha256:dddddddddddddddd…\` · unsigned</sub>
+
+<sub>Vibgrate Review reports change integrity against the declared architecture and security controls. It does not prove code is secure, and absence of findings is not a certification.</sub>"
+`;
+
+exports[`formatSarif > renders the code-scanning document 1`] = `
+"{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Vibgrate Review",
+          "version": "2026.1.0-test",
+          "informationUri": "https://vibgrate.com/review",
+          "rules": [
+            {
+              "id": "guard_removed",
+              "name": "guard_removed",
+              "shortDescription": {
+                "text": "guard removed"
+              },
+              "fullDescription": {
+                "text": "Restore the guard, or move it to a middleware the changed path provably passes through."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "tags": [
+                  "security",
+                  "vibgrate-review"
+                ]
+              }
+            },
+            {
+              "id": "unguarded_entrypoint",
+              "name": "unguarded_entrypoint",
+              "shortDescription": {
+                "text": "unguarded entrypoint"
+              },
+              "fullDescription": {
+                "text": "Add an authorization check."
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "properties": {
+                "tags": [
+                  "security",
+                  "vibgrate-review"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "automationDetails": {
+        "id": "vibgrate-review/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "results": [
+        {
+          "ruleId": "guard_removed",
+          "level": "error",
+          "message": {
+            "text": "An authorization or validation guard was removed from src/routes/x.ts and no equivalent guard remains in the file."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/routes/x.ts"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "findingId": "sec-01",
+            "confidence": 0.9,
+            "targetAlignment": "regression",
+            "protectedFinding": true,
+            "remediation": "Restore the guard, or move it to a middleware the changed path provably passes through."
+          }
+        },
+        {
+          "ruleId": "unguarded_entrypoint",
+          "level": "note",
+          "message": {
+            "text": "POST /ping has no authorization guard in scope, while 2 of 3 mutating routes in src/routes do (no-guard-in-scope)."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/routes/ping.ts"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "findingId": "sec-02",
+            "confidence": 0.5,
+            "targetAlignment": "regression",
+            "protectedFinding": false,
+            "remediation": "Add an authorization check."
+          }
+        }
+      ]
+    }
+  ]
+}"
+`;
+
+exports[`formatText > renders the human report 1`] = `
+"vg review · fail · advisory
+  bbbbbbbb vs aaaaaaaa (merge-base) · architecture, security
+
+  arch-01 high boundary_bypass
+    A changed routing file depends directly on data-access, skipping middleware, services (src/routes/x.ts → src/repositories/r.ts).
+    → Route the operation through the application service layer instead of calling data-access directly.
+    alignment regression · confidence 0.93 · src/routes/x.ts, src/repositories/r.ts
+
+  arch-02 medium duplicate_implementation
+    computeBillSum in src/orders.ts is structurally 81% the same as calculateTotal in src/billing.ts:10 | see both.
+    → Call calculateTotal instead, or extract the shared behaviour if the two genuinely differ.
+    alignment unknown · confidence 0.81 · src/orders.ts, src/billing.ts
+
+  sec-01 protected guard_removed
+    An authorization or validation guard was removed from src/routes/x.ts and no equivalent guard remains in the file.
+    → Restore the guard, or move it to a middleware the changed path provably passes through.
+    alignment regression · confidence 0.90 · src/routes/x.ts
+
+  sec-02 low unguarded_entrypoint
+    POST /ping has no authorization guard in scope, while 2 of 3 mutating routes in src/routes do (no-guard-in-scope).
+    → Add an authorization check.
+    alignment regression · confidence 0.50 · src/routes/ping.ts
+
+  unknowns
+    · Guard presence along the changed call paths was not observed — no runtime authorization test was supplied.
+
+  required checks: authz-test, changed-call-path-test
+  policy: 1 protected finding(s) are unresolved: guard_removed
+  capsule ~1234 tokens (median target 3000, cap 16000)
+  vg-policy-0.1.0 · model none · graph vg-graph/1.1 · sha256:dddddddddddd… · unsigned
+  explain one: \`vg review explain <finding-id>\` · machine result: \`vg review --format json\` · check one: \`vg review verify <receipt.json>\`
+  Review reports change integrity. It is not a proof of security and absence of findings is not a certification."
+`;

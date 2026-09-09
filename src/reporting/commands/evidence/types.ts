@@ -115,6 +115,35 @@ export interface FrozenComponent {
   ecosystem?: string;
 }
 
+/**
+ * Build-time facts recorded next to a frozen manifest, read from what the build
+ * itself produced: a BuildKit `--metadata-file`, a SLSA provenance or SBOM
+ * attestation, or a local image inspection. Additive — absent when a release
+ * was frozen from a scan artifact or SBOM file alone.
+ */
+export interface ReleaseBuild {
+  /** Which inputs contributed, in the order they were read. */
+  sources: ('buildx-metadata' | 'provenance-attestation' | 'sbom-attestation' | 'image-inspect')[];
+  /** Image name(s) the build tagged, or the reference that was inspected. */
+  imageName?: string;
+  /** Image config digest — identifies a local image that was never pushed. */
+  configDigest?: string;
+  /** BuildKit build record reference (`buildx.build.ref`). */
+  buildRef?: string;
+  builderId?: string;
+  buildType?: string;
+  /** Source repository the provenance (or the `org.opencontainers.image.source` label) names. */
+  sourceUri?: string;
+  /** Commit the provenance (or the `org.opencontainers.image.revision` label) names. */
+  sourceRevision?: string;
+  /** Base images the provenance lists, sorted by reference. */
+  baseImages?: { ref: string; digest?: string }[];
+  /** `org.opencontainers.image.*` labels found on the built image. */
+  labels?: Record<string, string>;
+  /** Attestation signatures are recorded, never verified, by vg — verify with cosign. */
+  signature: 'unverified';
+}
+
 /** An immutable, frozen-at-ship-time release manifest. Never regenerated. */
 export interface Release {
   productId: string;
@@ -129,6 +158,8 @@ export interface Release {
   distribution: string[];
   /** When this manifest was frozen (records the freeze, not the answer). */
   frozenAt: string;
+  /** Build facts read from BuildKit outputs or a local image, when supplied. */
+  build?: ReleaseBuild;
 }
 
 // ── Advisory + exposure ──

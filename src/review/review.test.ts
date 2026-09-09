@@ -19,6 +19,7 @@ import {
   CAPSULE_SCHEMA,
   FINDINGS_SCHEMA,
   RECEIPT_SCHEMA,
+  RECEIPT_SIGNATURE_PAYLOAD_TYPE,
   digest,
   findingFingerprint,
   receiptDigest,
@@ -29,6 +30,9 @@ import {
   type ReviewReceipt,
 } from './schemas.js';
 import { verifyFindings } from './verify.js';
+// Static, not `await import(...)` inside a test: loading the CLI entry is slow
+// under a full parallel run and must not count against a test's timeout.
+import { KNOWN_COMMANDS, buildProgram, dispatch } from '../cli.js';
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -388,7 +392,7 @@ describe('digests', () => {
     } as unknown as ReviewReceipt;
     const first = receiptDigest(receipt);
     receipt.digests.receipt = first;
-    receipt.signature = 'sig';
+    receipt.signature = { alg: 'ed25519', payload_type: RECEIPT_SIGNATURE_PAYLOAD_TYPE, keyid: 'k', sig: 'c2ln', public_key: 'pem' };
     expect(receiptDigest(receipt)).toBe(first);
   });
 
@@ -566,6 +570,34 @@ describe('change set', () => {
     expect(change.baseSha).toBe(change.headSha);
   });
 
+  it('never guesses `removed` or `added` from numstat counts — the status listing decides', () => {
+    // `0\t12` is what git prints for a deletion *and* for a modification that
+    // only removes lines. Guessing `removed` would stop the file being read,
+    // and a guard still in it would be reported as removed — a false
+    // protected finding. So the counts alone yield `modified`.
+    const numstat = '0\t12\tsrc/routes/gone.ts\n12\t0\tsrc/routes/new.ts\n';
+    const runner = (status: string): GitRunner => (args) => {
+      const key = args.join(' ');
+      if (key === 'rev-parse HEAD') return { stdout: 'c'.repeat(40), status: 0 };
+      if (key === 'rev-parse --show-toplevel') return { stdout: '/repo', status: 0 };
+      if (key === 'rev-parse --abbrev-ref HEAD') return { stdout: 'main', status: 0 };
+      if (key.includes('--numstat')) return { stdout: numstat, status: 0 };
+      if (key === 'status --porcelain -uall') return { stdout: status, status: 0 };
+      return { stdout: '', status: 0 };
+    };
+    const countsOnly = collectChangeSet('/repo', undefined, runner(''));
+    expect(countsOnly.files.map((f) => [f.path, f.op, f.addedLines, f.removedLines])).toEqual([
+      ['src/routes/gone.ts', 'modified', 0, 12],
+      ['src/routes/new.ts', 'modified', 12, 0],
+    ]);
+
+    const withStatus = collectChangeSet('/repo', undefined, runner(' D src/routes/gone.ts\nA  src/routes/new.ts\n'));
+    expect(withStatus.files.map((f) => [f.path, f.op])).toEqual([
+      ['src/routes/gone.ts', 'removed'],
+      ['src/routes/new.ts', 'added'],
+    ]);
+  });
+
   it('dirtyTreeHash changes when the change shape changes', () => {
     const a = dirtyTreeHash([{ path: 'a.ts', op: 'modified', addedLines: 1, removedLines: 0, hunks: [] }]);
     const b = dirtyTreeHash([{ path: 'a.ts', op: 'modified', addedLines: 2, removedLines: 0, hunks: [] }]);
@@ -684,25 +716,21 @@ describe('explain', () => {
 // ── CLI surface ─────────────────────────────────────────────────────────────
 
 describe('vg review command surface', () => {
-  it('registers `review` as a known command so the dispatcher routes it', async () => {
-    const { KNOWN_COMMANDS } = await import('../cli.js');
+  it('registers `review` as a known command so the dispatcher routes it', () => {
     expect(KNOWN_COMMANDS.has('review')).toBe(true);
   });
 
-  it('routes `vg review --out <file>` to review, not to ask', async () => {
-    const { dispatch } = await import('../cli.js');
+  it('routes `vg review --out <file>` to review, not to ask', () => {
     expect(dispatch(['review', '--format', 'json', '--out', 'receipt.json'], '/repo')[0]).toBe('review');
   });
 
-  it('does not mistake an --out value for a bare-word search query', async () => {
-    const { dispatch } = await import('../cli.js');
+  it('does not mistake an --out value for a bare-word search query', () => {
     // `--out`'s value must be consumed as a value, never read as the first
     // positional — otherwise it would fall through to `ask`.
     expect(dispatch(['--out', 'receipt.json', 'review'], '/repo')[0]).toBe('review');
   });
 
-  it('exposes the documented option names', async () => {
-    const { buildProgram } = await import('../cli.js');
+  it('exposes the documented option names', () => {
     const review = buildProgram().commands.find((c) => c.name() === 'review');
     expect(review).toBeDefined();
     const flags = review!.options.map((o) => o.long);
@@ -718,8 +746,7 @@ describe('vg review command surface', () => {
     expect(review!.options.find((o) => o.long === '--include-snippets')!.attributeName()).toBe('includeSnippets');
   });
 
-  it('registers `vg review explain <finding-id>`', async () => {
-    const { buildProgram } = await import('../cli.js');
+  it('registers `vg review explain <finding-id>`', () => {
     const review = buildProgram().commands.find((c) => c.name() === 'review');
     expect(review!.commands.map((c) => c.name())).toContain('explain');
   });

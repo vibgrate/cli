@@ -162,7 +162,10 @@ export function verifyEvidenceEnvelope(
 
 const DEFAULT_KEY = 'attest-key.pem';
 
-/** Resolve the Ed25519 signing key, minting a default one on first use (loud). */
+/**
+ * Resolve the Ed25519 signing key, minting a default one on first use (loud).
+ * Shared by `vg evidence` and `vg review` — one key, one place, one story.
+ */
 export function resolveSigningKey(root: string, explicit?: string): { key: crypto.KeyObject; keyPath: string; minted: boolean } {
   const chosen = explicit ?? process.env.VG_ATTEST_KEY;
   const keyPath = chosen ? path.resolve(chosen) : path.join(root, '.vibgrate', DEFAULT_KEY);
@@ -182,7 +185,7 @@ export function resolveSigningKey(root: string, explicit?: string): { key: crypt
     throw new CliError(`could not read an Ed25519 private key from ${keyPath}`, ExitCode.USAGE_ERROR);
   }
   if (key.asymmetricKeyType !== 'ed25519') {
-    throw new CliError(`evidence signing requires an Ed25519 key, but ${keyPath} is ${key.asymmetricKeyType ?? 'unknown'}`, ExitCode.USAGE_ERROR);
+    throw new CliError(`signing requires an Ed25519 key, but ${keyPath} is ${key.asymmetricKeyType ?? 'unknown'}`, ExitCode.USAGE_ERROR);
   }
   return { key, keyPath, minted };
 }

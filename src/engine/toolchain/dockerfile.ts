@@ -35,7 +35,9 @@ import type {
  *
  * Each `FROM` opens a build stage (`image` node). `FROM x AS y` names it;
  * `COPY --from=` links stages. External base images become `image` nodes so the
- * linker can join a Dockerfile to the registry image a workload runs.
+ * linker can join a Dockerfile to the registry image a workload runs. `EXPOSE`
+ * ports and `LABEL` metadata (`org.opencontainers.image.*` and any other key)
+ * become `property` nodes on the stage that declares them.
  */
 
 /** The instruction set we act on. Others are parsed and ignored. */
@@ -148,6 +150,90 @@ function parseExpose(args: string): string[] {
     .split(/\s+/)
     .filter(Boolean)
     .filter((token) => !token.startsWith('--'));
+}
+
+/**
+ * `LABEL key=value key2="value two" ...` — both the modern `key=value` form
+ * (values may be double- or single-quoted, with backslash escapes inside double
+ * quotes) and the legacy `LABEL key value` form that stamps one label per
+ * instruction.
+ *
+ * Labels are the one place a Dockerfile states facts *about* the image rather
+ * than how to build it — `org.opencontainers.image.source`, `.revision`,
+ * `.version`, `.licenses` — and they survive into the built image's config,
+ * where BuildKit, registries and scanners read them. Extracting them here lets
+ * the graph carry the same facts a scanner would find on the image, and gives
+ * the linker something to match against build provenance later.
+ *
+ * Values are recorded as written: an `$ARG` expansion stays an expansion, since
+ * the build invocation that resolves it is not in the file.
+ */
+export function parseLabels(args: string): { key: string; value: string }[] {
+  const tokens = tokenizeLabelArgs(args);
+  if (!tokens.length) return [];
+  const out: { key: string; value: string }[] = [];
+  const hasEquals = tokens.some((t) => t.includes('='));
+  if (!hasEquals) {
+    // Legacy form: `LABEL key value with spaces`.
+    const [key, ...rest] = tokens;
+    if (key) out.push({ key, value: rest.join(' ') });
+    return out;
+  }
+  for (const token of tokens) {
+    const eq = token.indexOf('=');
+    // A token without `=` in the modern form is a continuation of nothing we
+    // can attribute; Docker itself rejects it. Skip rather than guess.
+    if (eq <= 0) continue;
+    out.push({ key: token.slice(0, eq), value: token.slice(eq + 1) });
+  }
+  return out;
+}
+
+/**
+ * Split LABEL arguments on unquoted whitespace, honouring double quotes (with
+ * `\"` and `\\` escapes) and single quotes, and dropping the quotes. A quoted
+ * key (`"com.example.a b"=1`) is preserved as one token.
+ */
+function tokenizeLabelArgs(args: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  let sawToken = false;
+  for (let i = 0; i < args.length; i++) {
+    const ch = args[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"' && i + 1 < args.length) {
+        current += args[++i];
+        continue;
+      }
+      if (ch === quote) {
+        quote = null;
+        continue;
+      }
+      current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      sawToken = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (sawToken) tokens.push(current);
+      current = '';
+      sawToken = false;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < args.length) {
+      current += args[++i];
+      sawToken = true;
+      continue;
+    }
+    current += ch;
+    sawToken = true;
+  }
+  if (sawToken) tokens.push(current);
+  return tokens;
 }
 
 /**
@@ -303,6 +389,27 @@ export const dockerfileExtractor: ToolchainExtractor = {
             forStage.add(toPosix(source).replace(/^\.\//, ''));
           }
           if (forStage.size) copySources.set(currentStage, forStage);
+          break;
+        }
+
+        case 'LABEL': {
+          if (!currentStage) break;
+          for (const { key, value } of parseLabels(line.args)) {
+            // Scoped to the stage: a label set in a builder stage does not
+            // reach the final image, so two stages may legitimately carry the
+            // same key with different values.
+            const labelAddress = `${currentStage}/label/${key}`;
+            nodes.push({
+              kind: 'property',
+              name: key,
+              qualifiedName: labelAddress,
+              span: { start: line.startLine, end: line.endLine },
+              signature: 'dockerfile.label',
+              doc: safeDoc(value ? `${key}=${value}` : key),
+              importance: 0.1,
+            });
+            edges.push({ kind: 'contains', from: currentStage, to: labelAddress, confidence: 1 });
+          }
           break;
         }
 

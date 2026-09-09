@@ -5,17 +5,25 @@
  *   vg review                    changed-only vs HEAD (dirty tree + index)
  *   vg review --base origin/main merge-base of HEAD and base
  *   vg review explain <id>       the evidence behind one finding
+ *   vg review verify <receipt>   check a receipt's digest and Ed25519 signature offline
  *
- * Exit codes are the CI contract and never conflate "missing" with "pass":
+ * Exit codes are the CI contract and never conflate "missing" with "pass".
+ * Gating is opt-in (like `vg scan`): without `--fail-on` or
+ * `enforcement = "enforced"` the decision is reported and the process exits 0.
+ * With a gate:
  *
- *   0  pass
- *   1  fail (and, with `--fail-on needs_review`, needs_review / undetermined)
- *   2  needs_review or undetermined
+ *   0  pass (or a decision the gate does not cover)
+ *   2  fail — and, with `--fail-on needs_review`, needs_review / undetermined
+ *      (`ExitCode.GATE_FAILED`; `1` is reserved for runtime errors — see policy.ts)
  *   6  missing graph, policy, or a required model
+ *
+ * `vg review verify` mirrors `vg evidence verify`: 0 verified, 2 unverified
+ * (intact but the signer is not pinned, or the receipt is unsigned), 1 failed.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { KeyObject } from 'node:crypto';
 import type { Command } from 'commander';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { CliError, ExitCode } from '../util/exit.js';
@@ -25,6 +33,7 @@ import { formatExplain, formatMarkdown, formatSarif, formatText, type ReviewForm
 import { exitCodeForDecision, resolveFailOn, FAIL_ON_LEVELS, type FailOnLevel } from '../review/policy.js';
 import { buildEnvelope, collectSpans, pushReceipt, rejectPushWhenOffline, type ReviewPushBody } from '../review/push.js';
 import { runReview, type RunReviewResult } from '../review/run.js';
+import { resolveReviewSigningKey, verifyReceipt } from '../review/sign.js';
 import { injectContextBlock, renderContext, writeContextFile } from '../review/context-file.js';
 import { ensureCodeMap, reviewPolicyState, seedReviewPolicy } from '../review/prepare.js';
 import { defaultRun } from '../review/git.js';
@@ -50,6 +59,10 @@ interface ReviewOpts {
   autoBuild?: boolean;
   /** `--no-setup`; commander sets this false. */
   setup?: boolean;
+  /** `--no-sign`; commander sets this false. */
+  sign?: boolean;
+  /** `--sign-key <file>` — Ed25519 private key PEM. */
+  signKey?: string;
 }
 
 const FORMATS: ReviewFormat[] = ['text', 'json', 'sarif', 'md'];
@@ -73,6 +86,11 @@ export function registerReview(program: Command): void {
     .option('--include-snippets', 'include capped source snippets in the pushed receipt (explicit opt-in)')
     .option('--no-auto-build', 'do not build or refresh the code map — fail with exit 6 when it is missing or stale')
     .option('--no-setup', 'do not write a starter .vibgrate/review.toml when the repository has no review policy')
+    .option(
+      '--sign-key <file>',
+      'Ed25519 private key PEM to sign the receipt with (default: $VG_ATTEST_KEY, else .vibgrate/attest-key.pem, minted on first use — the key `vg build --attest` and `vg evidence` share)',
+    )
+    .option('--no-sign', 'leave the receipt unsigned (signature: null)')
     .option('--write-context', 'write .vibgrate/review-context.md — committed agent memory')
     .option(
       '--inject-context [file]',
@@ -94,6 +112,8 @@ export function registerReview(program: Command): void {
       });
       reportPrepare(prepared, Boolean(global.quiet) || Boolean(global.json));
 
+      const signingKey = resolveSigning(root, opts, Boolean(global.quiet));
+
       const result = await runReview({
         root,
         base: opts.base,
@@ -101,6 +121,7 @@ export function registerReview(program: Command): void {
         offline: global.offline,
         graphPath: global.graph,
         generatedAt: global.generatedAt,
+        signingKey,
       });
 
       if (opts.failOn && !FAIL_ON_LEVELS.includes(opts.failOn)) {
@@ -203,6 +224,62 @@ export function registerReview(program: Command): void {
       info(text);
     });
   applyGlobalOptions(explain);
+
+  const verify = cmd
+    .command('verify')
+    .description('verify a receipt offline — its content digest and its Ed25519 signature (no Vibgrate needed)')
+    .argument('<receipt>', 'a receipt written by `vg review --format json`')
+    .option('--pub <file>', 'public key PEM to pin the signer (moves `unverified` to `verified`)')
+    .action(function (this: Command, receiptPath: string, opts: { pub?: string }) {
+      const global = readGlobal(this);
+      const abs = path.resolve(receiptPath);
+      if (!fs.existsSync(abs)) {
+        throw new CliError(`no receipt at ${receiptPath} — write one with \`vg review --format json --out ${receiptPath}\``, ExitCode.NOT_FOUND);
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(fs.readFileSync(abs, 'utf8'));
+      } catch {
+        throw new CliError(`${receiptPath} is not valid JSON — expected a vg.review.receipt.v1 document`, ExitCode.USAGE_ERROR);
+      }
+      let publicKeyPem: string | undefined;
+      if (opts.pub) {
+        const pubPath = path.resolve(opts.pub);
+        if (!fs.existsSync(pubPath)) throw new CliError(`public key not found: ${opts.pub}`, ExitCode.USAGE_ERROR);
+        publicKeyPem = fs.readFileSync(pubPath, 'utf8');
+      }
+
+      const v = verifyReceipt(parsed, { publicKeyPem });
+      if (global.json) {
+        out(JSON.stringify(v, null, 2));
+      } else {
+        const color = v.status === 'verified' ? c.green : v.status === 'failed' ? c.red : c.yellow;
+        info(`  ${color(v.status.toUpperCase())}  ${v.reason}`);
+        if (v.receiptId) {
+          info(c.dim(`  receipt ${v.receiptId} · decision ${v.decision ?? '?'} · ${v.headSha ? v.headSha.slice(0, 8) : 'no head'} · ${v.keyid ? `key ${v.keyid}` : 'no key'}`));
+        }
+      }
+      process.exitCode = v.status === 'verified' ? ExitCode.OK : v.status === 'unverified' ? ExitCode.GATE_FAILED : ExitCode.ERROR;
+    });
+  applyGlobalOptions(verify);
+}
+
+/**
+ * The signing key for this run, or `null` under `--no-sign`. Resolution is the
+ * one Vibgrate Evidence uses (explicit → `$VG_ATTEST_KEY` → `.vibgrate/attest-key.pem`),
+ * and a first-use mint is said out loud: the key must be kept and gitignored
+ * for the signature to stay reproducible and pinnable.
+ */
+function resolveSigning(root: string, opts: ReviewOpts, quiet: boolean): KeyObject | null {
+  if (opts.sign === false) return null;
+  const { key, keyPath, minted } = resolveReviewSigningKey(root, opts.signKey);
+  if (minted && !quiet) {
+    info(
+      c.yellow(`  minted a new Ed25519 signing key at ${path.relative(root, keyPath) || keyPath}`)
+        + c.dim(' — keep it, gitignore it, and reuse it (or set VG_ATTEST_KEY) so receipts stay reproducible and pinnable'),
+    );
+  }
+  return key;
 }
 
 /**

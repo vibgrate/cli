@@ -20,7 +20,7 @@ export function chartPage(): string {
 }
 * { box-sizing:border-box; }
 html,body { margin:0; height:100%; background:var(--bg); color:var(--t); font-family:var(--sans); }
-body { display:flex; flex-direction:column; min-height:100dvh; }
+body { display:flex; flex-direction:column; min-height:100dvh; overflow:hidden; }
 button,input { font:inherit; color:inherit; }
 button { cursor:pointer; }
 a { color:var(--cyan); text-decoration:none; }
@@ -49,12 +49,17 @@ header {
 .seg button + button { border-left:1px solid var(--line); }
 .note { padding:8px 12px; font-size:13px; color:var(--tm); border-bottom:1px solid var(--line); background:var(--s0); }
 .note b { color:var(--t); }
-.work { flex:1; display:grid; grid-template-columns:1fr var(--panel); min-height:0; }
+.work { flex:1; display:grid; grid-template-columns:1fr var(--panel); grid-template-rows:minmax(0,1fr); min-height:0; }
 .work.closed { grid-template-columns:1fr 0; }
-.canvas { position:relative; overflow:hidden; min-height:280px;
+.stage { position:relative; min-height:0; height:100%; overflow:hidden; }
+.canvas {
+  height:100%; min-height:0; overflow:auto; overscroll-behavior:contain;
+  -webkit-overflow-scrolling:touch; cursor:grab; user-select:none;
   background: linear-gradient(var(--line) 1px,transparent 1px), linear-gradient(90deg,var(--line) 1px,transparent 1px);
-  background-size:32px 32px; }
-svg { width:100%; height:100%; min-height:360px; display:block; }
+  background-size:32px 32px; background-attachment:local;
+}
+.canvas.panning, .canvas.panning .node { cursor:grabbing; }
+svg { display:block; }
 .col { fill:var(--tl); font:600 10px var(--sans); letter-spacing:.12em; }
 .node { cursor:pointer; }
 .node.dim { opacity:.16; }
@@ -68,9 +73,19 @@ svg { width:100%; height:100%; min-height:360px; display:block; }
 .edge.hot { opacity:1; stroke-width:2.2; }
 .hint { position:absolute; left:12px; bottom:12px; max-width:min(320px,calc(100% - 24px));
   background:color-mix(in srgb,var(--s1) 92%,transparent); border:1px solid var(--line);
-  border-radius:10px; padding:10px 12px; font-size:12px; color:var(--tm); }
+  border-radius:10px; padding:10px 12px; font-size:12px; color:var(--tm); pointer-events:none; z-index:2; }
+.zoom {
+  position:absolute; right:12px; top:12px; display:flex; z-index:2;
+  border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--s1);
+}
+.zoom button {
+  height:32px; min-width:36px; padding:0 8px; border:0; border-radius:0;
+  background:transparent; color:var(--t); font-size:16px; line-height:1;
+}
+.zoom button + button { border-left:1px solid var(--line); }
+#zoom-fit { min-width:52px; font-size:12px; color:var(--tm); }
 .fab { display:none; position:absolute; right:12px; bottom:12px; height:40px; padding:0 14px;
-  border-radius:999px; border:1px solid var(--line); background:var(--s1); }
+  border-radius:999px; border:1px solid var(--line); background:var(--s1); z-index:2; }
 .drawer { background:var(--s1); border-left:1px solid var(--line); overflow:auto; min-height:0; }
 .dh { display:flex; align-items:center; gap:8px; padding:12px 14px; position:sticky; top:0;
   background:var(--s1); border-bottom:1px solid var(--line); }
@@ -92,7 +107,7 @@ svg { width:100%; height:100%; min-height:360px; display:block; }
 details { margin-top:16px; border-top:1px solid var(--line); padding-top:10px; color:var(--tm); font-size:13px; }
 footer { padding:6px 12px calc(6px + var(--safe)); border-top:1px solid var(--line); color:var(--tl); font-size:12px; display:flex; gap:12px; flex-wrap:wrap; }
 @media (max-width:860px) {
-  .work { grid-template-columns:1fr; grid-template-rows:1fr auto; }
+  .work { grid-template-columns:1fr; grid-template-rows:minmax(0,1fr) auto; }
   .work.closed { grid-template-columns:1fr; }
   .drawer { border-left:0; border-top:1px solid var(--line); max-height:48dvh; border-radius:16px 16px 0 0; }
   .work.closed .drawer { display:none; }
@@ -124,9 +139,16 @@ footer { padding:6px 12px calc(6px + var(--safe)); border-top:1px solid var(--li
 </header>
 <div class="note" id="note">Loading the map…</div>
 <div class="work" id="work">
-  <div class="canvas">
-    <svg id="map" viewBox="0 0 1120 760" preserveAspectRatio="xMidYMin meet" role="img" aria-label="Code map"></svg>
-    <div class="hint"><b>Click a card</b> to see what it does. Yellow = a source step is missing from the map. Rose = an architecture rule broke in that body.</div>
+  <div class="stage">
+    <div class="canvas" id="canvas" tabindex="0" aria-label="Code map. Scroll or drag to move. Pinch or Control-scroll to zoom.">
+      <svg id="map" role="img" aria-label="Code map"></svg>
+    </div>
+    <div class="zoom" role="group" aria-label="Map zoom">
+      <button id="zoom-out" aria-label="Zoom out" title="Zoom out (−)">−</button>
+      <button id="zoom-fit" aria-label="Reset zoom" title="Reset zoom (0)">100%</button>
+      <button id="zoom-in" aria-label="Zoom in" title="Zoom in (+)">+</button>
+    </div>
+    <div class="hint"><b>Scroll or drag</b> to move. Pinch or Ctrl-scroll to zoom. Click a card to see what it does. Yellow = a source step is missing from the map. Rose = an architecture rule broke in that body.</div>
     <button class="fab" id="open">Details</button>
   </div>
   <aside class="drawer" id="drawer" aria-label="Details"></aside>
@@ -135,8 +157,11 @@ footer { padding:6px 12px calc(6px + var(--safe)); border-top:1px solid var(--li
 <script>
 const LANE_X = {Handlers:40, Guards:40, Services:430, Models:820};
 const AREA_X = {};
-const state = { arch:true, view:"job", focus:null, reach:null, path:null, q:"", data:null };
+const state = { arch:true, view:"job", focus:null, reach:null, path:null, q:"", data:null, guardsTop:400 };
+const cam = { k:0 };
+const gesture = { pan:false, moved:false, x:0, y:0, sl:0, st:0, ignoreUntil:0 };
 
+function canvasEl(){ return document.getElementById("canvas"); }
 function readHash(){
   const raw = (location.hash || "").replace(/^#/, "");
   const p = new URLSearchParams(raw);
@@ -149,6 +174,71 @@ function writeHash(){
   if (!state.arch) p.set("arch", "0");
   const next = p.toString();
   if (location.hash.replace(/^#/, "") !== next) history.replaceState(null, "", next ? "#"+next : "#");
+}
+function worldSize(){
+  let w = 1120, h = 760;
+  if (!state.data) return {w,h};
+  state.data.nodes.forEach(n => {
+    if (n.x==null) return;
+    w = Math.max(w, n.x + n.w + 48);
+    h = Math.max(h, n.y + n.h + 64);
+  });
+  return {w,h};
+}
+function fitK(){
+  const c = canvasEl();
+  const {w} = worldSize();
+  const cw = (c && c.clientWidth) ? c.clientWidth : w;
+  return cw / Math.max(w, 1);
+}
+function sizeMap(){
+  const svg = document.getElementById("map");
+  const c = canvasEl();
+  if (!svg || !c) return;
+  const {w,h} = worldSize();
+  if (!cam.k) cam.k = fitK();
+  cam.k = Math.min(4, Math.max(0.25, cam.k));
+  svg.setAttribute("viewBox", "0 0 " + w + " " + h);
+  svg.setAttribute("preserveAspectRatio", "xMinYMin meet");
+  svg.style.width = (w * cam.k) + "px";
+  svg.style.height = (h * cam.k) + "px";
+  const fit = document.getElementById("zoom-fit");
+  if (fit) fit.textContent = Math.round((cam.k / fitK()) * 100) + "%";
+}
+function zoomBy(factor, cx, cy){
+  const c = canvasEl();
+  if (!c) return;
+  const rect = c.getBoundingClientRect();
+  const ox = (cx==null) ? c.clientWidth/2 : (cx - rect.left);
+  const oy = (cy==null) ? c.clientHeight/2 : (cy - rect.top);
+  const px = c.scrollLeft + ox;
+  const py = c.scrollTop + oy;
+  const prev = cam.k || fitK();
+  cam.k = Math.min(4, Math.max(0.25, prev * factor));
+  sizeMap();
+  const r = cam.k / prev;
+  c.scrollLeft = px * r - ox;
+  c.scrollTop = py * r - oy;
+}
+function resetZoom(){
+  cam.k = fitK();
+  sizeMap();
+  const c = canvasEl();
+  if (c) c.scrollTo({left:0, top:0});
+}
+function reveal(n){
+  if (!n || n.x==null) return;
+  const c = canvasEl();
+  if (!c) return;
+  const k = cam.k || 1;
+  const left = n.x * k, right = (n.x+n.w)*k, top = n.y*k, bot = (n.y+n.h)*k;
+  const pad = 28;
+  const visL = c.scrollLeft, visR = visL + c.clientWidth, visT = c.scrollTop, visB = visT + c.clientHeight;
+  if (left >= visL+pad && right <= visR-pad && top >= visT+pad && bot <= visB-pad) return;
+  c.scrollTo({
+    left: Math.max(0, (n.x + n.w/2)*k - c.clientWidth/2),
+    top: Math.max(0, (n.y + n.h/2)*k - c.clientHeight/3)
+  });
 }
 async function boot(){
   const res = await fetch("/api/graph");
@@ -192,20 +282,30 @@ function visible(){
   return new Set(nodes.map(n => n.id));
 }
 function layout(){
-  const used = {Handlers:0,Guards:0,Services:0,Models:0};
   const areaUsed = {};
   state.data.areas.forEach((a,i) => { AREA_X[a.id] = 40 + (i%3)*390; });
-  state.data.nodes.forEach(n => {
-    if (state.arch && state.view !== "cluster") {
-      const lane = n.lane || "Models";
-      const row = used[lane] || 0; used[lane] = row+1;
-      const top = lane === "Guards" ? 400 : 52;
-      n.x = LANE_X[lane] ?? 40; n.y = top + row*70; n.w=250; n.h=58;
-    } else {
+  if (state.arch && state.view !== "cluster") {
+    const buckets = {Handlers:[], Guards:[], Services:[], Models:[]};
+    state.data.nodes.forEach(n => {
+      const lane = n.lane && buckets[n.lane] ? n.lane : "Models";
+      buckets[lane].push(n);
+    });
+    function place(list, x, top){
+      list.forEach((n,i) => { n.x=x; n.y=top+i*70; n.w=250; n.h=58; });
+      return top + list.length * 70;
+    }
+    const hEnd = place(buckets.Handlers, LANE_X.Handlers, 52);
+    state.guardsTop = Math.max(400, hEnd + 48);
+    place(buckets.Guards, LANE_X.Guards, state.guardsTop);
+    place(buckets.Services, LANE_X.Services, 52);
+    place(buckets.Models, LANE_X.Models, 52);
+  } else {
+    state.guardsTop = 400;
+    state.data.nodes.forEach(n => {
       const row = areaUsed[n.area] || 0; areaUsed[n.area] = row+1;
       n.x = AREA_X[n.area] ?? 40; n.y = 52 + row*70; n.w=250; n.h=58;
-    }
-  });
+    });
+  }
 }
 const OUT={}, INN={};
 function indexEdges(){
@@ -236,7 +336,7 @@ function draw(){
   if (state.path) hot = new Set(state.path);
   let h = "";
   if (state.arch && state.view !== "cluster") {
-    h += '<text class="col" x="40" y="24">HANDLERS</text><text class="col" x="40" y="384">GUARDS</text><text class="col" x="430" y="24">SERVICES</text><text class="col" x="820" y="24">MODELS</text>';
+    h += '<text class="col" x="40" y="24">HANDLERS</text><text class="col" x="40" y="'+(state.guardsTop-16)+'">GUARDS</text><text class="col" x="430" y="24">SERVICES</text><text class="col" x="820" y="24">MODELS</text>';
   } else {
     state.data.areas.forEach(a => {
       h += '<text class="col" x="'+(AREA_X[a.id]||40)+'" y="24">'+esc(a.label.toUpperCase())+'</text>';
@@ -266,9 +366,13 @@ function draw(){
       + '</g>';
   });
   document.getElementById("map").innerHTML = h;
-  document.querySelectorAll(".node").forEach(g => g.addEventListener("click", () => openNode(g.dataset.id)));
+  document.querySelectorAll(".node").forEach(g => g.addEventListener("click", ev => {
+    if (gesture.moved || Date.now() < gesture.ignoreUntil) { ev.preventDefault(); ev.stopPropagation(); return; }
+    openNode(g.dataset.id);
+  }));
+  sizeMap();
   const m = state.data.meta;
-  document.getElementById("foot").innerHTML = "<span>"+m.nodes+" symbols</span><span>"+(m.architectureLoaded?"Architecture loaded":"Architecture not loaded")+"</span><span>"+(m.pulses?m.pulses+" rule break"+(m.pulses===1?"":"s"):"No rule breaks")+"</span>";
+  document.getElementById("foot").innerHTML = "<span>"+m.nodes+" symbols</span><span>"+(m.architectureLoaded?"Architecture loaded":"Architecture not loaded")+"</span><span>"+(m.pulses?m.pulses+" rule break"+(m.pulses===1?"":"s"):"No rule breaks")+"</span><span>Scroll or drag · pinch or Ctrl-scroll to zoom</span>";
 }
 function colorForKind(kind){
   return {route:"#38bdf8",function:"#38bdf8",method:"#22c55e",class:"#22c55e",property:"#94a3b8"}[kind] || "#94a3b8";
@@ -319,6 +423,7 @@ async function openNode(id){
   document.getElementById("close").onclick = () => document.getElementById("work").classList.add("closed");
   document.querySelectorAll("[data-go]").forEach(a => a.onclick = ev => { ev.preventDefault(); openNode(a.dataset.go); });
   draw();
+  reveal(n);
 }
 document.getElementById("q").addEventListener("input", e => { state.q = e.target.value; draw(); });
 document.getElementById("arch").onclick = () => {
@@ -347,10 +452,64 @@ document.getElementById("save").onclick = () => {
   a.click();
 };
 document.getElementById("open").onclick = () => document.getElementById("work").classList.remove("closed");
+document.getElementById("zoom-in").onclick = () => zoomBy(1.2);
+document.getElementById("zoom-out").onclick = () => zoomBy(1/1.2);
+document.getElementById("zoom-fit").onclick = () => resetZoom();
+(function bindPanZoom(){
+  const c = canvasEl();
+  c.addEventListener("wheel", e => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    zoomBy(Math.exp(-dy * 0.002), e.clientX, e.clientY);
+  }, { passive: false });
+  c.addEventListener("pointerdown", e => {
+    if (e.pointerType === "touch" || e.button !== 0) return;
+    gesture.pan = true; gesture.moved = false;
+    gesture.x = e.clientX; gesture.y = e.clientY;
+    gesture.sl = c.scrollLeft; gesture.st = c.scrollTop;
+    c.classList.add("panning");
+    try { c.setPointerCapture(e.pointerId); } catch {}
+  });
+  c.addEventListener("pointermove", e => {
+    if (!gesture.pan) return;
+    const dx = e.clientX - gesture.x, dy = e.clientY - gesture.y;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) gesture.moved = true;
+    if (gesture.moved) {
+      c.scrollLeft = gesture.sl - dx;
+      c.scrollTop = gesture.st - dy;
+    }
+  });
+  function endPan(){
+    if (!gesture.pan) return;
+    c.classList.remove("panning");
+    if (gesture.moved) gesture.ignoreUntil = Date.now() + 250;
+    gesture.pan = false;
+  }
+  c.addEventListener("pointerup", endPan);
+  c.addEventListener("pointercancel", endPan);
+})();
+window.addEventListener("resize", () => { if (state.data) sizeMap(); });
 document.addEventListener("keydown", e => {
-  if ((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==="k") { e.preventDefault(); document.getElementById("q").focus(); }
-  if (e.key==="/" && document.activeElement.tagName!=="INPUT") { e.preventDefault(); document.getElementById("q").focus(); }
+  if ((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==="k") { e.preventDefault(); document.getElementById("q").focus(); return; }
+  if (e.key==="/" && document.activeElement.tagName!=="INPUT") { e.preventDefault(); document.getElementById("q").focus(); return; }
   if (e.key==="Escape") document.getElementById("work").classList.add("closed");
+  const typing = document.activeElement && document.activeElement.tagName==="INPUT";
+  if (typing) return;
+  if (e.key==="+" || e.key==="=") { e.preventDefault(); zoomBy(1.2); }
+  if (e.key==="-" || e.key==="_") { e.preventDefault(); zoomBy(1/1.2); }
+  if (e.key==="0") { e.preventDefault(); resetZoom(); }
+  const c = canvasEl();
+  if (!c) return;
+  const step = e.shiftKey ? 240 : 80;
+  if (e.key==="ArrowDown") { e.preventDefault(); c.scrollBy({top: step}); }
+  if (e.key==="ArrowUp") { e.preventDefault(); c.scrollBy({top: -step}); }
+  if (e.key==="ArrowRight") { e.preventDefault(); c.scrollBy({left: step}); }
+  if (e.key==="ArrowLeft") { e.preventDefault(); c.scrollBy({left: -step}); }
+  if (e.key==="PageDown") { e.preventDefault(); c.scrollBy({top: c.clientHeight * 0.9}); }
+  if (e.key==="PageUp") { e.preventDefault(); c.scrollBy({top: -c.clientHeight * 0.9}); }
+  if (e.key==="Home") { e.preventDefault(); c.scrollTo({top:0}); }
+  if (e.key==="End") { e.preventDefault(); c.scrollTo({top: c.scrollHeight}); }
 });
 boot();
 </script>
