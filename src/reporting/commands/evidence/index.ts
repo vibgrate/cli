@@ -19,6 +19,7 @@ import { fetchKevCatalog, kevAdvisoriesForComponents } from './feeds.js';
 import { computeReadiness } from './readiness.js';
 import { resolveAdvisory } from './advisory.js';
 import { buildRelease } from './release.js';
+import { buildPushPayload, describePushResult, type PushAttestation, type PushResponse } from './push-payload.js';
 import { buildPack } from './pack.js';
 import { buildEvidenceStatement, signEvidenceStatement, verifyEvidenceEnvelope, resolveSigningKey, writeBundle } from './bundle.js';
 import { synthesizeAdvisory, undeterminedFields, recordDrill, hasRecentDrill } from './drill.js';
@@ -152,12 +153,15 @@ const releaseCmd = new Command('release')
   .argument('<product>', 'Product id')
   .argument('<version>', 'Shipped version')
   .option(...cwdOption)
-  .option('--from <file>', 'Scan artifact or SBOM captured at release', '.vibgrate/scan_result.json')
+  .option('--from <file>', 'Scan artifact or SBOM captured at release (CycloneDX, SPDX, or an SBOM attestation)', '.vibgrate/scan_result.json')
   .option('--ship-date <date>', 'Ship date (YYYY-MM-DD)')
   .option('--build-id <id>', 'Build id')
   .option('--digest <sha256>', 'Artefact digest')
   .option('--markets <cc,cc>', 'Distribution markets/channels, comma-separated')
-  .action(async (productId: string, version: string, opts) => {
+  .option('--buildkit-metadata <file>', 'BuildKit `--metadata-file` output: takes the image digest and build ref from it')
+  .option('--provenance <file>', 'SLSA provenance attestation (DSSE, in-toto, or bare predicate): records source repo, commit, and base images')
+  .option('--image <ref>', 'Inspect an image with docker for its digest, OCI labels, and attached provenance/SBOM attestations (contacts the registry when the ref is not local)')
+  .action(async function (this: Command, productId: string, version: string, opts) {
     const rootDir = root(opts);
     const product = await getProduct(rootDir, productId);
     if (!product) throw new CliError(`no such product: ${productId} — register it with \`vg evidence product add\``, ExitCode.NOT_FOUND);
@@ -165,14 +169,25 @@ const releaseCmd = new Command('release')
       productId: product.id,
       version,
       from: path.resolve(rootDir, opts.from),
+      fromExplicit: this.getOptionValueSource('from') !== 'default',
       shipDate: opts.shipDate,
       buildId: opts.buildId,
       artefactDigest: opts.digest,
       distribution: csv(opts.markets),
       frozenAt: nowIso(),
+      buildkitMetadata: opts.buildkitMetadata ? path.resolve(rootDir, opts.buildkitMetadata) : undefined,
+      provenance: opts.provenance ? path.resolve(rootDir, opts.provenance) : undefined,
+      image: opts.image,
     });
     const p = await freezeRelease(rootDir, release);
     console.log(chalk.green('✔') + ` froze ${chalk.bold(`${product.id}@${version}`)} — ${release.components.length} components, immutable at ${path.relative(rootDir, p)}`);
+    if (release.artefactDigest) console.log(chalk.dim(`  artefact digest  ${release.artefactDigest}`));
+    if (release.build) {
+      const b = release.build;
+      console.log(chalk.dim(`  build facts from ${b.sources.join(', ')} (attestation signatures not verified by vg)`));
+      if (b.sourceUri) console.log(chalk.dim(`  source           ${b.sourceUri}${b.sourceRevision ? ` @ ${b.sourceRevision}` : ''}`));
+      if (b.baseImages?.length) console.log(chalk.dim(`  base images      ${b.baseImages.map((i) => i.ref).join(', ')}`));
+    }
   });
 
 // ── shared: gather exposure inputs ──
@@ -497,8 +512,9 @@ const pushCmd = new Command('push')
   .option(...cwdOption)
   .option('--dsn <dsn>', 'DSN token (or use VIBGRATE_DSN env / `vg login`)')
   .option('--regime <id>', 'Reporting regime')
-  .option('--result <file>', 'An exposure result.json (or a bundle dir) to include')
-  .option('--signed', 'Mark the included exposure result as signed')
+  .option('--result <file>', 'An exposure result.json (or a bundle dir) to include — a bundle dir also sends its signature envelope and timestamp for server-side verification')
+  .option('--signed', 'Deprecated: signatures are verified from the bundle envelope; this flag no longer marks anything')
+  .option('--no-releases', 'Omit the frozen release manifests (products still carry the release count)')
   .option('--strict', 'Fail on push errors')
   .action(async (opts) => {
     const rootDir = root(opts);
@@ -510,30 +526,44 @@ const pushCmd = new Command('push')
     const org = await loadOrg(rootDir);
     const regime = resolveRegime((opts.regime as string) ?? org.defaultRegime);
     const products = await loadProducts(rootDir);
-    const releasesByProduct = await releasesByProductMap(rootDir, products);
-
-    const productPayload = products.map((p) => ({
-      id: p.id,
-      name: p.name,
-      classification: p.classification,
-      inScope: p.scopeDetermination?.inScope,
-      scopeRecorded: Boolean(p.scopeDetermination),
-      memberStates: p.memberStates,
-      supportDeclared: Boolean(p.supportPeriod?.declaredUntil),
-      supportUntil: p.supportPeriod?.declaredUntil,
-      bound: p.bindings.length > 0,
-      frozenReleaseCount: (releasesByProduct.get(p.id) ?? []).length,
-    }));
+    const releases = await loadReleases(rootDir);
 
     let exposure: ExposureResult | undefined;
+    let attestation: PushAttestation | undefined;
     if (opts.result) {
       const raw = path.resolve(rootDir, opts.result as string);
-      const resultPath = fs.existsSync(raw) && fs.statSync(raw).isDirectory() ? path.join(raw, 'result.json') : raw;
+      const isDir = fs.existsSync(raw) && fs.statSync(raw).isDirectory();
+      const resultPath = isDir ? path.join(raw, 'result.json') : raw;
       if (!fs.existsSync(resultPath)) throw new CliError(`no result.json at ${opts.result}`, ExitCode.NOT_FOUND);
       exposure = JSON.parse(fs.readFileSync(resultPath, 'utf8')) as ExposureResult;
+      // A bundle carries its own proof: send the envelope and timestamp so the
+      // server verifies the signature instead of recording a flag.
+      const envelopePath = path.join(isDir ? raw : path.dirname(raw), 'evidence.intoto.jsonl');
+      if (fs.existsSync(envelopePath)) {
+        const line = fs.readFileSync(envelopePath, 'utf8').split('\n').find((l) => l.trim());
+        if (line) {
+          attestation = { envelope: JSON.parse(line) as DsseEnvelope };
+          const tsr = path.join(isDir ? raw : path.dirname(raw), 'timestamp.tsr');
+          if (fs.existsSync(tsr)) attestation.timestampToken = fs.readFileSync(tsr).toString('base64');
+        }
+      }
+    }
+    if (opts.signed && !attestation) {
+      console.error(chalk.yellow('--signed is ignored: the server records a signature only from a bundle envelope (pass --result <bundle-dir>)'));
     }
 
-    const payload = { schemaVersion: 'evidence-push-1', regime: regime.id, generatedAt: nowIso(), signed: Boolean(opts.signed), products: productPayload, exposure };
+    const { payload, omittedComponentsFor } = buildPushPayload({
+      regime: regime.id,
+      generatedAt: nowIso(),
+      products,
+      releases,
+      exposure,
+      attestation,
+      includeReleases: opts.releases !== false,
+    });
+    if (omittedComponentsFor.length) {
+      console.error(chalk.yellow(`body budget: component lists omitted for ${omittedComponentsFor.length} older release(s) (${omittedComponentsFor.slice(0, 3).join(', ')}${omittedComponentsFor.length > 3 ? ', …' : ''}); digests and build facts still sent`));
+    }
     const body = JSON.stringify(payload);
     const url = `${parsed.scheme}://${parsed.host}/v1/ingest/evidence`;
     let res: Response;
@@ -553,7 +583,11 @@ const pushCmd = new Command('push')
       console.error(chalk.yellow(`push failed (${res.status}) — ${detail.slice(0, 160)}`));
       return;
     }
-    console.log(chalk.green('✔') + ` pushed ${products.length} product(s)${exposure ? ' + an exposure result' : ''} to Vibgrate Cloud`);
+    const confirmed = (await res.json().catch(() => ({ status: 'ok' }))) as PushResponse;
+    console.log(chalk.green('✔') + ` pushed ${describePushResult(payload, confirmed)} to Vibgrate Cloud`);
+    if (confirmed.attestation?.state === 'failed') {
+      console.error(chalk.yellow(`  the server could not verify the bundle signature${confirmed.attestation.reason ? ` — ${confirmed.attestation.reason}` : ''}; the ledger records it as failed`));
+    }
   });
 
 export const evidenceCommand = new Command('evidence')

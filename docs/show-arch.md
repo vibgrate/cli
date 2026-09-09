@@ -24,6 +24,8 @@ The same facts as `vg show`, `vg path`, and `vg impact`, drawn so a human can wa
 
 Architecture off is the raw graph. Architecture on paints jobs and “writes data / reads data” chips from `graph.arch.json`. No confidence percentages. No taxonomy slugs in the chrome.
 
+Scroll or drag to move around the map. Pinch, Ctrl-scroll, or the + / − buttons to zoom; `0` resets. Arrow keys, Page Up/Down, Home, and End also move the view. Opening a symbol that is off-screen pans it into view.
+
 A rose mark is a finding with `line > 0`. A yellow mark is a missing step. They are not the same thing.
 
 `/api/node/:id` is `vg show --json` plus a `view` block of the English labels.

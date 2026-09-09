@@ -16,6 +16,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type * as crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { classifyFile } from '../core-open/scanners/architecture/classify.js';
 import { loadGraph } from '../engine/load.js';
@@ -37,6 +38,7 @@ import type { DominanceVote } from './dominance.js';
 import { applyReviewPolicy } from './policy.js';
 import { removedLinesFromDiff, runScanners, vulnerablePackagesFromScan } from './scanners.js';
 import { isComparable, SimilarityIndex, type FunctionBody } from './similarity.js';
+import { isDependencyManifest, isNonCodePath } from './surface.js';
 import {
   CAPSULE_SCHEMA,
   FINDINGS_SCHEMA,
@@ -51,6 +53,7 @@ import {
   type ReviewFindings,
   type ReviewReceipt,
 } from './schemas.js';
+import { signReceipt } from './sign.js';
 import { verifyFindings, type VerifyResult } from './verify.js';
 
 export interface RunReviewOptions {
@@ -65,6 +68,12 @@ export interface RunReviewOptions {
   graphPath?: string;
   /** `--generated-at <iso>` — pins `created_at` for byte-deterministic output. */
   generatedAt?: string;
+  /**
+   * Ed25519 key to sign `digests.receipt` with (see `sign.ts`). Omitted or
+   * `null` leaves `signature: null` — the `--no-sign` path. Ed25519 is
+   * deterministic, so a stable key keeps `--generated-at` output byte-identical.
+   */
+  signingKey?: crypto.KeyObject | null;
   workspaceId?: string | null;
   /** Injected in tests. */
   run?: GitRunner;
@@ -100,19 +109,6 @@ function defaultRun(args: string[], cwd: string): { stdout: string; status: numb
   return { stdout: res.stdout ?? '', status: res.status ?? 1 };
 }
 
-/**
- * Files that carry no architectural surface: prose, images, and generated
- * artifacts. Kept deliberately narrow — anything not on this list counts as
- * code, because the quick path must be earned by positive evidence, never by
- * the analyzer failing to recognise a file.
- */
-const NON_CODE = /\.(md|mdx|markdown|txt|rst|adoc|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|pdf|csv|snap|lock)$/i;
-const NON_CODE_DIRS = /(^|\/)(docs?|\.github\/ISSUE_TEMPLATE|changelog|marketing)\//i;
-
-/** Dependency manifests — non-code by extension, but security-relevant. */
-const DEPENDENCY_MANIFEST =
-  /(^|\/)(package\.json|pnpm-lock\.yaml|package-lock\.json|yarn\.lock|.*\.csproj|packages\.lock\.json|Directory\.Packages\.props|requirements.*\.txt|pyproject\.toml|poetry\.lock|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|pom\.xml|build\.gradle(\.kts)?|Gemfile(\.lock)?|composer\.(json|lock))$/i;
-
 const EXEMPT_LAYERS = new Set(['config', 'shared', 'testing']);
 
 /**
@@ -130,8 +126,8 @@ function changeClassOf(capsule: AnalysisCapsule, findings: { architecture: numbe
   const roleByPath = new Map(capsule.roles.filter((r) => r.changed).map((r) => [r.path, r]));
 
   const architecturalPaths = capsule.change.ops.filter((op) => {
-    if (DEPENDENCY_MANIFEST.test(op.path)) return false; // counted under security
-    if (NON_CODE.test(op.path) || NON_CODE_DIRS.test(op.path)) return false;
+    if (isDependencyManifest(op.path)) return false; // counted under security
+    if (isNonCodePath(op.path)) return false;
     const role = roleByPath.get(op.path);
     // Unclassified (`role === undefined`) counts as architectural: unknown is
     // not the same as absent.
@@ -141,7 +137,7 @@ function changeClassOf(capsule: AnalysisCapsule, findings: { architecture: numbe
   if (findings.architecture > 0 || capsule.change.added_edges.length > 0 || architecturalPaths.length > 0) {
     classes.push('architecture');
   }
-  const dependencyChanges = capsule.change.ops.filter((op) => DEPENDENCY_MANIFEST.test(op.path));
+  const dependencyChanges = capsule.change.ops.filter((op) => isDependencyManifest(op.path));
   if (findings.security > 0 || capsule.security.length > 0 || dependencyChanges.length > 0) {
     classes.push('security');
   }
@@ -334,7 +330,7 @@ export async function runReview(opts: RunReviewOptions): Promise<RunReviewResult
     (f) => f.protected_finding === true,
   ).length;
 
-  const receipt: ReviewReceipt = {
+  const unsigned: ReviewReceipt = {
     schema_version: RECEIPT_SCHEMA,
     receipt_id: receiptId(Date.parse(createdAt) || 0, `${capsuleDigest}${findingsDigest}`),
     created_at: createdAt,
@@ -384,7 +380,10 @@ export async function runReview(opts: RunReviewOptions): Promise<RunReviewResult
     },
     signature: null,
   };
-  receipt.digests.receipt = receiptDigest(receipt);
+  unsigned.digests.receipt = receiptDigest(unsigned);
+  // Sealed, then signed: the signature is over the digest, and `signReceipt`
+  // recomputes that digest itself so the two can never disagree.
+  const receipt = opts.signingKey ? signReceipt(unsigned, opts.signingKey) : unsigned;
 
   return {
     receipt,

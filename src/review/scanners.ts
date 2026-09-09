@@ -18,19 +18,16 @@ import { evaluateLayerBoundary } from '../core-open/scanners/architecture/graph-
 import { evaluateLayerSkip } from './layers.js';
 import { describePattern, isRegression, type DataAccessPattern } from './dimensions.js';
 import type { DominanceVote } from './dominance.js';
-import { classifyRoute, voteAllAuth, type ClassifiedRoute } from './auth.js';
+import { MUTATING_METHODS, classifyRoute, routeGroup, voteAllAuth, type ClassifiedRoute } from './auth.js';
 import { routesForFile } from './routes.js';
 import { isComparable, SimilarityIndex, type FunctionBody } from './similarity.js';
+import { isDependencyManifest } from './surface.js';
 import type { ArchitectureLayer } from '../core-open/types.js';
 import type { ReviewConfig } from './config.js';
 import type { ChangeSet } from './git.js';
 import type { AnalysisCapsule, ReviewFinding, TargetAlignment } from './schemas.js';
 
 const EXEMPT_LAYERS = new Set<ArchitectureLayer>(['config', 'shared', 'testing']);
-
-/** Files whose change is a dependency change, per ecosystem. */
-const DEPENDENCY_MANIFESTS =
-  /(^|\/)(package\.json|pnpm-lock\.yaml|package-lock\.json|yarn\.lock|.*\.csproj|packages\.lock\.json|Directory\.Packages\.props|requirements.*\.txt|pyproject\.toml|poetry\.lock|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|pom\.xml|build\.gradle(\.kts)?|Gemfile(\.lock)?|composer\.(json|lock))$/i;
 
 /**
  * Call shapes that read as an authorization / validation guard. Deliberately
@@ -177,9 +174,10 @@ export function runScanners(input: ScanInput): ScanOutput {
   //     that would make the protected invariant a lie;
   //   - only mutating methods vote, so a codebase that deliberately leaves reads
   //     open still has a readable convention on its writes;
-  //   - below MIN_SECURITY_PEERS classified peers the finding is advisory and
-  //     cannot gate, because "most routes here are guarded" is not a claim four
-  //     routes can support.
+  //   - below MIN_SECURITY_PEERS classified peers there is no finding, because
+  //     "most routes here are guarded" is not a claim three routes can support
+  //     — but an open changed route in such a group is still reported as an
+  //     unknown, never silently treated as fine.
   if (config.protected.unguarded_entrypoint) {
     const classified: ClassifiedRoute[] = [];
     for (const [filePath, text] of [...input.fileText.entries()].sort()) {
@@ -226,11 +224,35 @@ export function runScanners(input: ScanInput): ScanOutput {
           + `(${[...new Set(changedUnsure.map((r) => r.rule))].join(', ')}) — neither confirmed nor excluded.`,
         );
       }
+
+      // A changed mutating route with no guard in a group too thin to have a
+      // convention. Not a finding — the peers cannot support one — but not
+      // silence either: silence here would read as "checked and fine", which
+      // is exactly the claim the peer floor says we cannot make. Routes that
+      // declared themselves public are a human decision and are left alone.
+      if (!vote.aboveFloor) {
+        const changedOpen = classified.filter(
+          (r) =>
+            routeGroup(r.file) === vote.group
+            && changedFiles.has(r.file)
+            && r.verdict === 'not-auth'
+            && r.rule === 'no-guard-in-scope'
+            && MUTATING_METHODS.has(r.method.toUpperCase()),
+        );
+        if (changedOpen.length > 0) {
+          unknowns.push(
+            `${changedOpen.length} changed mutating route(s) in ${vote.group} have no authorization guard in scope `
+            + `(${changedOpen.map((r) => `${r.method} ${r.path || r.file}`).join(', ')}) and only ${vote.classified} `
+            + `route(s) in ${vote.group} could be classified — too few to say whether guarding is the convention `
+            + 'here, so they are neither confirmed nor excluded.',
+          );
+        }
+      }
     }
   }
 
   // ── 4. Known-vulnerable dependency (protected) ───────────────────────────
-  const dependencyChanges = capsule.change.ops.filter((o) => DEPENDENCY_MANIFESTS.test(o.path));
+  const dependencyChanges = capsule.change.ops.filter((o) => isDependencyManifest(o.path));
   if (config.protected.known_vulnerable_dependency && dependencyChanges.length > 0) {
     if (input.vulnerablePackages === null) {
       // No advisory data on disk. Absent ≠ zero: this is an unknown, and it

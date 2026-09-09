@@ -19,6 +19,7 @@ import type { GraphEdge, GraphNode, VgGraph } from '../schema.js';
 import { VERSION } from '../version.js';
 import type { ReviewConfig } from './config.js';
 import { isIntroducedEdge, removedDestinations } from './delta.js';
+import { isDependencyManifest, isNonCodePath } from './surface.js';
 import type { ChangeSet, ChangedFile } from './git.js';
 import {
   CAPSULE_BUDGETS,
@@ -29,6 +30,7 @@ import {
   type CapsuleChangeEdge,
   type CapsuleChangeSymbol,
   type CapsuleEvidence,
+  type CapsulePolicyFact,
   type CapsuleProfile,
   type CapsuleRole,
 } from './schemas.js';
@@ -403,6 +405,14 @@ export function compileCapsule(input: CompileCapsuleInput): CompiledCapsule {
 
   // ── Policies (what is actually enforced, read from the engine) ───────────
   const profileForRules = declared ?? observed ?? undefined;
+  // Name the file that actually declared the profile. A CLAUDE.md declaration
+  // is intent, not review.toml — labelling it as the policy file would tell a
+  // reader to look for a setting that is not there.
+  const policySource: CapsulePolicyFact['source'] = config.target_pattern
+    ? 'review.toml'
+    : declared
+      ? 'intent'
+      : 'derived';
   const policies = boundaryProfileRules(profileForRules).map((rule, i) => ({
     evidence_id: addEvidence({
       id: `policy:layering:${i + 1}`,
@@ -412,7 +422,7 @@ export function compileCapsule(input: CompileCapsuleInput): CompiledCapsule {
     }),
     id: `layering-${i + 1}`,
     rule,
-    source: (declared ? 'review.toml' : 'derived') as 'review.toml' | 'derived',
+    source: policySource,
   }));
   // Only worth reporting when the change actually crosses a layer boundary:
   // "no rules are enforced" is noise on a change that stays inside one layer,
@@ -592,6 +602,10 @@ function changedFileCoverage(
   for (const path of [...changedPaths].sort()) {
     // A test file changing is not a claim about its own coverage.
     if (/(^|\/)(__tests__|tests?|spec)\//i.test(path) || /\.(test|spec)\.[^.]+$/i.test(path)) continue;
+    // Prose, assets and manifests have no call path for a test to reach.
+    // Giving them a verdict would put an `unverified_change` finding on every
+    // README edit and make the quick path unreachable.
+    if (isNonCodePath(path) || isDependencyManifest(path)) continue;
     out.push(
       testedFiles.has(path)
         ? { kind: 'test_covering_change', path, detail: 'a test edge reaches this file' }

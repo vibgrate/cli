@@ -269,7 +269,7 @@ vg evidence regimes
 vg evidence product add <name> [--markets DE,FR] [--classification <id>] [--in-scope] [--rationale <text>] [--bind <ref>] [--until <date>]
 vg evidence product list
 vg evidence product show <id>
-vg evidence release <product> <version> --from <sbom-or-scan> [--ship-date <date>] [--build-id <id>] [--digest <sha256>] [--markets DE,FR]
+vg evidence release <product> <version> [--from <sbom-or-scan>] [--image <ref>] [--buildkit-metadata <file>] [--provenance <file>] [--ship-date <date>] [--build-id <id>] [--digest <sha256>] [--markets DE,FR]
 vg evidence exposure <vuln> [--regime <id>] [--advisory <file>] [--offline] [--as-of <date>] [--products <substr>] [--include-eol] [--format table|json] [--pack --stage <stage>] [--bundle <dir>] [--tsa <url>]
 vg evidence readiness [--regime <id>] [--format table|json]
 vg evidence support-period <product> [--from <date>] [--until <date>]
@@ -277,7 +277,7 @@ vg evidence pack <vuln> [--regime <id>] [--stage <stage>] [--advisory <file>] [-
 vg evidence drill [--regime <id>] [--scenario <name>] [--elapsed <seconds>]
 vg evidence watch [--regime <id>] [--since <date>] [--webhook <url>] [--format table|json]
 vg evidence verify <bundle> [--pub <file>]
-vg evidence push [--result <bundle-or-file>] [--regime <id>] [--dsn <dsn>] [--signed]
+vg evidence push [--result <bundle-or-file>] [--regime <id>] [--dsn <dsn>] [--no-releases]
 vg evidence export [--out <dir>] [--regime <id>]
 ```
 
@@ -293,8 +293,12 @@ vg evidence export [--out <dir>] [--regime <id>]
 | `vg evidence pack` | Build the submission pack a human pastes into the reporting platform |
 | `vg evidence watch` | Check CISA KEV for new exposure against your shipped components |
 | `vg evidence verify` | Verify an evidence bundle offline — no account, no network |
-| `vg evidence push` | Push the product registry (and an optional exposure result) to Vibgrate Cloud |
+| `vg evidence push` | Push the product registry, every frozen release manifest, and an optional signed exposure bundle to Vibgrate Cloud, which verifies the signature |
 | `vg evidence export` | Air-gap bundle of all evidence state |
+
+`release` freezes the manifest from a Vibgrate scan artifact or an SBOM — CycloneDX, SPDX, or either one wrapped in an in-toto / DSSE **SBOM attestation**. Where the artefact is a container image, it can also take the facts straight from what BuildKit wrote instead of values typed in by hand: `--buildkit-metadata` reads the `docker buildx build --metadata-file` output for the image digest and build reference; `--provenance` reads a SLSA provenance attestation for the source repository, commit, and base images; and `--image <ref>` asks Docker for the image's digest, `org.opencontainers.image.*` labels, and any attached provenance and SBOM attestations (an attached SBOM becomes the manifest when `--from` is not given). `--image` runs `docker image inspect` and `docker buildx imagetools inspect`; the second contacts the image's registry when the reference is not present locally. Those facts are stored under `build` in the frozen manifest. A typed `--digest` that disagrees with what the build wrote is an error, never a silent preference, and attestation signatures are recorded as unverified — verify them with `cosign`.
+
+`push` sends the product registry, every frozen release manifest (components, artefact digest, and the build facts read from BuildKit), and — when `--result` points at a bundle directory — the exposure result with its DSSE envelope and RFC 3161 token. Vibgrate Cloud verifies the signature itself and records the outcome as `intact`, `failed` or `absent`; it never takes a flag's word for it (the old `--signed` flag is accepted and ignored). Bodies above the 10 MB limit drop component lists from the oldest releases first and say so; `--no-releases` omits the manifests entirely. In Vibgrate Cloud → Govern ▸ Evidence the frozen releases appear with their chain of custody, every component is searchable across releases, and each ledger entry offers its archived bundle for download.
 
 `exposure` matches against manifests **frozen at ship time**, not the current tree, and never guesses: a bound product with no frozen manifest returns `undetermined` with a reason. It runs fully `--offline` against a local advisory file, and can emit a signed evidence bundle (`--bundle <dir>`) that `vg evidence verify` checks offline with honest `verified` / `unverified` / `failed` states. Pass `--tsa <url>` to anchor the bundle to a trusted **RFC 3161** timestamp (`timestamp.tsr`), fully verifiable with `openssl ts -verify`.
 
@@ -1611,7 +1615,7 @@ vg show arch --no-open --json    # print the URL and counts; keep serving
 | `--focus <name>` | — | Open the map on this symbol |
 | `--no-open` | — | Print the URL without opening a browser |
 
-The map draws the same facts as `vg show`, `vg path`, and `vg impact` so a human can walk them: **by job** (handlers, guards, services, models — Architecture module on), **by cluster** (the graph areas), **who calls whom**, **missing steps** (a call exists in source but not on the map), and **problems** (architecture-rule breaks anchored on a line). With the Architecture module off it is the raw graph — never a guess. The page is served inline from loopback with no external assets, and `q` / Ctrl-C stops it. `vg show chart` is the pre-rename spelling and still works as a silent alias for one release. See [docs/show-arch.md](./docs/show-arch.md).
+The map draws the same facts as `vg show`, `vg path`, and `vg impact` so a human can walk them: **by job** (handlers, guards, services, models — Architecture module on), **by cluster** (the graph areas), **who calls whom**, **missing steps** (a call exists in source but not on the map), and **problems** (architecture-rule breaks anchored on a line). Scroll or drag to move; pinch, Ctrl-scroll, or the + / − buttons to zoom. With the Architecture module off it is the raw graph — never a guess. The page is served inline from loopback with no external assets, and `q` / Ctrl-C stops it. `vg show chart` is the pre-rename spelling and still works as a silent alias for one release. See [docs/show-arch.md](./docs/show-arch.md).
 
 #### vg show savings
 

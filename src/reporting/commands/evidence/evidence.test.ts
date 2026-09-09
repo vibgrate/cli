@@ -1,9 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { resolveRegime, listRegimes, getRegime } from './regimes.js';
 import { computeExposure, versionAffected, exposureSubjectDigest, type ExposureInput } from './exposure.js';
 import { computeReadiness } from './readiness.js';
-import { componentsFromArtifact, componentsFromCycloneDx } from './release.js';
+import { buildRelease, componentsFromArtifact, componentsFromCycloneDx, componentsFromSource } from './release.js';
+import type { Exec } from './buildkit.js';
 import { buildEvidenceStatement, signEvidenceStatement, verifyEvidenceEnvelope } from './bundle.js';
 import { osvToAdvisory } from './advisory.js';
 import { buildTimeStampReq, parseTimestampToken, verifyTimestamp } from './tsa.js';
@@ -142,6 +146,111 @@ describe('release freezing', () => {
   it('extracts components from a CycloneDX SBOM', () => {
     const comps = componentsFromCycloneDx({ components: [{ name: 'netty', version: '4.1.104', purl: 'pkg:maven/io.netty/netty@4.1.104' }] });
     expect(comps[0]).toMatchObject({ name: 'netty', version: '4.1.104', ecosystem: 'Maven' });
+  });
+  it('extracts components from an SPDX document and from an SBOM attestation', () => {
+    const spdx = { spdxVersion: 'SPDX-2.3', SPDXID: 'SPDXRef-DOCUMENT', packages: [{ name: 'netty', versionInfo: '4.1.104', externalRefs: [{ referenceType: 'purl', referenceLocator: 'pkg:maven/io.netty/netty@4.1.104' }] }] };
+    expect(componentsFromSource(spdx, 'sbom.spdx.json')).toEqual({ attested: false, components: [{ name: 'netty', version: '4.1.104', purl: 'pkg:maven/io.netty/netty@4.1.104', ecosystem: 'Maven' }] });
+    const statement = { _type: 'https://in-toto.io/Statement/v0.1', subject: [], predicateType: 'https://spdx.dev/Document', predicate: spdx };
+    const envelope = { payloadType: 'application/vnd.in-toto+json', payload: Buffer.from(JSON.stringify(statement)).toString('base64'), signatures: [] };
+    expect(componentsFromSource(envelope, 'sbom.att.json')).toMatchObject({ attested: true, components: [{ name: 'netty' }] });
+    expect(() => componentsFromSource({ _type: 'https://in-toto.io/Statement/v1', predicateType: 'https://slsa.dev/provenance/v1', predicate: {} }, 'p.json')).toThrow(/pass it with --provenance/);
+    expect(() => componentsFromSource({ hello: 1 }, 'x.json')).toThrow(/unrecognised source format/);
+  });
+});
+
+describe('release freezing from BuildKit outputs', () => {
+  const DIGEST = 'sha256:' + '11'.repeat(32);
+  const CONFIG = 'sha256:' + '22'.repeat(32);
+  const provenance = {
+    buildType: 'https://mobyproject.org/buildkit@v1',
+    builder: { id: 'https://github.com/acme/web/actions/runs/7' },
+    materials: [
+      { uri: 'pkg:docker/node@22-alpine?platform=linux%2Famd64', digest: { sha256: '33'.repeat(32) } },
+      { uri: 'git+https://github.com/acme/web@refs/heads/main', digest: { sha1: 'deadbeef' } },
+    ],
+  };
+  const spdx = { spdxVersion: 'SPDX-2.3', SPDXID: 'SPDXRef-DOCUMENT', packages: [{ name: 'left-pad', versionInfo: '1.3.0', externalRefs: [{ referenceType: 'purl', referenceLocator: 'pkg:npm/left-pad@1.3.0' }] }] };
+  const base = { productId: 'sentinelgate', version: '3.2.1', distribution: ['DE'], frozenAt: '2026-09-09T00:00:00.000Z' };
+
+  function tmp(files: Record<string, unknown>): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-evidence-'));
+    for (const [name, data] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), JSON.stringify(data));
+    return dir;
+  }
+
+  it('takes digest and build ref from --metadata-file and provenance from an attestation', async () => {
+    const dir = tmp({
+      'meta.json': { 'buildx.build.ref': 'b0/n0/ref1', 'containerimage.digest': DIGEST, 'containerimage.config.digest': CONFIG, 'image.name': 'ghcr.io/acme/web:3.2.1' },
+      'prov.json': { _type: 'https://in-toto.io/Statement/v0.1', subject: [], predicateType: 'https://slsa.dev/provenance/v0.2', predicate: provenance },
+      'sbom.json': spdx,
+    });
+    const release = await buildRelease({ ...base, from: path.join(dir, 'sbom.json'), fromExplicit: true, buildkitMetadata: path.join(dir, 'meta.json'), provenance: path.join(dir, 'prov.json') });
+    expect(release.artefactDigest).toBe(DIGEST);
+    expect(release.buildId).toBe('b0/n0/ref1');
+    expect(release.components).toEqual([{ name: 'left-pad', version: '1.3.0', purl: 'pkg:npm/left-pad@1.3.0', ecosystem: 'npm' }]);
+    expect(release.build).toEqual({
+      sources: ['buildx-metadata', 'provenance-attestation'],
+      signature: 'unverified',
+      imageName: 'ghcr.io/acme/web:3.2.1',
+      configDigest: CONFIG,
+      buildRef: 'b0/n0/ref1',
+      builderId: 'https://github.com/acme/web/actions/runs/7',
+      buildType: 'https://mobyproject.org/buildkit@v1',
+      sourceUri: 'https://github.com/acme/web',
+      sourceRevision: 'deadbeef',
+      baseImages: [{ ref: 'node@22-alpine', digest: 'sha256:' + '33'.repeat(32) }],
+    });
+  });
+
+  it('refuses a typed --digest that contradicts what the build wrote', async () => {
+    const dir = tmp({ 'meta.json': { 'containerimage.digest': DIGEST }, 'sbom.json': spdx });
+    await expect(buildRelease({ ...base, from: path.join(dir, 'sbom.json'), artefactDigest: 'sha256:' + 'ff'.repeat(32), buildkitMetadata: path.join(dir, 'meta.json') })).rejects.toThrow(/artefact digest mismatch/);
+  });
+
+  it('records no build block when only --from was given', async () => {
+    const dir = tmp({ 'sbom.json': spdx });
+    const release = await buildRelease({ ...base, from: path.join(dir, 'sbom.json') });
+    expect(release.build).toBeUndefined();
+    expect(release.artefactDigest).toBeUndefined();
+  });
+
+  it('freezes from a local image: repo digest, OCI labels, attached provenance and SBOM', async () => {
+    const exec: Exec = async (_file, args) => {
+      if (args[0] === 'image') {
+        return { stdout: JSON.stringify([{ Id: CONFIG, RepoDigests: [`ghcr.io/acme/web@${DIGEST}`], Config: { Labels: { 'org.opencontainers.image.source': 'https://github.com/acme/web', 'org.opencontainers.image.revision': 'deadbeef' } } }]) };
+      }
+      return { stdout: JSON.stringify({ manifest: { digest: DIGEST }, Provenance: { SLSA: provenance }, SBOM: { SPDX: spdx } }) };
+    };
+    const release = await buildRelease({ ...base, from: '/nonexistent/scan_result.json', image: 'ghcr.io/acme/web:3.2.1', exec });
+    expect(release.artefactDigest).toBe(DIGEST);
+    expect(release.components.map((c) => c.name)).toEqual(['left-pad']);
+    expect(release.build).toMatchObject({
+      sources: ['image-inspect', 'provenance-attestation', 'sbom-attestation'],
+      imageName: 'ghcr.io/acme/web:3.2.1',
+      configDigest: CONFIG,
+      sourceUri: 'https://github.com/acme/web',
+      sourceRevision: 'deadbeef',
+      labels: { 'org.opencontainers.image.revision': 'deadbeef', 'org.opencontainers.image.source': 'https://github.com/acme/web' },
+      baseImages: [{ ref: 'node@22-alpine' }],
+    });
+  });
+
+  it('prefers the builder\'s provenance over an author-typed label for the source commit', async () => {
+    const exec: Exec = async (_file, args) => {
+      if (args[0] === 'image') return { stdout: JSON.stringify([{ Id: CONFIG, RepoDigests: [], Config: { Labels: { 'org.opencontainers.image.revision': 'stale-label' } } }]) };
+      return { stdout: JSON.stringify({ manifest: { digest: DIGEST }, Provenance: { SLSA: provenance }, SBOM: { SPDX: spdx } }) };
+    };
+    const release = await buildRelease({ ...base, from: '/nonexistent/scan_result.json', image: 'web:local', exec });
+    expect(release.build?.sourceRevision).toBe('deadbeef');
+    expect(release.build?.labels).toEqual({ 'org.opencontainers.image.revision': 'stale-label' });
+    // No repo digest for a never-pushed image: the index digest from imagetools is the artefact identity.
+    expect(release.artefactDigest).toBe(DIGEST);
+    expect(release.build?.configDigest).toBe(CONFIG);
+  });
+
+  it('is actionable when the image has no SBOM and --from does not exist', async () => {
+    const exec: Exec = async () => ({ stdout: JSON.stringify({ manifest: { digest: DIGEST } }) });
+    await expect(buildRelease({ ...base, from: '/nonexistent/scan_result.json', image: 'ghcr.io/acme/web:3.2.1', exec })).rejects.toThrow(/carries no SBOM attestation.*build with --sbom=true/);
   });
 });
 

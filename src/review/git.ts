@@ -99,8 +99,15 @@ function parseNumstat(out: string): Map<string, { added: number; removed: number
     const removed = parts[1] === '-' ? 0 : Number(parts[1]);
     // A rename is emitted as `added\tremoved\told\tnew`.
     const path = parts.length >= 4 ? parts[3] : parts[2];
-    const op: ChangedFile['op'] =
-      parts.length >= 4 ? 'renamed' : removed > 0 && added === 0 ? 'modified' : 'modified';
+    // The counts cannot tell a deletion from a modification that only removes
+    // lines — both print `0\tN` — so the op derived here is never `removed`
+    // (nor `added` for `N\t0`). It is only the fallback for a path the status
+    // listing did not name; the `--name-status` / porcelain letters are the
+    // authority, and `mergeFiles` prefers them. Guessing `removed` from the
+    // counts would be unsafe: a file marked removed is never read, so a guard
+    // that is still in it would be reported as removed — a false protected
+    // finding.
+    const op: ChangedFile['op'] = parts.length >= 4 ? 'renamed' : 'modified';
     map.set(path, { added, removed, op });
   }
   return map;

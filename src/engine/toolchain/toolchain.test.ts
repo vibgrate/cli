@@ -6,7 +6,7 @@ import { extractToolchain } from './index.js';
 import { terraformExtractor } from './terraform.js';
 import { kubernetesExtractor } from './kubernetes.js';
 import { composeExtractor } from './compose.js';
-import { dockerfileExtractor, logicalLines, copySourcePaths } from './dockerfile.js';
+import { dockerfileExtractor, logicalLines, copySourcePaths, parseLabels } from './dockerfile.js';
 import { githubActionsExtractor, imagesBuiltBy, terraformAppliedDirs } from './workflows.js';
 import { helmExtractor } from './helm.js';
 import { buildProjectProfile } from './profile.js';
@@ -331,6 +331,49 @@ EXPOSE 8080
   it('skips a FROM whose image is a build-arg indirection', async () => {
     const result = await dockerfileExtractor.extract('Dockerfile', 'FROM $BASE\n');
     expect(result.nodes.filter((n) => n.signature === 'dockerfile.base')).toEqual([]);
+  });
+
+  it('parses LABEL in both modern and legacy forms', () => {
+    expect(parseLabels('a=1 b="two words" c=\'three\' d=')).toEqual([
+      { key: 'a', value: '1' },
+      { key: 'b', value: 'two words' },
+      { key: 'c', value: 'three' },
+      { key: 'd', value: '' },
+    ]);
+    expect(parseLabels('"com.example.key with space"="v=1" e="say \\"hi\\""')).toEqual([
+      { key: 'com.example.key with space', value: 'v=1' },
+      { key: 'e', value: 'say "hi"' },
+    ]);
+    expect(parseLabels('maintainer Jane Doe <jane@example.com>')).toEqual([{ key: 'maintainer', value: 'Jane Doe <jane@example.com>' }]);
+    expect(parseLabels('')).toEqual([]);
+  });
+
+  it('records OCI image labels as property nodes on the stage that declares them', async () => {
+    const source = `FROM node:22-alpine AS builder
+LABEL stage=builder
+FROM node:22-alpine
+ARG GIT_SHA
+LABEL org.opencontainers.image.source="https://github.com/acme/web" \\
+      org.opencontainers.image.revision=$GIT_SHA \\
+      org.opencontainers.image.licenses=Apache-2.0
+LABEL org.opencontainers.image.title="Acme Web"
+`;
+    const result = await dockerfileExtractor.extract('Dockerfile', source);
+    const labels = result.nodes.filter((n) => n.signature === 'dockerfile.label');
+    expect(labels.map((n) => n.qualifiedName)).toEqual([
+      'dockerfile:Dockerfile#builder/label/stage',
+      'dockerfile:Dockerfile#1/label/org.opencontainers.image.source',
+      'dockerfile:Dockerfile#1/label/org.opencontainers.image.revision',
+      'dockerfile:Dockerfile#1/label/org.opencontainers.image.licenses',
+      'dockerfile:Dockerfile#1/label/org.opencontainers.image.title',
+    ]);
+    const source_ = labels.find((n) => n.name === 'org.opencontainers.image.source');
+    expect(source_).toMatchObject({ kind: 'property', doc: 'org.opencontainers.image.source=https://github.com/acme/web', span: { start: 5, end: 7 } });
+    // An unresolved build arg is kept as written — the file does not know its value.
+    expect(labels.find((n) => n.name === 'org.opencontainers.image.revision')?.doc).toBe('org.opencontainers.image.revision=$GIT_SHA');
+    expect(result.edges).toContainEqual({ kind: 'contains', from: 'dockerfile:Dockerfile#1', to: 'dockerfile:Dockerfile#1/label/org.opencontainers.image.title', confidence: 1 });
+    // Same bytes, same output.
+    expect(await dockerfileExtractor.extract('Dockerfile', source)).toEqual(result);
   });
 });
 

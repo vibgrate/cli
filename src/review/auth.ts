@@ -154,11 +154,21 @@ export function voteAuth(group: string, routes: readonly ClassifiedRoute[]): Aut
   };
 }
 
+/**
+ * The peer group a route votes in: the directory it is declared in. Exported
+ * so a consumer that needs to find a route's group again (the scanner, when it
+ * reports the routes a thin group could not judge) uses this rule and not a
+ * second copy of it.
+ */
+export function routeGroup(file: string): string {
+  return file.split('/').slice(0, -1).join('/') || '.';
+}
+
 /** Group routes by the directory they are declared in, then vote each group. */
 export function voteAllAuth(routes: readonly ClassifiedRoute[]): AuthVote[] {
   const groups = new Map<string, ClassifiedRoute[]>();
   for (const r of routes) {
-    const dir = r.file.split('/').slice(0, -1).join('/') || '.';
+    const dir = routeGroup(r.file);
     let bucket = groups.get(dir);
     if (!bucket) groups.set(dir, (bucket = []));
     bucket.push(r);

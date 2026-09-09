@@ -24,6 +24,10 @@ backward compatible.
 
 ### Fixed
 
+- **`vg show arch` clipped the map to a fixed viewport.** Columns that ran off the
+  bottom of the window could not be scrolled or zoomed; the canvas is now a
+  pannable, zoomable map (scroll or drag, pinch / Ctrl-scroll, + / −).
+
 - **Context compression was a silent passthrough in the published build.** The
   listener, `vg savings --benchmark`, and the `vg code` tool-result compression
   bound their layers through a runtime-string dynamic import that the bundler
@@ -33,6 +37,38 @@ backward compatible.
   them that way.
 
 ### Added
+
+- **`vg evidence push` sends the frozen manifests and the bundle's proof.**
+  The push (`evidence-push-2`) now carries every frozen release — components,
+  artefact digest, build id, and the `build` facts read from BuildKit — and,
+  when `--result` points at a bundle directory, the DSSE envelope and RFC 3161
+  token, so Vibgrate Cloud verifies the signature itself and records
+  `intact` / `failed` / `absent` instead of trusting a flag. `--signed` is
+  accepted and ignored. Bodies over the 10 MB limit drop component lists
+  from the oldest releases first and say so; `--no-releases` omits the
+  manifests. The terminal line reports what the server confirmed.
+
+- **`vg evidence release` reads what BuildKit built.** A frozen release can now
+  take its facts from the build rather than from typed-in values:
+  `--buildkit-metadata <file>` reads the `docker buildx build --metadata-file`
+  output for the image digest and build reference; `--provenance <file>` reads
+  a SLSA provenance attestation (DSSE envelope, in-toto Statement, or bare
+  predicate) for the source repository, commit, and base images; and
+  `--image <ref>` asks Docker for the image digest, its
+  `org.opencontainers.image.*` labels, and any attached provenance and SBOM
+  attestations, using the attached SBOM as the manifest when `--from` is not
+  given (`docker buildx imagetools inspect` contacts the registry when the
+  reference is not present locally). `--from` also accepts SPDX documents and in-toto / DSSE SBOM
+  attestations alongside CycloneDX and scan artifacts. The facts are stored
+  under a new optional `build` block in the manifest; a `--digest` that
+  contradicts the build is an error, and attestation signatures are recorded
+  as `unverified` — vg carries no registry trust root.
+
+- **Dockerfile `LABEL` instructions are in the code graph.** Each label becomes
+  a `property` node (`dockerfile.label`) on the build stage that declares it,
+  so `org.opencontainers.image.source`, `.revision`, `.version` and the like
+  are facts on the stage rather than ignored text. Values are recorded as
+  written; an unresolved `$ARG` stays an `$ARG`.
 
 - **Context compression for AI coding agents — with no new commands.**
   `vg serve --compress` adds an Anthropic- and OpenAI-compatible listener

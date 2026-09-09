@@ -431,11 +431,22 @@ vg evidence exposure CVE-2025-12345 --bundle ./ev   # signed answer, exit code f
 | --- | --- | --- |
 | 1. Set up | `vg evidence init` | Org, coordinator CSIRT, and the person with filing authority |
 | 2. Register | `vg evidence product add` | A product with digital elements — markets, classification, scope rationale |
-| 3. Freeze | `vg evidence release` | Pin a shipped version to an immutable component manifest, from an SBOM or scan |
+| 3. Freeze | `vg evidence release` | Pin a shipped version to an immutable component manifest, from an SBOM, a scan, or what BuildKit built |
 | 4. Ask | `vg evidence exposure <vuln>` | Which shipped products contain it, at which versions, in which markets, still in support |
 | 5. Prove | `vg evidence verify <bundle>` | Re-check the signed answer offline, on any machine |
 
 Between those: `vg evidence readiness` is a deterministic gap report against the regime's obligations, `vg evidence regimes` lists the regimes and their clocks, `vg evidence drill` runs a timed rehearsal against a simulated advisory, `vg evidence watch` joins the CISA KEV catalog to your frozen manifests, `vg evidence pack` builds the submission pack a human pastes into the reporting platform, and `vg evidence export` writes an air-gapped bundle of everything.
+
+### Freeze a container release from what the build wrote
+
+If the shipped artefact is a container image, the build already produced the facts a manifest needs. `vg evidence release` can read them directly rather than have someone type them in:
+
+```bash
+docker buildx build --push --provenance=true --sbom=true --metadata-file build.json -t ghcr.io/acme/gateway:3.2.1 .
+vg evidence release acme-gateway 3.2.1 --image ghcr.io/acme/gateway:3.2.1 --ship-date 2025-02-14
+```
+
+`--image <ref>` asks Docker for the image digest, its `org.opencontainers.image.*` labels, and the provenance and SBOM attestations attached to it; the attached SBOM becomes the manifest. It runs `docker image inspect` and `docker buildx imagetools inspect`, and the second contacts the registry when the reference is not present locally. Without a daemon, pass the same facts as files: `--buildkit-metadata build.json` for the digest and build reference, `--provenance <file>` for a SLSA attestation (source repository, commit, base images), and `--from <file>` for a CycloneDX or SPDX SBOM, bare or as an attestation. The result is recorded under `build` in the frozen manifest. A `--digest` that contradicts the build is an error, and attestation signatures are recorded as unverified — `vg` has no registry trust root, so verify them with `cosign`.
 
 ### What is in a bundle, and what "verified" means
 
@@ -668,7 +679,7 @@ All HCS computation runs in an optional, separately-licensed engine module that 
 | `vg fix` | Ranked, risk-tiered upgrade plans from the hosted planner — then apply the one you choose |
 | `vg init [path]` | Initialise config and `.vibgrate/` |
 | `vg report` | Generate a report from a scan artifact |
-| `vg review` | **Vibgrate Review** — architecture + security-control review of the current change, locally. One decision (`pass` / `needs_review` / `fail` / `undetermined`) in a signed receipt; protected findings cannot be blessed into a pass. Reports change integrity, not a proof of security. Builds or refreshes the code map itself when it is missing or stale (`--no-auto-build` opts out) |
+| `vg review` | **Vibgrate Review** — architecture + security-control review of the current change, locally. One decision (`pass` / `needs_review` / `fail` / `undetermined`) in a signed receipt (Ed25519 over the receipt digest; `vg review verify <receipt.json>` checks it offline); protected findings cannot be blessed into a pass. Reports change integrity, not a proof of security. Builds or refreshes the code map itself when it is missing or stale (`--no-auto-build` opts out) |
 | `vg sbom export` / `delta` / `vex` | Export CycloneDX/SPDX SBOM, diff two artifacts, or emit an OpenVEX document |
 | `vg scan [path]` | Scan for upgrade drift |
 | `vg scan --full` | Comprehensive scan: drift + vulnerabilities + a banned-dependency report |

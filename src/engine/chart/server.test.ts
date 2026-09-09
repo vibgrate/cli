@@ -31,6 +31,8 @@ describe('chart server', () => {
     expect(page.ok).toBe(true);
     const html = await page.text();
     expect(html).toContain('Code map');
+    expect(html).toContain('id="zoom-in"');
+    expect(html).toMatch(/overflow:\s*auto/);
     expect(html).not.toContain('HAILE');
     expect(html).not.toContain('confidence');
 
