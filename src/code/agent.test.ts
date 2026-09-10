@@ -6,6 +6,7 @@ import { runAgent, compact, compactWithModel, type AgentEvent } from './agent.js
 import { ScriptedProvider } from './providers.js';
 import { fixtureGraph } from './graph-fixture.js';
 import { readModelSavings } from '../engine/savings.js';
+import { readSavingsEvents } from '../compress/ledger.js';
 import type { CodeFs } from './session.js';
 import type { ChatMessage, Provider, ToolCall } from './types.js';
 
@@ -1283,5 +1284,113 @@ describe('reasoning traces (protocol v5)', () => {
     });
     const usage = events.find((e) => e.type === 'usage');
     expect(usage && 'cachedPromptTokens' in usage).toBe(false);
+  });
+});
+
+describe('runAgent — in-loop compression is wired to the real engine', () => {
+  const baseFile = 'export function scanDir() {\n  const timeout = 0;\n  return timeout;\n}\n';
+  /** A model that reads the transcript: compress → follow the marker → finish. */
+  class MarkerFollowingProvider implements Provider {
+    readonly id = 'scripted';
+    readonly label = 'marker follower';
+    readonly local = true;
+    readonly model = 'claude-sonnet-5';
+    turn = 0;
+    /** The tool result the model saw on turn 2 (the compressed log). */
+    compressed = '';
+    /** Tool names advertised on the first call. */
+    toolNames: string[] = [];
+    retrieveArgs: Record<string, unknown> | null = null;
+    async chat(messages: ChatMessage[], opts?: { tools?: Array<{ name: string }> }) {
+      this.turn++;
+      if (this.turn === 1) {
+        this.toolNames = (opts?.tools ?? []).map((t) => t.name);
+        return { text: '', model: this.model, provider: this.id, toolCalls: [tc('run_command', { command: 'npm test' }, 't1')] };
+      }
+      if (this.turn === 2) {
+        const last = messages[messages.length - 1]!;
+        this.compressed = typeof last.content === 'string' ? last.content : '';
+        const m = /hash=([a-f0-9]{12,24})/.exec(this.compressed);
+        this.retrieveArgs = { hash: m?.[1] ?? 'missing', grep: 'ERROR' };
+        return { text: '', model: this.model, provider: this.id, toolCalls: [tc('vg_retrieve', this.retrieveArgs, 't2')] };
+      }
+      return { text: '', model: this.model, provider: this.id, toolCalls: [tc('finish', { summary: 'done' }, 't3')] };
+    }
+  }
+
+  const bulkyLog = (): string => {
+    const lines: string[] = [];
+    for (let i = 0; i < 400; i++) lines.push(`[12:00:${String(i % 60).padStart(2, '0')}] INFO worker-${i % 7} heartbeat ok latency=${10 + (i % 5)}ms queue=0`);
+    lines.splice(120, 0, 'ERROR TimeoutError: request to https://api.example.test/v1/items timed out after 5000ms', '    at fetchItems (src/items.ts:42:11)', '    at run (src/main.ts:9:3)');
+    lines.push('Tests: 1 failed, 211 passed');
+    return lines.join('\n');
+  };
+
+  it('compresses a bulky tool result, lets the model retrieve the original, and records the saving', async () => {
+    const ctx = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-code-compress-'));
+    const compressEnv: NodeJS.ProcessEnv = { ...process.env, VG_CONTEXT_DIR: ctx, VG_CCR_BACKEND: 'disk' };
+    const provider = new MarkerFollowingProvider();
+    const events: AgentEvent[] = [];
+    const log = bulkyLog();
+    expect(log.length).toBeGreaterThan(4000);
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'why does the items request time out',
+      providers: [provider],
+      fsImpl: memFs({ 'src/scan.ts': baseFile }),
+      run: () => ({ stdout: log, exitCode: 0 }),
+      approve: async () => true,
+      onEvent: (e) => events.push(e),
+      compressEnv,
+    });
+    expect(result.stopped).toBe('finished');
+    // The retrieve tool is advertised alongside the agent's own tools.
+    expect(provider.toolNames).toContain('vg_retrieve');
+    expect(provider.toolNames).toContain('run_command');
+    // The full result reached the host event (as the tool returned it — the
+    // command tool has its own output cap); only the model's copy was shrunk,
+    // and it carries a marker the model can follow.
+    const full = events.find((e) => e.type === 'tool-result' && e.name === 'run_command') as { content: string };
+    expect(full.content.length).toBeGreaterThan(4000);
+    expect(provider.compressed.length).toBeLessThan(full.content.length);
+    expect(provider.compressed).toMatch(/hash=[a-f0-9]{12,24}/);
+    expect(provider.compressed).toContain('TimeoutError');
+    // The retrieval round-tripped through the store: the tool result carries the original line.
+    const retrieval = events.find((e) => e.type === 'tool-result' && e.name === 'vg_retrieve') as { content: string; failed?: boolean } | undefined;
+    expect(retrieval).toBeDefined();
+    expect(retrieval!.failed).toBeUndefined();
+    expect(retrieval!.content).toContain('api.example.test/v1/items timed out');
+    // Savings are reported on the run and in the ledger `vg savings` reads.
+    expect(result.compression).toMatchObject({ results: 1, retrievals: 1 });
+    expect(result.compression!.tokensSaved).toBeGreaterThan(0);
+    const rows = readSavingsEvents(compressEnv);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ source: 'cli', client: 'vg-code', model: 'claude-sonnet-5', tokensSaved: result.compression!.tokensSaved, project: 'repo' });
+    fs.rmSync(ctx, { recursive: true, force: true });
+  });
+
+  it('advertises no retrieve tool and writes no ledger row when compression is off', async () => {
+    const ctx = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-code-compress-off-'));
+    const compressEnv: NodeJS.ProcessEnv = { ...process.env, VG_CONTEXT_DIR: ctx, VG_CODE_COMPRESS: '0' };
+    const provider = new MarkerFollowingProvider();
+    const events: AgentEvent[] = [];
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'why does the items request time out',
+      providers: [provider],
+      fsImpl: memFs({ 'src/scan.ts': baseFile }),
+      run: () => ({ stdout: bulkyLog(), exitCode: 0 }),
+      approve: async () => true,
+      onEvent: (e) => events.push(e),
+      compressEnv,
+    });
+    expect(provider.toolNames).not.toContain('vg_retrieve');
+    const full = events.find((e) => e.type === 'tool-result' && e.name === 'run_command') as { content: string };
+    expect(provider.compressed).toBe(full.content);
+    expect(result.compression).toBeUndefined();
+    expect(readSavingsEvents(compressEnv)).toHaveLength(0);
+    fs.rmSync(ctx, { recursive: true, force: true });
   });
 });

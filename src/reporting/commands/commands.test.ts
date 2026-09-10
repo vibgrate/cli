@@ -5,7 +5,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 // or replicate the logic here for unit testing.
 
 import { resolveIngestHost, createWorkspaceDsn } from './dsn.js';
-import { parseDsn, computeHmac } from './push.js';
+import { parseDsn, computeHmac, buildClaimUrl } from './push.js';
 
 // ── DSN parsing (now exported from push.ts) ──
 
@@ -43,6 +43,27 @@ describe('DSN parsing', () => {
     expect(result).not.toBeNull();
     expect(result!.keyId).toBe('4a445ff36e993ca0');
     expect(result!.secret).toHaveLength(64);
+  });
+});
+
+describe('buildClaimUrl (CLI claim path)', () => {
+  it('carries the vid, a scan_drift job, and the cli channel', () => {
+    const url = new URL(buildClaimUrl('abc-123'));
+    expect(url.pathname).toBe('/claim');
+    expect(url.searchParams.get('vid')).toBe('abc-123');
+    expect(url.searchParams.get('job')).toBe('scan_drift');
+    expect(url.searchParams.get('channel')).toBe('cli');
+  });
+
+  it('defaults to dash.vibgrate.com with no dashHost given', () => {
+    const url = new URL(buildClaimUrl('vid-1'));
+    expect(url.hostname).toBe('dash.vibgrate.com');
+    expect(url.protocol).toBe('https:');
+  });
+
+  it('honours an explicit dashHost (regional residency)', () => {
+    const url = new URL(buildClaimUrl('vid-1', 'dash.eu.vibgrate.com'));
+    expect(url.hostname).toBe('dash.eu.vibgrate.com');
   });
 });
 

@@ -8,6 +8,7 @@ import { kernelDisabled } from '../../install/module-core.js';
 import { haileModuleDir, haileModulePathOverride } from './haile-provider.js';
 import type { HaileModuleSummary, HaileProfile, HaileSidecar, HaileSymbol } from './types.js';
 import {
+  DEFAULT_POLICY,
   DEFAULT_PROFILE,
   HAILE_ENGINE_VERSION,
   HAILE_IR,
@@ -15,7 +16,8 @@ import {
   HAILE_TAXONOMY,
   type HailePolicy,
 } from './types.js';
-import { architecturePolicyFor } from './policy-config.js';
+import { architecturePolicyFor, isHailePolicy } from './policy-config.js';
+import { applyArchitectureOverlays, loadArchitecturePolicy } from './policy-overlay.js';
 
 function sidecarPathWithSuffix(graphPath: string, suffix: string): string {
   if (graphPath.endsWith('.json')) return `${graphPath.slice(0, -5)}${suffix}`;
@@ -85,12 +87,23 @@ export function writeSidecarDocument(sidecar: HaileSidecar, graphPath: string): 
  * Derive the classify file from an in-memory graph by launching the
  * installed module. Returns null when the module is missing — never a
  * TypeScript lexicon copy, never a PATH/`HAILE_BIN` fallback.
+ *
+ * The repository's `.vibgrate/architecture.toml` is read first: its baked
+ * pack is handed to the module, its `[[overlay]]` tables are applied to the
+ * document the module wrote. An overlay that does not validate throws
+ * ArchitecturePolicyError before anything is classified — the caller fails
+ * the architecture step loudly; a missing module stays a quiet null.
  */
 export function writeHaileSidecarFor(
   graph: VgGraph,
   graphPath: string,
   options: { profile?: HaileProfile; policy?: HailePolicy; root?: string } = {},
 ): string | null {
+  const root = options.root ?? path.dirname(path.dirname(graphPath));
+  // Fail loud on a bad overlay even when the module is absent: the file is
+  // wrong whatever classifies, and the next `vg module install arch` must not
+  // be the moment the team learns it.
+  const document = loadArchitecturePolicy(root);
   try {
     const entry = resolveHaileModuleEntry();
     if (!entry) return null;
@@ -99,19 +112,30 @@ export function writeHaileSidecarFor(
     const profile = options.profile ?? DEFAULT_PROFILE;
     // The policy comes from the flag, then the environment, then
     // `.vibgrate/architecture.toml` next to the graph's repository root.
-    const policy = architecturePolicyFor(options.root ?? path.dirname(path.dirname(graphPath)), options.policy);
-    const result = spawnSync(
-      process.execPath,
-      [entry, 'sidecar', '--stdin', '--out', file, '--profile', profile, '--policy', policy],
-      {
+    const policy = architecturePolicyFor(root, options.policy);
+    const run = (pack: HailePolicy) =>
+      spawnSync(process.execPath, [entry, 'sidecar', '--stdin', '--out', file, '--profile', profile, '--policy', pack], {
         input: JSON.stringify(graph),
         encoding: 'utf8',
         timeout: 120_000,
         maxBuffer: 64 * 1024 * 1024,
-      },
-    );
+      });
+    let result = run(policy);
+    // An installed module published before the pack landed (vertical-v1)
+    // refuses the id. Judge under the default and stamp what was evaluated —
+    // the stamp, not the request, is what every reader prints.
+    if (result.status !== 0 && policy !== DEFAULT_POLICY && /invalid --policy/.test(result.stderr ?? '')) {
+      result = run(DEFAULT_POLICY);
+    }
     if (result.status !== 0) return null;
     if (!fs.existsSync(file)) return null;
+    if (document.overlays.length) {
+      const written = JSON.parse(fs.readFileSync(file, 'utf8')) as HaileSidecar;
+      if (written.magic !== HAILE_MAGIC || !Array.isArray(written.symbols)) return null;
+      if (!isHailePolicy(written.policy)) written.policy = policy;
+      applyArchitectureOverlays(written, document.overlays);
+      if (!writeSidecarDocument(written, graphPath)) return null;
+    }
     return file;
   } catch {
     return null;

@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hashString } from './hash.js';
 import { cacheDir } from './cache.js';
+import { openVectorCas, VECTOR_TEXT_VERSION, type CasStore } from './cas.js';
 import { resolveGraphPath } from './artifacts.js';
 import { acquireLock, lockHeld, releaseLock } from './lock.js';
 import type { GraphNode, VgGraph } from '../schema.js';
@@ -56,6 +57,71 @@ export interface LoadEmbedderOptions {
 /** The embedding model id in effect (explicit override → default). */
 export function resolveEmbedModel(model?: string): string {
   return model ?? 'bge-small-en-v1.5';
+}
+
+/**
+ * What the engine knows about an embedding model. `queryPrefix` matters:
+ * BGE v1.5 is an *asymmetric* retriever trained with an instruction on the
+ * query side only — documents stay bare. MiniLM is symmetric and takes none.
+ * Getting this wrong is silent (vectors still come out) and costs ranking
+ * quality on every semantic ask.
+ */
+export interface EmbedModelSpec {
+  /** User-facing id, recorded in the sidecar header. */
+  id: string;
+  /** Ids/aliases accepted on the command line. */
+  aliases: readonly string[];
+  dims: number;
+  maxTokens: number;
+  /** Prepended to *queries* only; documents are embedded as-is. */
+  queryPrefix?: string;
+  tier: 'default' | 'quality' | 'speed';
+}
+
+/** The FlagEmbedding instruction for BGE v1.5 English retrieval queries. */
+export const BGE_QUERY_PREFIX = 'Represent this sentence for searching relevant passages: ';
+
+/** Models the vendored backend can load. The default stays the small BGE. */
+export const EMBED_MODELS: readonly EmbedModelSpec[] = [
+  {
+    id: 'bge-small-en-v1.5',
+    aliases: ['bge-small', 'bge-small-en', 'BAAI/bge-small-en-v1.5'],
+    dims: 384,
+    maxTokens: 512,
+    queryPrefix: BGE_QUERY_PREFIX,
+    tier: 'default',
+  },
+  {
+    id: 'bge-base-en-v1.5',
+    aliases: ['bge-base', 'bge-base-en', 'BAAI/bge-base-en-v1.5'],
+    dims: 768,
+    maxTokens: 512,
+    queryPrefix: BGE_QUERY_PREFIX,
+    tier: 'quality',
+  },
+  {
+    id: 'all-MiniLM-L6-v2',
+    aliases: ['all-minilm', 'minilm', 'sentence-transformers/all-MiniLM-L6-v2'],
+    dims: 384,
+    maxTokens: 256,
+    tier: 'speed',
+  },
+];
+
+/** Registry entry for a model id or alias (case-insensitive); undefined for an unknown id. */
+export function embedModelSpec(id: string): EmbedModelSpec | undefined {
+  const want = id.trim().toLowerCase();
+  return EMBED_MODELS.find((m) => m.id.toLowerCase() === want || m.aliases.some((a) => a.toLowerCase() === want));
+}
+
+/**
+ * The text actually embedded for a *query* against `modelId`: the model's
+ * query instruction (when it has one) followed by the question. Documents
+ * never go through this — see `nodeEmbedText`.
+ */
+export function queryEmbedText(modelId: string, text: string): string {
+  const prefix = embedModelSpec(modelId)?.queryPrefix;
+  return prefix ? `${prefix}${text}` : text;
 }
 
 /**
@@ -253,8 +319,15 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
         return out;
       },
       async embedQuery(text) {
-        const v = await model.queryEmbed(text);
-        return Array.from(v as ArrayLike<number>);
+        // Not the backend's `queryEmbed`: that prepends the E5-style
+        // `query: ` marker to every model, which is the wrong instruction
+        // for BGE and an unwanted one for MiniLM. The registry knows each
+        // model's real query prefix; documents stay unprefixed.
+        for await (const batch of model.embed([queryEmbedText(modelId, text)], 1)) {
+          const v = (batch as ArrayLike<number>[])[0];
+          if (v) return Array.from(v);
+        }
+        return [];
       },
     };
   } catch (e) {
@@ -378,42 +451,62 @@ function pathContext(file: string): string {
   return [...dirs.slice(-2), stem].filter(Boolean).join(' ');
 }
 
+/** Category keywords help ops/config queries land on the right file type. */
+const DOCUMENT_CATEGORY_HINTS: Record<string, string> = {
+  manifest: 'package dependencies scripts install dependencies versions',
+  docker: 'dockerfile container image build runtime',
+  compose: 'docker-compose services containers networking volumes',
+  ci: 'continuous integration github actions workflow pipeline test build deploy',
+  'build-config': 'typescript tsconfig bundler vite webpack eslint prettier test',
+  'api-contract': 'openapi swagger graphql protobuf api schema endpoints',
+  'task-runner': 'makefile justfile tasks build test run commands',
+  workspace: 'monorepo workspace packages pnpm turbo nx',
+  infra: 'deploy infrastructure kubernetes kubernetes terraform helm kubernetes',
+  'env-example': 'environment variables configuration secrets template',
+  markdown: 'documentation readme guide',
+};
+
+/** Which `nodeEmbedText` produced a vector — the store keys vectors by hash of this text. */
+export const EMBED_TEXT_VERSION = VECTOR_TEXT_VERSION;
+
 /**
- * The text we embed for a node. Alongside identity + signature we add the
- * strongest available signal — the node's **doc-comment / docstring** summary —
- * plus lightweight context already on the graph (file-path words, area label), so
- * a tersely-named symbol (`Table`, `NotificationJob`) a concept query can reach.
+ * The text we embed for a node (v2, **path-agnostic**). Alongside identity +
+ * signature we add the strongest available signal — the node's
+ * **doc-comment / docstring** summary — so a tersely-named symbol (`Table`,
+ * `NotificationJob`) a concept query can reach.
+ *
+ * What is deliberately *not* here: the file path and the area label. Both
+ * used to be, and both made the vector private to one path on one branch —
+ * the same symbol at a renamed path, or on a sibling branch, or after a
+ * recluster relabelled its area, could never reuse its vector. Path words
+ * are a lexical signal and the lexical arm of the hybrid query still ranks
+ * on them; the vector carries only what the symbol *is*.
  *
  * `document` nodes (markdown, manifests, Docker, CI, OpenAPI, …) put the
  * scrubbed body in `doc` — that body is the primary embed signal so `vg ask`
  * can answer project-context questions, not only code symbols.
  */
-export function nodeEmbedText(node: GraphNode, areaLabel?: string): string {
+export function nodeEmbedText(node: GraphNode): string {
   if (node.kind === 'document') {
     const category = (node.signature ?? 'document').replace(/^document:/, '');
-    // Category keywords help ops/config queries land on the right file type.
-    const categoryHints: Record<string, string> = {
-      manifest: 'package dependencies scripts install dependencies versions',
-      docker: 'dockerfile container image build runtime',
-      compose: 'docker-compose services containers networking volumes',
-      ci: 'continuous integration github actions workflow pipeline test build deploy',
-      'build-config': 'typescript tsconfig bundler vite webpack eslint prettier test',
-      'api-contract': 'openapi swagger graphql protobuf api schema endpoints',
-      'task-runner': 'makefile justfile tasks build test run commands',
-      workspace: 'monorepo workspace packages pnpm turbo nx',
-      infra: 'deploy infrastructure kubernetes kubernetes terraform helm kubernetes',
-      'env-example': 'environment variables configuration secrets template',
-      markdown: 'documentation readme guide',
-    };
-    const hint = categoryHints[category] ?? category;
-    return [
-      node.qualifiedName,
-      'document',
-      category,
-      hint,
-      pathContext(node.file),
-      (node.doc ?? '').slice(0, 5000),
-    ]
+    const hint = DOCUMENT_CATEGORY_HINTS[category] ?? category;
+    return [node.qualifiedName, 'document', category, hint, (node.doc ?? '').slice(0, 5000)]
+      .filter(Boolean)
+      .join('\n');
+  }
+  return [node.qualifiedName, node.kind, node.signature ?? '', node.doc ?? ''].filter(Boolean).join(' ');
+}
+
+/**
+ * The pre-v2 embed text (path words + area label included). Kept one release
+ * for readers of sidecars written before the content-addressed vector store;
+ * nothing new is embedded with it.
+ */
+export function nodeEmbedTextV1(node: GraphNode, areaLabel?: string): string {
+  if (node.kind === 'document') {
+    const category = (node.signature ?? 'document').replace(/^document:/, '');
+    const hint = DOCUMENT_CATEGORY_HINTS[category] ?? category;
+    return [node.qualifiedName, 'document', category, hint, pathContext(node.file), (node.doc ?? '').slice(0, 5000)]
       .filter(Boolean)
       .join('\n');
   }
@@ -492,32 +585,56 @@ export interface EmbedTarget {
  * work the disk cache had already done. Keep them on this one function.
  */
 export function embedTargets(graph: VgGraph): EmbedTarget[] {
-  // Tolerant of a partial graph: vgd indexes whatever a client publishes, and
-  // an `areas`-less map is a valid (if unlabelled) one.
-  const areaLabel = new Map((graph.areas ?? []).map((a) => [a.id, a.label] as const));
+  // Tolerant of a partial graph: vgd indexes whatever a client publishes.
   const targets: EmbedTarget[] = [];
   for (const n of graph.nodes ?? []) {
     // file/external stay out of the index; document (docs/env examples) are in.
     if (n.kind === 'file' || n.kind === 'external') continue;
-    const text = nodeEmbedText(n, areaLabel.get(n.area));
+    const text = nodeEmbedText(n);
     targets.push({ id: n.id, text, hash: hashString(text) });
   }
   return targets;
 }
 
 /**
+ * Split targets into (bound vectors, still-pending), consulting the per-map
+ * sidecar first and then the content-addressed vector store. A store hit is
+ * copied into `cache.entries` so the sidecar can be re-packed without ONNX;
+ * the caller decides whether to persist it. `cas` may be null (disabled).
+ */
+function bindVectors(
+  targets: EmbedTarget[],
+  cache: EmbedCache,
+  cas: CasStore | null,
+): { vectors: Map<string, number[]>; pending: EmbedTarget[]; fromCas: number } {
+  const vectors = new Map<string, number[]>();
+  const pending: EmbedTarget[] = [];
+  let fromCas = 0;
+  for (const t of targets) {
+    const cached = cache.entries[t.id];
+    if (cached && cached.hash === t.hash) {
+      vectors.set(t.id, cached.vec);
+      continue;
+    }
+    const shared = cas?.getVector(cache.model, t.hash);
+    if (shared) {
+      vectors.set(t.id, shared);
+      cache.entries[t.id] = { hash: t.hash, vec: shared };
+      fromCas++;
+      continue;
+    }
+    pending.push(t);
+  }
+  return { vectors, pending, fromCas };
+}
+
+/**
  * How many searchable nodes still need embedding for `modelId` — cheap (hashes
- * the embed-text, reads only the cache; never loads the model). Lets the embed
- * command / background warm-up exit instantly when nothing changed.
+ * the embed-text, reads only the caches; never loads the model). Lets the
+ * embed command / background warm-up exit instantly when nothing changed.
  */
 export function countPending(graph: VgGraph, root: string, modelId: string): number {
-  const entries = loadCache(root, modelId).entries;
-  let pending = 0;
-  for (const t of embedTargets(graph)) {
-    const cached = entries[t.id];
-    if (!cached || cached.hash !== t.hash) pending++;
-  }
-  return pending;
+  return bindVectors(embedTargets(graph), loadCache(root, modelId), openVectorCas(root)).pending.length;
 }
 
 /** What a reader (vgd) finds in this repo's on-disk vector cache. */
@@ -544,14 +661,7 @@ export function readCachedVectors(
   root: string,
   modelId = resolveEmbedModel(),
 ): CachedVectorRead {
-  const entries = loadCache(root, modelId).entries;
-  const vectors = new Map<string, number[]>();
-  const pending: EmbedTarget[] = [];
-  for (const t of embedTargets(graph)) {
-    const cached = entries[t.id];
-    if (cached && cached.hash === t.hash && cached.vec.length > 0) vectors.set(t.id, cached.vec);
-    else pending.push(t);
-  }
+  const { vectors, pending } = bindVectors(embedTargets(graph), loadCache(root, modelId), openVectorCas(root));
   return { model: modelId, vectors, pending, writerBusy: lockHeld(`${vectorCachePath(root)}.lock`) };
 }
 
@@ -780,9 +890,14 @@ function purgeLegacyJsonCaches(root: string): void {
 
 /**
  * Node embeddings for the searchable (non-file/external) nodes, cache-backed:
- * only nodes whose embed-text changed are re-embedded. The first run embeds in
- * chunks, **persists the cache incrementally** (so an interrupted/timed-out run
- * resumes instead of wasting the work), and reports progress via `onProgress`.
+ * only nodes whose embed-text has no vector anywhere are embedded. Lookup
+ * order is the per-map sidecar (node id → vector), then the content-addressed
+ * vector store keyed by embed-text hash — so a symbol already embedded on
+ * another branch, at another path, or in another worktree binds without the
+ * model. The first run embeds in chunks, **persists the sidecar
+ * incrementally** (so an interrupted/timed-out run resumes instead of wasting
+ * the work), writes every new vector to the store, and reports progress via
+ * `onProgress`.
  */
 export async function getNodeEmbeddings(
   graph: VgGraph,
@@ -792,16 +907,11 @@ export async function getNodeEmbeddings(
 ): Promise<Map<string, number[]>> {
   const file = vectorCachePath(root);
   const cache = loadCache(root, embedder.id);
+  const cas = openVectorCas(root);
 
   // Includes document nodes (markdown/txt/env examples) so ask can retrieve docs.
   const targets = embedTargets(graph);
-  const toEmbed: EmbedTarget[] = [];
-  const vectors = new Map<string, number[]>();
-  for (const t of targets) {
-    const cached = cache.entries[t.id];
-    if (cached && cached.hash === t.hash) vectors.set(t.id, cached.vec);
-    else toEmbed.push(t);
-  }
+  const { vectors, pending: toEmbed, fromCas } = bindVectors(targets, cache, cas);
 
   // Atomic write (temp + rename) so a reader never sees a half-written cache.
   const persist = (): void => {
@@ -812,11 +922,15 @@ export async function getNodeEmbeddings(
       /* cache write best-effort */
     }
   };
+  const pruneStale = (): void => {
+    const live = new Set(targets.map((t) => t.id));
+    for (const id of Object.keys(cache.entries)) if (!live.has(id)) delete cache.entries[id];
+  };
 
   if (toEmbed.length) {
     // Single-writer: if another process (e.g. a background warm-up) is already
     // embedding this repo, don't double-work or race the cache — return what's
-    // cached so far (lexical floor still applies). It will be complete next run.
+    // bound so far (lexical floor still applies). It will be complete next run.
     const lock = `${file}.lock`;
     if (!acquireLock(lock)) return vectors;
     try {
@@ -829,6 +943,9 @@ export async function getNodeEmbeddings(
           const vec = vecs[j] ?? [];
           vectors.set(t.id, vec);
           cache.entries[t.id] = { hash: t.hash, vec };
+          // Store objects are per (model, text hash): the next branch, path,
+          // or worktree that carries this symbol binds it without the model.
+          cas?.putVector(embedder.id, t.hash, vec);
         });
         onProgress?.(Math.min(i + EMBED_CHUNK, toEmbed.length), toEmbed.length);
         // Persist periodically so a crash/timeout resumes from here next run.
@@ -838,11 +955,23 @@ export async function getNodeEmbeddings(
         }
       }
       // prune entries for nodes no longer present, then a final authoritative write
-      const live = new Set(targets.map((t) => t.id));
-      for (const id of Object.keys(cache.entries)) if (!live.has(id)) delete cache.entries[id];
+      pruneStale();
       persist();
     } finally {
       releaseLock(lock);
+    }
+  } else if (fromCas > 0) {
+    // Everything bound, some of it from the store: pack the sidecar so the
+    // next load of this map is a single read. Skip quietly if a writer is
+    // mid-run — the store still has every vector.
+    const lock = `${file}.lock`;
+    if (acquireLock(lock)) {
+      try {
+        pruneStale();
+        persist();
+      } finally {
+        releaseLock(lock);
+      }
     }
   } else if (!fs.existsSync(file) && Object.keys(cache.entries).length > 0) {
     // Migrating from legacy JSON with a full hit set — rewrite as binary once

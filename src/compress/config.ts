@@ -141,6 +141,7 @@ export const KNOBS: readonly Knob[] = [
   k('VG_COMPRESS_MAX_ITEMS', 'int', 'compress', 'Max items kept by the JSON array compressor per block.', { default: '50', hot: true }),
   k('VG_CODE_COMPRESS', 'bool', 'compress', 'Compress bulky tool results inside the `vg code` agent loop before they enter the transcript. Reads that an edit is computed from are always byte-exact.', { default: 'true', hot: true }),
   k('VG_CODE_COMPRESS_MIN_CHARS', 'int', 'compress', 'Size (chars) a `vg code` tool result must reach before in-loop compression is attempted.', { default: '4000', hot: true }),
+  k('VG_CODE_RETRIEVE_MAX_TOKENS', 'int', 'compress', 'Cap (tokens) on what one `vg_retrieve` call inside `vg code` returns; the model narrows with grep / lines / head / tail for more.', { default: '4000', hot: true }),
   k('VG_COMPRESS_USER_MESSAGES', 'bool', 'compress', 'Allow compression of user-role text (default: only pasted tool output inside it).', { default: 'false', hot: true }),
   k('VG_COMPRESS_SYSTEM_MESSAGES', 'bool', 'compress', 'Allow compression of system/developer prompts.', { default: 'false', hot: true }),
   k('VG_COMPRESS_ASSISTANT_TEXT', 'bool', 'compress', 'Allow compression of assistant text blocks.', { default: 'false', hot: true }),

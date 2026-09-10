@@ -62,8 +62,8 @@ describe('AGENTS registry', () => {
     expect(vibe).toEqual([{ name: 'mistral', api_base: `${URL}/v1`, api_key_env_var: 'MISTRAL_API_KEY', browser_auth_base_url: 'https://console.mistral.ai', browser_auth_api_base_url: 'https://console.mistral.ai/api', backend: 'mistral' }]);
     expect(JSON.parse(AGENTS.opencode.env(URL).OPENCODE_CONFIG_CONTENT!)).toEqual({ provider: { anthropic: { options: { baseURL: `${URL}/v1` } }, openai: { options: { baseURL: `${URL}/v1` } } } });
     expect(opencodeConfigContent(URL)).not.toContain(' ');
-    expect(AGENTS.grok.proxyArgs!({})).toEqual(['--openai-url', 'https://api.x.ai']);
-    expect(AGENTS.vibe.proxyArgs!({})).toEqual(['--openai-url', 'https://api.mistral.ai']);
+    expect(AGENTS.grok.proxyEnv!({})).toEqual({ VG_PROXY_OPENAI_API_URL: 'https://api.x.ai' });
+    expect(AGENTS.vibe.proxyEnv!({})).toEqual({ VG_PROXY_OPENAI_API_URL: 'https://api.mistral.ai' });
   });
 
   it('Claude: exactly one base-URL key, chosen by Vertex/Foundry switches; tool search precedence', () => {

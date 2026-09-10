@@ -250,8 +250,11 @@ export async function wrap(agent: WrapAgent, opts: WrapOptions): Promise<WrapRes
   const host = opts.host ?? knobs.string('VG_PROXY_HOST', env) ?? '127.0.0.1';
   let port = opts.port ?? knobs.int('VG_PROXY_PORT', env, { min: 1, max: 65535 });
   const profile = opts.profile ?? (knobs.isSet('VG_COMPRESS_PROFILE', env) ? knobs.string('VG_COMPRESS_PROFILE', env) : undefined);
-  const proxyArgs = [...(spec.proxyArgs?.(env) ?? []), ...(profile ? ['--profile', profile] : [])];
-  const proxyEnv: NodeJS.ProcessEnv = { ...env, VG_PROXY_AGENT_TYPE: env.VG_PROXY_AGENT_TYPE ?? agent };
+  const proxyArgs = profile ? ['--profile', profile] : [];
+  // Upstream pins for a listener this run starts. A listener that is already
+  // running keeps its own configuration — one shared listener, one upstream.
+  const pins = spec.proxyEnv?.(env) ?? {};
+  const proxyEnv: NodeJS.ProcessEnv = { ...env, ...pins, VG_PROXY_AGENT_TYPE: env.VG_PROXY_AGENT_TYPE ?? agent };
   if (opts.capture) proxyEnv.VG_WRAP_CAPTURE_FILE = path.resolve(cwd, opts.capture);
   const explicitUrl = env.VG_PROXY_URL?.trim();
   let proxyUrl = explicitUrl || `http://${host}:${port}`;
@@ -283,12 +286,14 @@ export async function wrap(agent: WrapAgent, opts: WrapOptions): Promise<WrapRes
     args: [...launchArgs, ...userArgs],
     configFile,
     proxyArgs,
+    proxyEnv: pins,
   };
 
   if (opts.dryRun) {
-    say(`vg serve --compress -- ${agent} --dry-run (nothing started, nothing written)`);
+    say(`vg serve --compress ${agent} --dry-run (nothing started, nothing written)`);
     say(`  binary   ${binary ?? `(none — watcher mode; ${spec.notes ?? ''})`}`);
     say(`  proxy    ${proxyUrl}${proxyArgs.length ? `  (vg serve --compress ${proxyArgs.join(' ')})` : ''}`);
+    for (const [k, v] of Object.entries(pins)) say(`  upstream ${k}=${v}`);
     for (const [k, v] of Object.entries(plan.env)) say(`  env      ${k}=${v}`);
     for (const k of unset) say(`  unset    ${k}`);
     if (configFile) say(`  config   ${rel(configFile, cwd, home)} (${spec.method})`);

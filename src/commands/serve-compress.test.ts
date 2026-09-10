@@ -2,26 +2,36 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Command } from 'commander';
 
 const wrapMock = vi.fn();
+const ensureProxyRunning = vi.fn();
+const startProxy = vi.fn();
+const stopProxy = vi.fn(async (_port: number) => ({ stopped: false }));
 vi.mock('../wrap/wrap.js', () => ({ wrap: (...args: unknown[]) => wrapMock(...args) }));
-vi.mock('../proxy/lifecycle.js', () => ({
-  ensureProxyRunning: vi.fn(),
-  registerClient: vi.fn(),
-  unregisterClient: vi.fn(),
-  readProxyState: () => null,
-  pidAlive: () => false,
-  probeProxy: async () => ({ ok: false }),
-  stopProxy: async () => ({ stopped: false }),
-  listClients: () => [],
-  pruneStaleClients: () => {},
-}));
+vi.mock('../proxy/lifecycle.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../proxy/lifecycle.js')>();
+  return {
+    ...actual,
+    ensureProxyRunning: (...args: unknown[]) => ensureProxyRunning(...args),
+    registerClient: vi.fn(),
+    unregisterClient: vi.fn(),
+    readProxyState: () => null,
+    pidAlive: () => false,
+    probeProxy: async () => ({ ok: false }),
+    stopProxy: (...args: unknown[]) => stopProxy(...(args as [number])),
+    listClients: () => [],
+    pruneStaleClients: () => {},
+  };
+});
+vi.mock('../proxy/server.js', () => ({ startProxy: (...args: unknown[]) => startProxy(...args) }));
 
 import { registerServe } from './serve.js';
 import { KNOWN_COMMANDS } from '../cli.js';
+import { daemonArgv } from '../proxy/lifecycle.js';
 
 /** Parse `argv` through a fresh program with `vg serve` registered; capture stdout. */
 async function run(argv: string[]): Promise<{ stdout: string; error?: Error }> {
   const program = new Command();
   program.exitOverride();
+  program.enablePositionalOptions(); // as buildProgram() does — serve relies on it for pass-through
   registerServe(program);
   let stdout = '';
   const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
@@ -42,6 +52,7 @@ async function run(argv: string[]): Promise<{ stdout: string; error?: Error }> {
 
 const serveCommand = (): Command => {
   const program = new Command();
+  program.enablePositionalOptions();
   registerServe(program);
   return program.commands.find((x) => x.name() === 'serve') as Command;
 };
@@ -50,6 +61,8 @@ describe('vg serve — the compression half', () => {
   const savedExit = process.exitCode;
   beforeEach(() => {
     wrapMock.mockReset();
+    ensureProxyRunning.mockReset();
+    startProxy.mockReset();
     process.exitCode = undefined;
   });
   afterEach(() => {
@@ -101,9 +114,9 @@ describe('vg serve — the compression half', () => {
     expect(serve.options.find((o) => o.long === '--graph')?.required).not.toBe(false);
   });
 
-  it('runs one agent session through the listener and passes everything after `--` on', async () => {
+  it('runs one agent session through the listener; everything after the agent name is the agent\'s, no `--` needed', async () => {
     wrapMock.mockResolvedValue({ exitCode: 0, proxyUrl: 'http://127.0.0.1:8790', applied: [] });
-    const r = await run(['serve', '--compress', '--compress-port', '8790', '--profile', 'aggressive', '--', 'claude', '--model', 'x', '-p', 'hi']);
+    const r = await run(['serve', '--compress', '--compress-port', '8790', '--profile', 'aggressive', 'claude', '--model', 'x', '-p', 'hi']);
     expect(r.error).toBeUndefined();
     expect(wrapMock).toHaveBeenCalledTimes(1);
     const [agent, opts] = wrapMock.mock.calls[0] as [string, Record<string, unknown>];
@@ -111,28 +124,95 @@ describe('vg serve — the compression half', () => {
     expect(opts).toMatchObject({ args: ['--model', 'x', '-p', 'hi'], port: 8790, profile: 'aggressive' });
   });
 
+  it('still accepts the explicit `--` separator', async () => {
+    wrapMock.mockResolvedValue({ exitCode: 0, proxyUrl: 'u', applied: [] });
+    const r = await run(['serve', '--compress', '--', 'claude', '--model', 'x']);
+    expect(r.error).toBeUndefined();
+    const [agent, opts] = wrapMock.mock.calls[0] as [string, Record<string, unknown>];
+    expect(agent).toBe('claude');
+    expect(opts).toMatchObject({ args: ['--model', 'x'] });
+  });
+
   it('propagates the agent’s exit code', async () => {
     wrapMock.mockResolvedValue({ exitCode: 3, proxyUrl: 'u', applied: [] });
-    await run(['serve', '--compress', '--', 'codex']);
+    await run(['serve', '--compress', 'codex']);
     expect(process.exitCode).toBe(3);
   });
 
   it('rejects an agent it cannot route, naming the ones it can', async () => {
-    const r = await run(['serve', '--compress', '--', 'not-an-agent']);
+    const r = await run(['serve', '--compress', 'not-an-agent']);
     expect(r.error?.message).toMatch(/cannot run "not-an-agent"/);
     expect(r.error?.message).toMatch(/claude/);
     expect(wrapMock).not.toHaveBeenCalled();
   });
 
   it('points at the right form when an agent is named without --compress', async () => {
-    const r = await run(['serve', '--', 'claude']);
+    const r = await run(['serve', 'claude']);
     expect(r.error?.message).toContain('--compress');
-    expect(r.error?.message).toContain('vg serve --compress -- claude');
+    expect(r.error?.message).toContain('vg serve --compress claude');
     expect(wrapMock).not.toHaveBeenCalled();
   });
 
+  it('`--background` ensures a detached listener and returns, reusing a healthy one', async () => {
+    ensureProxyRunning.mockResolvedValue({ url: 'http://127.0.0.1:8787', port: 8787, pid: 9, started: true, state: {} });
+    const r = await run(['serve', '--compress', '--background', '--profile', 'aggressive', '--json']);
+    expect(r.error).toBeUndefined();
+    expect(ensureProxyRunning).toHaveBeenCalledTimes(1);
+    const call = ensureProxyRunning.mock.calls[0]![0] as { port: number; spawnArgs: string[]; detached: boolean };
+    expect(call).toMatchObject({ port: 8787, spawnArgs: ['--profile', 'aggressive'], detached: true });
+    expect(JSON.parse(r.stdout)).toMatchObject({ url: 'http://127.0.0.1:8787', started: true, profile: 'aggressive' });
+    // Nothing is served in the foreground — no MCP transport, no listener bound here.
+    expect(startProxy).not.toHaveBeenCalled();
+  });
+
+  it('`--background` does not take an agent — the one-session form starts the listener itself', async () => {
+    const r = await run(['serve', '--compress', '--background', 'claude']);
+    expect(r.error?.message).toContain('vg serve --compress <agent>');
+    expect(ensureProxyRunning).not.toHaveBeenCalled();
+  });
+
+  it('accepts the exact argv the lifecycle spawner starts the daemon with', async () => {
+    // The spawner and the command it spawns are tested against each other:
+    // the daemon used to be started as `vg proxy --background`, a verb that
+    // was later retired, so every auto-start exited 5 before binding.
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('exit');
+    }) as never);
+    try {
+      startProxy.mockImplementation(async (_cfg: unknown, deps: { onClosed?: () => void }) => {
+        setImmediate(() => deps.onClosed?.());
+        return { url: 'http://127.0.0.1:8793', port: 8793, host: '127.0.0.1', pid: 1, startedAt: 0, close: async () => {}, stats: () => ({}), context: {} };
+      });
+      const r = await run(daemonArgv(8793, ['--profile', 'coding']));
+      // No "unknown option" from commander; the listener was bound with the
+      // requested port and profile, and the process exited once it closed.
+      expect(r.error?.message).toBe('exit');
+      expect(startProxy).toHaveBeenCalledTimes(1);
+      expect((startProxy.mock.calls[0]![0] as { port: number; profile: string }).port).toBe(8793);
+      expect((startProxy.mock.calls[0]![0] as { port: number; profile: string }).profile).toBe('coding');
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      exit.mockRestore();
+    }
+  });
+
+  it('`status` and `stop` take `--compress-port` (the parent serve\'s `--port` is MCP\'s)', async () => {
+    stopProxy.mockClear();
+    await run(['serve', 'stop', '--compress-port', '9001', '--json']);
+    expect(stopProxy).toHaveBeenCalledWith(9001);
+    const r = await run(['serve', 'status', '--compress-port', '9002', '--json']);
+    expect(JSON.parse(r.stdout)).toMatchObject({ port: 9002, running: false });
+  });
+
+  it('keeps the daemon flag out of --help and the listing surface', () => {
+    const serve = serveCommand();
+    const daemon = serve.options.find((o) => o.long === '--compress-daemon');
+    expect(daemon?.hidden).toBe(true);
+    expect(serve.options.find((o) => o.long === '--background')?.hidden).not.toBe(true);
+  });
+
   it('validates the port before starting anything', async () => {
-    const r = await run(['serve', '--compress', '--compress-port', '70000', '--', 'claude']);
+    const r = await run(['serve', '--compress', '--compress-port', '70000', 'claude']);
     expect(r.error?.message).toMatch(/--compress-port must be 1\.\.65535/);
     expect(wrapMock).not.toHaveBeenCalled();
   });

@@ -12,6 +12,32 @@ backward compatible.
 
 ## [Unreleased]
 
+### Added
+
+- **Your own architecture rules: `[[overlay]]` tables in `.vibgrate/architecture.toml`
+  (`vg.arch.policy.v1`).** An overlay attaches to the role and purpose the
+  Architecture module discovered for a symbol, under an optional path prefix —
+  never to a folder you drew. `deny` adds a finding named after your
+  `team/…` or `org/…` id, `allow` drops a baked rule for one folder, `remap`
+  changes a baked rule's severity. A `deny` with `severity = "hard"` fails
+  `vg scan --fail-on architecture-finding` like a baked violation. An overlay
+  that does not validate fails the build with every problem listed; the
+  `policy` key keeps its warn-and-fall-back.
+- **`vertical-v1`, a third policy pack** for vertical-slice code: a request
+  handler owns its slice's reads and writes; the domain and the views must
+  still stay pure. Needs an Architecture module published after the pack
+  landed — an older module refuses the id and the map is judged under
+  `hexagonal-v1`, which the `policy` line then says.
+- **`vg build --init-policy`** writes a first draft of
+  `.vibgrate/architecture.toml` from what the build classified (`layered-v1`
+  when controllers, services and repositories dominate; `hexagonal-v1`
+  otherwise; never `vertical-v1`), with the overlay tables as commented
+  examples. It never overwrites an existing file.
+- **`vg show <symbol>` prints `policy <pack>`** — plus the overlay ids, when
+  any — as its own line above the boundary findings; `--json`, the LSP node
+  payload and `vg show arch` carry the same `policy` and `overlays` fields.
+  A reader no longer infers the pack from a rule id's prefix.
+
 ### Changed
 
 - **`vg show chart` is now `vg show arch`.** The local interactive map of the
@@ -95,7 +121,7 @@ backward compatible.
   Crush, Amp, Droid, Kiro, Zed and VS Code through the listener: config edits
   with backups, per-process ownership so concurrent sessions never undo each
   other, and a byte-exact revert. `--compress-scope user` writes the home
-  config instead of the repo. `vg serve --compress -- <agent>` is the
+  config instead of the repo. `vg serve --compress <agent>` is the
   per-session form — environment only, nothing written. `vg serve status`
   shows what is routed.
 - **`vg code` compresses its own tool results** — bulky `run_command`,

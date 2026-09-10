@@ -69,6 +69,7 @@ export interface HaileProvider {
       cap?: number;
       architecture?: boolean;
       tests?: boolean;
+      expand?: boolean;
     },
   ): unknown;
   /** Full map HTML. Absent → the host serves a tiny package list. */

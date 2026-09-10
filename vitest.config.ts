@@ -1,4 +1,13 @@
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { configDefaults, defineConfig } from 'vitest/config';
+
+// The content-addressed store (src/engine/cas.ts) lives in the machine cache
+// tree. Point it at a per-run temp dir so tests never read the developer's
+// real store (a stale hit there would mask a miss) and never fill it. The
+// path is derived from this (main) process's pid; test/global-setup.ts, which
+// runs in the same process, creates and removes it.
+export const TEST_CACHE_DIR = path.join(os.tmpdir(), `vibgrate-vitest-cache-${process.pid}`);
 
 // Suites that build graphs across EVERY supported language, compiling all ~20
 // tree-sitter grammar WASMs in-process (`inline: true`). Two of these landing
@@ -28,7 +37,9 @@ export default defineConfig({
     // store. Production default remains the global store (unset this env).
     env: {
       VIBGRATE_GRAPH_IN_REPO: '1',
+      VIBGRATE_CACHE_DIR: TEST_CACHE_DIR,
     },
+    globalSetup: ['test/global-setup.ts'],
     // No embedding model is ever downloaded during tests: semantic paths use the
     // injected stub embedder, and the one test that calls the real loader points
     // its cache at an uncreatable dir so it fails fast (offline) without fetching.

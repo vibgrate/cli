@@ -157,9 +157,9 @@ function drawWorkspace(){
   }
   writeHash();
 }
-function openSlice(packageId){
-  if (vscode) { vscode.postMessage({ type:"openSlice", packageId:packageId, view:"job", focus:state.focus, arch:true }); return; }
-  const url = "/api/slice?package="+encodeURIComponent(packageId)+(state.focus? "&focus="+encodeURIComponent(state.focus):"");
+function openSlice(packageId, expand){
+  if (vscode) { vscode.postMessage({ type:"openSlice", packageId:packageId, view:"job", focus:state.focus, arch:true, expand:!!expand }); return; }
+  const url = "/api/slice?package="+encodeURIComponent(packageId)+(state.focus? "&focus="+encodeURIComponent(state.focus):"")+(expand? "&expand=1":"");
   api(url, function(body){ state.slice = body; drawSlice(); });
 }
 function drawSlice(){
@@ -194,6 +194,7 @@ function drawSlice(){
       more.type = "button";
       const hint = state.slice.overflowHint && state.slice.overflowHint[col.id];
       more.textContent = hint ? "+ " + hint : "+ " + extra + " more in this lane";
+      more.onclick = function(){ if (state.packageId) openSlice(state.packageId, true); };
       stack.appendChild(more);
     }
     wrap.appendChild(stack);

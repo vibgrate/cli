@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fixCommand, buildTargetResolver } from './fix.js';
-import type { FixPlanRequest, FixPlanResponse, PlannedUpgrade, VulnDelta } from '../planning/types.js';
+import { fixCommand, buildTargetResolver, gateConflicts } from './fix.js';
+import type { FixPlanRequest, FixPlanResponse, PlannedUpgrade, UpgradePlan, VulnDelta } from '../planning/types.js';
 import type { ScanArtifact } from '../../core-open/index.js';
 
 /**
@@ -192,6 +192,80 @@ describe('vg fix', () => {
     });
     await expect(fixCommand.parseAsync([dir, '--fail-on-vulns', 'high', '--no-apply'], { from: 'user' })).rejects.toThrow('exit:2');
     exitSpy.mockRestore();
+  });
+
+  it('--packages narrows the candidates sent to the planner to exactly that batch', async () => {
+    writeArtifact([
+      { package: 'lodash', section: 'dependencies', currentSpec: '^4.17.0', resolvedVersion: '4.17.20', latestStable: '4.17.21', majorsBehind: 0, drift: 'minor-behind' },
+      { package: 'chalk', section: 'dependencies', currentSpec: '^5.0.0', resolvedVersion: '5.0.0', latestStable: '5.1.0', majorsBehind: 0, drift: 'minor-behind' },
+    ]);
+    let sentBody: FixPlanRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        sentBody = JSON.parse(String(init.body)) as FixPlanRequest;
+        return fakeResponse(mockResponse());
+      }),
+    );
+
+    await fixCommand.parseAsync([dir, '--format', 'json', '--packages', 'lodash'], { from: 'user' });
+
+    expect(sentBody?.candidates).toHaveLength(1);
+    expect(sentBody?.candidates[0]?.package).toBe('lodash');
+  });
+
+  it('--kind narrows the candidates to a single semver bump kind', async () => {
+    writeArtifact([
+      { package: 'lodash', section: 'dependencies', currentSpec: '^4.17.0', resolvedVersion: '4.17.20', latestStable: '4.17.21', majorsBehind: 0, drift: 'minor-behind' },
+      { package: 'chalk', section: 'dependencies', currentSpec: '^5.0.0', resolvedVersion: '5.0.0', latestStable: '5.1.0', majorsBehind: 0, drift: 'minor-behind' },
+    ]);
+    let sentBody: FixPlanRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        sentBody = JSON.parse(String(init.body)) as FixPlanRequest;
+        return fakeResponse(mockResponse());
+      }),
+    );
+
+    // lodash 4.17.20 -> 4.17.21 is a patch bump; chalk 5.0.0 -> 5.1.0 is minor.
+    await fixCommand.parseAsync([dir, '--format', 'json', '--kind', 'patch'], { from: 'user' });
+
+    expect(sentBody?.candidates).toHaveLength(1);
+    expect(sentBody?.candidates[0]?.package).toBe('lodash');
+  });
+
+});
+
+describe('gateConflicts', () => {
+  function conflictPlan(over: Partial<UpgradePlan> = {}): UpgradePlan {
+    return {
+      tier: 'safe',
+      label: 'Low-risk',
+      description: '',
+      upgrades: [{ package: 'lodash', ecosystem: 'npm', from: '4.17.20', to: '4.17.21', kind: 'patch', blastRadius: 'low', fixes: emptyDelta(), reason: 'x' }],
+      excluded: [],
+      riskScore: 0,
+      confidence: 'high',
+      fixes: emptyDelta(),
+      introduces: emptyDelta(),
+      ...over,
+    };
+  }
+
+  it('blocks a plan with a blocking conflict unless --force is set', () => {
+    const plan = conflictPlan({ conflicts: [{ packages: ['lodash', 'lodash-es'], reason: 'shared peer range would break', severity: 'blocking' }] });
+    expect(gateConflicts(plan, false).blocked).toBe(true);
+    expect(gateConflicts(plan, true).blocked).toBe(false);
+  });
+
+  it('never blocks on an advisory-only conflict', () => {
+    const plan = conflictPlan({ conflicts: [{ packages: ['a', 'b'], reason: 'worth a look', severity: 'advisory' }] });
+    expect(gateConflicts(plan, false).blocked).toBe(false);
+  });
+
+  it('does not block a plan with no conflicts', () => {
+    expect(gateConflicts(conflictPlan(), false).blocked).toBe(false);
   });
 });
 

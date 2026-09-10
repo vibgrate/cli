@@ -33,7 +33,8 @@ export function inputBucket(tokens: number): string {
 
 export function modelFamily(model: string): string {
   const m = model.toLowerCase();
-  for (const fam of ['opus', 'sonnet', 'haiku', 'fable', 'mythos', 'gpt', 'gemini']) if (m.includes(fam)) return fam;
+  for (const fam of ['opus', 'sonnet', 'haiku', 'fable', 'mythos', 'gpt', 'gemini', 'grok', 'llama', 'deepseek', 'qwen', 'kimi', 'mistral', 'glm']) if (m.includes(fam)) return fam;
+  if (/^o[1-9](?:-|$)/.test(m)) return 'gpt';
   return 'other';
 }
 

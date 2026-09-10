@@ -26,6 +26,7 @@ export type RouteName =
   | 'openai_chat'
   | 'openai_responses'
   | 'passthrough'
+  | 'gemini_passthrough'
   | 'shutdown'
   | 'clients'
   | 'cache_clear'
@@ -71,6 +72,13 @@ const ROUTES: Route[] = [
   { method: 'POST', pattern: /^\/v1\/(moderations|audio\/transcriptions|audio\/speech)$/, name: 'passthrough', guard: 'auth' },
   { method: 'POST', pattern: /^\/v1\/messages\/batches(\/.*)?$/, name: 'passthrough', guard: 'auth' },
   { method: 'GET', pattern: /^\/v1\/messages\/batches(\/.*)?$/, name: 'passthrough', guard: 'auth' },
+  // Gemini's native API (Gemini CLI with GOOGLE_GEMINI_BASE_URL, the Google
+  // GenAI SDKs): forwarded whole, query string included (`?alt=sse`, `?key=`).
+  // Not compressed yet — the pipeline knows the `contents[].parts` shape, the
+  // wire handler does not — but never a 404 either.
+  { method: 'POST', pattern: /^\/v1(?:beta|alpha)?\/(?:models|tunedModels|cachedContents|files|batches|corpora)(\/.*)?$/, name: 'gemini_passthrough', guard: 'auth' },
+  { method: 'GET', pattern: /^\/v1(?:beta|alpha)?\/(?:models|tunedModels|cachedContents|files|batches|corpora)(\/.*)?$/, name: 'gemini_passthrough', guard: 'auth' },
+  { method: 'DELETE', pattern: /^\/v1(?:beta|alpha)?\/(?:cachedContents|files)\/.+$/, name: 'gemini_passthrough', guard: 'auth' },
   { method: 'POST', pattern: /^\/api\/proxy\/shutdown$/, name: 'shutdown', guard: 'admin' },
   { method: 'GET', pattern: /^\/api\/proxy\/clients$/, name: 'clients', guard: 'auth' },
   { method: 'POST', pattern: /^\/api\/cache\/clear$/, name: 'cache_clear', guard: 'admin' },

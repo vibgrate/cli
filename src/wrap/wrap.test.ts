@@ -253,8 +253,10 @@ describe('wrap()', () => {
     delete h.env.VG_PROXY_URL;
     h.env.VG_WRAP_PROXY_TIMEOUT = '2.5';
     await wrap('grok', { args: [], ...h, spawn, which: () => '/g', isAlive: () => true, quiet: true, profile: 'aggressive', port: 9100 });
-    expect(h.ensureCalls[0]).toMatchObject({ port: 9100, timeoutMs: 2500, spawnArgs: ['--openai-url', 'https://api.x.ai', '--profile', 'aggressive'] });
+    // Upstream pins travel as listener env (settings), not as flags `vg serve` does not have.
+    expect(h.ensureCalls[0]).toMatchObject({ port: 9100, timeoutMs: 2500, spawnArgs: ['--profile', 'aggressive'] });
     expect((h.ensureCalls[0] as { env: NodeJS.ProcessEnv }).env.VG_PROXY_AGENT_TYPE).toBe('grok');
+    expect((h.ensureCalls[0] as { env: NodeJS.ProcessEnv }).env.VG_PROXY_OPENAI_API_URL).toBe('https://api.x.ai');
     await wrap('grok', { args: [], ...h, spawn, which: () => '/g', isAlive: () => true, quiet: true, noProxy: true });
     expect(h.ensureCalls).toHaveLength(1);
   });
@@ -298,7 +300,8 @@ describe('wrap()', () => {
     expect(env.COPILOT_PROVIDER_BASE_URL).toBe('http://127.0.0.1:8787/v1');
     expect(env.GITHUB_COPILOT_USE_TOKEN_EXCHANGE).toBe('false');
     expect(calls[0]!.args).toEqual(['-p', 'x']);
-    expect(h.ensureCalls[0]).toMatchObject({ spawnArgs: ['--openai-url', 'https://api.githubcopilot.com'] });
+    expect(h.ensureCalls[0]).toMatchObject({ spawnArgs: [] });
+    expect((h.ensureCalls[0] as { env: NodeJS.ProcessEnv }).env.VG_PROXY_OPENAI_API_URL).toBe('https://api.githubcopilot.com');
     const text = h.lines.join('\n');
     expect(text).toContain('Code: ABCD-1234');
     expect(text).not.toContain('gho_oauthtoken');

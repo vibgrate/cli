@@ -9,6 +9,7 @@ import { availableRegionIds, dashHostForIngestHost } from '../regions.js';
 import { prepareCompressedUpload } from '../utils/compact-artifact.js';
 import { uploadScanArtifact } from '../utils/upload.js';
 import { loadConfig } from '../../core-open/index.js';
+import { installId } from '../../engine/stats-share.js';
 import type { ScanArtifact } from '../types.js';
 import { buildEnvelope, pushReceipt } from '../../review/push.js';
 import { RECEIPT_SCHEMA, type ReviewReceipt } from '../../review/schemas.js';
@@ -44,6 +45,24 @@ export function computeHmac(body: string, secret: string): string {
   return crypto.createHmac('sha256', secret).update(body).digest('base64');
 }
 
+/**
+ * The CLI claim path (Intent Continuity spec): an unauthenticated `vg push`
+ * has no DSN to upload with, but it does have a stable local identity — the
+ * same `~/.vibgrate/install-id` anonymous id `vg serve --share-stats` already
+ * uses (see engine/stats-share.ts). Printing it as `vid` on a claim link lets
+ * the signup this prompts be attributed back to this CLI run, the same way a
+ * website visit is, once the visitor identifies (dash's /claim page calls
+ * POST /v1/auth/intent/identify with this same vid). No DSN is minted here —
+ * `vibgrate login`'s device flow still owns that.
+ */
+export function buildClaimUrl(vid: string, dashHost = 'dash.vibgrate.com'): string {
+  const url = new URL(`https://${dashHost}/claim`);
+  url.searchParams.set('vid', vid);
+  url.searchParams.set('job', 'scan_drift');
+  url.searchParams.set('channel', 'cli');
+  return url.toString();
+}
+
 export const pushCommand = new Command('push')
   .description('Push a scan artifact — or a `vg review` receipt — to Vibgrate Cloud')
   .option('--dsn <dsn>', 'DSN token (or use VIBGRATE_DSN env)')
@@ -56,6 +75,9 @@ export const pushCommand = new Command('push')
     if (!dsn) {
       console.error(chalk.red('No DSN provided.'));
       console.error(chalk.dim('Run "vibgrate login", set VIBGRATE_DSN, or use the --dsn flag.'));
+      console.error(
+        chalk.dim(`No account yet? Claim this run: ${buildClaimUrl(installId())}`),
+      );
       if (opts.strict) process.exit(1);
       return;
     }

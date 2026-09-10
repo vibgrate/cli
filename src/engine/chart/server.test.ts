@@ -73,5 +73,17 @@ describe('chart server', () => {
 
     const missing = await fetch(server.url + '/api/node/nope');
     expect(missing.status).toBe(404);
+
+    const layout = await fetchJson(server.url + '/api/layout');
+    expect(layout.magic).toBe('vg.arch.board.v1');
+    expect(layout.density).toBe('expanded');
+    const saved = await fetch(server.url + '/api/layout', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ magic: 'vg.arch.board.v1', density: 'compact' }),
+    });
+    expect(saved.ok).toBe(true);
+    const compact = await fetchJson(server.url + '/api/layout');
+    expect(compact.density).toBe('compact');
   });
 });

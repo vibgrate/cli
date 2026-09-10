@@ -145,11 +145,21 @@ export interface HaileFinding {
  * adapters — the application layer owns its ports, the domain stays pure,
  * handlers only delegate. `layered-v1`: controller → service → repository —
  * the service layer owns the ORM and a controller must not read or write
- * the store itself.
+ * the store itself. `vertical-v1`: vertical slices — a request handler owns
+ * its slice end to end, reads and writes included; only the domain and the
+ * views must stay pure. A module published before the pack landed refuses
+ * the id; the CLI then judges under hexagonal-v1 and stamps that.
  */
-export type HailePolicy = 'hexagonal-v1' | 'layered-v1';
-export const POLICIES: readonly HailePolicy[] = ['hexagonal-v1', 'layered-v1'];
+export type HailePolicy = 'hexagonal-v1' | 'layered-v1' | 'vertical-v1';
+export const POLICIES: readonly HailePolicy[] = ['hexagonal-v1', 'layered-v1', 'vertical-v1'];
 export const DEFAULT_POLICY: HailePolicy = 'hexagonal-v1';
+
+/**
+ * Schema id of `.vibgrate/architecture.toml`: a baked pack plus optional
+ * `[[overlay]]` tables (`policy-overlay.ts`). The file may omit the key; when
+ * present it must equal this id.
+ */
+export const ARCH_POLICY_SCHEMA = 'vg.arch.policy.v1';
 
 export interface HaileModuleSummary {
   path: string;
@@ -169,6 +179,8 @@ export interface HaileSidecar {
   profile: HaileProfile;
   /** Policy pack the findings were evaluated under (module ≥ 2026.903.4; absent means hexagonal-v1). */
   policy?: HailePolicy;
+  /** Ids of the user overlays (`team/…`, `org/…`) applied on top of the pack, in file order. Absent when none. */
+  overlays?: string[];
   symbols: HaileSymbol[];
   symbols_capped?: true;
   modules?: HaileModuleSummary[];

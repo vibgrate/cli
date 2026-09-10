@@ -134,4 +134,6 @@ export interface ArchSliceSpec {
   /** When false, columns follow graph kind rather than sidecar roles. */
   architecture?: boolean;
   tests?: boolean;
+  /** Raise the per-lane card cap (clicking “+ N more”). */
+  expand?: boolean;
 }

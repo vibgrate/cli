@@ -52,7 +52,7 @@ export function looksAnthropic(headers: Record<string, string>): boolean {
 /** Family of the route being served — decides which base applies. */
 export function routeFamily(path: string): 'anthropic' | 'openai' | 'gemini' | 'unknown' {
   if (path.startsWith('/v1/messages')) return 'anthropic';
-  if (path.startsWith('/v1beta/')) return 'gemini';
+  if (path.startsWith('/v1beta/') || path.startsWith('/v1alpha/')) return 'gemini';
   if (path.startsWith('/v1/chat/completions') || path.startsWith('/v1/responses') || path.startsWith('/v1/embeddings') || path.startsWith('/v1/models') || path === '/chat/completions' || path === '/responses') return 'openai';
   return 'unknown';
 }

@@ -60,3 +60,25 @@ describe('costUsd', () => {
     expect(savingsUsd('claude-sonnet-4-6', 1_000_000, env)).toBe(3);
   });
 });
+
+describe('Sep-2026 price list', () => {
+  it('prices the current OpenAI, Gemini and Grok releases (cached input at the published rate)', () => {
+    expect(priceFor('gpt-6-astra')).toMatchObject({ input: 10, output: 50, cacheRead: 1 });
+    expect(priceFor('gpt-5.6-sol')).toMatchObject({ input: 4, output: 20, cacheRead: 0.4 });
+    expect(priceFor('gpt-5.6-luna')).toMatchObject({ input: 0.2, output: 1.2 });
+    expect(priceFor('gpt-5.5')).toMatchObject({ input: 5, output: 30 });
+    expect(priceFor('gpt-5.3-codex')).toMatchObject({ input: 1.75, output: 14 });
+    expect(priceFor('gemini-3.8-flash')).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075 });
+    expect(priceFor('gemini-3.5-flash-lite')).toMatchObject({ input: 0.3, output: 2.5 });
+    expect(priceFor('grok-4.6')).toMatchObject({ input: 2, output: 6, cacheRead: 0.5 });
+    expect(priceFor('grok-4.3')).toMatchObject({ input: 1.25, output: 2.5 });
+  });
+
+  it('infers a sensible rate for the next id in each line', () => {
+    expect(inferPrice('gpt-6-nova')).toMatchObject({ input: 10, output: 50 });
+    expect(inferPrice('gpt-5.6-marte')).toMatchObject({ input: 2, output: 12 });
+    expect(inferPrice('gemini-3.9-flash')).toMatchObject({ input: 0.75, output: 3.75 });
+    expect(inferPrice('gemini-3.2-pro')).toMatchObject({ input: 2, output: 12 });
+    expect(inferPrice('grok-4.7')).toMatchObject({ input: 2, output: 6 });
+  });
+});

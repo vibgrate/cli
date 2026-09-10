@@ -12,6 +12,7 @@ import { attachVgd } from '../runtime/vgd/attach.js';
 import { ActivityLog } from '../runtime/vgd/activity.js';
 import type { VgGraph } from '../schema.js';
 import { writeArtifacts } from '../engine/artifacts.js';
+import { readHaileSidecar, seedArchitecturePolicy, type SeedArchitecturePolicyResult } from '../engine/haile/index.js';
 import { writeSnapshot } from '../engine/freshness.js';
 import { refreshInstalledInstructions, SMALL_REPO_FILES } from '../install/registry.js';
 import { writeAreaSkills } from '../install/area-skills.js';
@@ -30,6 +31,8 @@ import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.
 interface BuildCmdOpts {
   /** Boundary policy pack for the architecture sidecar (`--policy`). */
   policy?: string;
+  /** Write a starter `.vibgrate/architecture.toml` from this build's classify file (never overwrites). */
+  initPolicy?: boolean;
   only?: string;
   exclude?: string[];
   html?: boolean;
@@ -64,7 +67,8 @@ export function registerBuild(program: Command): void {
     .option('--jobs <n>', 'worker count (1 = single-threaded)')
     .option('--scip <file>', 'ingest a SCIP index for precise resolution (default: auto-detect index.scip)')
     .option('--no-scip', 'ignore any SCIP index')
-    .option('--policy <pack>', 'boundary policy pack for the architecture module: hexagonal-v1 | layered-v1 (default: .vibgrate/architecture.toml, else hexagonal-v1)')
+    .option('--policy <pack>', 'boundary policy pack for the architecture module: hexagonal-v1 | layered-v1 | vertical-v1 (default: .vibgrate/architecture.toml, else hexagonal-v1)')
+    .option('--init-policy', 'write a starter .vibgrate/architecture.toml (vg.arch.policy.v1: pack inferred from what this build classified, overlay stubs); never overwrites')
     .option('--no-tsc', 'skip the in-process TypeScript resolver (heuristic floor only)')
     .option('--fast', 'skip precise tsc resolve (heuristic only — faster XL cold builds)')
     .option('--no-index', 'do not write the SQLite serve index under .vibgrate/cache/')
@@ -170,6 +174,23 @@ export async function runBuild(
     ...(opts.policy ? { policy: opts.policy } : {}),
   });
 
+  // A `[[overlay]]` that does not validate fails the architecture step
+  // loudly: the map is on disk, the classify file is not, and the message
+  // names every problem. Nothing downstream should guess at a half policy.
+  if (written.architecturePolicyError) {
+    throw new CliError(`architecture policy: ${written.architecturePolicyError}`, ExitCode.ERROR);
+  }
+
+  // `--init-policy`: seed `.vibgrate/architecture.toml` from the classify
+  // file this build just wrote. The map was judged under whatever pack was in
+  // force before the file existed, so a different inferred pack asks for one
+  // more build.
+  let initPolicy: (SeedArchitecturePolicyResult & { stamped: string | null }) | undefined;
+  if (opts.initPolicy) {
+    const sidecar = readHaileSidecar(written.graphPath);
+    initPolicy = { ...seedArchitecturePolicy({ root, sidecar }), stamped: sidecar?.policy ?? null };
+  }
+
   if (haile?.status === 'unavailable' && !global.json && !global.quiet) {
     info(
       c.yellow(
@@ -265,12 +286,16 @@ export async function runBuild(
       languages: result.graph.meta.languages,
       reparsed: result.reparsed,
       reused: result.reused,
+      cas: result.cas
+        ? { parseHits: result.cas.parseHits, parseWrites: result.cas.parseWrites, dir: result.cas.dir }
+        : undefined,
       totalFiles: result.totalFiles,
       resolve: result.resolveStats,
       tsc: result.tsc,
       scip: result.scip,
       epistemic: epistemicBreakdown(result.graph.edges),
       artifacts: written,
+      ...(initPolicy ? { initPolicy } : {}),
       corpusHash: result.graph.provenance.corpusHash,
       toolchain: result.graph.provenance.toolchain,
       attestation,
@@ -281,10 +306,25 @@ export async function runBuild(
     return;
   }
 
+  if (initPolicy) {
+    if (initPolicy.written) {
+      const from = initPolicy.observed ? `inferred from ${initPolicy.observed} classified symbols` : 'default pack; nothing classified yet';
+      info(`  wrote ${initPolicy.path} · policy ${c.bold(initPolicy.policy)} (${from})`);
+      if (initPolicy.stamped && initPolicy.stamped !== initPolicy.policy) {
+        info(c.dim(`  this map was judged under ${initPolicy.stamped} — run vg build again to judge it under ${initPolicy.policy}`));
+      }
+    } else {
+      info(c.dim(`  ${initPolicy.path} already exists (policy ${initPolicy.policy}) — left untouched`));
+    }
+  }
+
   const { counts } = result.graph.meta;
+  // Parses served by content from the shared store (another branch, path, or
+  // worktree) are the reuse the path cache alone could not give — say so.
+  const shared = result.cas && result.cas.parseHits > 0 ? `, ${result.cas.parseHits} shared` : '';
   const incremental =
     result.reused > 0
-      ? `incremental: ${result.reparsed} of ${result.totalFiles} files re-parsed`
+      ? `incremental: ${result.reparsed} of ${result.totalFiles} files re-parsed${shared}`
       : `${result.totalFiles} files parsed`;
   const seconds = (result.timing.totalMs / 1000).toFixed(2);
   info(`${c.cyan('vg')} · mapped ${rel(root)} in ${seconds}s (${incremental})`);

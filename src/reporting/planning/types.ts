@@ -84,6 +84,21 @@ export interface ExcludedUpgrade {
   reason: string;
 }
 
+/**
+ * A cross-package conflict the planner found within a plan's own upgrade set —
+ * e.g. two packages that both pin a shared peer dependency to incompatible
+ * ranges once bumped together, or a lockfile resolution that cannot satisfy
+ * every upgrade at once. Detected and explained server-side (same "moat" as
+ * the rest of planning); the CLI only renders and gates on it.
+ */
+export interface UpgradeConflict {
+  /** Packages (within this plan) whose upgrades conflict with each other. */
+  packages: string[];
+  reason: string;
+  /** 'blocking' refuses apply without --force; 'advisory' is shown but not gated. */
+  severity: 'blocking' | 'advisory';
+}
+
 export interface UpgradePlan {
   tier: PlanTier;
   label: string;
@@ -100,6 +115,8 @@ export interface UpgradePlan {
   expectedDriftScore?: number;
   /** Estimated DriftScore change vs the current scan (negative = drift reduced). Computed client-side. */
   driftDelta?: number;
+  /** Cross-package conflicts found within this plan's own upgrade set, if any. */
+  conflicts?: UpgradeConflict[];
 }
 
 /** How advisory data was sourced, so the client never reports "0" as "clean" when it is really "unchecked". */

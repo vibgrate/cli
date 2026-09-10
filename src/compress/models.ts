@@ -62,6 +62,17 @@ const ROWS: Row[] = [
   { id: 'claude-3-opus-20240229', family: 'anthropic', ctx: 200 * K, out: 4096, aliases: ['claude-3-opus-latest', 'claude-3-opus'], cache: true },
   { id: 'claude-3-haiku-20240307', family: 'anthropic', ctx: 200 * K, out: 4096, aliases: ['claude-3-haiku'], cache: true },
   // --- OpenAI ---------------------------------------------------------------
+  // GPT-5.5 and later (incl. the GPT-5.6 Luna/Terra/Sol family and GPT-6
+  // Astra, Sep 2026) carry a 1,050,000-token window and 128k output.
+  { id: 'gpt-6-astra', family: 'openai', ctx: 1_050_000, out: 128 * K, thinking: true },
+  { id: 'gpt-5.6-sol', family: 'openai', ctx: 1_050_000, out: 128 * K, thinking: true },
+  { id: 'gpt-5.6-terra', family: 'openai', ctx: 1_050_000, out: 128 * K, thinking: true },
+  { id: 'gpt-5.6-luna', family: 'openai', ctx: 1_050_000, out: 128 * K, thinking: true },
+  { id: 'gpt-5.5', family: 'openai', ctx: 1_050_000, out: 128 * K, thinking: true },
+  { id: 'gpt-5.4', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
+  { id: 'gpt-5.4-mini', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
+  { id: 'gpt-5.4-nano', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
+  { id: 'gpt-5.3-codex', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
   { id: 'gpt-5', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
   { id: 'gpt-5-mini', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
   { id: 'gpt-5-nano', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
@@ -80,6 +91,15 @@ const ROWS: Row[] = [
   { id: 'gpt-4', family: 'openai', ctx: 8192, out: 4096, aliases: ['gpt-4-0613'] },
   { id: 'gpt-3.5-turbo', family: 'openai', ctx: 16385, out: 4096, aliases: ['gpt-3.5-turbo-0125', 'gpt-3.5-turbo-1106'] },
   // --- Google ---------------------------------------------------------------
+  // Gemini 3.x (2026): 1M window, 64k output, thinking billed as output.
+  { id: 'gemini-3.8-flash', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
+  { id: 'gemini-3.7-flash', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
+  { id: 'gemini-3.6-flash', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
+  { id: 'gemini-3.5-flash', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
+  { id: 'gemini-3.5-flash-lite', family: 'google', ctx: ONE_MILLION, out: 65536 },
+  { id: 'gemini-3.1-flash-lite', family: 'google', ctx: ONE_MILLION, out: 65536 },
+  { id: 'gemini-3.1-pro-preview', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true, aliases: ['gemini-3.1-pro'] },
+  { id: 'gemini-omni-1.1-flash', family: 'google', ctx: ONE_MILLION, out: 65536, aliases: ['gemini-omni-flash-preview'] },
   { id: 'gemini-2.5-pro', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
   { id: 'gemini-2.5-flash', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
   { id: 'gemini-2.5-flash-lite', family: 'google', ctx: ONE_MILLION, out: 65536 },
@@ -108,6 +128,11 @@ const ROWS: Row[] = [
   { id: 'deepseek-reasoner', family: 'deepseek', ctx: 128 * K, out: 65536, aliases: ['deepseek-r1'], thinking: true },
   { id: 'deepseek-coder', family: 'deepseek', ctx: 16384, out: 4096 },
   // --- xAI ------------------------------------------------------------------
+  // Grok 4.5 / 4.6 (2026): 500k window; 4.3 / 4.20: 1M.
+  { id: 'grok-4.6', family: 'xai', ctx: 500 * K, out: 32768, thinking: true },
+  { id: 'grok-4.5', family: 'xai', ctx: 500 * K, out: 32768, thinking: true },
+  { id: 'grok-4.3', family: 'xai', ctx: ONE_MILLION, out: 32768, thinking: true },
+  { id: 'grok-build-0.1', family: 'xai', ctx: 256 * K, out: 32768 },
   { id: 'grok-4', family: 'xai', ctx: 256 * K, out: 32768, thinking: true },
   { id: 'grok-3', family: 'xai', ctx: 131072, out: 16384 },
   { id: 'grok-3-mini', family: 'xai', ctx: 131072, out: 16384, thinking: true },
@@ -280,6 +305,8 @@ export function inferModelInfo(id: string): ModelInfo {
     return pick('anthropic', bills ? ONE_MILLION : 200 * K, bills ? 128 * K : 32 * K, bills, true);
   }
   if (/^gpt-4\.1/.test(s)) return pick('openai', 1_047_576, 32768);
+  // GPT-6 and GPT-5.5+ (a later minor than 5.4) ship the 1.05M window.
+  if (/^gpt-[6-9]/.test(s) || /^gpt-5\.(?:[5-9]|\d{2,})/.test(s)) return pick('openai', 1_050_000, 128 * K, true);
   if (/^gpt-5/.test(s)) return pick('openai', 400 * K, 128 * K, true);
   if (/^gpt-4o/.test(s)) return pick('openai', 128 * K, 16384);
   if (/^o[1-9](?:-|$)/.test(s)) return pick('openai', 200 * K, 100 * K, true);
@@ -298,7 +325,9 @@ export function inferModelInfo(id: string): ModelInfo {
   if (/deepseek-v4/.test(s)) return pick('deepseek', ONE_MILLION, 384 * K, true);
   if (/deepseek-coder/.test(s)) return pick('deepseek', 16384, 4096);
   if (/deepseek/.test(s)) return pick('deepseek', 131072, 8192, /r1|reason/.test(s));
-  if (/grok-4|grok-code/.test(s)) return pick('xai', 256 * K, 32768);
+  if (/grok-4\.(?:[5-9]|\d{2,})/.test(s)) return pick('xai', 500 * K, 32768, true);
+  if (/grok-4\.[2-4]/.test(s)) return pick('xai', ONE_MILLION, 32768, true);
+  if (/grok-4|grok-code|grok-build/.test(s)) return pick('xai', 256 * K, 32768);
   if (/grok/.test(s)) return pick('xai', 131072, 16384);
   if (/qwen|qwq/.test(s)) return pick('qwen', 131072, 8192);
   if (/kimi|moonshot/.test(s)) return pick('moonshot', 131072, 16384);

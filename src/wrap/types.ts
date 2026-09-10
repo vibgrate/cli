@@ -164,8 +164,13 @@ export interface AgentSpec {
   revert?(file: string, ctx?: EditContext): RevertResult;
   /** Args prepended to the user's args (session-local routing, e.g. Codex `--config`). */
   launchArgs?(url: string, args: string[], ctx: LaunchContext): string[];
-  /** Extra listener args when this run has to start compression itself (upstream pins). */
-  proxyArgs?(env: NodeJS.ProcessEnv): string[];
+  /**
+   * Environment for the listener when this run has to start compression
+   * itself — upstream pins such as `VG_PROXY_OPENAI_API_URL` or
+   * `VG_PROXY_PROVIDER`. Settings, not flags: `vg serve` deliberately has no
+   * per-provider URL flags (the ~130 `VG_*` knobs are read from the env).
+   */
+  proxyEnv?(env: NodeJS.ProcessEnv): Record<string, string>;
   /** Setup lines printed for agents whose endpoint is a GUI setting. */
   notes?: string;
   /** Install hint when the binary is missing. */
@@ -195,7 +200,10 @@ export interface WrapPlan {
   unset: string[];
   args: string[];
   configFile?: string;
+  /** Flags the listener is started with (profile only). */
   proxyArgs: string[];
+  /** Upstream pins handed to the listener when this run starts it. */
+  proxyEnv: Record<string, string>;
 }
 
 export interface WrapStatusRow {

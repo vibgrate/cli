@@ -364,6 +364,24 @@ describe('proxy server: OpenAI shapes and pass-through', () => {
     expect(upstream.calls[1].method).toBe('GET');
   });
 
+  it('passes Gemini-native calls through with the query string, so Gemini CLI streams and authenticates', async () => {
+    // Gemini CLI (GOOGLE_GEMINI_BASE_URL) speaks /v1beta/models/<m>:streamGenerateContent?alt=sse
+    // with x-goog-api-key. This used to 404 (no route) and, for the routes
+    // that existed, the query string was dropped on the way upstream.
+    const upstream = fakeUpstream((c) => jsonResponse({ echoed: c.body, url: c.url }));
+    const t = await up({ deps: { fetch: upstream.fetch } });
+    const body = { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] };
+    const r = await call(t.url, '/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse', { method: 'POST', json: body, headers: { 'x-goog-api-key': 'g-key' } });
+    expect(r.status).toBe(200);
+    expect(upstream.calls[0].url).toBe('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse');
+    expect(upstream.calls[0].headers['x-goog-api-key']).toBe('g-key');
+    expect((r.json?.echoed as Record<string, unknown>).contents).toEqual(body.contents);
+    const list = await call(t.url, '/v1beta/models?key=g-key', { headers: {} });
+    expect(list.status).toBe(200);
+    expect(upstream.calls[1].url).toBe('https://generativelanguage.googleapis.com/v1beta/models?key=g-key');
+    expect(upstream.calls[1].method).toBe('GET');
+  });
+
   it('uses the generic upstream override for OpenAI-shaped routes', async () => {
     const upstream = fakeUpstream(() => jsonResponse({ choices: [{ message: { role: 'assistant', content: 'x' } }] }));
     const t = await up({ overrides: { upstreamUrl: 'http://127.0.0.1:11434/v1' }, deps: { fetch: upstream.fetch } });

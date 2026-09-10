@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { HOOK_NEEDLE, installClaudeHooks, uninstallClaudeHooks } from './hooks.js';
+import { HOOK_NEEDLE, SESSION_START_NEEDLE, installClaudeHooks, installClaudeSessionStartHook, uninstallClaudeHooks, uninstallClaudeSessionStartHook } from './hooks.js';
 import { hookContext, patternToQuery } from '../commands/hook.js';
 
 /**
@@ -82,5 +82,53 @@ describe('hook runtime (pre-tool-use)', () => {
     expect(hookContext(JSON.stringify({ tool_name: 'Grep', tool_input: { pattern: 'ab' } }), root)).toBeNull();
     // Grep with a fine pattern but no graph on disk → silence, never an error.
     expect(hookContext(JSON.stringify({ tool_name: 'Grep', tool_input: { pattern: 'collectMandate' } }), root)).toBeNull();
+  });
+});
+
+describe('installClaudeSessionStartHook — the listener self-heal for `vg install claude --compress`', () => {
+  it('adds a SessionStart entry that starts or reuses the listener, beside any PreToolUse entries', () => {
+    const root = tmp();
+    installClaudeHooks(root, 'vg');
+    const r = installClaudeSessionStartHook(root, '/usr/local/bin/vg');
+    expect(r.status).toBe('written');
+    const s = read(root) as { hooks: { PreToolUse: unknown[]; SessionStart: { hooks: { command: string; timeout: number }[] }[] } };
+    expect(s.hooks.PreToolUse).toHaveLength(1);
+    expect(s.hooks.SessionStart).toHaveLength(1);
+    expect(s.hooks.SessionStart[0]!.hooks[0]!.command).toBe('/usr/local/bin/vg serve --compress --background --quiet');
+    expect(s.hooks.SessionStart[0]!.hooks[0]!.command).toContain(SESSION_START_NEEDLE);
+    expect(s.hooks.SessionStart[0]!.hooks[0]!.timeout).toBe(30);
+  });
+
+  it('is idempotent, updates its own entry in place, and leaves foreign SessionStart hooks alone', () => {
+    const root = tmp();
+    fs.mkdirSync(path.join(root, '.claude'));
+    fs.writeFileSync(path.join(root, '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo hi' }] }] } }));
+    expect(installClaudeSessionStartHook(root, 'vg').status).toBe('written');
+    expect(installClaudeSessionStartHook(root, 'vg').status).toBe('unchanged');
+    expect(installClaudeSessionStartHook(root, '/opt/vg').status).toBe('written');
+    const s = read(root) as { hooks: { SessionStart: { hooks: { command: string }[] }[] } };
+    expect(s.hooks.SessionStart.flatMap((g) => g.hooks.map((h) => h.command))).toEqual(['echo hi', '/opt/vg serve --compress --background --quiet']);
+  });
+
+  it('uninstall removes only our entry and prunes what it emptied', () => {
+    const root = tmp();
+    installClaudeSessionStartHook(root, 'vg');
+    expect(uninstallClaudeSessionStartHook(root).status).toBe('written');
+    expect(read(root)).toEqual({});
+    expect(uninstallClaudeSessionStartHook(root).status).toBe('unchanged');
+    // A foreign hook survives.
+    fs.writeFileSync(path.join(root, '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo hi' }] }] } }));
+    installClaudeSessionStartHook(root, 'vg');
+    uninstallClaudeSessionStartHook(root);
+    const s = read(root) as { hooks: { SessionStart: { hooks: { command: string }[] }[] } };
+    expect(s.hooks.SessionStart[0]!.hooks.map((h) => h.command)).toEqual(['echo hi']);
+  });
+
+  it('fails closed on unparseable settings', () => {
+    const root = tmp();
+    fs.mkdirSync(path.join(root, '.claude'));
+    fs.writeFileSync(path.join(root, '.claude', 'settings.json'), '{ not json');
+    expect(installClaudeSessionStartHook(root, 'vg').status).toBe('skipped');
+    expect(fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8')).toBe('{ not json');
   });
 });

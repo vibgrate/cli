@@ -25,7 +25,7 @@ export async function runSavingsBenchmark(
   } catch {
     /* best effort */
   }
-  const report = await runPerf(deps, { iterations, fixture: o.fixture, model: o.model ?? 'claude-sonnet-4-5', generatedAt: global.generatedAt });
+  const report = await runPerf(deps, { iterations, fixture: o.fixture, model: o.model ?? 'claude-sonnet-5', generatedAt: global.generatedAt });
   if (global.json) {
     json({ ...report, layers: { missing } });
     return;

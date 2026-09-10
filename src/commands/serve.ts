@@ -1,4 +1,4 @@
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { mapFileExists } from '../engine/snapshot.js';
 import { serveStdio, createServer, GraphSource, attachGraphSource, type ServeOptions } from '../mcp/server.js';
@@ -16,7 +16,7 @@ import { SessionStats, ServeStatusDisplay } from '../mcp/serve-stats.js';
 import { LedgerTail } from '../mcp/ledger-tail.js';
 import { LiveStatsBus, liveStatsDir } from '../mcp/live-stats.js';
 import { savingsLedgerPath } from '../engine/savings.js';
-import { compressionOverrides, registerServeCompression, startCompression } from './serve-compress.js';
+import { compressionOverrides, ensureBackgroundListener, registerServeCompression, startCompression } from './serve-compress.js';
 import { registerServeCompressCommand } from './compress.js';
 import { registerServeRetrieve } from './retrieve.js';
 import { registerServeMemory } from './memory.js';
@@ -52,7 +52,10 @@ export function registerServe(program: Command): void {
   const cmd = program
     .command('serve')
     .description('start Vibgrate AI Context — local-first MCP serving your code map, drift & version-correct docs to your AI')
-    .argument('[agent...]', 'with --compress: run this agent through the compression listener for one session, then restore (put its own flags after `--`)')
+    .argument('[agent...]', 'with --compress: run this agent through the compression listener for one session, then restore — everything after the agent name is passed to it (`vg serve --compress claude -p "hi"`)')
+    // Options are read only up to the agent name; the agent's own flags travel
+    // untouched. `vg serve --compress claude --model x` needs no `--`.
+    .passThroughOptions()
     .option('--http', 'serve over streamable HTTP instead of stdio')
     .option('--port <n>', 'port for --http', '7437')
     .option('--host <h>', 'host for --http', '127.0.0.1')
@@ -70,23 +73,47 @@ export function registerServe(program: Command): void {
     .option('--compress-port <n>', 'port for the compression listener (default: VG_PROXY_PORT or 8787)')
     .option('--compress-mode <mode>', 'cache (prefix-cache safe, default) | token (maximum removal)')
     .option('--profile <name>', 'compression profile: coding | balanced | aggressive | general')
+    .option('--background', 'start the compression listener as a background process (or reuse the one already running) and return; stop it with `vg serve stop`. Implies --compress-only')
+    // The detached listener `--background` (and `vg install --compress`) spawns
+    // runs `vg serve --compress-only --compress-daemon`: the listener with no
+    // MCP transport, alive until it is stopped. Internal — not a user flag.
+    .addOption(new Option('--compress-daemon').hideHelp())
     .option('--memory', 'expose cross-agent memory tools (memory_search / memory_save) scoped to this project. Env: VG_MEMORY=1')
-    .action(async function (this: Command, agentArgv: string[], opts: { http?: boolean; port?: string; host?: string; savings?: boolean; shareStats?: boolean; dedup?: boolean; refresh?: boolean; watch?: boolean; surface?: string; tools?: string; compress?: boolean; compressOnly?: boolean; compressPort?: string; compressMode?: string; profile?: string; memory?: boolean }) {
+    .action(async function (this: Command, agentArgv: string[], opts: { http?: boolean; port?: string; host?: string; savings?: boolean; shareStats?: boolean; dedup?: boolean; refresh?: boolean; watch?: boolean; surface?: string; tools?: string; compress?: boolean; compressOnly?: boolean; compressPort?: string; compressMode?: string; profile?: string; background?: boolean; compressDaemon?: boolean; memory?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
       // `--compress-only` is the "I just want compression" path: no map is
       // built, none is required, and the graph tools are not listed. It is the
       // honest answer for a repo with no map yet, or an agent that only needs
       // its context shrunk.
-      const compressOnly = opts.compressOnly === true;
+      const daemon = opts.compressDaemon === true;
+      const background = opts.background === true;
+      const compressOnly = opts.compressOnly === true || daemon || background;
       const compress = opts.compress === true || compressOnly;
+      if (background && agentArgv.length) {
+        throw new CliError('`--background` starts the listener and returns; to run an agent through it use `vg serve --compress <agent>` (the listener is started for you)', ExitCode.USAGE_ERROR);
+      }
+      if (background) {
+        // Ensure-and-return: the detached daemon is `vg serve --compress-only
+        // --compress-daemon`, spawned by the lifecycle module and probed on
+        // /health. A healthy listener already on the port is reused.
+        const overrides = compressionOverrides(opts);
+        const cfg = resolveProxyConfig(overrides);
+        const r = await ensureBackgroundListener(cfg, { profile: overrides.profile, mode: overrides.mode });
+        if (global.json) json({ url: r.url, port: r.port, started: r.started, mode: cfg.mode, profile: cfg.profile });
+        else if (!global.quiet) {
+          info(`vg · compression listener ${r.started ? c.green('started') : c.dim('already running')} at ${c.bold(r.url)} ${c.dim(`(${cfg.mode} mode, ${cfg.profile} profile, background)`)}`);
+          info(c.dim('  point an agent at it with `vg install <agent> --compress`; `vg serve status` · `vg serve stop`'));
+        }
+        return;
+      }
       if (agentArgv.length && !compress) {
         throw new CliError(
-          `\`vg serve ${agentArgv[0]}\` needs --compress — it runs an agent through the compression listener. Try \`vg serve --compress -- ${agentArgv.join(' ')}\``,
+          `\`vg serve ${agentArgv[0]}\` needs --compress — it runs an agent through the compression listener. Try \`vg serve --compress ${agentArgv.join(' ')}\``,
           ExitCode.USAGE_ERROR,
         );
       }
-      // One-shot: `vg serve --compress -- claude …` runs a single agent session
+      // One-shot: `vg serve --compress claude …` runs a single agent session
       // through the compression listener using its own environment, restores
       // everything when the child exits, and never touches durable config.
       // (`vg install <agent> --compress` is the durable form.)
@@ -199,13 +226,22 @@ export function registerServe(program: Command): void {
               : `vg · compressing at ${c.bold(listener.url)} ${c.dim(`(${cfg.mode} mode, ${cfg.profile} profile)`)}`,
           );
           info(c.dim(`  Anthropic ${listener.url}/v1/messages · OpenAI ${listener.url}/v1/chat/completions · savings ${listener.url}/`));
-          info(c.dim('  point an agent at it with `vg install <agent> --compress`, or run one session with `vg serve --compress -- <agent>`'));
+          info(c.dim('  point an agent at it with `vg install <agent> --compress`, or run one session with `vg serve --compress <agent>`'));
         }
         const closeListener = (): void => {
           void listener.close().then(() => process.exit(0));
         };
         process.once('SIGINT', closeListener);
         process.once('SIGTERM', closeListener);
+        if (daemon) {
+          // The detached listener: no MCP transport, nothing on stdio. It
+          // lives until `vg serve stop` / the admin shutdown route closes the
+          // listener, then exits so no orphan lingers without a port. When
+          // another process already owns the port there is nothing to do.
+          if (listener.attached) return;
+          await listener.closed;
+          process.exit(0);
+        }
       }
 
       const freshness = compressOnly ? 'no code map' : refresh ? 'auto-refresh' : 'as built';
@@ -231,7 +267,7 @@ export function registerServe(program: Command): void {
 }
 
 /**
- * `vg serve --compress -- <agent> [args…]` — one session, environment only.
+ * `vg serve --compress <agent> [args…]` — one session, environment only.
  *
  * The durable form is `vg install <agent> --compress`, which writes the
  * agent's own config; this is the "just this run" path, so nothing survives

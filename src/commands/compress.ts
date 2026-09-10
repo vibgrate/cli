@@ -34,7 +34,7 @@ export function registerServeCompressCommand(serve: Command): void {
     .command('compress')
     .description('compress tool output or a chat transcript offline (same shape out; markers point at retrievable originals)')
     .argument('[file]', 'input file (default: stdin, or `-`)')
-    .option('--model <id>', 'model id — selects the tokenizer family and context limit', 'claude-sonnet-4-5')
+    .option('--model <id>', 'model id — selects the tokenizer family and context limit', 'claude-sonnet-5')
     .option('--format <fmt>', 'force the message format: openai | anthropic | responses')
     .option('--profile <name>', 'savings profile: coding | balanced | aggressive | general')
     .option('--mode <mode>', 'cache (newest delta only, prefix-cache safe) | token (maximum removal)')
