@@ -79,6 +79,15 @@ function truthy(value: string | undefined): boolean {
 }
 
 /**
+ * Env for a caller that already named a vgd socket. CI and VG_NO_DAEMON would
+ * otherwise hide that runtime (one-shot jobs must not auto-start a daemon);
+ * an explicit socket is an opt-in, including in tests.
+ */
+export function envForNamedVgdSocket(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, CI: 'false', VG_NO_DAEMON: '0', VIBGRATE_NO_DAEMON: '0' };
+}
+
+/**
  * Why auto-start is off, or null when it is on. Exposed so `vg doctor` can
  * explain a missing daemon instead of leaving the user to guess.
  */

@@ -93,6 +93,13 @@ export interface EmbedBrokerOptions {
   now?: () => number;
   /** Injected delay (tests). Used while waiting for another process's cache lock. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * True while freshness is rebuilding this repository in a child. Warming
+   * the current slot then is wasted: the child is about to replace the map
+   * and `onGraphPut` will drop the vectors. Callers stay lexical until the
+   * reload re-warms.
+   */
+  isRebuilding?: (repositoryId: string) => boolean;
 }
 
 /** Options for a blocking {@link EmbedBroker.ensureIndex} (embed-rank / embed-index). */
@@ -144,6 +151,7 @@ export class EmbedBroker {
   private currentKey: string | undefined;
   private graphProvider?: (repositoryId: string, gitRef: string) => VgGraph | undefined;
   private rootProvider?: (repositoryId: string) => string | undefined;
+  private readonly isRebuilding?: (repositoryId: string) => boolean;
 
   private readonly log: EmbedBrokerLog;
   private readonly spawnWorker: () => ChildProcess;
@@ -163,6 +171,7 @@ export class EmbedBroker {
     this.crashRetryDelayMs = options.crashRetryDelayMs ?? CRASH_RETRY_DELAY_MS;
     this.now = options.now ?? ((): number => Date.now());
     this.sleepImpl = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.isRebuilding = options.isRebuilding;
   }
 
   status(): EmbedBrokerStatus {
@@ -268,6 +277,11 @@ export class EmbedBroker {
     if (this.gaveUp) return;
     const idx = this.indexes.get(key);
     if (idx?.state === 'ready' || this.inflight.has(key)) return;
+    if (this.isRebuilding?.(repositoryId)) {
+      this.log(`semantic: ${repositoryId}@${gitRef} not warming — a rebuild is in flight; lexical until it lands`);
+      this.scheduleRewarm(repositoryId, gitRef);
+      return;
+    }
     const graph = this.graphProvider?.(repositoryId, gitRef);
     if (!graph) return;
     // Fire and forget: warming must never block the op that triggered it.
@@ -316,6 +330,11 @@ export class EmbedBroker {
       this.indexes.set(key, idx);
     }
     if (idx.state === 'ready') return idx;
+    if (this.isRebuilding?.(repositoryId)) {
+      this.log(`semantic: ${repositoryId}@${gitRef} not warming — a rebuild is in flight; lexical until it lands`);
+      this.scheduleRewarm(repositoryId, gitRef);
+      return idx;
+    }
     if (this.gaveUp) {
       idx.state = 'failed';
       idx.error = this.reason ?? 'embedding worker unavailable';

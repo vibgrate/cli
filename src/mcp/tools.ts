@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import { loadRoleMap } from '../engine/haile/role-preference.js';
 import * as path from 'node:path';
 import { queryGraph, queryGraphSemantic } from '../engine/query.js';
-import type { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
+import type { DaemonRanking, DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import { rankQuestion } from '../engine/relevance-provider.js';
 import { rankingAskFrom } from '../engine/user-ask.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
@@ -61,6 +61,13 @@ export interface ToolContext {
    * is what removes this process's own model load and vector scan.
    */
   semanticSession?: DaemonSemanticSession;
+  /**
+   * Rank this question inside vgd. When set, retrieve never loads the
+   * embedding backend in this process — a null ranking means lexical, not
+   * "embed here". The daemon uses this so `run-tool` cannot pull the addon
+   * into vgd itself.
+   */
+  rank?: (question: string) => Promise<DaemonRanking | null>;
 }
 
 export interface VgTool {
@@ -149,10 +156,25 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
   const topicTags = await loadTopicTags(graph, ctx.root, ctx.graphPath);
   const modRank = await rankQuestion(graph, rankingAskFrom(question), { limit: 48, topicTags });
   const roles = loadRoleMap(ctx.root, graph.provenance?.corpusHash);
-  // The daemon first: it already holds vectors for this slot, so it answers the
-  // semantic half without this process loading the model at all. `null` means
-  // "rank it yourself" — the same path taken when no daemon is running.
-  if (ctx.semanticSession && !ctx.local) {
+  // Rank where the vectors live. An injected ranker (the daemon's embed
+  // broker) means this process never loads the native backend. A null
+  // ranking is "use lexical", not "embed here".
+  if (ctx.rank && !ctx.local) {
+    try {
+      const ranked = await withTimeout(ctx.rank(question), SEMANTIC_BUDGET_MS, 'daemon ranking over budget');
+      if (ranked) {
+        const q = await queryGraphSemantic(graph, question, {
+          budget,
+          semanticRanked: ranked.ranked,
+          ranked: modRank,
+          roles,
+        });
+        return { q, mode: `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})` };
+      }
+    } catch {
+      /* over budget or ranking failed — lexical below, no in-process embedder */
+    }
+  } else if (ctx.semanticSession && !ctx.local) {
     try {
       const ranked = await withTimeout(
         ctx.semanticSession.rank(question, graph.provenance?.corpusHash),
@@ -172,25 +194,27 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
       // Over budget or the socket died — fall through to the local path.
     }
   }
-  try {
-    const q = await withTimeout(
-      (async () => {
-        const embedder = await readyEmbedder(ctx.local);
-        if (!embedder) return null;
-        // First call on a fresh repo embeds every node here; withTimeout does not
-        // cancel it, so the work continues in the background and caches to disk —
-        // this call answers lexically, the next hits the warm cache and is fast.
-        const nodeVectors = await getNodeEmbeddings(graph, embedder, ctx.root);
-        const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors, ranked: modRank, roles });
-        mode = `semantic (${embedder.id})`;
-        return r;
-      })(),
-      SEMANTIC_BUDGET_MS,
-      'semantic path over budget',
-    );
-    if (q) return { q, mode };
-  } catch {
-    // Over the latency budget or a semantic fault — answer from the lexical floor.
+  if (!ctx.rank) {
+    try {
+      const q = await withTimeout(
+        (async () => {
+          const embedder = await readyEmbedder(ctx.local);
+          if (!embedder) return null;
+          // First call on a fresh repo embeds every node here; withTimeout does not
+          // cancel it, so the work continues in the background and caches to disk —
+          // this call answers lexically, the next hits the warm cache and is fast.
+          const nodeVectors = await getNodeEmbeddings(graph, embedder, ctx.root);
+          const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors, ranked: modRank, roles });
+          mode = `semantic (${embedder.id})`;
+          return r;
+        })(),
+        SEMANTIC_BUDGET_MS,
+        'semantic path over budget',
+      );
+      if (q) return { q, mode };
+    } catch {
+      // Over the latency budget or a semantic fault — answer from the lexical floor.
+    }
   }
   return { q: queryGraph(graph, question, { budget, ranked: modRank, roles }), mode: 'lexical' };
 }

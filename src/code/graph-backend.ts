@@ -104,8 +104,8 @@ export interface VgdGraphBackendOptions {
   repositoryId: string;
   gitRef?: string;
   socketPath?: string;
-  /** Always required for fall back when vgd has no slot or is down. */
-  fallback: VgGraph;
+  /** Used when vgd has no slot or is down. Omit when this process holds no map. */
+  fallback?: VgGraph;
   request?: (req: VgdRequest, opts?: VgdClientOptions) => Promise<unknown>;
 }
 
@@ -114,7 +114,7 @@ export interface VgdGraphBackendOptions {
  * The returned `source` reflects which path answered.
  */
 export function vgdGraphBackend(options: VgdGraphBackendOptions): GraphBackend {
-  const local = localGraphBackend(options.fallback);
+  const local = options.fallback ? localGraphBackend(options.fallback) : null;
   const request = options.request ?? ((req, opts) => vgdRequest(req, opts));
   const clientOpts: VgdClientOptions = { socketPath: options.socketPath };
 
@@ -161,7 +161,8 @@ export function vgdGraphBackend(options: VgdGraphBackendOptions): GraphBackend {
       } catch {
         /* fall through */
       }
-      return local.search(query, opts);
+      if (local) return local.search(query, opts);
+      return { source: 'vgd', matches: [] };
     },
     async impact(symbol, opts) {
       try {
@@ -195,7 +196,8 @@ export function vgdGraphBackend(options: VgdGraphBackendOptions): GraphBackend {
       } catch {
         /* fall through */
       }
-      return local.impact(symbol, opts);
+      if (local) return local.impact(symbol, opts);
+      return null;
     },
   };
 }
@@ -204,7 +206,7 @@ export function vgdGraphBackend(options: VgdGraphBackendOptions): GraphBackend {
  * Pick a backend: vgd when repositoryId + socket are known, else local.
  */
 export function resolveGraphBackend(input: {
-  graph: VgGraph;
+  graph?: VgGraph;
   repositoryId?: string | null;
   gitRef?: string | null;
   socketPath?: string | null;
@@ -217,7 +219,16 @@ export function resolveGraphBackend(input: {
       fallback: input.graph,
     });
   }
-  return localGraphBackend(input.graph);
+  if (input.graph) return localGraphBackend(input.graph);
+  return {
+    source: 'vgd',
+    async search() {
+      return { source: 'vgd', matches: [] };
+    },
+    async impact() {
+      return null;
+    },
+  };
 }
 
 function resolveSymbolId(graph: VgGraph, symbol: string): string | null {

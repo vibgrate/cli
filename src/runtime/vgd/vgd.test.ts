@@ -58,6 +58,16 @@ describe('WorkspaceRegistry', () => {
     expect(second.registeredAt).toBe('2026-01-02T00:00:00.000Z');
     expect(reg.size()).toBe(1);
   });
+
+  it('resolveGraph never answers a selected-but-unloaded ref from another branch', () => {
+    const reg = new WorkspaceRegistry();
+    const ws = reg.register('/repos/app', () => new Date('2026-01-01T00:00:00.000Z'), { gitRef: 'main' });
+    reg.putGraph(ws.id, 'main', fixtureGraph());
+    reg.selectGitRef(ws.id, 'feat');
+    expect(reg.resolveGraph(ws.id, 'feat')).toBeNull();
+    expect(reg.resolveGraph(ws.id)).toBeNull();
+    expect(reg.resolveGraph(ws.id, 'main')?.gitRef).toBe('main');
+  });
 });
 
 describe('defaultVgdTimeoutMs', () => {
@@ -69,6 +79,9 @@ describe('defaultVgdTimeoutMs', () => {
     // guaranteed false "vgd did not respond" failures on large repos.
     expect(defaultVgdTimeoutMs('put-graph')).toBeGreaterThanOrEqual(60_000);
     expect(defaultVgdTimeoutMs('load-graph')).toBeGreaterThanOrEqual(60_000);
+    expect(defaultVgdTimeoutMs('ensure-graph')).toBeGreaterThanOrEqual(60_000);
+    expect(defaultVgdTimeoutMs('graph-query')).toBeGreaterThan(2000);
+    expect(defaultVgdTimeoutMs('run-tool')).toBeGreaterThan(2000);
     expect(defaultVgdTimeoutMs('host-load')).toBeGreaterThanOrEqual(60_000);
     expect(defaultVgdTimeoutMs('host-generate')).toBeGreaterThanOrEqual(60_000);
     // First ask on a large repo may wait for the slot index (or an on-disk writer).
@@ -180,6 +193,72 @@ describe('vgd server + client', () => {
       );
       expect(missing.ok).toBe(false);
       if (!missing.ok) expect(missing.code).toBe('no_map');
+
+      // A second load of the same map is a no-op: re-putting would drop the
+      // semantic index for nothing.
+      const again = await vgdRequest({ op: 'load-graph', root, gitRef: 'main', graphPath }, { socketPath });
+      expect(again.ok).toBe(true);
+      if (again.ok && 'stored' in again) expect(again.alreadyHeld).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('ensure-graph rebuilds when no map exists, then answers graph-query from the slot', async () => {
+    const dir = tmp();
+    const socketPath = path.join(dir, 'vgd.sock');
+    const root = path.join(dir, 'workspace');
+    fs.mkdirSync(root);
+    const graphPath = path.join(dir, 'graph.json');
+    let rebuilds = 0;
+    const server = await startVgdServer({
+      socketPath,
+      pidPath: path.join(dir, 'vgd.pid'),
+      rebuild: async () => {
+        rebuilds += 1;
+        fs.writeFileSync(graphPath, serializeGraph(fixtureGraph()));
+        return { ok: true };
+      },
+    });
+    try {
+      const first = await vgdRequest({ op: 'ensure-graph', root, gitRef: 'main', graphPath }, { socketPath });
+      expect(first.ok).toBe(true);
+      if (first.ok && 'stored' in first) {
+        expect(first.rebuilt).toBe(true);
+        expect(first.nodeCount).toBeGreaterThan(0);
+      }
+      expect(rebuilds).toBe(1);
+
+      const q = await vgdRequest(
+        {
+          op: 'graph-query',
+          repositoryId: first.ok && 'stored' in first ? first.repositoryId : '',
+          mode: 'hubs',
+          limit: 5,
+        },
+        { socketPath },
+      );
+      expect(q.ok).toBe(true);
+      if (q.ok && 'result' in q) {
+        const result = q.result as { ok?: boolean; mode?: string };
+        expect(result.ok).toBe(true);
+        expect(result.mode).toBe('hubs');
+      }
+
+      const tool = await vgdRequest(
+        {
+          op: 'run-tool',
+          repositoryId: first.ok && 'stored' in first ? first.repositoryId : '',
+          name: 'get_graph_summary',
+          args: {},
+        },
+        { socketPath },
+      );
+      expect(tool.ok).toBe(true);
+      if (tool.ok && 'result' in tool) {
+        const summary = tool.result as { counts?: { nodes?: number } };
+        expect(summary.counts?.nodes).toBeGreaterThan(0);
+      }
     } finally {
       await server.close();
     }
@@ -217,6 +296,8 @@ describe('vgd server + client', () => {
         expect(status.workspaces).toBe(1);
         expect(status.socketPath).toBe(socketPath);
         expect(status.cliVersion).toBe(VERSION);
+        expect(status.memory?.rss).toBeGreaterThan(0);
+        expect(status.memory?.heapUsed).toBeGreaterThan(0);
       }
 
       expect(fs.readFileSync(pidPath, 'utf8').trim()).toBe('4242');

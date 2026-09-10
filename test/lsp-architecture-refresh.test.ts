@@ -25,13 +25,30 @@ describe('LSP architecture refresh after graph refine', () => {
     expect(src).toContain('private refineAndPublishArchitecture()');
     expect(methodBody('private refineAndPublishArchitecture()')).toContain('this.publishScore()');
 
+    // `ensureGraph` is a dispatcher: daemon vs local. The re-publish lives on
+    // both acquisition paths so a `--no-daemon` session and a vgd session each
+    // re-push the score after the map (or slot) is actually in hand.
     const ensure = methodBody('private async ensureGraph()');
-    expect(ensure).toContain('this.refineAndPublishArchitecture()');
+    expect(ensure).toContain('takeGraphFromDaemon');
+    expect(ensure).toContain('ensureGraphLocal');
     expect(ensure).not.toMatch(/if \(this\.artifact\) refineArtifactWithGraph/);
 
+    const fromDaemon = methodBody('private async takeGraphFromDaemon()');
+    expect(fromDaemon).toContain('this.refineAndPublishArchitecture()');
+    expect(fromDaemon).not.toMatch(/if \(this\.artifact\) refineArtifactWithGraph/);
+
+    const local = methodBody('private async ensureGraphLocal()');
+    expect(local.match(/this\.refineAndPublishArchitecture\(\)/g)?.length).toBe(2);
+    expect(local).not.toMatch(/if \(this\.artifact\) refineArtifactWithGraph/);
+
+    const slotChanged = methodBody('private onDaemonSlotChanged(');
+    expect(slotChanged).toContain('this.refineAndPublishArchitecture()');
+    expect(slotChanged).not.toMatch(/if \(this\.artifact\) refineArtifactWithGraph/);
+
     // A settled refresh reloads through `reloadGraphFromDisk`, which the
-    // daemon's `slot-changed` push shares — the re-publish must live there so
-    // both routes to a new map re-push the score, not just the local one.
+    // daemon's `slot-changed` push shares on the local-fallback path — the
+    // re-publish must live there so both routes to a new map re-push the
+    // score, not just the in-process one.
     const refresh = methodBody('private onRefreshSettled(');
     expect(refresh).toContain('this.reloadGraphFromDisk();');
     expect(refresh).not.toMatch(/if \(this\.artifact\) refineArtifactWithGraph/);

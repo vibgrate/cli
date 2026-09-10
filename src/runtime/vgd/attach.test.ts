@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { attachVgd, daemonDisabledReason } from './attach.js';
+import { attachVgd, daemonDisabledReason, envForNamedVgdSocket } from './attach.js';
 import type { VgdRequest, VgdResponse } from './protocol.js';
 
 const stored: VgdResponse = { ok: true, stored: true, repositoryId: 'repo1', gitRef: 'main', nodeCount: 7 };
@@ -21,6 +21,11 @@ describe('daemonDisabledReason', () => {
     expect(daemonDisabledReason({ env: { CI: 'false' } })).toBeNull();
     expect(daemonDisabledReason({ env: { VG_NO_DAEMON: '0' } })).toBeNull();
     expect(daemonDisabledReason({ env: {} })).toBeNull();
+  });
+
+  it('envForNamedVgdSocket lets an explicit socket attach even in CI', () => {
+    const env = envForNamedVgdSocket({ CI: 'true', VG_NO_DAEMON: '1' });
+    expect(daemonDisabledReason({ env })).toBeNull();
   });
 });
 

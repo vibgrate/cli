@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import * as path from 'node:path';
-import { inventory } from '../src/engine/drift.js';
+import { classify, enrichOnline, inventory, type DepRecord } from '../src/engine/drift.js';
 import { makeProject, cleanup } from './helpers.js';
 
 const dirs: string[] = [];
@@ -68,5 +68,45 @@ describe('drift inventory — nested monorepo manifests', () => {
     });
     const inv = inventory(path.join(outer, 'app'));
     expect(inv.records.find((r) => r.name === 'outsider')?.installed).toBeUndefined();
+  });
+});
+
+describe('classify — behind latest only, never ahead', () => {
+  it('labels each lag band when installed is older than latest', () => {
+    expect(classify('6.0.3', '7.0.2')).toBe('major');
+    expect(classify('1.2.3', '1.3.0')).toBe('minor');
+    expect(classify('1.2.3', '1.2.4')).toBe('patch');
+    expect(classify('1.2.3', '1.2.3')).toBe('current');
+  });
+
+  it('treats an installed version newer than npm latest as current, not major', () => {
+    // @types/node majors track Node.js majors; npm `latest` is LTS (22), not Current (26).
+    expect(classify('26.4.1', '22.20.2')).toBe('current');
+    expect(classify('22.21.0', '22.20.2')).toBe('current');
+    expect(classify('22.20.3', '22.20.2')).toBe('current');
+  });
+
+  it('is unknown when latest is missing', () => {
+    expect(classify('1.0.0')).toBe('unknown');
+    expect(classify('1.0.0', undefined)).toBe('unknown');
+  });
+});
+
+describe('enrichOnline', () => {
+  it('writes latest from the registry and classifies directional drift', async () => {
+    const records: DepRecord[] = [
+      { name: '@types/node', ecosystem: 'npm', declared: '^26.4.1', installed: '26.4.1' },
+      { name: 'typescript', ecosystem: 'npm', declared: '^6.0.0', installed: '6.0.3' },
+    ];
+    const latestByName: Record<string, string> = {
+      '@types/node': '22.20.2',
+      typescript: '7.0.2',
+    };
+    await enrichOnline(records, async (url) => {
+      const name = decodeURIComponent(String(url).split('/').slice(-2, -1)[0] ?? '');
+      return { ok: true, json: async () => ({ version: latestByName[name] }) } as Response;
+    });
+    expect(records[0]).toMatchObject({ latest: '22.20.2', drift: 'current' });
+    expect(records[1]).toMatchObject({ latest: '7.0.2', drift: 'major' });
   });
 });

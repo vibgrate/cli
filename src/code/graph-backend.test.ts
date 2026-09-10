@@ -65,6 +65,19 @@ describe('graph backend', () => {
     expect(res.matches.length).toBeGreaterThan(0);
   });
 
+  it('vgdGraphBackend with no local fallback returns empty on failure', async () => {
+    const request = vi.fn(async () => {
+      throw new Error('down');
+    });
+    const b = vgdGraphBackend({
+      repositoryId: 'r1',
+      request: request as never,
+    });
+    const res = await b.search('scanDir');
+    expect(res.source).toBe('vgd');
+    expect(res.matches).toEqual([]);
+  });
+
   it('resolveGraphBackend picks vgd when socket + repo id set', () => {
     const b = resolveGraphBackend({
       graph: fixtureGraph(),

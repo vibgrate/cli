@@ -609,7 +609,7 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | `vg serve` | Start **Vibgrate AI Context** (local-first MCP: code map + drift + version-correct docs) |
 | `vg share` | Make the graph committable + auto-updating for your team |
 | `vg show <file>` | Explain a node: what it is, what it calls, what calls it |
-| `vg show arch` | Open a local, interactive architecture map of the code graph — by job, by cluster, who calls whom, missing steps, rule breaks (loopback; `--focus <symbol>`, `--no-open`) |
+| `vg show arch` | Open a local architecture map: workspace packages first, then a column slice (UI → service → store). Loopback; `--focus <symbol>`, `--no-open` |
 | `vg status` | Cache/freshness, counts, staleness |
 | `vg tests <file>` | Which tests cover a node |
 | `vg tree <file>` | Call tree rooted at a node |

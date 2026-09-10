@@ -1,5 +1,5 @@
 import { resolveGraphPath } from './artifacts.js';
-import { loadGraphFileWithSnapshot } from './snapshot.js';
+import { loadGraphFileWithSnapshot, mapFileExists } from './snapshot.js';
 import { loadGraphPreferIndex } from './index-db.js';
 import type { VgGraph } from '../schema.js';
 
@@ -20,4 +20,13 @@ export function loadGraph(root: string, graphPath?: string): VgGraph | null {
     if (preferred) return preferred.graph;
   }
   return loadGraphFileWithSnapshot(file);
+}
+
+/**
+ * Cheap existence check — stats the JSON / snapshot header, never parses the
+ * map. Callers that only need "is there a map yet?" must not `loadGraph`,
+ * which materialises tens of thousands of nodes for a boolean.
+ */
+export function graphExists(root: string, graphPath?: string): boolean {
+  return mapFileExists(resolveGraphPath(root, graphPath));
 }

@@ -59,6 +59,14 @@ export function registerDaemon(program: Command): void {
         info(
           `vgd · running pid ${res.pid}${cli} · ${res.workspaces} workspace(s)${slots} · ${res.uptimeMs}ms up · ${c.dim(res.socketPath)}`,
         );
+        if ('memory' in res && res.memory) {
+          const mb = (n: number): string => `${(n / (1024 * 1024)).toFixed(1)}MB`;
+          info(
+            c.dim(
+              `  memory · rss ${mb(res.memory.rss)} · heap ${mb(res.memory.heapUsed)} · ${res.memory.graphSlots} graph slot(s) · ${res.memory.embedSlots} embed slot(s)`,
+            ),
+          );
+        }
         if (skew.running && skew.state !== 'match') {
           const verb = skew.state === 'older' ? 'older than' : 'newer than';
           info(

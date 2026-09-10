@@ -33,6 +33,23 @@ describe('publishGraphToVgd', () => {
     expect(t.seen.map((r) => r.op)).toEqual(['load-graph']);
   });
 
+  it('reports current when the daemon already holds the map', async () => {
+    const t = transport(() => ({
+      ok: true as const,
+      stored: true as const,
+      repositoryId: 'repo1',
+      gitRef: 'main',
+      nodeCount: 12,
+      alreadyHeld: true,
+    }));
+    const result = await publishGraphToVgd('/repo', {
+      isRunning: () => Promise.resolve(true),
+      request: t.request,
+    });
+    expect(result).toMatchObject({ status: 'current', repositoryId: 'repo1', gitRef: 'main' });
+    expect(t.seen.map((r) => r.op)).toEqual(['load-graph']);
+  });
+
   it('does nothing — and starts nothing — when no daemon is running', async () => {
     const t = transport(() => stored);
     const result = await publishGraphToVgd('/repo', {

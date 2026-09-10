@@ -81,28 +81,38 @@ describe('vg lsp defers freshness to the daemon only when it is real', () => {
     expect(defer).toContain('subscription.close();');
   });
 
-  it('reloads from disk on a pushed change, sharing the local refresh path', () => {
+  it('reloads from disk on a pushed change only on the local-fallback path', () => {
     expect(defer).toContain('onChange: () => this.reloadGraphFromDisk()');
     expect(methodBody('private onRefreshSettled(')).toContain('this.reloadGraphFromDisk();');
     expect(methodBody('private reloadGraphFromDisk()')).toContain('this.refineAndPublishArchitecture();');
+  });
+
+  it('prefers the daemon as the sole graph owner when a runtime is running', () => {
+    expect(src).toContain('takeGraphFromDaemon');
+    expect(src).toContain('this process holds no copy');
+    expect(methodBody('private async ensureGraph()')).toContain('takeGraphFromDaemon');
+    expect(methodBody('private async onGraphQuery(')).toContain('queryViaDaemon');
+    expect(methodBody('private async takeGraphFromDaemon()')).toContain("op: 'ensure-graph'");
+    expect(methodBody('private async takeGraphFromDaemon()')).not.toContain('loadGraph(');
+    expect(methodBody('private async takeGraphFromDaemon()')).not.toContain('buildGraph(');
   });
 });
 
 describe('vg serve defers freshness to the daemon only when it is real', () => {
   const src = fs.readFileSync(path.resolve(here, '../src/mcp/server.ts'), 'utf8');
-  const start = src.indexOf('async function watchViaDaemonOrLocally(');
-  const fn = src.slice(start, src.indexOf('\nexport function createServer(', start));
+  const start = src.indexOf('export async function attachGraphSource(');
+  const fn = src.slice(start, src.indexOf('\nasync function runToolViaDaemon(', start));
 
-  it('publishes before subscribing', () => {
+  it('ensures the map in vgd before subscribing', () => {
     expect(start).toBeGreaterThanOrEqual(0);
-    const publishAt = fn.indexOf('publishGraphToVgd(');
+    const ensureAt = fn.indexOf("op: 'ensure-graph'");
     const subscribeAt = fn.indexOf('subscribeToSlots({');
-    expect(publishAt).toBeGreaterThanOrEqual(0);
-    expect(subscribeAt).toBeGreaterThan(publishAt);
+    expect(ensureAt).toBeGreaterThanOrEqual(0);
+    expect(subscribeAt).toBeGreaterThan(ensureAt);
   });
 
-  it('scopes the subscription to the published repository', () => {
-    expect(fn).toContain('repositoryId: published.repositoryId,');
+  it('scopes the subscription to the ensured repository', () => {
+    expect(fn).toContain('repositoryId: ensured.repositoryId,');
   });
 
   it('falls back to its own watcher on every other path', () => {
@@ -112,10 +122,16 @@ describe('vg serve defers freshness to the daemon only when it is real', () => {
     expect(fn).toContain('onDetach: () => source.resumeLocalFreshness(),');
   });
 
-  it('stands down only on a confirmed subscription', () => {
+  it('stands down only on a confirmed subscription, and drops the local copy', () => {
     const confirmAt = fn.indexOf('if (subscription.active) {');
-    const standDownAt = fn.indexOf('source.deferFreshnessToDaemon();');
+    const standDownAt = fn.indexOf('source.deferFreshnessToDaemon({');
     expect(confirmAt).toBeGreaterThanOrEqual(0);
     expect(standDownAt).toBeGreaterThan(confirmAt);
+  });
+
+  it('runs graph tools via vgd so this process holds no map', () => {
+    expect(src).toContain('runToolViaDaemon');
+    expect(src).toContain("op: 'run-tool'");
+    expect(src).toContain('vgd owns this map — this process holds no copy');
   });
 });

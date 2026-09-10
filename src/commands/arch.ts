@@ -12,10 +12,11 @@ import { spawn } from 'node:child_process';
 import type { Command } from 'commander';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { resolveGraphPath } from '../engine/artifacts.js';
-import { startChartServer, DEFAULT_CHART_HOST, DEFAULT_CHART_PORT } from '../engine/chart/server.js';
-import { projectChart } from '../engine/chart/model.js';
+import { startChartServer, DEFAULT_CHART_HOST, DEFAULT_CHART_PORT, overviewOf } from '../engine/chart/server.js';
+import { locateInOverview } from '../engine/chart/overview.js';
 import { loadGraph } from '../engine/load.js';
 import { readHaileSidecar } from '../engine/haile/sidecar.js';
+import { loadHaileProvider } from '../engine/haile/haile-provider.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { c, info, json } from '../util/output.js';
@@ -56,28 +57,32 @@ function configure(chart: Command): void {
         throw new CliError('no map found — run `vg` to build one first', ExitCode.NOT_FOUND);
       }
       const sidecar = readHaileSidecar(graphPath, { corpusHash: graph.provenance?.corpusHash });
-      const payload = projectChart(graph, sidecar);
-      const url = opts.focus
-        ? `${server.url}/#n=${encodeURIComponent(opts.focus)}`
-        : server.url;
+      const provider = await loadHaileProvider();
+      const overview = overviewOf(graph, sidecar, provider);
+      const located = opts.focus ? locateInOverview(graph, opts.focus) : null;
+      const url = located
+        ? `${server.url}/#zoom=slice&package=${encodeURIComponent(located.packageId)}&n=${encodeURIComponent(located.nodeId)}`
+        : `${server.url}/#zoom=workspace`;
 
       if (global.json) {
         json({
           url,
           host: server.host,
           port: server.port,
-          architectureLoaded: payload.meta.architectureLoaded,
-          nodes: payload.meta.nodes,
-          pulses: payload.meta.pulses,
-          missingSteps: payload.meta.missingSteps,
+          architectureLoaded: overview.meta.architectureLoaded,
+          packages: overview.meta.packages,
+          symbols: overview.meta.symbols,
+          nodes: overview.meta.packages,
+          pulses: overview.meta.findings,
+          missingSteps: overview.meta.missingSteps,
         });
       } else {
         info(`${c.cyan('vg · arch')}  ${url}`);
         info(
           c.dim(
-            payload.meta.architectureLoaded
-              ? `  architecture loaded · ${payload.meta.nodes} symbols · ${payload.meta.pulses} rule break(s)`
-              : `  architecture module not loaded · ${payload.meta.nodes} symbols · raw map`,
+            overview.meta.architectureLoaded
+              ? `  architecture loaded · ${overview.meta.packages} packages · ${overview.meta.symbols} symbols · ${overview.meta.findings} rule break(s)`
+              : `  architecture module not loaded · ${overview.meta.packages} packages · ${overview.meta.symbols} symbols · raw map`,
           ),
         );
         info(c.dim('  q / Ctrl-C to stop'));

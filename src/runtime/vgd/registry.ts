@@ -111,6 +111,7 @@ export class WorkspaceRegistry {
 
   unregister(root: string): boolean {
     const id = repositoryIdFromRoot(path.resolve(root));
+    this.graphs.evictRepository(id);
     return this.byId.delete(id);
   }
 
@@ -132,25 +133,19 @@ export class WorkspaceRegistry {
   }
 
   /**
-   * Resolve an ActiveGraph for query/impact: prefer the named gitRef, else the
-   * selected current slot, else any warm slot for the repository.
+   * Resolve an ActiveGraph for query/impact.
+   *
+   * A named gitRef is exact: missing that slot is `null`, never another
+   * branch's map. Omitting gitRef uses the selected current slot only.
+   * Falling through to "any warm slot" used to answer a `feat` query from
+   * `main`'s graph after `select-git-ref` — silent cross-branch leakage.
    */
   resolveGraph(repositoryId: string, gitRef?: string): { graph: VgGraph; gitRef: string } | null {
     if (gitRef) {
       const slot = this.graphs.get(repositoryId, gitRef);
-      if (slot) return { graph: slot.graph, gitRef: slot.gitRef };
+      return slot ? { graph: slot.graph, gitRef: slot.gitRef } : null;
     }
     const current = this.graphs.current(repositoryId);
-    if (current) return { graph: current.graph, gitRef: current.gitRef };
-    // Fall back to any warm slot for this repo (deterministic: earliest loaded).
-    const any = this.graphs
-      .list(repositoryId)
-      .slice()
-      .sort((a, b) => a.loadedAt - b.loadedAt)[0];
-    if (any) {
-      const slot = this.graphs.get(repositoryId, any.gitRef);
-      if (slot) return { graph: slot.graph, gitRef: slot.gitRef };
-    }
-    return null;
+    return current ? { graph: current.graph, gitRef: current.gitRef } : null;
   }
 }

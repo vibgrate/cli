@@ -687,7 +687,10 @@ async function search(ctx: ToolContext, query: string): Promise<ToolResult> {
         return { content: parts.join('\n'), mutated: false };
       }
       // Honest empty for a pure string locate (prefer this over graph false positives).
-      if (hybrid.totalTextMatches === 0 || /\s|https?:\/\//i.test(query) || /^["'`]/.test(query.trim())) {
+      // When vgd holds the map, still ask it — this process may have no copy.
+      const literalLocate =
+        hybrid.totalTextMatches === 0 || /\s|https?:\/\//i.test(query) || /^["'`]/.test(query.trim());
+      if (literalLocate && !ctx.graphBackend) {
         const hint = hybrid.hint ? `\n${hybrid.hint}` : '';
         return {
           content: `no symbol or text match for "${query}".${hint}`,

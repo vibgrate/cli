@@ -29,6 +29,11 @@ export interface SlotSubscriptionOptions {
   socketPath?: string;
   /** Only hear about this repository. Omit for every repository. */
   repositoryId?: string;
+  /**
+   * Give up waiting for the daemon's `watching: true` ack (default 2000ms).
+   * A hang here used to stall `vg serve` / `vg lsp` attach forever.
+   */
+  readyMs?: number;
   /** Called for each pushed change. */
   onChange: (change: SlotChange) => void;
   /**
@@ -56,6 +61,7 @@ export function subscribeToSlots(options: SlotSubscriptionOptions): Promise<Slot
   const socketPath = options.socketPath ?? vgdSocketPath();
   const log = options.log ?? ((): void => {});
   const connect = options.connect ?? ((p: string) => net.createConnection(p));
+  const readyMs = options.readyMs ?? 2_000;
 
   return new Promise<SlotSubscription>((resolve) => {
     let settled = false;
@@ -63,6 +69,7 @@ export function subscribeToSlots(options: SlotSubscriptionOptions): Promise<Slot
     let closed = false;
     let buffer = '';
     let socket: net.Socket;
+    let readyTimer: ReturnType<typeof setTimeout> | undefined;
 
     const handle: SlotSubscription = {
       get active() {
@@ -80,6 +87,7 @@ export function subscribeToSlots(options: SlotSubscriptionOptions): Promise<Slot
     };
 
     const detach = (reason: string): void => {
+      if (readyTimer) clearTimeout(readyTimer);
       const wasActive = active;
       active = false;
       if (!settled) {
@@ -101,6 +109,8 @@ export function subscribeToSlots(options: SlotSubscriptionOptions): Promise<Slot
     }
 
     socket.setEncoding('utf8');
+    readyTimer = setTimeout(() => detach('subscription timed out'), readyMs);
+    readyTimer.unref?.();
     socket.on('connect', () => {
       socket.write(JSON.stringify({ op: 'watch-slots', repositoryId: options.repositoryId }) + '\n');
     });
@@ -119,6 +129,7 @@ export function subscribeToSlots(options: SlotSubscriptionOptions): Promise<Slot
         }
         if (frame.watching === true) {
           active = true;
+          if (readyTimer) clearTimeout(readyTimer);
           if (!settled) {
             settled = true;
             log(`watch-slots: subscribed${options.repositoryId ? ` to ${options.repositoryId}` : ''}`);

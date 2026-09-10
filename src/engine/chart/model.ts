@@ -80,6 +80,7 @@ export interface ChartPayload {
   areas: Array<{ id: number; label: string; size: number }>;
 }
 
+/** Per-symbol projection for `/api/node` and tests. Not the default map payload — that is `projectOverview` / `projectSlice`. */
 export function projectChart(graph: VgGraph, sidecar: HaileSidecar | null): ChartPayload {
   const nodes = graph.nodes
     .filter((n) => !HIDDEN_KINDS.has(n.kind))
@@ -186,6 +187,28 @@ export function searchNodes(payload: ChartPayload, q: string): ChartNodeView[] {
       return blob.includes(needle);
     })
     .slice(0, 30);
+}
+
+/** Search the graph without serialising every symbol to the browser. */
+export function searchGraph(graph: VgGraph, sidecar: HaileSidecar | null, q: string): ChartNodeView[] {
+  const needle = q.trim().toLowerCase();
+  const hits: ChartNodeView[] = [];
+  for (const n of graph.nodes) {
+    if (HIDDEN_KINDS.has(n.kind) || n.kind === 'package' || n.kind === 'external') continue;
+    if (!needle) {
+      hits.push(viewNode(n, graph, sidecar));
+      if (hits.length >= 20) break;
+      continue;
+    }
+    const view = viewNode(n, graph, sidecar);
+    const blob = [view.name, view.qualifiedName, view.job, view.intent ?? '', ...view.purposes.map((p) => p.label), view.file]
+      .join(' ')
+      .toLowerCase();
+    if (!blob.includes(needle)) continue;
+    hits.push(view);
+    if (hits.length >= 30) break;
+  }
+  return hits;
 }
 
 function metaOf(graph: VgGraph, sidecar: HaileSidecar | null, nodes: ChartNodeView[]): ChartMeta {

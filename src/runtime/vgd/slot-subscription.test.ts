@@ -71,6 +71,12 @@ describe('subscribeToSlots', () => {
     expect(seen).toEqual([{ repositoryId: 'r1', gitRef: 'main', nodeCount: 9, corpusHash: 'H' }]);
   });
 
+  it('is inactive when the daemon never acknowledges (ready timeout)', async () => {
+    const { connect } = fake();
+    const sub = await subscribeToSlots({ connect, onChange: () => {}, readyMs: 30 });
+    expect(sub.active).toBe(false);
+  });
+
   it('is inactive — never silently "subscribed" — when no daemon answers', async () => {
     const { socket, connect } = fake();
     const pending = subscribeToSlots({ connect, onChange: () => {} });

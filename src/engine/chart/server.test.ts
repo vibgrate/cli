@@ -31,17 +31,29 @@ describe('chart server', () => {
     expect(page.ok).toBe(true);
     const html = await page.text();
     expect(html).toContain('Code map');
-    expect(html).toContain('id="zoom-in"');
-    expect(html).toMatch(/overflow:\s*auto/);
+    expect(html).toContain('Workspace');
     expect(html).not.toContain('HAILE');
     expect(html).not.toContain('confidence');
+    expect(html).not.toContain('function sizeMap(');
 
     const meta = await fetchJson(server.url + '/api/meta');
-    expect(meta.magic).toBe('vg.chart.service.v1');
     expect(meta.architectureLoaded).toBe(false);
+    expect(meta.symbols).toBeGreaterThan(0);
+    expect(meta.packages).toBeGreaterThan(0);
+
+    const overview = await fetchJson(server.url + '/api/overview');
+    expect(overview.magic).toBe('vg.arch.overview.v1');
+    expect(overview.packages.length).toBeGreaterThan(0);
+    expect(overview.packages.length).toBeLessThanOrEqual(200);
 
     const graph = await fetchJson(server.url + '/api/graph');
-    expect(graph.nodes.every((n: { kind: string }) => n.kind !== 'file')).toBe(true);
+    expect(graph.magic).toBe('vg.arch.overview.v1');
+    expect(graph.packages).toBeTruthy();
+
+    const slice = await fetchJson(server.url + '/api/slice?package=' + encodeURIComponent(overview.packages[0].id));
+    expect(slice.magic).toBe('vg.arch.slice.v1');
+    const painted = slice.columns.reduce((n: number, col: { cards: unknown[] }) => n + col.cards.length, 0);
+    expect(painted).toBeLessThanOrEqual(120);
 
     const node = await fetchJson(server.url + '/api/node/scanDir');
     expect(node.name).toBe('scanDir');
