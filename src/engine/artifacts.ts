@@ -8,7 +8,7 @@ import { renderReport } from './report.js';
 import { renderHtml } from './html.js';
 import { globalGraphPath, globalGraphPathForRef, repositoryStoreDir } from '../runtime/paths.js';
 import { deleteTagsSidecarFor } from './relevance-enrich.js';
-import { deleteHaileSidecarFor, writeHaileSidecarFor } from './haile/index.js';
+import { ArchitecturePolicyError, deleteHaileSidecarFor, writeHaileSidecarFor } from './haile/index.js';
 import { detectGitRef } from '../runtime/git-ref.js';
 import type { VgGraph } from '../schema.js';
 
@@ -42,6 +42,12 @@ export interface WrittenArtifacts {
   reportPath?: string;
   htmlPath?: string;
   factsPath?: string;
+  /**
+   * `.vibgrate/architecture.toml` did not validate (a bad `[[overlay]]`): the
+   * message lists every problem. The map is written; the classify file is
+   * not. Callers fail the architecture step loudly with this text.
+   */
+  architecturePolicyError?: string;
 }
 
 export function vibgrateDir(root: string): string {
@@ -297,10 +303,17 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
     written.factsPath = factsPath;
   }
 
-  // HAILE sidecar is derived and must not enter graph.json. Best-effort:
-  // a classify fault never fails the build. --max-privacy / --no-graph never
-  // reach writeArtifacts (see shouldBuildCodeMap).
-  writeHaileSidecarFor(graph, graphPath, { root: options.root, ...(options.policy ? { policy: options.policy as HailePolicy } : {}) });
+  // Architecture sidecar is derived and must not enter graph.json. Best-effort:
+  // a classify fault never fails the build — except a user overlay that does
+  // not validate, which the caller must surface. --max-privacy / --no-graph
+  // never reach writeArtifacts (see shouldBuildCodeMap).
+  try {
+    writeHaileSidecarFor(graph, graphPath, { root: options.root, ...(options.policy ? { policy: options.policy as HailePolicy } : {}) });
+  } catch (err) {
+    if (!(err instanceof ArchitecturePolicyError)) throw err;
+    deleteHaileSidecarFor(graphPath);
+    written.architecturePolicyError = err.message;
+  }
 
   return written;
 }

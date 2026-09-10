@@ -161,7 +161,7 @@ export function showJsonFor(
     tested: node.tested,
     calls: callees.map((n) => n.qualifiedName),
     calledBy: callers.map((n) => n.qualifiedName),
-    arch: haileJsonFields(haile) ?? null,
+    arch: haileJsonFields(haile, { policy: sidecar?.policy ?? null, overlays: sidecar?.overlays ?? null }) ?? null,
     view: viewNode(node, graph, sidecar),
   };
 }

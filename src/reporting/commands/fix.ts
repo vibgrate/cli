@@ -30,7 +30,7 @@ import { dedupePlans } from '../planning/dedupe.js';
 import { estimateDriftScore } from '../planning/expected-drift.js';
 import { applyPlan, type NpmPackageManager, type WorkspaceTarget } from '../planning/apply.js';
 import { detectWorkspaceRoot } from './update.js';
-import type { FixCandidateInput, FixPlanRequest, FixPlanResponse, PlanTier, PlannedUpgrade, UpgradePlan } from '../planning/types.js';
+import type { FixCandidateInput, FixPlanRequest, FixPlanResponse, PlanTier, PlannedUpgrade, UpgradeConflict, UpgradeKind, UpgradePlan } from '../planning/types.js';
 
 const SEVERITY_RANK: Record<VulnSeverity, number> = { unknown: 0, low: 1, moderate: 2, high: 3, critical: 4 };
 
@@ -80,6 +80,36 @@ function collectCandidates(artifact: ScanArtifact): RawCandidate[] {
     }
   }
   out.sort((a, b) => a.ecosystem.localeCompare(b.ecosystem) || a.package.localeCompare(b.package));
+  return out;
+}
+
+/** Best-effort semver bump classification from two `major.minor.patch...` strings. */
+function classifyBump(from: string | null, to: string | null): UpgradeKind {
+  const a = /^v?(\d+)\.(\d+)\.(\d+)/.exec(from ?? '');
+  const b = /^v?(\d+)\.(\d+)\.(\d+)/.exec(to ?? '');
+  if (!a || !b) return 'unknown';
+  if (Number(b[1]) !== Number(a[1])) return 'major';
+  if (Number(b[2]) !== Number(a[2])) return 'minor';
+  if (Number(b[3]) !== Number(a[3])) return 'patch';
+  return 'unknown';
+}
+
+/**
+ * Narrow candidates to a specific, caller-chosen subset before planning — the
+ * mechanism a caller (a script, or the VS Code extension's grouped "Fix N
+ * Patch/Minor/Major Upgrades" action) uses to plan+apply exactly one Dependabot-
+ * style batch instead of every drifted dependency at once. `--packages` and
+ * `--kind` compose (both narrow further when both are given).
+ */
+function filterCandidates(candidates: RawCandidate[], opts: { packages?: string[]; kind?: UpgradeKind }): RawCandidate[] {
+  let out = candidates;
+  if (opts.packages && opts.packages.length > 0) {
+    const wanted = new Set(opts.packages.map((p) => p.trim()).filter(Boolean));
+    out = out.filter((c) => wanted.has(c.package));
+  }
+  if (opts.kind) {
+    out = out.filter((c) => classifyBump(c.from, c.to) === opts.kind);
+  }
   return out;
 }
 
@@ -153,6 +183,9 @@ export const fixCommand = new Command('fix')
   .option('--yes', 'Apply the recommended plan without prompting')
   .option('--dry-run', 'Preview the recommended plan (or --plan <tier>) without applying; never prompts')
   .option('--no-apply', 'Only print the plans; never modify the project')
+  .option('--packages <names>', 'Plan/apply only these packages (comma-separated) — for grouping a specific batch instead of every drifted dependency')
+  .option('--kind <bump>', 'Plan/apply only upgrades of this semver bump kind (patch|minor|major) — combine with --packages to target one Dependabot-style batch')
+  .option('--force', 'Apply a plan even if the planner flagged a blocking cross-package conflict within it')
   .option('--fail-on-vulns <severity>', 'Exit non-zero if the recommended plan leaves an advisory at/above this severity unresolved (low|moderate|high|critical)')
   .action(async (targetPath: string, opts: {
     in: string;
@@ -164,6 +197,9 @@ export const fixCommand = new Command('fix')
     yes?: boolean;
     dryRun?: boolean;
     apply?: boolean; // commander maps --no-apply → apply === false
+    packages?: string;
+    kind?: string;
+    force?: boolean;
     failOnVulns?: string;
   }) => {
     const rootDir = path.resolve(targetPath);
@@ -177,6 +213,18 @@ export const fixCommand = new Command('fix')
       console.error(chalk.red(`Invalid --fail-on-vulns value '${opts.failOnVulns}'. Use one of: low, moderate, high, critical.`));
       process.exit(1);
     }
+
+    const kindFilter = opts.kind as UpgradeKind | undefined;
+    if (kindFilter && kindFilter !== 'patch' && kindFilter !== 'minor' && kindFilter !== 'major') {
+      console.error(chalk.red(`Invalid --kind value '${opts.kind}'. Use one of: patch, minor, major.`));
+      process.exit(1);
+    }
+    const packageFilter = opts.packages
+      ? opts.packages
+          .split(',')
+          .map((p) => p.trim())
+          .filter(Boolean)
+      : undefined;
 
     // `vg fix` is a paid, hosted capability — it needs a DSN. No local planning
     // fallback exists (the planning intelligence is server-side by design).
@@ -214,7 +262,11 @@ export const fixCommand = new Command('fix')
       process.exit(1);
     }
 
-    const raw = collectCandidates(artifact);
+    const raw = filterCandidates(collectCandidates(artifact), { packages: packageFilter, kind: kindFilter });
+    if ((packageFilter || kindFilter) && raw.length === 0) {
+      console.log(chalk.green('\n✔ Nothing to upgrade — no drifted dependency matches that selection.'));
+      return;
+    }
 
     // Gather usage + contracts from local source (never leaves the machine except
     // as the aggregate counts/symbols the planner needs). One bounded walk.
@@ -415,6 +467,18 @@ function npmPackageManager(artifact: ScanArtifact): NpmPackageManager {
   return 'npm';
 }
 
+/**
+ * Split a plan's conflicts into blocking vs. advisory, and decide whether apply
+ * should be refused. `--force` lifts a block but the conflicts are still shown
+ * — pure and exported so the decision is unit-testable without spawning any
+ * real package-manager process.
+ */
+export function gateConflicts(plan: UpgradePlan, force?: boolean): { blocking: UpgradeConflict[]; advisory: UpgradeConflict[]; blocked: boolean } {
+  const blocking = (plan.conflicts ?? []).filter((c) => c.severity === 'blocking');
+  const advisory = (plan.conflicts ?? []).filter((c) => c.severity === 'advisory');
+  return { blocking, advisory, blocked: blocking.length > 0 && !force };
+}
+
 /** Interactive plan picker (TTY). Resolves to the chosen tier, or null to cancel. */
 function promptPlanSelection(response: FixPlanResponse): Promise<PlanTier | null> {
   const plans = response.plans.filter((p) => p.upgrades.length > 0);
@@ -447,7 +511,7 @@ async function runApplyFlow(
   rootDir: string,
   artifact: ScanArtifact,
   response: FixPlanResponse,
-  opts: { plan?: string; yes?: boolean; dryRun?: boolean },
+  opts: { plan?: string; yes?: boolean; dryRun?: boolean; force?: boolean },
   canonicalTier?: Map<PlanTier, PlanTier>,
 ): Promise<void> {
   const nonEmpty = response.plans.filter((p) => p.upgrades.length > 0);
@@ -494,6 +558,21 @@ async function runApplyFlow(
   if (!chosen || chosen.upgrades.length === 0) {
     console.log(chalk.dim('Selected plan has no upgrades.'));
     return;
+  }
+
+  const gate = gateConflicts(chosen, opts.force);
+  for (const c of gate.advisory) {
+    console.log(chalk.yellow(`  ⚠ conflict: ${c.packages.join(', ')} — ${c.reason}`));
+  }
+  if (gate.blocking.length > 0 && !opts.dryRun) {
+    console.log(chalk.bold.red(`\n✖ ${gate.blocking.length} cross-package conflict(s) in the ${chosen.label} plan:`));
+    for (const c of gate.blocking) console.log(chalk.red(`  ✖ ${c.packages.join(', ')} — ${c.reason}`));
+    if (gate.blocked) {
+      console.log(chalk.dim('Nothing applied. Re-run with --force to apply anyway, or --plan <tier> for a plan without this conflict.'));
+      process.exitCode = 2;
+      return;
+    }
+    console.log(chalk.dim('--force set — applying despite the conflict above.'));
   }
 
   const pm = npmPackageManager(artifact);

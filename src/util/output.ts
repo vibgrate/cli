@@ -24,3 +24,22 @@ export const c = chalk;
 export function disableColor(): void {
   chalk.level = 0;
 }
+
+/**
+ * process.exit() terminates immediately even if a just-queued write to
+ * stdout/stderr has not yet reached its destination — when that destination
+ * is a pipe (a CI runner, a parent process capturing output, `| jq`, …)
+ * rather than a TTY, the write is asynchronous and exiting right after it
+ * can silently truncate the very message being reported. Queue a no-op
+ * write behind whatever is already pending on both streams and exit only
+ * once they confirm they are caught up.
+ */
+export function exitAfterFlush(code: number): never {
+  let pending = 2;
+  const done = (): void => {
+    if (--pending === 0) process.exit(code);
+  };
+  process.stdout.write('', done);
+  process.stderr.write('', done);
+  return undefined as never;
+}

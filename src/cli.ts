@@ -42,7 +42,7 @@ import { registerLlmHost } from './commands/llm-host.js';
 import { registerHcs } from './commands/hcs.js';
 import { registerReview } from './commands/review.js';
 import { CliError, ExitCode } from './util/exit.js';
-import { c, info, disableColor } from './util/output.js';
+import { c, info, disableColor, exitAfterFlush } from './util/output.js';
 
 // Drift-reporting commands (merged from the Vibgrate CLI). These run on the
 // open base engine (`@vibgrate/core-open`) — no proprietary kernel.
@@ -129,6 +129,10 @@ export function buildProgram(): Command {
   const program = new Command();
   program
     .name('vg')
+    // Program options are read only before the subcommand name, which is what
+    // lets `vg serve` pass everything after an agent name straight to the
+    // agent (`vg serve --compress claude -p hi`) — see passThroughOptions there.
+    .enablePositionalOptions()
     .description(
       'vg — local codebase intelligence for AI coding agents: a deterministic, ' +
         'no-API-key code graph + MCP server, drift reporting, and version-correct library docs',
@@ -399,11 +403,11 @@ function handleError(err: unknown): never {
   if (err instanceof CommanderError) {
     // Help/version are not errors.
     if (err.code === 'commander.helpDisplayed' || err.code === 'commander.help') {
-      process.exit(ExitCode.OK);
+      return exitAfterFlush(ExitCode.OK);
     }
-    if (err.code === 'commander.version') process.exit(ExitCode.OK);
+    if (err.code === 'commander.version') return exitAfterFlush(ExitCode.OK);
     // Unknown command / bad option / missing argument → usage error.
-    process.exit(ExitCode.USAGE_ERROR);
+    return exitAfterFlush(ExitCode.USAGE_ERROR);
   }
   // Host UIs (`vg code --stream-json`) only render NDJSON on stdout. Mirror the
   // failure there so the panel is never left hanging after a human stderr line.
@@ -420,14 +424,14 @@ function handleError(err: unknown): never {
   if (err instanceof CliError) {
     emitHostError(err.message);
     info(c.red(`error: ${err.message}`));
-    process.exit(err.code);
+    return exitAfterFlush(err.code);
   }
   const message = err instanceof Error ? err.message : String(err);
   const correlation = Math.random().toString(36).slice(2, 10);
   emitHostError(message);
   info(c.red(`error: ${message}`));
   info(c.dim(`  (ref ${correlation}) — re-run with --json for detail, or report at https://vibgrate.com/help`));
-  process.exit(ExitCode.ERROR);
+  return exitAfterFlush(ExitCode.ERROR);
 }
 
 // Export for programmatic/default-build use and tests.

@@ -23,6 +23,16 @@ export const HOOK_NEEDLE = 'vg hook pre-tool-use';
 const MATCHER = 'Grep|Glob';
 const HOOK_TIMEOUT_S = 10;
 
+/**
+ * The SessionStart hook `vg install claude --compress` adds beside the routing:
+ * every new Claude Code session makes sure the compression listener the
+ * routing points at is actually running (idempotent — a healthy listener is
+ * reused). Without it the routing survives a reboot but the listener does not,
+ * and the first session after one fails to connect.
+ */
+export const SESSION_START_NEEDLE = 'serve --compress --background';
+const SESSION_START_TIMEOUT_S = 30;
+
 interface HookEntry {
   type: 'command';
   command: string;
@@ -41,6 +51,89 @@ export interface HookInstallResult {
 
 function hookCommand(vgBin: string): string {
   return `${vgBin} hook pre-tool-use`;
+}
+
+function sessionStartCommand(vgBin: string): string {
+  return `${vgBin} serve --compress --background --quiet`;
+}
+
+type Loaded = { file: string; rel: string; settings: Record<string, unknown> } | { file: string; rel: string; skipped: HookInstallResult };
+
+/** Parse the project settings file under the merge contract (fail closed on anything unparseable). */
+function loadSettings(root: string): Loaded {
+  const file = path.join(root, '.claude', 'settings.json');
+  const rel = path.join('.claude', 'settings.json');
+  let settings: Record<string, unknown> = {};
+  if (fs.existsSync(file)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { file, rel, skipped: { file: rel, status: 'skipped', note: 'settings.json is not a JSON object — left untouched' } };
+      }
+      settings = parsed as Record<string, unknown>;
+    } catch {
+      return { file, rel, skipped: { file: rel, status: 'skipped', note: 'settings.json is not parseable JSON — left untouched (fix it and rerun)' } };
+    }
+  }
+  return { file, rel, settings };
+}
+
+/**
+ * Merge a SessionStart entry that starts (or reuses) the compression listener.
+ * Same contract as the PreToolUse merge: strict JSON in, only
+ * `hooks.SessionStart` extended, idempotent by needle, everything else verbatim.
+ */
+export function installClaudeSessionStartHook(root: string, vgBin = 'vg'): HookInstallResult {
+  const loaded = loadSettings(root);
+  if ('skipped' in loaded) return loaded.skipped;
+  const { file, rel, settings } = loaded;
+  const hooks = (settings.hooks ??= {}) as Record<string, unknown>;
+  if (typeof hooks !== 'object' || Array.isArray(hooks)) {
+    return { file: rel, status: 'skipped', note: '"hooks" is not an object — left untouched' };
+  }
+  const groups = (hooks.SessionStart ??= []) as HookGroup[];
+  if (!Array.isArray(groups)) {
+    return { file: rel, status: 'skipped', note: '"hooks.SessionStart" is not an array — left untouched' };
+  }
+  const desired: HookEntry = { type: 'command', command: sessionStartCommand(vgBin), timeout: SESSION_START_TIMEOUT_S };
+  for (const group of groups) {
+    for (const entry of group.hooks ?? []) {
+      if (typeof entry.command === 'string' && entry.command.includes(SESSION_START_NEEDLE)) {
+        if (entry.command === desired.command && entry.timeout === desired.timeout) return { file: rel, status: 'unchanged' };
+        entry.command = desired.command;
+        entry.timeout = desired.timeout;
+        writeSettings(file, settings);
+        return { file: rel, status: 'written', note: 'updated existing vg SessionStart entry' };
+      }
+    }
+  }
+  groups.push({ hooks: [desired] });
+  writeSettings(file, settings);
+  return { file: rel, status: 'written' };
+}
+
+/** Remove the SessionStart entry we own; prunes groups/keys left empty. */
+export function uninstallClaudeSessionStartHook(root: string): HookInstallResult {
+  const loaded = loadSettings(root);
+  if ('skipped' in loaded) return loaded.skipped;
+  const { file, rel, settings } = loaded;
+  if (!fs.existsSync(file)) return { file: rel, status: 'unchanged' };
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  const groups = hooks?.SessionStart as HookGroup[] | undefined;
+  if (!Array.isArray(groups)) return { file: rel, status: 'unchanged' };
+  let removed = false;
+  for (const group of groups) {
+    const before = group.hooks?.length ?? 0;
+    group.hooks = (group.hooks ?? []).filter((e) => !(typeof e.command === 'string' && e.command.includes(SESSION_START_NEEDLE)));
+    if (group.hooks.length !== before) removed = true;
+  }
+  if (!removed) return { file: rel, status: 'unchanged' };
+  const kept = groups.filter((g) => (g.hooks?.length ?? 0) > 0);
+  if (kept.length) (hooks as Record<string, unknown>).SessionStart = kept;
+  else delete (hooks as Record<string, unknown>).SessionStart;
+  if (hooks && Object.keys(hooks).length === 0) delete settings.hooks;
+  writeSettings(file, settings);
+  return { file: rel, status: 'written' };
 }
 
 export function installClaudeHooks(root: string, vgBin = 'vg'): HookInstallResult {

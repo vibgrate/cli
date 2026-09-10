@@ -7,6 +7,12 @@ import { hashString } from './hash.js';
 import { redactSecrets } from '../core-open/utils/redact.js';
 import { extractAstRolesFromTree } from './ast-roles.js';
 import { scanEffects } from './effects.js';
+
+/** The regex effect scan runs unless `VIBGRATE_EFFECTS_REGEX=0` (gate parity runs only). */
+function effectsRegexEnabled(): boolean {
+  const v = process.env.VIBGRATE_EFFECTS_REGEX;
+  return !(v === '0' || v === 'false');
+}
 import { extractDutiesWithCandidates, fileBindings, type Bindings } from './duties.js';
 import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport, RawTypeRef } from './types.js';
 
@@ -500,8 +506,11 @@ function collectDefs(
       // A declaration without a body (an interface or abstract method) has
       // nothing to scan: no effects at all, so the classifier does not read
       // "no sites" as a contradiction of what the name says.
+      // VIBGRATE_EFFECTS_REGEX=0 switches this regex scan off so the gold gate
+      // can show the duty walk carries the key purposes on its own (regex-off
+      // parity, docs/HAILE-BLEEDING-EDGE-SPEC.md §4).
       effects:
-        (rule.kind === 'function' || rule.kind === 'method' || rule.kind === 'route' || rule.kind === 'job' || rule.kind === 'component' || rule.kind === 'test') && hasBody(defNode, langId)
+        effectsRegexEnabled() && (rule.kind === 'function' || rule.kind === 'method' || rule.kind === 'route' || rule.kind === 'job' || rule.kind === 'component' || rule.kind === 'test') && hasBody(defNode, langId)
           ? scanEffects(source.slice(defNode.startIndex, spanEnd.endIndex), langId)
           : undefined,
       _start: defNode.startIndex,

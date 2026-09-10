@@ -26,7 +26,7 @@ export function registerSavings(program: Command): void {
     .option('--benchmark', 'measure the compression pipeline offline over built-in fixtures instead of reporting recorded savings')
     .option('--iterations <n>', 'with --benchmark: runs per fixture', '5')
     .option('--fixture <name>', 'with --benchmark: only this fixture or content type (json, build_output, search_results, git_diff, source_code, html, plain_text, tabular)')
-    .option('--model <id>', 'with --benchmark: model id used for tokenizer selection', 'claude-sonnet-4-5')
+    .option('--model <id>', 'with --benchmark: model id used for tokenizer selection', 'claude-sonnet-5')
     .action(async function (this: Command) {
       const global = readGlobal(this);
       const days = Number(this.opts().days) || 30;
@@ -149,7 +149,7 @@ function printCompression(r: CompressionReport): void {
   info('');
   info(c.bold('  context compression') + c.dim('  (vg serve --compress / vg code / SDK; tokens and $ are estimates)'));
   if (!r.enabled) {
-    info(c.dim('    nothing recorded yet — start `vg serve --compress` and point an agent at it with `vg install <agent> --compress`'));
+    info(c.dim('    nothing recorded yet — `vg install <agent> --compress` routes an agent through the listener and starts it; `vg code` records here too'));
     return;
   }
   info(c.dim('    ' + 'window'.padEnd(8) + ['requests', 'before', 'after', 'saved', 'saved %', 'saved $'].map((h) => h.padStart(11)).join('')));

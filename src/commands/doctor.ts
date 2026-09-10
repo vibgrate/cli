@@ -310,7 +310,7 @@ function printCompression(x: CompressionDiagnosis): void {
     info(`  ${w.name.padEnd(10)} ${paint(w.status, w.summary)}${w.hint ? c.dim(` — ${w.hint}`) : ''}`);
   }
   for (const p of x.problems) info(`  config     ${c.yellow(p)}`);
-  if (!x.proxy.some((p) => p.status === 'ok')) info(c.dim('  tip        `vg serve --compress` starts the listener; `vg install <agent> --compress` points an agent at it; `vg savings` shows what it saved'));
+  if (!x.proxy.some((p) => p.status === 'ok')) info(c.dim('  tip        `vg install <agent> --compress` points an agent at the listener and starts it (`vg serve --compress --background` starts it alone); `vg savings` shows what it saved'));
 }
 
 function diagnoseCredentials(root: string): Diagnosis['credentials'] {

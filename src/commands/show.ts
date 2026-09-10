@@ -47,12 +47,13 @@ export function registerShow(program: Command): void {
       const extendsEdges = index.out(node.id, 'extends').concat(index.out(node.id, 'implements'));
       const supertypes = extendsEdges.map((e) => index.node(e.dst)?.qualifiedName).filter(Boolean);
       const area = graph.areas.find((a) => a.id === node.area);
-      const haile = findHaileSymbol(
-        readHaileSidecar(resolveGraphPath(root, global.graph), {
-          corpusHash: graph.provenance?.corpusHash,
-        }),
-        node.id,
-      );
+      const sidecar = readHaileSidecar(resolveGraphPath(root, global.graph), {
+        corpusHash: graph.provenance?.corpusHash,
+      });
+      const haile = findHaileSymbol(sidecar, node.id);
+      // The pack (and any user overlays) the findings were judged under — a
+      // reader must never have to infer it from a rule id's prefix.
+      const archOpts = { policy: sidecar?.policy ?? null, overlays: sidecar?.overlays ?? null };
 
       // `show` is the CLI twin of the MCP `get_node` tool — record it under that
       // shared name (source `cli`) when an AI host identified itself. Baseline =
@@ -95,7 +96,7 @@ export function registerShow(program: Command): void {
           calls: callees.map((n) => n.qualifiedName),
           calledBy: callers.map((n) => n.qualifiedName),
           extends: supertypes,
-          arch: haileJsonFields(haile) ?? null,
+          arch: haileJsonFields(haile, archOpts) ?? null,
         });
         return;
       }
@@ -107,7 +108,7 @@ export function registerShow(program: Command): void {
         `  importance ${node.importance.toFixed(3)}${node.isHub ? c.yellow(' ★ hub') : ''} · area #${node.area}${area ? ` ${c.dim(area.label)}` : ''}`,
       );
       if (haile) {
-        for (const line of formatHaileLines(haile)) info(line);
+        for (const line of formatHaileLines(haile, archOpts)) info(line);
       }
       if (supertypes.length) info(`  ${c.dim('extends:')} ${supertypes.join(', ')}`);
       info(`  ${c.dim('calls')} (${callees.length}): ${callees.slice(0, 12).map((n) => n.qualifiedName).join(', ') || '—'}`);

@@ -80,7 +80,9 @@ import {
   type RunProvenance,
 } from './run-provenance.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
-import { createToolOutputCompressor, type ToolOutputCompressor } from './compress-tool-output.js';
+import * as path from 'node:path';
+import { createToolOutputCompressor, RETRIEVE_TOOL_NAME, type CompressionStats, type ToolOutputCompressor } from './compress-tool-output.js';
+import { env as knobEnv } from '../compress/config.js';
 import { repositoryIdFromRoot } from '../runtime/paths.js';
 import type { SymbolSpan } from './apply.js';
 import type { CodeFs } from './session.js';
@@ -156,6 +158,8 @@ export interface AgentOptions {
   instruction: string;
   providers: Provider[];
   fsImpl: CodeFs;
+  /** Environment for the in-loop compressor (knobs, store and ledger paths); defaults to `process.env`. */
+  compressEnv?: NodeJS.ProcessEnv;
   /** Run a shell command (injected). Prefer {@link executionEnv} when set. May be async. */
   run: (command: string) => ShellResult | Promise<ShellResult>;
   /**
@@ -358,6 +362,8 @@ export interface AgentResult {
   provider: { id: string; model: string; fellBack: boolean };
   /** Total tokens the model reported over the run (for the cost meter). */
   usage: { promptTokens: number; completionTokens: number };
+  /** What the in-loop compressor did to tool results (absent when compression is off). */
+  compression?: CompressionStats;
   /** Trajectory / ZNS metrics for FCS reporting. */
   metrics?: AgentMetrics;
   /** Last Failure Capsule built during this run (if any). */
@@ -466,13 +472,14 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const agentToolSpecs = allowSubagents
     ? AGENT_TOOLS
     : AGENT_TOOLS.filter((t) => t.name !== 'spawn_subagent');
-  const allTools = [...agentToolSpecs, ...(options.externalTools?.specs ?? [])];
   // In-loop context compression: a bulky tool result is re-billed on every
   // later step, so it is shrunk once here on the way into the transcript.
   // Reads that an edit is computed from stay byte-exact; see
   // ./compress-tool-output.ts. Fails open — a compressor problem never stops
-  // a coding session.
-  const outputCompressor = await createLoopCompressor(instruction);
+  // a coding session. The model also gets `vg_retrieve`, so a marker left in
+  // a compressed result can be followed back to the original.
+  const outputCompressor = await createLoopCompressor(instruction, providers[0]?.model ?? '', options.compressEnv);
+  const allTools = [...agentToolSpecs, ...(outputCompressor.toolSpec ? [outputCompressor.toolSpec] : []), ...(options.externalTools?.specs ?? [])];
   // The relevance module ranks the seeds when installed (auto-provisioned);
   // null → the mechanical fallback. Computed once per run and reused by the
   // capsule-delta recompile below.
@@ -815,6 +822,9 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       trajectory: traj,
     };
     onEvent({ type: 'metrics', metrics });
+    // What the in-loop compressor saved lands in the ledger `vg savings`
+    // reads, so a `vg code` session counts like one through the listener.
+    outputCompressor.record({ model: providerInfo.model, client: 'vg-code', project: path.basename(root) });
     const result: AgentResult = {
       finalText,
       changes,
@@ -822,6 +832,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       stopped,
       provider: providerInfo,
       usage,
+      compression: outputCompressor.enabled ? { ...outputCompressor.stats } : undefined,
       metrics,
       failureCapsule: lastFailureCapsule,
       capsuleSummary: capsule ? summarizeCapsule(capsule) : capsuleSummary,
@@ -1119,6 +1130,16 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       if (call.name === 'search_code' && options.attribution?.client && !recordedSearch) {
         recordedSearch = true;
         recordSearchSaving(root, context, options.attribution, now());
+      }
+
+      // `vg_retrieve`: the model is following a compression marker. Answered
+      // from the local store in-process — no gate, no progress bookkeeping,
+      // never compressed again (that would re-introduce the marker it expands).
+      if (call.name === RETRIEVE_TOOL_NAME && outputCompressor.toolSpec) {
+        const r = outputCompressor.retrieve(call.arguments) ?? { content: JSON.stringify({ error: 'retrieval is not available in this session' }), found: false };
+        onEvent({ type: 'tool-result', name: call.name, content: r.content, mutated: false, ...(r.found ? {} : { failed: true }) });
+        messages.push({ role: 'tool', content: r.content, toolCallId: call.id, name: call.name });
+        continue;
       }
 
       // Shell commands see the real tree — flush session overlay first.
@@ -1525,21 +1546,32 @@ function writeAgentAudit(
  * failure to load them degrades to "no compression" rather than to a broken
  * agent — the whole layer is optional by construction.
  */
-async function createLoopCompressor(instruction: string): Promise<ToolOutputCompressor> {
+async function createLoopCompressor(instruction: string, model: string, env: NodeJS.ProcessEnv = process.env): Promise<ToolOutputCompressor> {
+  if (!knobEnv.bool('VG_CODE_COMPRESS', env)) return createToolOutputCompressor({ compress: ({ content }) => ({ content, tokensSaved: 0 }), env });
   try {
-    const [{ createRouter }, { tokenizerFor }, { defaultStore }] = await Promise.all([
+    const [{ createRouter }, { tokenizerFor }, { defaultStore }, { executeRetrieve }, { appendSavingsEvent }, { savingsUsd }] = await Promise.all([
       import('../compress/router.js'),
       import('../compress/tokenizers.js'),
       import('../compress/ccr/store.js'),
+      import('../compress/ccr/handler.js'),
+      import('../compress/ledger.js'),
+      import('../compress/pricing.js'),
     ]);
-    const router = createRouter({ profile: 'coding' });
-    const tokenizer = tokenizerFor('claude-sonnet-4-5');
-    const store = defaultStore();
+    const router = createRouter({ profile: 'coding', env });
+    // The routed model's tokenizer family, not a fixed one: the floors,
+    // ratios and savings are all counted in its tokens.
+    const tokenizer = tokenizerFor(model || 'claude-sonnet-5');
+    const store = defaultStore(env);
     return createToolOutputCompressor({
+      env,
       compress: ({ content, toolName, query }) => {
         const res = router.compress({ content, query: query ?? instruction, toolName, tokenizer, ccr: store, injectMarker: true, losslessOnly: false });
-        return { content: res.content, tokensSaved: Math.max(0, tokenizer.count(content) - tokenizer.count(res.content)) };
+        const before = tokenizer.count(content);
+        const after = tokenizer.count(res.content);
+        return { content: res.content, tokensSaved: Math.max(0, before - after), tokensBefore: before, tokensAfter: after };
       },
+      retrieve: (args) => executeRetrieve(store, args, { tokenizer, maxTokens: knobEnv.int('VG_CODE_RETRIEVE_MAX_TOKENS', env, { min: 256 }) }),
+      ledger: { append: (ev) => appendSavingsEvent(ev, env), usdSaved: savingsUsd },
     });
   } catch {
     return createToolOutputCompressor({ compress: ({ content }) => ({ content, tokensSaved: 0 }), env: { VG_CODE_COMPRESS: '0' } });

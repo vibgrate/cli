@@ -56,4 +56,14 @@ describe('finding lines and the policy id', () => {
     const inherited = formatHaileLines({ ...(base as object), findings: [{ rule: 'hexagonal-v1/controller-persists', severity: 'hard', message: 'HTTP handler writes the store via OrderRepository.save (1 hop); controllers must not persist' }] } as never);
     expect(inherited.some((l) => l.endsWith('(hexagonal-v1/controller-persists)'))).toBe(true);
   });
+
+  it('prints the pack and the overlay ids as their own line above the findings, and carries them in the JSON fields', () => {
+    const withPolicy = formatHaileLines(symbol, { policy: "hexagonal-v1", overlays: ["team/handlers-may-not-persist"] });
+    expect(withPolicy).toContain('  policy hexagonal-v1 + team/handlers-may-not-persist');
+    const policyOnly = formatHaileLines(symbol, { policy: "vertical-v1", overlays: [] });
+    expect(policyOnly).toContain('  policy vertical-v1');
+    expect(formatHaileLines(symbol).some((l) => l.startsWith('  policy'))).toBe(false);
+    expect(haileJsonFields(symbol, { policy: "layered-v1", overlays: ["org/x"] })).toMatchObject({ policy: 'layered-v1', overlays: ['org/x'] });
+    expect(haileJsonFields(symbol)).toMatchObject({ policy: null, overlays: [] });
+  });
 });

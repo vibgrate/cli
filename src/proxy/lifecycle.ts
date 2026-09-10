@@ -156,7 +156,9 @@ export interface EnsureOptions {
   port?: number;
   host?: string;
   timeoutMs?: number;
+  /** Extra `vg serve` flags for the daemon (e.g. `--profile aggressive`). */
   spawnArgs?: string[];
+  /** Environment for the daemon: upstream pins (`VG_PROXY_OPENAI_API_URL`, …) live here, not in flags. */
   env?: NodeJS.ProcessEnv;
   detached?: boolean;
   /** Injected for tests. */
@@ -173,8 +175,24 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 /**
- * Start-lock → probe → spawn a detached `vg serve --compress --compress-port N` (detached, stdio
- * ignored) → wait for `/health`. Returns the live state.
+ * The argv the detached listener is started with. `vg serve` is the one
+ * runtime, so the daemon is `vg serve --compress-only --compress-daemon`: the
+ * compression listener without a code map, kept alive until `vg serve stop`
+ * (or the admin shutdown route). The bind host travels as `VG_PROXY_HOST`
+ * because `--host` on `vg serve` belongs to MCP-over-HTTP, not the listener.
+ *
+ * Exported so the spawner and the command it spawns are tested against each
+ * other: the previous form (`vg proxy --background`) outlived the verb it
+ * named, and nothing caught the daemon exiting 5 before it ever bound.
+ */
+export function daemonArgv(port: number, extra: string[] = []): string[] {
+  return ['serve', '--compress-only', '--compress-daemon', '--compress-port', String(port), '--quiet', ...extra];
+}
+
+/**
+ * Start-lock → probe → spawn a detached `vg serve --compress-only
+ * --compress-daemon --compress-port N` (stdio ignored) → wait for `/health`.
+ * Returns the live state.
  */
 export async function ensureProxyRunning(opts: EnsureOptions = {}): Promise<{ url: string; port: number; pid: number; started: boolean; state: ProxyState }> {
   const env = opts.env ?? process.env;
@@ -212,8 +230,8 @@ export async function ensureProxyRunning(opts: EnsureOptions = {}): Promise<{ ur
     if (again) return { url, port, pid: again.pid, started: false, state: again };
     const execPath = opts.execPath ?? process.execPath;
     const script = opts.script ?? process.argv[1];
-    const args = [script, 'proxy', '--background', '--port', String(port), '--host', host, ...(opts.spawnArgs ?? [])];
-    const child = (opts.spawn ?? spawn)(execPath, args, { detached: opts.detached ?? true, stdio: 'ignore', env: { ...env } });
+    const args = [script, ...daemonArgv(port, opts.spawnArgs)];
+    const child = (opts.spawn ?? spawn)(execPath, args, { detached: opts.detached ?? true, stdio: 'ignore', env: { ...env, VG_PROXY_HOST: host, VG_PROXY_PORT: String(port) } });
     if (opts.detached ?? true) child.unref();
     while (now() < deadline) {
       await sleep(150);

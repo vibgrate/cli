@@ -394,7 +394,7 @@ function runShow(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryContex
 function architectureFieldsFor(graph: VgGraph, nodeId: string, ctx: GraphQueryContext): { architecture?: Record<string, unknown> } {
   try {
     const sidecar = readHaileSidecar(resolveGraphPath(ctx.root), { corpusHash: graph.provenance?.corpusHash });
-    const fields = haileJsonFields(findHaileSymbol(sidecar, nodeId));
+    const fields = haileJsonFields(findHaileSymbol(sidecar, nodeId), { policy: sidecar?.policy ?? null, overlays: sidecar?.overlays ?? null });
     return fields ? { architecture: fields } : {};
   } catch {
     return {};

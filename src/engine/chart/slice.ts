@@ -63,7 +63,8 @@ export function projectSlice(graph: VgGraph, sidecar: HaileSidecar | null, spec:
         ? 'hexagonal-v1'
         : 'kind';
   const laneDefs = lanesFor(policy === 'kind' ? 'layered-v1' : policy);
-  const cap = Math.max(1, Math.min(spec.cap ?? LANE_CARD_CAP, LANE_CARD_CAP));
+  const expandCap = spec.expand === true ? 120 : undefined;
+  const cap = Math.max(1, Math.min(expandCap ?? spec.cap ?? LANE_CARD_CAP, 120));
   const view: ArchSliceView = spec.view ?? 'job';
   const showTests = spec.tests === true;
   const symbols = bound ? indexSymbols(sidecar) : new Map<string, HaileSymbol>();

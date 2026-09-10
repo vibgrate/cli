@@ -12,11 +12,13 @@ import {
   writeNavigationConfig,
 } from '../install/registry.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
-import { installClaudeHooks, uninstallClaudeHooks } from '../install/hooks.js';
+import { installClaudeHooks, installClaudeSessionStartHook, uninstallClaudeHooks, uninstallClaudeSessionStartHook } from '../install/hooks.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { c, info, json } from '../util/output.js';
 import { applyProxyToAgent, isWrapAgent, unwrap, loginCopilot, type DurableScope } from '../wrap/index.js';
+import { ensureBackgroundListener } from './serve-compress.js';
+import { resolveProxyConfig } from '../proxy/config.js';
 import { env as knobEnv } from '../compress/config.js';
 
 /**
@@ -35,7 +37,7 @@ import { env as knobEnv } from '../compress/config.js';
  *   --learn      rewrite the agent's guardrails from what past sessions
  *                actually got wrong (preview unless --apply)
  *
- * The per-session equivalent of `--compress` is `vg serve --compress -- <agent>`,
+ * The per-session equivalent of `--compress` is `vg serve --compress <agent>`,
  * which sets the environment for one run and writes nothing.
  */
 export function registerInstall(program: Command): void {
@@ -107,8 +109,15 @@ export function registerInstall(program: Command): void {
         return;
       }
 
-      const targets = opts.all ? ASSISTANTS : opts.detect ? detected.map((d) => d.assistant) : tools.map(resolve);
-      if (targets.length === 0) {
+      // With --compress, an id the routing registry knows but the skill/MCP
+      // registry does not (cline, continue, goose, openhands, qwen, crush,
+      // vibe, zcode) is a routing-only install: its base-URL config is
+      // written and nothing else. Before this split those eight, all listed
+      // as supported in the docs, failed with "unknown assistant".
+      const routingOnly = opts.compress && !opts.all && !opts.detect ? tools.filter((id) => !assistantById(id) && isWrapAgent(WRAP_AGENT_ALIASES[id] ?? id)) : [];
+      const named = tools.filter((id) => !routingOnly.includes(id));
+      const targets = opts.all ? ASSISTANTS : opts.detect ? detected.map((d) => d.assistant) : named.map(resolve);
+      if (targets.length === 0 && routingOnly.length === 0) {
         if (opts.detect) {
           // Detecting nothing is a clean no-op, not a usage mistake.
           if (global.json) json({ root, detected: [], results: [] });
@@ -143,7 +152,36 @@ export function registerInstall(program: Command): void {
       // is pointed at the local compression listener (marker-tracked, so
       // `vg uninstall` restores it byte-for-byte). Assistants with no config
       // surface for a base URL are reported, not silently skipped.
-      const compressRouting = opts.compress ? routeThroughCompression(targets.map((a) => a.id), opts.compress, (opts.compressScope as DurableScope | undefined) ?? 'project', root) : [];
+      const compressRouting = opts.compress ? routeThroughCompression([...targets.map((a) => a.id), ...routingOnly], opts.compress, (opts.compressScope as DurableScope | undefined) ?? 'project', root) : [];
+
+      // Routing an agent at a listener that is not running is the setup
+      // failure every reviewer of this feature hit: the config is written, the
+      // agent starts, and its first request is refused. So `--compress` also
+      // makes sure the listener is up — a detached `vg serve --compress-only`
+      // daemon, reused when healthy — unless the URL names a listener vg does
+      // not own (an explicit `--compress <url>` or `VG_PROXY_URL`).
+      const routed = compressRouting.some((p) => p.status === 'written' || p.status === 'unchanged');
+      const ownListener = typeof opts.compress !== 'string' && !knobEnv.string('VG_PROXY_URL');
+      let listener: { url: string; started: boolean; error?: string } | null = null;
+      if (routed && ownListener && !global.offline) {
+        try {
+          const r = await ensureBackgroundListener(resolveProxyConfig());
+          listener = { url: r.url, started: r.started };
+        } catch (err) {
+          listener = { url: proxyUrlFor(opts.compress), started: false, error: (err as Error).message };
+        }
+      }
+      // Claude Code can re-check the listener itself: a SessionStart hook runs
+      // `vg serve --compress --background` (idempotent) on every new session,
+      // so the routing keeps working after a reboot. Project scope only — it
+      // lives in the same .claude/settings.json the routing was written to.
+      let sessionHook: ReturnType<typeof installClaudeSessionStartHook> | null = null;
+      if (routed && ownListener && (opts.compressScope ?? 'project') === 'project' && compressRouting.some((p) => p.id === 'claude' && p.status !== 'unsupported' && p.status !== 'failed')) {
+        sessionHook =
+          launch.command === 'npx'
+            ? { file: '.claude/settings.json', status: 'skipped', note: 'vg is not installed on PATH — the SessionStart hook that restarts the listener needs a fast binary (npm i -g @vibgrate/cli), rerun `vg install claude --compress` after' }
+            : installClaudeSessionStartHook(root, launch.command);
+      }
 
       // Guardrails learned from past sessions. Same outcome family (agent
       // config written), so it is a mode of install, not a verb.
@@ -167,7 +205,7 @@ export function registerInstall(program: Command): void {
           launch: { command: launch.command, args: launch.args, note: launch.note ?? null },
           results,
           ...(signIn ? { copilot: { file: signIn.file, fingerprint: signIn.fingerprint, domain: signIn.domain } } : {}),
-          ...(opts.compress ? { compress: compressRouting } : {}),
+          ...(opts.compress ? { compress: compressRouting, listener, sessionStartHook: sessionHook } : {}),
           ...(learned ? { learn: learned } : {}),
         });
         return;
@@ -180,7 +218,12 @@ export function registerInstall(program: Command): void {
         else if (p.status === 'unchanged') info(`${c.dim('·')} ${c.bold(p.id)} — already routed through ${p.url} ${c.dim(`(${p.file})`)}`);
         else info(`${c.yellow('!')} ${c.bold(p.id)} — ${p.note}`);
       }
-      if (compressRouting.some((p) => p.status === 'written')) info(c.dim('  start the listener with `vg serve --compress`; undo the routing with `vg uninstall <agent>`'));
+      if (listener?.error) info(`${c.yellow('!')} listener — ${listener.error}`);
+      else if (listener) info(`${c.green('✔')} ${c.bold('listener')} — ${listener.started ? 'started' : 'already running'} at ${listener.url} ${c.dim('(background; `vg serve status` · `vg serve stop`)')}`);
+      else if (routed && !ownListener) info(c.dim(`  routed at a listener vg does not manage (${proxyUrlFor(opts.compress)}) — make sure it is running`));
+      if (sessionHook?.status === 'written') info(`${c.green('✔')} ${c.bold('hook')} — SessionStart restarts the listener when needed (${sessionHook.file})`);
+      else if (sessionHook?.note) info(`${c.yellow('!')} hook — ${sessionHook.note}`);
+      if (compressRouting.some((p) => p.status === 'written')) info(c.dim('  undo the routing with `vg uninstall <agent>`'));
       // Opt-in PreToolUse enrichment (Claude Code settings format only): the
       // host's own Grep/Glob results arrive annotated with graph context.
       if (opts.hooks && targets.some((a) => a.id === 'claude')) {
@@ -207,12 +250,18 @@ export function registerInstall(program: Command): void {
     .action(function (this: Command, tools: string[], opts: { purge?: boolean; force?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
-      const results = tools.map(resolve).map((a) => ({ id: a.id, removed: uninstallAssistant(a, root, !!opts.purge) }));
+      const routingOnly = tools.filter((id) => !assistantById(id) && isWrapAgent(WRAP_AGENT_ALIASES[id] ?? id));
+      const results = [
+        ...tools.filter((id) => !routingOnly.includes(id)).map(resolve).map((a) => ({ id: a.id, removed: uninstallAssistant(a, root, !!opts.purge) })),
+        ...routingOnly.map((id) => ({ id, removed: [] as string[] })),
+      ];
       // Uninstalling claude also removes the vg PreToolUse hook entries (ours
       // only — everything else in settings.json is preserved verbatim).
-      if (tools.map(resolve).some((a) => a.id === 'claude')) {
+      if (results.some((r) => r.id === 'claude')) {
         const hooksResult = uninstallClaudeHooks(root);
         if (hooksResult.status === 'written') results.find((r) => r.id === 'claude')?.removed.push(`${hooksResult.file} (vg hook entries)`);
+        const startHook = uninstallClaudeSessionStartHook(root);
+        if (startHook.status === 'written') results.find((r) => r.id === 'claude')?.removed.push(`${startHook.file} (listener SessionStart hook)`);
       }
       // `install --compress` wrote the assistant's own base-URL config behind a
       // marker; uninstall is the one revert verb, so it restores that too.
@@ -270,7 +319,7 @@ function routeThroughCompression(ids: string[], explicit: string | boolean, scop
   const url = proxyUrlFor(explicit);
   return ids.map((id): CompressRouting => {
     const agent = WRAP_AGENT_ALIASES[id] ?? id;
-    const oneShot = `\`vg serve --compress -- ${id}\``;
+    const oneShot = `\`vg serve --compress ${id}\``;
     if (!isWrapAgent(agent)) return { id, url, status: 'unsupported', fields: [], note: `no compression routing for ${id} — it has no base-URL config vg can write; run it with ${oneShot} instead when supported` };
     try {
       const applied = applyProxyToAgent(agent, url, { scope, cwd: root });

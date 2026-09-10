@@ -40,7 +40,8 @@ describe('registry', () => {
   it('infers unknown ids by pattern and falls back to 128k', () => {
     expect(inferModelInfo('claude-opus-7').contextLimit).toBe(ONE_MILLION);
     expect(inferModelInfo('claude-opus-4-5-preview').contextLimit).toBe(200_000);
-    expect(inferModelInfo('gpt-5.5-turbo').contextLimit).toBe(400_000);
+    expect(inferModelInfo('gpt-5.5-turbo').contextLimit).toBe(1_050_000);
+    expect(inferModelInfo('gpt-5.4-turbo').contextLimit).toBe(400_000);
     expect(inferModelInfo('gpt-4.1-ultra').contextLimit).toBe(1_047_576);
     expect(inferModelInfo('gemini-3-flash').contextLimit).toBe(ONE_MILLION);
     expect(inferModelInfo('ollama/tinyllama').family).toBe('ollama');
@@ -84,5 +85,32 @@ describe('billsPriorThinking', () => {
     expect(billsPriorThinking('claude-haiku-4-5')).toBe(false);
     expect(billsPriorThinking('claude-3-7-sonnet')).toBe(false);
     expect(billsPriorThinking('gpt-4o')).toBe(false);
+  });
+});
+
+describe('Sep-2026 model generation', () => {
+  it('knows the current OpenAI, Gemini and Grok releases by exact id', () => {
+    expect(modelInfo('gpt-6-astra')).toMatchObject({ family: 'openai', contextLimit: 1_050_000, maxOutput: 128_000, billsThinking: true });
+    expect(modelInfo('gpt-5.6-sol').contextLimit).toBe(1_050_000);
+    expect(modelInfo('gpt-5.5').contextLimit).toBe(1_050_000);
+    expect(modelInfo('gpt-5.4-mini').contextLimit).toBe(400_000);
+    expect(modelInfo('gpt-5.3-codex').family).toBe('openai');
+    expect(modelInfo('gemini-3.8-flash')).toMatchObject({ family: 'google', contextLimit: 1_000_000, billsThinking: true });
+    expect(modelInfo('gemini-3.1-pro').id).toBe('gemini-3.1-pro-preview');
+    expect(modelInfo('gemini-omni-flash-preview').id).toBe('gemini-omni-1.1-flash');
+    expect(modelInfo('grok-4.6')).toMatchObject({ family: 'xai', contextLimit: 500_000, billsThinking: true });
+    expect(modelInfo('grok-4.3').contextLimit).toBe(1_000_000);
+  });
+
+  it('infers the next releases in each line instead of falling to the 128k bucket', () => {
+    // A GPT-6 or GPT-5.7 id nobody has registered yet keeps the 1.05M window;
+    // before this rule `gpt-6-*` fell through `/^gpt-/` to 128k / 16k output.
+    expect(modelInfo('gpt-6-nova').contextLimit).toBe(1_050_000);
+    expect(modelInfo('gpt-5.7-terra').contextLimit).toBe(1_050_000);
+    expect(modelInfo('gpt-5.4-turbo').contextLimit).toBe(400_000);
+    expect(modelInfo('grok-4.7').contextLimit).toBe(500_000);
+    expect(modelInfo('grok-4.2-fast').contextLimit).toBe(1_000_000);
+    expect(modelInfo('gemini-3.9-flash').contextLimit).toBe(1_000_000);
+    expect(modelInfo('openrouter/openai/gpt-6-astra').contextLimit).toBe(1_050_000);
   });
 });

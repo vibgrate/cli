@@ -74,13 +74,28 @@ function bytes(graph: VgGraph): string {
   return serializeGraph({ ...graph, generatedAt: PIN });
 }
 
-/** Cold arm: the mutated tree in a FRESH directory — no cache can exist. */
+/**
+ * Cold arm: the mutated tree in a FRESH directory — no cache can exist. The
+ * content-addressed store is machine-wide, so the cold arm also gets its own
+ * empty store: a parse served by content is exactly the reuse this gate must
+ * not let into the reference build.
+ */
 async function coldBuild(files: Record<string, string>): Promise<string> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'incr-cold-'));
-  writeTree(dir, files);
-  const r = await buildGraph({ root: dir, generatedAt: PIN, noIndex: true });
-  expect(r.reused).toBe(0); // genuinely cold
-  return bytes(r.graph);
+  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'incr-cold-store-'));
+  const prev = process.env.VIBGRATE_CACHE_DIR;
+  process.env.VIBGRATE_CACHE_DIR = store;
+  try {
+    writeTree(dir, files);
+    const r = await buildGraph({ root: dir, generatedAt: PIN, noIndex: true });
+    expect(r.reused).toBe(0); // genuinely cold
+    expect(r.cas?.parseHits ?? 0).toBe(0);
+    return bytes(r.graph);
+  } finally {
+    if (prev === undefined) delete process.env.VIBGRATE_CACHE_DIR;
+    else process.env.VIBGRATE_CACHE_DIR = prev;
+    fs.rmSync(store, { recursive: true, force: true });
+  }
 }
 
 type Mutate = (files: Record<string, string>) => Record<string, string>;
@@ -92,7 +107,7 @@ type Mutate = (files: Record<string, string>) => Record<string, string>;
  */
 async function warmIncremental(
   mutate: Mutate,
-): Promise<{ out: string; reused: number; tscReused: number; mutated: Record<string, string> }> {
+): Promise<{ out: string; reused: number; tscReused: number; casHits: number; mutated: Record<string, string> }> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'incr-warm-'));
   writeTree(dir, FIXTURE);
   await buildGraph({ root: dir, generatedAt: PIN, noIndex: true });
@@ -106,7 +121,13 @@ async function warmIncremental(
 
   const r = await buildGraph({ root: dir, generatedAt: PIN, noIndex: true });
   expect(r.reused).toBeGreaterThan(0); // the parse cache must have engaged
-  return { out: bytes(r.graph), reused: r.reused, tscReused: r.tsc?.reusedFiles ?? 0, mutated };
+  return {
+    out: bytes(r.graph),
+    reused: r.reused,
+    tscReused: r.tsc?.reusedFiles ?? 0,
+    casHits: r.cas?.parseHits ?? 0,
+    mutated,
+  };
 }
 
 describe('incremental ≡ full rebuild (byte identity across the mutation corpus)', () => {
@@ -166,7 +187,29 @@ describe('incremental ≡ full rebuild (byte identity across the mutation corpus
       return out;
     };
     const warm = await warmIncremental(mutate);
+    // The path cache misses the new name; the content-addressed store serves
+    // the identical bytes — a rename is a retag, not a re-parse.
+    expect(warm.casHits).toBeGreaterThanOrEqual(1);
     expect(warm.out).toBe(await coldBuild(warm.mutated));
+  });
+
+  it('a fresh checkout of an indexed tree (no path cache, shared store) re-parses nothing and is byte-identical', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'incr-fresh-'));
+    writeTree(dir, FIXTURE);
+    const first = await buildGraph({ root: dir, generatedAt: PIN, noIndex: true });
+    expect(first.cas?.parseWrites ?? 0).toBeGreaterThan(0);
+    expect(first.cas?.manifest && fs.existsSync(first.cas.manifest)).toBe(true);
+
+    // What `git checkout` into a sibling branch — or a wiped `.vibgrate/` —
+    // looks like to the engine: every mtime new, no path-keyed cache.
+    fs.rmSync(path.join(dir, '.vibgrate', 'cache'), { recursive: true, force: true });
+    for (const rel of Object.keys(FIXTURE)) fs.writeFileSync(path.join(dir, rel), FIXTURE[rel]!);
+
+    const second = await buildGraph({ root: dir, generatedAt: PIN, noIndex: true });
+    expect(second.reparsed).toBe(0);
+    expect(second.cas?.parseHits).toBe(second.totalFiles);
+    expect(bytes(second.graph)).toBe(bytes(first.graph));
+    expect(bytes(second.graph)).toBe(await coldBuild(FIXTURE));
   });
 
   it('touch-only change (same content, new mtime) — identical output AND identical corpusHash', async () => {

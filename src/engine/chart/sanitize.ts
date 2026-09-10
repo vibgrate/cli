@@ -149,6 +149,23 @@ function sanitizeCard(raw: unknown): ArchCard | null {
     ...(Array.isArray(c.calls) ? { calls: c.calls.filter(isLink).slice(0, 12) } : {}),
     ...(Array.isArray(c.calledBy) ? { calledBy: c.calledBy.filter(isLink).slice(0, 12) } : {}),
     ...(Array.isArray(c.types) ? { types: c.types.filter((t): t is string => typeof t === 'string').slice(0, 12) } : {}),
+    ...(Array.isArray(c.members)
+      ? {
+          members: c.members
+            .filter((m) => m && typeof m === 'object' && typeof (m as { name?: unknown }).name === 'string')
+            .slice(0, 8)
+            .map((m) => {
+              const row = m as { id?: string; name: string; job?: string; file?: string; line?: number | null };
+              return {
+                id: typeof row.id === 'string' ? row.id : row.name,
+                name: row.name,
+                job: typeof row.job === 'string' ? row.job : '',
+                file: typeof row.file === 'string' ? row.file : '',
+                line: typeof row.line === 'number' && row.line > 0 ? Math.floor(row.line) : null,
+              };
+            }),
+        }
+      : {}),
     ...(c.guard ? { guard: true } : {}),
   };
 }

@@ -14,6 +14,8 @@ import { loadCoverage, applyCoverage } from './coverage.js';
 import { buildFacts } from './facts.js';
 import { groundGraph } from './grounding.js';
 import { loadCache } from './cache.js';
+import { casRepositoryId, gitHeadCommit, openParseCas, writeRefManifest, MANIFEST_SCHEMA, type CasStats } from './cas.js';
+import { detectGitRef } from '../runtime/git-ref.js';
 import { ambientFingerprint, loadTscCache, tsConfigFingerprint, tscKeys } from './tsc-cache.js';
 import {
   resolveLimits,
@@ -115,6 +117,12 @@ export interface BuildResult {
   reused: number;
   /** Files skipped via mtime+size fingerprint (subset of reused). */
   statHits: number;
+  /**
+   * Content-addressed store engagement (cas.ts). `parseHits` counts parses
+   * served by content hash after the path-keyed cache missed — a rename, a
+   * sibling branch, another worktree. Absent when the store is disabled.
+   */
+  cas?: CasStats & { dir: string; manifest?: string };
   totalFiles: number;
   /** Stat+hash of every file in the corpus — input for the freshness snapshot. */
   fileStats: FileStat[];
@@ -171,10 +179,15 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   // can change the Terraform structure extracted, so it belongs in the
   // reproducibility fingerprint alongside the source grammars.
   const grammars = `${grammarSetVersion()}+${toolchainGrammarSetVersion()}`;
+  // The content-addressed store sits under the path-keyed cache: `--no-cache`
+  // bypasses its reads (a cold arm must be cold) but still writes, so a
+  // verify rebuild proves that a stored parse equals a fresh one.
+  const cas = openParseCas(root, { noReads: options.noCache, parseKey: { toolVersion: VERSION, grammars } });
   const cache = loadCache(root, {
     toolVersion: VERSION,
     grammars,
     disabled: options.noCache,
+    cas,
   });
 
   // Hash every discovered file (mtime+size fast path → content hash) and split
@@ -186,6 +199,8 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const toParse: DiscoveredFile[] = [];
   const reused: FileParse[] = [];
   const buildWarnings: string[] = [];
+  /** Files skipped for size — in fileStats under a sentinel hash, never in the manifest. */
+  const oversizeRels = new Set<string>();
   let statHits = 0;
   const pendingHash: { file: DiscoveredFile; size: number; mtimeMs: number }[] = [];
   for (const file of files) {
@@ -208,6 +223,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
         mtimeMs: stat.mtimeMs,
         hash: hashString(`vg:oversize:${stat.size}`),
       });
+      oversizeRels.add(file.rel);
       buildWarnings.push(
         `${file.rel}: skipped — ${formatBytes(stat.size)} exceeds the ` +
           `${formatBytes(limits.maxFileBytes)} per-file limit (set VG_MAX_FILE_BYTES to raise it, 0 to disable)`,
@@ -254,7 +270,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
         mtimeMs: p.mtimeMs,
         hash: r.hash,
       });
-      const cached = cache.get(p.file.rel, r.hash);
+      const cached = cache.get(p.file.rel, r.hash, p.file.lang.id);
       if (cached) {
         reused.push(cached);
         cache.set(p.file.rel, cached, { mtimeMs: p.mtimeMs, size: p.size });
@@ -537,6 +553,29 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const edgeKinds = [...new Set(analysis.edges.map((e) => e.kind))].sort() as EdgeKind[];
   const corpusHash = computeCorpusHash(parses, hashes);
 
+  // The ref's catalog: the tree this graph was composed from, as path → object
+  // address, beside the objects themselves. Best-effort and off the graph —
+  // it never reaches serialized output.
+  let casResult: BuildResult['cas'];
+  if (cas) {
+    const git = detectGitRef(root);
+    const ref = git.kind === 'none' || !git.ref ? 'current' : git.ref;
+    const commit = git.kind === 'detached' ? git.ref : git.kind === 'branch' ? gitHeadCommit(root) : undefined;
+    const manifest = writeRefManifest(cas, {
+      schema: MANIFEST_SCHEMA,
+      repoId: casRepositoryId(root),
+      ref,
+      commit,
+      root,
+      engine: VERSION,
+      corpusHash,
+      files: fileStats
+        .filter((f) => !oversizeRels.has(f.rel))
+        .map((f) => ({ path: f.rel, addr: `b3:${f.hash}`, size: f.size })),
+    });
+    casResult = { ...cas.stats, dir: cas.dir, manifest: manifest ?? undefined };
+  }
+
   // Edge-level epistemic tier: stamp every edge with how it was resolved
   // (observed / name-matched / declared) so consumers can filter by assurance.
   // Pure function of the edge's fields + its destination node kind → deterministic.
@@ -626,6 +665,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     reparsed: parsedNew.length,
     reused: reused.length,
     statHits,
+    cas: casResult,
     totalFiles: files.length,
     fileStats,
     resolveStats: resolved.stats,

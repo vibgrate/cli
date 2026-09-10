@@ -55,6 +55,14 @@ import { readHaileSidecar } from '../engine/haile/sidecar.js';
 import { loadHaileProvider } from '../engine/haile/haile-provider.js';
 import { overviewOf, sliceOf } from '../engine/chart/server.js';
 import { architecturePageHtml } from '../engine/chart/page.js';
+import { readArchUiScript } from '../engine/chart/arch-ui-script.js';
+import {
+  BOARD_LAYOUT_MAGIC,
+  defaultBoardLayout,
+  readBoardLayout,
+  writeBoardLayout,
+  type ArchBoardLayout,
+} from '../engine/chart/board-layout.js';
 import { showJsonFor } from '../engine/chart/model.js';
 import { parseArchView, type ArchOverview, type ArchSlice } from '../engine/chart/arch-types.js';
 import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
@@ -742,6 +750,8 @@ export class VibgrateLanguageServer {
     this.conn.onRequest('vibgrate/architecture/page', (_m, params) => this.onArchitecturePage(params));
     this.conn.onRequest('vibgrate/architecture/slice', (_m, params) => this.onArchitectureSlice(params));
     this.conn.onRequest('vibgrate/architecture/node', (_m, params) => this.onArchitectureNode(params));
+    this.conn.onRequest('vibgrate/architecture/ui', () => this.onArchitectureUi());
+    this.conn.onRequest('vibgrate/architecture/layout', (_m, params) => this.onArchitectureLayout(params));
     // Trend data for the panel sparkline (plan §5.6). Entries carry their
     // methodology so the client can break the line across a change — the one
     // trend rule v3 imposes. Empty history is an empty array, not an error.
@@ -1730,7 +1740,7 @@ export class VibgrateLanguageServer {
    * webview or `vg show arch`). Overview is included so the host can paint L0
    * without a second round trip.
    */
-  private async onArchitecturePage(params: unknown): Promise<{ html: string; overview: ArchOverview | null } | null> {
+  private async onArchitecturePage(params: unknown): Promise<{ html: string; overview: ArchOverview | null; layout: ArchBoardLayout } | null> {
     const p = params as { host?: string; nonce?: string } | undefined;
     const host = p?.host === 'vscode' ? 'vscode' : 'browser';
     const nonce = typeof p?.nonce === 'string' ? p.nonce : undefined;
@@ -1738,9 +1748,10 @@ export class VibgrateLanguageServer {
       const provider = await loadHaileProvider();
       const html = architecturePageHtml(provider, { host, nonce });
       const graph = this.graphForArchitecture();
-      if (!graph) return { html, overview: null };
+      const layout = readBoardLayout(this.opts.root) ?? defaultBoardLayout();
+      if (!graph) return { html, overview: null, layout };
       const sidecar = this.architectureSidecar(graph);
-      return { html, overview: overviewOf(graph, sidecar, provider) };
+      return { html, overview: overviewOf(graph, sidecar, provider), layout };
     } catch {
       return null;
     }
@@ -1756,6 +1767,8 @@ export class VibgrateLanguageServer {
       focus?: string;
       architecture?: boolean;
       tests?: boolean;
+      cap?: number;
+      expand?: boolean;
     };
     const graph = this.graphForArchitecture();
     if (!graph || typeof p?.packageId !== 'string' || !p.packageId) return null;
@@ -1768,10 +1781,41 @@ export class VibgrateLanguageServer {
         focus: typeof p.focus === 'string' ? p.focus : undefined,
         architecture: p.architecture !== false,
         tests: p.tests === true,
+        cap: typeof p.cap === 'number' && p.cap > 0 ? p.cap : undefined,
+        expand: p.expand === true,
       });
     } catch {
       return null;
     }
+  }
+
+  /**
+   * `vibgrate/architecture/ui` — minified map canvas (React Flow). Null when
+   * the architecture module did not ship the pack; the host keeps vanilla HTML.
+   */
+  private async onArchitectureUi(): Promise<{ js: string | null }> {
+    try {
+      const provider = await loadHaileProvider();
+      return { js: readArchUiScript(provider) };
+    } catch {
+      return { js: null };
+    }
+  }
+
+  /**
+   * `vibgrate/architecture/layout` — read or write `.vibgrate/board.arch.json`.
+   */
+  private onArchitectureLayout(params: unknown): ArchBoardLayout {
+    const p = params as { layout?: unknown } | undefined;
+    if (p?.layout && typeof p.layout === 'object') {
+      const current = readBoardLayout(this.opts.root) ?? defaultBoardLayout();
+      return writeBoardLayout(this.opts.root, {
+        ...current,
+        ...(p.layout as object),
+        magic: BOARD_LAYOUT_MAGIC,
+      } as ArchBoardLayout);
+    }
+    return readBoardLayout(this.opts.root) ?? defaultBoardLayout();
   }
 
   /**

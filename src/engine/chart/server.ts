@@ -24,6 +24,7 @@ import { projectOverview } from './overview.js';
 import { projectSlice } from './slice.js';
 import { sanitizeOverview, sanitizeSlice } from './sanitize.js';
 import { parseArchView, type ArchOverview, type ArchSlice, type ArchSliceView } from './arch-types.js';
+import { defaultBoardLayout, readBoardLayout, writeBoardLayout, BOARD_LAYOUT_MAGIC, type ArchBoardLayout } from './board-layout.js';
 
 export const DEFAULT_CHART_HOST = '127.0.0.1';
 export const DEFAULT_CHART_PORT = 7420;
@@ -53,11 +54,9 @@ export async function startChartServer(opts: ChartListenOptions): Promise<ChartS
   const host = opts.host ?? DEFAULT_CHART_HOST;
   const requested = opts.port ?? DEFAULT_CHART_PORT;
   const server = http.createServer((req, res) => {
-    try {
-      handle(req, res, graph, sidecar, provider);
-    } catch {
-      send(res, 500, 'map failed', 'text/plain');
-    }
+    void handle(req, res, opts.root, graph, sidecar, provider).catch(() => {
+      if (!res.headersSent) send(res, 500, 'map failed', 'text/plain');
+    });
   });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -77,13 +76,14 @@ export async function startChartServer(opts: ChartListenOptions): Promise<ChartS
   });
 }
 
-function handle(
+async function handle(
   req: IncomingMessage,
   res: ServerResponse,
+  root: string,
   graph: VgGraph,
   sidecar: HaileSidecar | null,
   provider: HaileProvider | null,
-): void {
+): Promise<void> {
   const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
   if (!originAllowed(origin, process.env.VIBGRATE_ALLOWED_ORIGINS)) {
     send(res, 403, 'forbidden origin', 'text/plain');
@@ -100,6 +100,24 @@ function handle(
     serveArchUi(res, provider, pathName.slice('/arch-ui/'.length));
     return;
   }
+  if (req.method === 'GET' && pathName === '/api/layout') {
+    json(res, readBoardLayout(root) ?? defaultBoardLayout());
+    return;
+  }
+  if ((req.method === 'PUT' || req.method === 'POST') && pathName === '/api/layout') {
+    const raw = await readBody(req);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch {
+      json(res, { error: 'invalid json' }, 400);
+      return;
+    }
+    const current = readBoardLayout(root) ?? defaultBoardLayout();
+    const merged = { ...current, ...(parsed && typeof parsed === 'object' ? parsed : {}), magic: BOARD_LAYOUT_MAGIC };
+    json(res, writeBoardLayout(root, merged as ArchBoardLayout));
+    return;
+  }
   if (req.method === 'GET' && pathName === '/api/meta') {
     json(res, overviewOf(graph, sidecar, provider).meta);
     return;
@@ -114,7 +132,20 @@ function handle(
     const focus = url.searchParams.get('focus') ?? undefined;
     const architecture = url.searchParams.get('arch') !== '0';
     const tests = url.searchParams.get('tests') === '1';
-    json(res, sliceOf(graph, sidecar, provider, { packageId, view, focus, architecture, tests }));
+    const expand = url.searchParams.get('expand') === '1';
+    const capRaw = Number(url.searchParams.get('cap') ?? '');
+    json(
+      res,
+      sliceOf(graph, sidecar, provider, {
+        packageId,
+        view,
+        focus,
+        architecture,
+        tests,
+        expand,
+        cap: Number.isFinite(capRaw) && capRaw > 0 ? capRaw : undefined,
+      }),
+    );
     return;
   }
   if (req.method === 'GET' && pathName === '/api/graph') {
@@ -192,6 +223,8 @@ export function sliceOf(
     focus?: string;
     architecture: boolean;
     tests: boolean;
+    cap?: number;
+    expand?: boolean;
   },
 ): ArchSlice {
   const resolved = spec.packageId || projectOverview(graph, sidecar).packages[0]?.id || 'root';
@@ -201,6 +234,8 @@ export function sliceOf(
     focus: spec.focus,
     architecture: spec.architecture,
     tests: spec.tests,
+    cap: spec.cap,
+    expand: spec.expand,
   };
   if (provider?.projectSlice) {
     try {
@@ -246,6 +281,23 @@ function serveArchUi(res: ServerResponse, provider: HaileProvider | null, rel: s
     'x-content-type-options': 'nosniff',
   });
   res.end(body);
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 1_000_000) {
+        reject(new Error('payload too large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
 }
 
 function lookup(graph: VgGraph, key: string) {

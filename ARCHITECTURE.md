@@ -60,6 +60,9 @@ src/
 │   ├── query.ts, queries.ts, lookup.ts, test-query.ts   Query layer
 │   ├── impact.ts, paths.ts                              Graph algorithms
 │   ├── cache.ts, artifacts.ts                           On-disk artifacts
+│   ├── cas.ts            Content-addressed store: parses keyed by file bytes,
+│   │                     vectors keyed by embed text, one manifest per ref —
+│   │                     shared across branches, renames, and worktrees
 │   ├── snapshot.ts       Binary snapshot (graph.snap): sidecar cache beside a
 │   │                     committed graph.json; THE map in the global store
 │   ├── graph-model.ts, types.ts                         Core data model
@@ -135,6 +138,22 @@ asserts stable output.
    questions against it — they do not re-parse the source.
 3. **drift reporting** runs on top of `@vibgrate/core-open` and the resolved
    package-version manifest.
+
+### Reuse across branches, renames, and worktrees
+
+A parse is a pure function of a file's bytes, its language, the tool version,
+and the grammar set; a semantic vector is a pure function of the model and the
+symbol's embed text (which carries no file path or area label). `engine/cas.ts`
+stores both by content under the machine cache directory
+(`$VIBGRATE_CACHE_DIR/cas/<repo>/`, evictable, never inside the repository), and
+writes a manifest per git ref listing the tree as `path → object`. The
+path-keyed parse cache under `.vibgrate/cache/` is only a hint over that store:
+a miss falls through to the object by content hash and re-tags its path. So
+the first visit to a sibling branch, a renamed file, or a second worktree of the
+same clone re-parses and re-embeds only what genuinely changed. The store is a
+performance layer with no say over output: the incremental-identity gate
+(`engine/incremental-identity.test.ts`) asserts that a build served from the
+store is byte-identical to a cold build, and `--no-cache` bypasses its reads.
 
 ## How to add a language
 

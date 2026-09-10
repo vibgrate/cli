@@ -169,6 +169,22 @@ describe('project slice', () => {
     expect(painted.some((c) => c.symbolId === 'SaveUser' || c.id === slice.focusCardId)).toBe(true);
   });
 
+  it('folds DTOs and never titles a card constructor', () => {
+    const slice = projectSlice(monorepoGraph(), null, { packageId: 'pkg-api' });
+    const titles = slice.columns.flatMap((c) => c.cards.map((card) => card.title));
+    expect(titles).not.toContain('UserDto');
+    expect(titles).not.toContain('constructor');
+  });
+
+  it('expand raises the per-lane cap so +N more can open the rest', () => {
+    const tight = projectSlice(monorepoGraph(), null, { packageId: 'pkg-api', cap: 1 });
+    const wide = projectSlice(monorepoGraph(), null, { packageId: 'pkg-api', expand: true });
+    const tightN = tight.columns.flatMap((c) => c.cards).length;
+    const wideN = wide.columns.flatMap((c) => c.cards).length;
+    expect(tightN).toBeLessThanOrEqual(1 + (tight.focusCardId ? 1 : 0));
+    expect(wideN).toBeGreaterThan(tightN);
+  });
+
   it('does not paint tests unless asked', () => {
     const hidden = projectSlice(monorepoGraph(), emptySidecar('arch-test'), { packageId: 'pkg-api' });
     expect(hidden.columns.flatMap((c) => c.cards).some((c) => c.title === 'makeUser')).toBe(false);

@@ -7,7 +7,7 @@ import { c, info, json } from '../util/output.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { configSummary, resolveProxyConfig, type ProxyConfig } from '../proxy/config.js';
 import { startProxy } from '../proxy/server.js';
-import { pidAlive, probeProxy, readProxyState, stopProxy, listClients, pruneStaleClients } from '../proxy/lifecycle.js';
+import { ensureProxyRunning, pidAlive, probeProxy, readProxyState, stopProxy, listClients, pruneStaleClients } from '../proxy/lifecycle.js';
 import { wrapStatus } from '../wrap/status.js';
 import { AGENTS } from '../wrap/agents.js';
 import { copilotStatus } from '../wrap/copilot-auth.js';
@@ -32,10 +32,14 @@ export function registerServeCompression(serve: Command): void {
   const status = serve
     .command('status')
     .description('what the local runtime is serving: compression listener, attached agents, sign-in state')
-    .option('--port <n>', 'compression port to inspect')
+    // `--compress-port`, not `--port`: `--port` on the parent `vg serve` is
+    // MCP-over-HTTP's, and one flag meaning two things on one command family
+    // is the confusion this avoids. (`vg serve` passes options through past
+    // its first positional, so the subcommand does receive its own flags.)
+    .option('--compress-port <n>', 'compression port to inspect (default: VG_PROXY_PORT or 8787)')
     .action(async function (this: Command) {
       const global = readGlobal(this);
-      const port = portOf(this.opts().port) ?? resolveProxyConfig().port;
+      const port = portOf(this.opts().compressPort) ?? resolveProxyConfig().port;
       const state = readProxyState(port);
       const alive = state ? pidAlive(state.pid) : false;
       const probe = state && alive ? await probeProxy(state.url, { token: state.token }) : { ok: false };
@@ -59,7 +63,7 @@ export function registerServeCompression(serve: Command): void {
         json(payload);
         return;
       }
-      if (!state) info(`${c.cyan('vg serve status')} · no compression listener on port ${port} ${c.dim('(start one with `vg serve --compress`)')}`);
+      if (!state) info(`${c.cyan('vg serve status')} · no compression listener on port ${port} ${c.dim('(start one with `vg serve --compress --background`, or `vg install <agent> --compress`)')}`);
       else if (!alive) info(`${c.cyan('vg serve status')} · ${c.yellow('stale')} state file for pid ${state.pid} on port ${port} ${c.dim('(run `vg serve stop` to clean up)')}`);
       else if (!probe.ok) info(`${c.cyan('vg serve status')} · pid ${state.pid} alive but ${state.url}/health did not answer`);
       else info(`${c.cyan('vg serve status')} · ${c.green('compressing')} at ${state.url} ${c.dim(`(pid ${state.pid}, ${state.mode}/${state.profile}, v${state.version})`)}`);
@@ -82,10 +86,10 @@ export function registerServeCompression(serve: Command): void {
   const stop = serve
     .command('stop')
     .description('stop a background compression listener (graceful shutdown, then SIGTERM)')
-    .option('--port <n>', 'port to stop')
+    .option('--compress-port <n>', 'port to stop (default: VG_PROXY_PORT or 8787)')
     .action(async function (this: Command) {
       const global = readGlobal(this);
-      const port = portOf(this.opts().port) ?? resolveProxyConfig().port;
+      const port = portOf(this.opts().compressPort) ?? resolveProxyConfig().port;
       const r = await stopProxy(port);
       if (global.json) {
         json({ port, ...r });
@@ -181,6 +185,8 @@ export interface CompressionListener {
   /** Already serving when we arrived — we neither started nor own it. */
   attached: boolean;
   close(): Promise<void>;
+  /** Resolves once a listener this process owns has closed (never, when attached). */
+  closed: Promise<void>;
 }
 
 /**
@@ -197,11 +203,15 @@ export async function startCompression(
 ): Promise<CompressionListener> {
   const existing = readProxyState(cfg.port);
   if (existing && pidAlive(existing.pid) && (await probeProxy(existing.url, { token: existing.token })).ok) {
-    return { url: existing.url, port: cfg.port, attached: true, close: async () => {} };
+    return { url: existing.url, port: cfg.port, attached: true, close: async () => {}, closed: new Promise<void>(() => {}) };
   }
   let running;
+  let onClosed: () => void = () => {};
+  const closed = new Promise<void>((resolve) => {
+    onClosed = resolve;
+  });
   try {
-    running = await startProxy(cfg, { stderr: opts.stderr, pinnedKnobs: pinnedKnobs(opts.pinned) });
+    running = await startProxy(cfg, { stderr: opts.stderr, pinnedKnobs: pinnedKnobs(opts.pinned), onClosed: () => onClosed() });
   } catch (err) {
     const msg =
       (err as NodeJS.ErrnoException).code === 'EADDRINUSE'
@@ -209,7 +219,28 @@ export async function startCompression(
         : (err as Error).message;
     throw new CliError(msg, ExitCode.ERROR);
   }
-  return { url: running.url, port: running.port, attached: false, close: () => running.close() };
+  return { url: running.url, port: running.port, attached: false, close: () => running.close(), closed };
+}
+
+/**
+ * `vg serve --compress --background`: make sure a detached listener is running
+ * on the configured port and return at once. Idempotent — a healthy listener
+ * is reused, never duplicated — so `vg install <agent> --compress` and the
+ * Claude Code SessionStart hook can both call it on every start.
+ */
+export async function ensureBackgroundListener(
+  cfg: ProxyConfig,
+  opts: { profile?: string; mode?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ url: string; port: number; started: boolean }> {
+  const spawnArgs: string[] = [];
+  if (opts.profile) spawnArgs.push('--profile', opts.profile);
+  if (opts.mode) spawnArgs.push('--compress-mode', opts.mode);
+  try {
+    const r = await ensureProxyRunning({ port: cfg.port, host: cfg.host, spawnArgs, env: opts.env ?? process.env, detached: true });
+    return { url: r.url, port: r.port, started: r.started };
+  } catch (err) {
+    throw new CliError(`could not start the compression listener on port ${cfg.port}: ${(err as Error).message} — start it in the foreground with \`vg serve --compress\` to see why`, ExitCode.ERROR);
+  }
 }
 
 function redactSettings(settings: Record<string, unknown>): Record<string, unknown> {

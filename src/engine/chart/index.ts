@@ -1,4 +1,5 @@
 export { chartPage, architecturePageHtml } from './page.js';
+export { readBoardLayout, writeBoardLayout, defaultBoardLayout, BOARD_LAYOUT_MAGIC } from './board-layout.js';
 export { startChartServer, DEFAULT_CHART_HOST, DEFAULT_CHART_PORT, overviewOf, sliceOf } from './server.js';
 export type { ChartServer, ChartListenOptions } from './server.js';
 export { projectChart, showJsonFor, pathJson, searchNodes, searchGraph, viewNode } from './model.js';

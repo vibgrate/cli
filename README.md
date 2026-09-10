@@ -102,18 +102,21 @@ compresses tool output and older turns **before** they reach the model, keeps
 the originals retrievable on your machine, and reports what it saved.
 
 ```bash
-vg serve --compress             # your local runtime, now compressing as well as serving the map
-vg install claude --compress    # point Claude Code at it (undo with `vg uninstall claude`)
+vg install claude --compress    # point Claude Code at the listener and start it (undo with `vg uninstall claude`)
 vg savings                      # tokens and estimated dollars saved, today / 7 days / 30 days
 ```
 
 There is no separate command to learn: compression is a mode of the server you
-already run and a flag on the installer you already use. If you want only the
-compression — no code map, nothing to build first — `vg serve --compress-only`
-is the whole setup. For a single session
-without writing any config, `vg serve --compress -- claude` runs one agent
-through it and restores your environment when it exits. Inside `vg code` it is
-already on — bulky tool results are compressed before they re-enter the loop.
+already run and a flag on the installer you already use. `vg install <agent>
+--compress` writes the agent's own base-URL config, starts the listener in the
+background (or reuses one already running) and, for Claude Code, adds a
+SessionStart hook that brings it back after a reboot. `vg serve --compress`
+serves the code map and compresses in one foreground process; `vg serve
+--compress --background` starts only the listener and returns. For a single
+session without writing any config, `vg serve --compress claude` runs one
+agent through it and restores your environment when it exits. Inside `vg code`
+it is already on — bulky tool results are compressed before they re-enter the
+loop, and the model can pull any original back with `vg_retrieve`.
 
 What it does, in the order it runs:
 
@@ -589,7 +592,7 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | Command | Description |
 | --- | --- |
 | `vg ask "<question>"` | Query the map in natural language |
-| `vg build [path]` | Build / update the code map (incremental, deterministic); `--policy hexagonal-v1\|layered-v1` picks the boundary rules the architecture module evaluates (default from `.vibgrate/architecture.toml`; the two packs are compared in [docs/architecture-policies.md](./docs/architecture-policies.md)) |
+| `vg build [path]` | Build / update the code map (incremental, deterministic); `--policy hexagonal-v1\|layered-v1\|vertical-v1` picks the boundary rules the architecture module evaluates (default from `.vibgrate/architecture.toml`, which may also carry your own `[[overlay]]` rules); `--init-policy` writes a first draft of that file from what the build classified (the packs and overlays are described in [docs/architecture-policies.md](./docs/architecture-policies.md)) |
 | `vg bundle` | Build an air-gapped bundle (grammars + graph + library catalog) |
 | `vg code ["<instruction>"]` | Graph-grounded coding agent — local or hosted model, every edit and command approved (`--auto` for CI, `--single` for a one-shot diff) |
 | `vg embed` | Precompute the semantic index for instant `vg ask` |
@@ -620,13 +623,14 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 Compression adds no new command. It is a mode of `vg serve`, a flag on
 `vg install`, and a section of `vg savings`.
 
-**Typical path:** `vg serve --compress` → `vg install claude --compress` → `vg savings`
+**Typical path:** `vg install claude --compress` → use Claude Code as usual → `vg savings`
 
 | Command | Description |
 | --- | --- |
 | `vg serve --compress` | Serve the code map **and** compress context: an Anthropic- and OpenAI-compatible listener on loopback for any agent |
-| `vg serve --compress -- <agent>` | Run one agent session through it, environment only — nothing written, nothing left behind |
-| `vg install <agent> --compress` | Point an agent at it durably by writing its own base-URL config (marker-tracked and reversible) |
+| `vg serve --compress --background` | Start the listener as a background process (or reuse the running one) and return; `vg serve stop` ends it |
+| `vg serve --compress <agent>` | Run one agent session through it, environment only — nothing written, nothing left behind |
+| `vg install <agent> --compress` | Point an agent at it durably by writing its own base-URL config (marker-tracked and reversible), and start the listener |
 | `vg uninstall <agent>` | Put that config back byte-for-byte, along with everything else `vg install` wrote |
 | `vg install <agent> --learn` | Turn your past agent sessions into guardrails in its instructions file: repeated failures, loops, missing context (`--apply` writes) |
 | `vg savings` | Tokens and dollars saved, today / 7 days / 30 days, by model, client and project |

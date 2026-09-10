@@ -144,8 +144,13 @@ describe('embedder loading', () => {
         '  EmbeddingModel: {},',
         '  FlagEmbedding: {',
         '    init: async () => ({',
-        '      embed: async function* () {},',
-        '      queryEmbed: async () => [0.25, 0.75],',
+        // The engine embeds queries through `embed` with the model's own
+        // instruction prefix (never the backend's generic `queryEmbed`); the
+        // fake answers with a recognisable vector only when that prefix arrived.
+        '      embed: async function* (texts) {',
+        "        yield texts.map((t) => (t.startsWith('Represent this sentence for searching relevant passages: q') ? [0.25, 0.75] : [0, 0]));",
+        '      },',
+        '      queryEmbed: async () => [9, 9],',
         '    }),',
         '  },',
         '};',
@@ -195,7 +200,7 @@ describe('embed model id + cache detection (drives the ask setup note)', () => {
     }
   });
 
-  it('nodeEmbedText adds doc summary + file-path + area context, dropping noise dirs', () => {
+  it('nodeEmbedText adds the doc summary but no path or area words (vectors must be portable across refs)', () => {
     const node = {
       qualifiedName: 'Table',
       kind: 'function',
@@ -203,12 +208,16 @@ describe('embed model id + cache detection (drives the ask setup note)', () => {
       doc: 'Renders a sortable data table of rows',
       file: 'apps/web/src/components/Table.tsx',
     } as unknown as GraphNode;
-    const t = nodeEmbedText(node, 'react');
+    const t = nodeEmbedText(node);
     expect(t).toContain('Table');
     expect(t).toContain('Renders a sortable data table of rows'); // doc summary included
-    expect(t).toContain('components'); // meaningful dir kept
-    expect(t).toContain('react'); // area label included
-    expect(t.split(/\s+/)).not.toContain('src'); // noise dir dropped
+    // Path words and the area label are lexical signals, not part of what the
+    // symbol *is*: leaving them out is what lets the same symbol on another
+    // branch, at a renamed path, or after a recluster reuse its vector.
+    expect(t.split(/\s+/)).not.toContain('components');
+    expect(t.split(/\s+/)).not.toContain('src');
+    // Same node at another path → identical embed text → identical vector key.
+    expect(nodeEmbedText({ ...node, file: 'lib/ui/Table.tsx' } as unknown as GraphNode)).toBe(t);
   });
 });
 
@@ -253,6 +262,11 @@ describe('getNodeEmbeddings — cached, resumable, progress', () => {
 
   it('resumes from a partial cache (only the missing entries are embedded)', async () => {
     const dir = makeProject(FILES);
+    // This exercises the sidecar / legacy-JSON resume path on its own: with the
+    // content-addressed store on, the dropped entries would simply bind from
+    // it and nothing would be embedded (covered by src/engine/embeddings.test.ts).
+    const savedCas = process.env.VIBGRATE_CAS;
+    process.env.VIBGRATE_CAS = '0';
     try {
       const g = (await buildGraph({ root: dir, generatedAt: '2020-01-01T00:00:00.000Z', inline: true })).graph;
       const targets = g.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external').length;
@@ -271,11 +285,10 @@ describe('getNodeEmbeddings — cached, resumable, progress', () => {
       fs.mkdirSync(cdir, { recursive: true });
       const legacy = path.join(cdir, 'embeddings-stub-emb.json');
       const { hashString } = await import('../src/engine/hash.js');
-      const areaLabel = new Map(g.areas.map((a) => [a.id, a.label] as const));
       const entries: Record<string, { hash: string; vec: number[] }> = {};
       for (const id of keep) {
         const n = g.nodes.find((x) => x.id === id)!;
-        entries[id] = { hash: hashString(nodeEmbedText(n, areaLabel.get(n.area))), vec: [1, 0] };
+        entries[id] = { hash: hashString(nodeEmbedText(n)), vec: [1, 0] };
       }
       fs.writeFileSync(legacy, JSON.stringify({ model: 'stub-emb', entries }));
 
@@ -287,6 +300,8 @@ describe('getNodeEmbeddings — cached, resumable, progress', () => {
       expect(fs.existsSync(bin)).toBe(true);
       expect(fs.existsSync(legacy)).toBe(false);
     } finally {
+      if (savedCas === undefined) delete process.env.VIBGRATE_CAS;
+      else process.env.VIBGRATE_CAS = savedCas;
       cleanup(dir);
     }
   });

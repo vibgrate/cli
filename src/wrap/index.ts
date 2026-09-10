@@ -5,7 +5,7 @@
  * This module is the engine, not a command. Two surfaces drive it:
  *
  *   `vg install <agent> --compress`   durable — writes the agent's own config
- *   `vg serve --compress -- <agent>`  one session — environment only
+ *   `vg serve --compress <agent>`     one session — environment only
  *
  * and `vg uninstall <agent>` is the single revert path for both.
  */

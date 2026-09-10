@@ -11,8 +11,9 @@ Two surfaces drive it, and one reverts both:
 
 | Intent | Command | What this module does |
 |---|---|---|
-| Route an agent durably | `vg install <agent> --compress` | `applyProxyToAgent()` — a marker-tracked edit of the agent's own base-URL config, `.vg-backup` beside it, `durable` holder (pid 0) |
-| Route an agent for one session | `vg serve --compress -- <agent>` | `wrap()` — ensure a listener, set the child environment, spawn, forward signals, restore on exit |
+| Route an agent durably | `vg install <agent> --compress` | `applyProxyToAgent()` — a marker-tracked edit of the agent's own base-URL config, `.vg-backup` beside it, `durable` holder (pid 0). The command then calls `ensureBackgroundListener()` (a detached `vg serve --compress-only --compress-daemon`) and, for Claude Code at project scope, writes a SessionStart hook (`src/install/hooks.ts`) that re-runs `vg serve --compress --background` |
+| Route an agent for one session | `vg serve --compress <agent>` | `wrap()` — ensure a listener (`ensureProxyRunning`, same daemon argv — see `daemonArgv()` in `src/proxy/lifecycle.ts`), set the child environment, spawn, forward signals, restore on exit |
+| Start or reuse the listener alone | `vg serve --compress --background` | `ensureBackgroundListener()` — the idempotent form the hook and the installer call |
 | Undo either | `vg uninstall <agent>` | `unwrap()` — restore the original bytes, skipping a file another live session still holds unless `--force` |
 | See what is routed | `vg serve status` | `wrapStatus()` |
 | Health rows | `vg doctor` | `wrapDiagnostics()` |
@@ -40,6 +41,16 @@ one-session run in the same directory inherits that routing and never reverts
 it, so a durable install is not undone by an agent exiting. Two concurrent
 one-session runs each own their own edits and cannot revert each other's;
 `unwrap` reports a file it declined to touch rather than taking it.
+
+## Upstream pins
+
+An agent whose provider is not Anthropic or OpenAI (Grok, Kimi, Mistral Vibe,
+Copilot, Gemini CLI, Amp) declares `proxyEnv(env)` on its spec — settings such
+as `VG_PROXY_OPENAI_API_URL` or `VG_PROXY_PROVIDER` — which `wrap()` hands to
+the listener it starts. They are env, not flags: `vg serve` has no per-provider
+URL flags by design. A listener that is already running keeps its own
+configuration, so one shared listener serves one upstream; `vg serve config
+set` changes it durably.
 
 ## Config-file markers
 

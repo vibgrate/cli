@@ -73,16 +73,18 @@ export type StartProxyDeps = {
   bindModules?: boolean;
   /** Foreground: echo log lines to stderr. */
   stderr?: boolean;
+  /** Called once the listener has fully closed — by `close()`, the admin shutdown route or `vg serve stop`. */
+  onClosed?: () => void;
   baseEnv?: NodeJS.ProcessEnv;
   pinnedKnobs?: string[];
 };
 
 export async function startProxy(config: ProxyConfig, deps: StartProxyDeps = {}): Promise<RunningProxy> {
   if (!isLoopbackBind(config.host) && !config.token) {
-    throw new Error(`refusing to bind ${config.host} without a token: set VG_PROXY_TOKEN or pass --token (non-loopback binds require client authentication)`);
+    throw new Error(`refusing to bind ${config.host} without a token: set VG_PROXY_TOKEN (\`vg serve config set VG_PROXY_TOKEN <secret>\`) — a non-loopback bind requires client authentication`);
   }
   const env = config.env;
-  const { session, store, bindModules, stderr, baseEnv, pinnedKnobs, ...overrides } = deps;
+  const { session, store, bindModules, stderr, baseEnv, pinnedKnobs, onClosed, ...overrides } = deps;
   let bound: string[] = [];
   let missing: string[] = [];
   let bundle: ProxyDeps;
@@ -204,6 +206,7 @@ export async function startProxy(config: ProxyConfig, deps: StartProxyDeps = {})
       const t = setTimeout(resolve, 2000);
       t.unref?.();
     });
+    if (onClosed) void closing.then(onClosed, onClosed);
     return closing;
   };
 
@@ -326,7 +329,11 @@ async function dispatch(ctx: ProxyContext, req: http.IncomingMessage, res: http.
       return handleChat(ctx, req, res, openAIResponsesAdapter, body, headers, route.upstreamPath ?? pathname);
     case 'anthropic_count_tokens':
     case 'passthrough':
-      return handlePassthrough(ctx, req, res, body, headers, pathname);
+    case 'gemini_passthrough':
+      // The query string travels with a pass-through: Gemini streams on
+      // `?alt=sse` and may authenticate on `?key=`; dropping it turned a
+      // streaming call into a buffered one and an auth into a 401.
+      return handlePassthrough(ctx, req, res, body, headers, `${pathname}${url.search}`);
     case 'shutdown':
       return handleShutdown(ctx, req, res);
     case 'clients':

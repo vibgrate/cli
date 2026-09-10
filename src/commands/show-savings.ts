@@ -38,7 +38,7 @@ export function registerShowSavings(show: Command): void {
         if (!running) process.exitCode = ExitCode.NOT_FOUND;
         return;
       }
-      info(`${c.cyan('vg show savings')} · ${c.bold(url)} ${running ? c.green('(compressing)') : c.yellow('(nothing listening — start it with `vg serve --compress`)')}`);
+      info(`${c.cyan('vg show savings')} · ${c.bold(url)} ${running ? c.green('(compressing)') : c.yellow('(nothing listening — start it with `vg serve --compress --background`)')}`);
       if (!running) process.exitCode = ExitCode.NOT_FOUND;
       if (o.open) {
         const opened = await openUrl(url);

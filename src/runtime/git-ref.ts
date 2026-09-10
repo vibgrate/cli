@@ -4,13 +4,15 @@
  * Used to key ActiveGraph slots and on-disk snapshots: one graph per
  * (repositoryId, gitRef), not merely per clone path.
  *
- * Results are cached per absolute root for the process lifetime so a hot path
- * (path resolution, auto-refresh write) never re-spawns `git rev-parse` on
- * every call. The ref only changes when the user checks out another branch —
- * restart `vg serve` (or any long-lived process) after a checkout, same as
- * before this cache existed for slot identity.
+ * Results are cached per absolute root so a hot path (path resolution,
+ * auto-refresh write) never re-spawns `git rev-parse` on every call. The
+ * cache is keyed on the *contents* of `.git/HEAD` (a few dozen bytes, read
+ * per call — as cheap as a stat and exact): a checkout rewrites HEAD, so a
+ * long-lived process (`vg serve`, `vgd`, the editor) sees the new ref on its
+ * next call without a restart and never writes into the old ref's slot.
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -24,22 +26,24 @@ export interface GitRefInfo {
 
 export type GitRunner = (args: string[], cwd: string) => { stdout: string; status: number };
 
-/** Process-lifetime cache: abs(root) → ref. Bypassed when a custom `run` is passed (tests). */
-const refCache = new Map<string, GitRefInfo>();
+/** Cache: abs(root) → ref, valid while `.git/HEAD` still reads the same. Bypassed when a custom `run` is passed (tests). */
+const refCache = new Map<string, { info: GitRefInfo; head: string }>();
 
 /**
  * Resolve the current branch name, or detached HEAD SHA.
  * Never throws — returns kind `none` when git is missing or the path is not a repo.
- * When `run` is omitted (production), the result is cached per absolute root for
- * the process lifetime. Tests that pass a custom `run` always re-invoke it.
+ * When `run` is omitted (production), the result is cached per absolute root
+ * and revalidated against the contents of `.git/HEAD` on every call, so a
+ * checkout is seen live. Tests that pass a custom `run` always re-invoke it.
  */
 export function detectGitRef(root: string, run?: GitRunner): GitRefInfo {
   const useCache = run === undefined;
   const runner = run ?? defaultGitRun;
   const key = useCache ? path.resolve(root) : '';
+  const head = useCache ? headFingerprint(key) : '';
   if (useCache) {
     const hit = refCache.get(key);
-    if (hit) return hit;
+    if (hit && hit.head === head) return hit.info;
   }
   let info: GitRefInfo;
   try {
@@ -62,14 +66,54 @@ export function detectGitRef(root: string, run?: GitRunner): GitRefInfo {
   } catch {
     info = { ref: '', kind: 'none' };
   }
-  if (useCache) refCache.set(key, info);
+  if (useCache) refCache.set(key, { info, head });
   return info;
 }
 
-/** Tests / rare branch-switch mid-process: drop the cached ref for one root or all. */
+/** Tests / callers that want a guaranteed re-probe: drop the cached ref for one root or all. */
 export function clearDetectGitRefCache(root?: string): void {
   if (root === undefined) refCache.clear();
   else refCache.delete(path.resolve(root));
+}
+
+/**
+ * The bytes of the `HEAD` file governing `root` — `ref: refs/heads/main\n`,
+ * or a bare SHA when detached — or `''` when no git dir is found. Walks up
+ * from `root` (vg may run in a subdirectory) and follows a `.git` *file*
+ * (`gitdir: …`, how linked worktrees are laid out) to the worktree's own HEAD.
+ */
+export function headFingerprint(root: string): string {
+  let dir = path.resolve(root);
+  for (let depth = 0; depth < 64; depth++) {
+    const dotGit = path.join(dir, '.git');
+    let st: fs.Stats | undefined;
+    try {
+      st = fs.statSync(dotGit);
+    } catch {
+      st = undefined;
+    }
+    if (st) {
+      let gitDir = dotGit;
+      if (st.isFile()) {
+        // Linked worktree / submodule: `.git` is a pointer file.
+        try {
+          const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, 'utf8'));
+          if (m) gitDir = path.resolve(dir, m[1]!);
+        } catch {
+          return '';
+        }
+      }
+      try {
+        return fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8');
+      } catch {
+        return '';
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return '';
 }
 
 /**

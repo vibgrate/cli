@@ -328,7 +328,19 @@ vg fix --dry-run             # show exactly what would change, apply nothing
 vg fix --plan safe --yes     # apply a specific plan non-interactively (CI)
 vg fix --no-apply            # only print the plans
 vg fix --format json         # machine-readable report for CI or an agent (no apply)
+vg fix --kind patch --yes    # group and apply just the patch-level bumps
+vg fix --packages "lodash,chalk" --yes  # group and apply exactly this batch
 ```
+
+**Grouping, instead of one PR per package.** `--packages` and `--kind` narrow
+planning to a specific batch — every patch bump, every minor bump, or an
+explicit package list — so a CI job or an editor integration can open one PR
+per batch instead of a constant stream of single-package PRs. The two compose:
+`--packages "a,b,c" --kind minor` plans+applies only the minor bumps among
+those three. Each batch still goes through the full hosted planner, so
+cross-package conflicts *within that batch* (e.g. two packages that would pin
+a shared peer dependency to incompatible ranges once bumped together) are
+still caught — a conflict blocks apply unless you pass `--force`.
 
 **Applying.** When there's more than one plan, `vg fix` shows them and asks which
 to apply; with a single plan it applies it directly. Applying runs your project's
@@ -389,6 +401,9 @@ disruptive plan.
 | `--dry-run` | Show what would change without applying. |
 | `--no-apply` | Only print the plans; never modify the project. |
 | `--repository-name <name>` | Override the repository name recorded for this plan. |
+| `--packages <names>` | Plan/apply only these packages (comma-separated) — for grouping a specific batch instead of every drifted dependency. |
+| `--kind <patch\|minor\|major>` | Plan/apply only upgrades of this semver bump kind. Combine with `--packages` to target one Dependabot-style batch. |
+| `--force` | Apply a plan even if the planner flagged a blocking cross-package conflict within it. |
 | `--fail-on-vulns <severity>` | Exit non-zero if the recommended plan leaves an advisory at or above this severity unresolved. |
 
 Exit codes: `0` on success, `2` when `--fail-on-vulns` finds an unresolved
@@ -1126,6 +1141,20 @@ With no `--provider`, `vg code` chooses from what you have already configured, b
 
 Add `--json` for the full machine-readable result (proposed changes, diffs, and the verification summary), or `--out <file>` to write it for CI. Requires a map — run `vg` first if you have not built one.
 
+#### Tool results are compressed
+
+Inside the agent loop there is no wire to sit on, so `vg code` applies
+[context compression](#context-compression) itself: a bulky `run_command`,
+`search_code` or `web_fetch` result is compressed once on the way into the
+transcript instead of being re-billed on every later step. Reads an edit is
+computed from, and failed results, are never touched. The original stays in the
+local retrievable store and the model gets a `vg_retrieve` tool, so it can pull
+back the whole result or just the lines it needs (`grep`, `lines`, `head`,
+`tail`, capped by `VG_CODE_RETRIEVE_MAX_TOKENS`). Tokens are counted in the
+routed model's tokenizer; the run result reports what it saved (`compression`
+in `--json`) and `vg savings` counts it under the `vg-code` client. Set
+`VG_CODE_COMPRESS=0` to turn it off.
+
 ---
 
 ### vg embed
@@ -1249,6 +1278,10 @@ Run `vg install --list` for the live support matrix (ids can grow over time) —
 | `--detect` | Detect assistants in use (repo footprint, home config, PATH) and install for those; with `--list`, only report what was detected |
 | `--list` | Show the support matrix and exit |
 | `--no-hook` | Skip the advisory nudge |
+| `--compress [url]` | Also route the assistant through the local compression listener and start it — see [vg install --compress](#vg-install---compress--vg-uninstall) |
+| `--compress-scope <s>` | Where `--compress` writes: `project` (default) or `user` |
+| `--login` | Copilot only: GitHub device-flow sign-in before the routing is written |
+| `--learn` / `--apply` | Turn past agent sessions into guardrails in the assistant's instructions file — see [vg install --learn](#vg-install---learn) |
 
 **`vg uninstall` flags:**
 
@@ -1256,6 +1289,7 @@ Run `vg install --list` for the live support matrix (ids can grow over time) —
 |------|-------------|
 | `<tools...>` | Assistant ids to remove (required) |
 | `--purge` | Also delete the skill file |
+| `--force` | Restore a routed config file even when another live session still holds it |
 
 `vg uninstall` only removes AI-assistant wiring. To remove the CLI package from the machine, use your package manager (`npm uninstall -g @vibgrate/cli`, etc.).
 
@@ -1543,6 +1577,7 @@ vg serve
 | `--share-stats` | — | Also upload the counts-only usage ledger to Vibgrate to improve the local MCP (opt-in; off by default; implies `--savings`; disabled under `--offline`) |
 | `--dedup` | — | Collapse a node's heavy relation lists on repeat reads within a session, to save tokens (opt-in) |
 | `--no-refresh` | — | Serve the map as built; skip the auto-rebuild when files change |
+| `--compress`, `--compress-only`, `--background`, `--compress-port`, `--compress-mode`, `--profile`, `[agent…]` | — | Context compression in the same process — see [vg serve --compress](#vg-serve---compress) |
 
 Via stdio (default), your AI assistant spawns the server. Via `--http`, it runs as a local HTTP endpoint for browser or shared access.
 
@@ -1703,7 +1738,7 @@ already use (`vg install`), and a section of the report you already read
 
 ```bash
 vg serve --compress          # serve the map *and* compress context, one process
-vg install claude --compress # point Claude Code at it (undo: `vg uninstall claude`)
+vg install claude --compress # point Claude Code at it and start the listener (undo: `vg uninstall claude`)
 vg savings                   # what it saved: today / 7 days / 30 days
 ```
 
@@ -1741,7 +1776,8 @@ vg serve --compress                          # MCP on stdio + compression on 127
 vg serve --http --compress                   # MCP over HTTP as well
 vg serve --compress --profile aggressive     # compress harder
 vg serve --compress-only                     # compression only, no code map needed
-vg serve --compress -- claude --model o4-mini   # one session, environment only
+vg serve --compress --background             # start (or reuse) the listener as a background process, then return
+vg serve --compress claude --model claude-sonnet-5   # one session, environment only
 ```
 
 | Flag | Default | Description |
@@ -1751,7 +1787,8 @@ vg serve --compress -- claude --model o4-mini   # one session, environment only
 | `--compress-only` | off | Compression **without** a code map: none is built, none is required, and only the tools that answer without one are listed |
 | `--compress-mode <m>` | `cache` | `cache` (newest turn only, prompt-cache safe) or `token` (maximum removal) |
 | `--profile <p>` | `coding` | `coding` / `balanced` / `aggressive` / `general` |
-| `[-- <agent> …]` | — | Run one agent session through the listener, then restore the environment |
+| `--background` | off | Start the compression listener as a background process — or reuse the healthy one already on the port — and return. No code map, no MCP; stop it with `vg serve stop`. This is what `vg install <agent> --compress` runs for you |
+| `[-- <agent> …]` | — | Run one agent session through the listener (started for you if it is not running), then restore the environment |
 
 Everything else is a setting rather than a flag. There are around 130 `VG_*`
 knobs — upstream URLs, spend caps, rate limits, tokens for off-loopback
@@ -1769,16 +1806,22 @@ asked for compression. They remain callable either way.
 `vg serve --compress` attaches to it instead of failing — several assistants
 each spawning their own `vg serve` is the normal case, not an error.
 
-Subcommands: `vg serve status [--json]` (what is listening, which agents are
-routed, Copilot sign-in state), `vg serve stop`, `vg serve config [--json]`
-with `set <KEY> <VALUE>` / `unset <KEY>`.
+Subcommands: `vg serve status [--compress-port <n>] [--json]` (what is
+listening, which agents are routed, Copilot sign-in state), `vg serve stop
+[--compress-port <n>]`, `vg serve config [--json]` with `set <KEY> <VALUE>` /
+`unset <KEY>`.
 
-Local endpoints (loopback only, `404` elsewhere): `/` (the savings page, see
-`vg show savings`), `/health`, `/ready`, `/version`, `/api/stats`,
-`/api/savings`, `/api/settings` (GET / POST), `/api/ccr/<hash>`,
-`/api/proxy/clients`, `/api/proxy/shutdown`, `/metrics` (Prometheus text).
-Sidecar endpoints for your own code: `POST /v1/compress` (a request body in →
-the same body compressed, plus accounting) and `POST /v1/retrieve`.
+Local endpoints: `/` (the savings page, see `vg show savings`), `/health`,
+`/ready`, `/version`, `/api/stats`, `/api/savings`, `/api/proxy/clients`,
+`/metrics` (Prometheus text) — these answer on the listener's own bind and,
+when a token is set, require it off-loopback. The admin endpoints
+`/api/settings` (GET / POST), `/api/ccr/<hash>`, `/api/proxy/shutdown`,
+`/api/cache/clear` and `/api/stats/reset` answer loopback callers only and
+return `404` to anyone else. Sidecar endpoints for your own code: `POST
+/v1/compress` (a `{ messages, … }` request body in → the same body compressed,
+plus accounting) and `POST /v1/retrieve`. Gemini-native calls
+(`/v1beta/models/…:generateContent`, `:streamGenerateContent?alt=sse`) pass
+through with their query string intact — forwarded, not yet compressed.
 
 Every response carries `x-vg-tokens-before`, `x-vg-tokens-after`,
 `x-vg-tokens-saved`, `x-vg-usd-saved` and `x-vg-transforms` headers so a client
@@ -1793,22 +1836,36 @@ routing an assistant through compression is a flag on it — not a separate verb
 that edits the same files a second way. `vg uninstall` is the one revert.
 
 ```bash
-vg install claude --compress             # write Claude Code's base URL, repo-local
+vg install claude --compress             # write Claude Code's base URL, repo-local, and start the listener
 vg install codex --compress --compress-scope user   # write the home config instead
 vg install copilot-cli --compress --login           # device-flow sign-in, then route
 vg serve status                          # what is routed right now, and by whom
 vg uninstall cursor                      # put its config back, byte-for-byte
 ```
 
-**Supported agents:** `claude`, `codex`, `cursor`, `aider`, `copilot`,
+One command is a working setup. After writing the routing, `--compress` makes
+sure the listener it points at is running: it starts `vg serve --compress
+--background` (or reuses the healthy listener already on the port) and prints
+the URL. For Claude Code it also adds a `SessionStart` hook to the same
+`.claude/settings.json` that runs `vg serve --compress --background --quiet`,
+so the routing keeps working after a reboot — each new session restarts the
+listener if it is gone. The hook needs `vg` on your `PATH` (`npm i -g
+@vibgrate/cli`); with `npx` it is skipped and said so. `vg uninstall claude`
+removes the hook with the routing. Pointing at a listener vg does not manage —
+an explicit `--compress <url>` or `VG_PROXY_URL` — starts nothing.
+
+**Supported agents:** `claude`, `codex`, `cursor`, `aider`, `copilot-cli`,
 `opencode`, `cline`, `continue`, `goose`, `openhands`, `gemini`, `qwen`,
-`kimi`, `grok`, `crush`, `amp`, `droid`, `kiro`, `vibe`, `zcode`,
-`vscode-claude`. Agents that read a config file (Codex `config.toml`, Cline /
-Cursor / Kimi JSON, Continue / Goose / OpenHands YAML, Claude Code
-`settings.json`) get an atomic edit with a `.vg-backup` beside it, a marker
-recording exactly which fields changed, and an owner file so two concurrent
-sessions never undo each other. An assistant with no base-URL config is
-reported as unsupported, not silently skipped.
+`kimi`, `grok`, `crush`, `amp`, `factory` (Droid), `kiro`, `vibe`, `zcode`,
+`vscode` (Claude Code in VS Code). Agents that read a config file (Codex
+`config.toml`, Claude Code / Droid `settings.json`, OpenCode and Crush JSON,
+Continue and Goose YAML) get an atomic edit with a `.vg-backup` beside it, a
+marker recording exactly which fields changed, and an owner file so two
+concurrent sessions never undo each other. Agents that only read an
+environment variable (Cursor, Aider, Cline, OpenHands, Kimi, Grok, Qwen Code,
+Gemini CLI, Amp, Kiro, Mistral Vibe, ZCode) have no file to write durably —
+run them with `vg serve --compress <agent>`; the install reports that
+rather than silently skipping.
 
 | Flag | Description |
 |------|-------------|
@@ -1817,7 +1874,7 @@ reported as unsupported, not silently skipped.
 | `--login` | Copilot only: GitHub device-flow sign-in before writing. The token is stored `0600` at `VG_COPILOT_AUTH_FILE` and never printed |
 | `--force` (on `uninstall`) | Restore a file another live session still holds |
 
-**One session instead of durable config.** `vg serve --compress -- <agent>`
+**One session instead of durable config.** `vg serve --compress <agent>`
 runs a single agent through the listener using the environment only: nothing is
 written, and everything is restored when the child exits. The child inherits
 your terminal, gets `VG_WRAP_ACTIVE=1`, receives forwarded `SIGTERM` /
@@ -1966,6 +2023,9 @@ Every setting is an environment variable; `vg serve config` prints them all with
 | `VG_COMPRESS_THINKING_COMPACT` | `false` | Compact prior-turn reasoning where it is billed *hot* |
 | `VG_COMPRESS_TOOL_PROFILES` | — | JSON map: tool → `{skipCompression, losslessOnly, maxItemsAfterCrush, bias, preserveKeywords}` *hot* |
 | `VG_COMPRESS_DEADLINE_MS` | `2000` | Per-request budget; over it, the original is forwarded *hot* |
+| `VG_CODE_COMPRESS` | `true` | Compress bulky tool results inside the `vg code` loop *hot* |
+| `VG_CODE_COMPRESS_MIN_CHARS` | `4000` | Size a `vg code` tool result must reach before it is compressed *hot* |
+| `VG_CODE_RETRIEVE_MAX_TOKENS` | `4000` | Cap on one `vg_retrieve` answer inside `vg code`; narrow with `grep` / `lines` / `head` / `tail` *hot* |
 | `VG_MODEL_LIMITS` / `VG_MODEL_ALIAS_MAP` / `VG_MODEL_PRICES` | — | Context-window, alias and pricing overrides (also `models.json` in the data dir) *hot* |
 | `VG_CCR` | `true` | Keep originals retrievable *hot* |
 | `VG_CCR_TTL_SECONDS` | `1800` | How long an original stays retrievable |
@@ -2000,7 +2060,7 @@ The same pipeline is available programmatically from `@vibgrate/cli`, offline, w
 import { compress, withCompression, compressionMiddleware, CompressionStore } from '@vibgrate/cli';
 
 // One call over a message array (OpenAI or Anthropic shape; same shape back).
-const result = await compress(messages, { model: 'claude-sonnet-4-5', mode: 'token' });
+const result = await compress(messages, { model: 'claude-sonnet-5', mode: 'token' });
 console.log(result.tokensBefore, result.tokensAfter, result.transformsApplied);
 
 // Wrap an SDK client: compresses on the way in, answers vg_retrieve calls itself.

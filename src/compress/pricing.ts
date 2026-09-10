@@ -51,6 +51,16 @@ const TABLE: Readonly<Record<string, Price>> = {
   'claude-3-opus-20240229': P(15, 75, 1.5, 18.75),
   'claude-3-haiku-20240307': P(0.25, 1.25, 0.03, 0.3),
   // OpenAI
+  // OpenAI (Sep 2026 list; cached input = 10% of input)
+  'gpt-6-astra': P(10, 50, 1),
+  'gpt-5.6-sol': P(4, 20, 0.4),
+  'gpt-5.6-terra': P(2, 12, 0.2),
+  'gpt-5.6-luna': P(0.2, 1.2, 0.02),
+  'gpt-5.5': P(5, 30, 0.5),
+  'gpt-5.4': P(2.5, 15, 0.25),
+  'gpt-5.4-mini': P(0.75, 4.5, 0.075),
+  'gpt-5.4-nano': P(0.2, 1.25, 0.02),
+  'gpt-5.3-codex': P(1.75, 14, 0.175),
   'gpt-5': P(1.25, 10, 0.125),
   'gpt-5-mini': P(0.25, 2, 0.025),
   'gpt-5-nano': P(0.05, 0.4, 0.005),
@@ -68,7 +78,15 @@ const TABLE: Readonly<Record<string, Price>> = {
   'gpt-4-32k': P(60, 120),
   'gpt-4': P(30, 60),
   'gpt-3.5-turbo': P(0.5, 1.5, 0.25),
-  // Google
+  // Google (Gemini 3.6–3.8 Flash: introductory rate through 2026-12-31, then 1.5 / 7.5 / 0.15)
+  'gemini-3.8-flash': P(0.75, 3.75, 0.075),
+  'gemini-3.7-flash': P(0.75, 3.75, 0.075),
+  'gemini-3.6-flash': P(0.75, 3.75, 0.075),
+  'gemini-3.5-flash': P(1.5, 9, 0.15),
+  'gemini-3.5-flash-lite': P(0.3, 2.5, 0.03),
+  'gemini-3.1-flash-lite': P(0.3, 2.5, 0.03),
+  'gemini-3.1-pro-preview': P(2, 12, 0.2),
+  'gemini-omni-1.1-flash': P(1.5, 9, 0.15),
   'gemini-2.5-pro': P(1.25, 10, 0.31),
   'gemini-2.5-flash': P(0.3, 2.5, 0.075),
   'gemini-2.5-flash-lite': P(0.1, 0.4, 0.025),
@@ -96,7 +114,11 @@ const TABLE: Readonly<Record<string, Price>> = {
   'deepseek-chat': P(0.27, 1.1, 0.07),
   'deepseek-reasoner': P(0.55, 2.19, 0.14),
   'deepseek-coder': P(0.14, 0.28),
-  // xAI
+  // xAI (base tier, prompts under 200k tokens)
+  'grok-4.6': P(2, 6, 0.5),
+  'grok-4.5': P(2, 6, 0.3),
+  'grok-4.3': P(1.25, 2.5, 0.2),
+  'grok-build-0.1': P(1, 2, 0.2),
   'grok-4': P(3, 15, 0.75),
   'grok-3': P(3, 15, 0.75),
   'grok-3-mini': P(0.3, 0.5, 0.075),
@@ -121,6 +143,10 @@ export function inferPrice(id: string): Price | null {
   if (/sonnet/.test(s)) return P(3, 15, 0.3, 3.75);
   if (/haiku/.test(s)) return P(1, 5, 0.1, 1.25);
   if (/claude/.test(s)) return P(3, 15, 0.3, 3.75);
+  if (/^gpt-[6-9]/.test(s)) return P(10, 50, 1);
+  if (/^gpt-5\.6/.test(s)) return P(2, 12, 0.2);
+  if (/^gpt-5\.5/.test(s)) return P(5, 30, 0.5);
+  if (/^gpt-5\.[34]/.test(s)) return P(2.5, 15, 0.25);
   if (/^gpt-5/.test(s)) return P(1.25, 10, 0.125);
   if (/^gpt-4\.1/.test(s)) return P(2, 8, 0.5);
   if (/^gpt-4o-mini/.test(s)) return P(0.15, 0.6, 0.075);
@@ -128,11 +154,16 @@ export function inferPrice(id: string): Price | null {
   if (/^o[1-9]/.test(s)) return P(2, 8, 0.5);
   if (/^gpt-4/.test(s)) return P(10, 30, 5);
   if (/^gpt-3/.test(s)) return P(0.5, 1.5, 0.25);
+  if (/gemini-3.*flash-lite/.test(s)) return P(0.3, 2.5, 0.03);
+  if (/gemini-3.*flash/.test(s)) return P(0.75, 3.75, 0.075);
+  if (/gemini-3.*pro/.test(s)) return P(2, 12, 0.2);
   if (/gemini.*flash/.test(s)) return P(0.3, 2.5, 0.075);
   if (/gemini|gemma/.test(s)) return P(1.25, 10, 0.31);
   if (/llama/.test(s)) return P(0.6, 0.6);
   if (/mistral|mixtral|codestral|ministral/.test(s)) return P(0.4, 2);
   if (/deepseek/.test(s)) return P(0.27, 1.1, 0.07);
+  if (/grok-4\.(?:[5-9]|\d{2,})/.test(s)) return P(2, 6, 0.5);
+  if (/grok-4\.[2-4]/.test(s)) return P(1.25, 2.5, 0.2);
   if (/grok/.test(s)) return P(3, 15, 0.75);
   if (/qwen|qwq/.test(s)) return P(0.2, 0.6);
   if (/kimi|moonshot/.test(s)) return P(0.6, 2.5, 0.15);

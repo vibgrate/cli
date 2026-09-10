@@ -15,7 +15,10 @@ describe('stratification + holdout', () => {
     expect(modelFamily('claude-opus-4-1')).toBe('opus');
     expect(modelFamily('gpt-5.1-codex')).toBe('gpt');
     expect(modelFamily('claude-fable-5')).toBe('fable');
-    expect(modelFamily('llama-3')).toBe('other');
+    expect(modelFamily('llama-3')).toBe('llama');
+    expect(modelFamily('grok-4.6')).toBe('grok');
+    expect(modelFamily('o4-mini')).toBe('gpt');
+    expect(modelFamily('some-custom')).toBe('other');
     expect(stratumKey({ turnKind: 'new_user_ask', inputTokens: 5000, model: 'claude-sonnet-4-5', hasTools: true })).toBe('sonnet|new_user_ask|s|tools');
     expect(parseStratumLabel(stratumLabel('control', 'a|b|c|d'))).toEqual({ arm: 'control', key: 'a|b|c|d' });
     expect(parseStratumLabel('router:x')).toBeNull();

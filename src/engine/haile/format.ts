@@ -18,8 +18,15 @@ export function isUsableHaileSymbol(symbol: unknown): symbol is HaileSymbol {
   return true;
 }
 
+export interface FormatHaileOptions {
+  /** Baked pack stamped on the sidecar (`hexagonal-v1` …). Printed above findings. */
+  policy?: string | null;
+  /** User overlay ids (`team/…`, `org/…`) applied on top of the pack, when any. */
+  overlays?: readonly string[] | null;
+}
+
 /** Text lines for `vg show`. Empty when the symbol is missing or malformed. */
-export function formatHaileLines(symbol: HaileSymbol | null | undefined): string[] {
+export function formatHaileLines(symbol: HaileSymbol | null | undefined, opts?: FormatHaileOptions): string[] {
   if (!isUsableHaileSymbol(symbol)) return [];
   const alts = symbol.role.alternatives
     .slice(0, 3)
@@ -37,6 +44,7 @@ export function formatHaileLines(symbol: HaileSymbol | null | undefined): string
     `  intent ${symbol.intent.text}`,
   ];
   if (symbol.file_layer) lines.push(`  file-layer ${symbol.file_layer}`);
+  if (opts?.policy) lines.push(`  policy ${opts.policy}${opts.overlays?.length ? ` + ${opts.overlays.join(', ')}` : ''}`);
   for (const finding of symbol.findings ?? []) {
     if (!finding || typeof finding.message !== 'string' || typeof finding.rule !== 'string') continue;
     const at = typeof finding.line === 'number' && finding.line > 0 ? ` · line ${finding.line}` : '';
@@ -45,7 +53,10 @@ export function formatHaileLines(symbol: HaileSymbol | null | undefined): string
   return lines;
 }
 
-export function haileJsonFields(symbol: HaileSymbol | undefined): Record<string, unknown> | undefined {
+export function haileJsonFields(
+  symbol: HaileSymbol | undefined,
+  opts?: FormatHaileOptions,
+): Record<string, unknown> | undefined {
   if (!isUsableHaileSymbol(symbol)) return undefined;
   return {
     role: symbol.role,
@@ -56,5 +67,7 @@ export function haileJsonFields(symbol: HaileSymbol | undefined): Record<string,
     findings: Array.isArray(symbol.findings) ? symbol.findings : [],
     file_layer: symbol.file_layer ?? null,
     ast_role: symbol.ast_role ?? null,
+    policy: opts?.policy ?? null,
+    overlays: opts?.overlays?.length ? [...opts.overlays] : [],
   };
 }

@@ -27,6 +27,8 @@ import { VERSION } from '../version.js';
 import { resolveIngestHost } from './dsn.js';
 import { dashHostForIngestHost } from '../regions.js';
 import { resolveDsn } from '../credentials.js';
+import { installId } from '../../engine/stats-share.js';
+import { buildClaimUrl } from './push.js';
 import { emitIngestIdLine, emitDriftScoreLine } from '../utils/ingest-id-output.js';
 import { uploadScanArtifact } from '../utils/upload.js';
 import { buildGraph } from '../../engine/build.js';
@@ -143,6 +145,7 @@ async function autoPush(
   if (!dsn) {
     console.error(chalk.red('No DSN provided for push.'));
     console.error(chalk.dim('Run "vibgrate login", set VIBGRATE_DSN, or use the --dsn flag.'));
+    console.error(chalk.dim(`No account yet? Claim this run: ${buildClaimUrl(installId())}`));
     if (opts.strict) process.exit(1);
     return;
   }
@@ -362,7 +365,7 @@ export const scanCommand = new Command('scan')
   .option('--format <format>', 'Output format (text|json|sarif|md)', 'text')
   .option(
     '--fail-on <level>',
-    'Fail on warn or error. architecture-finding (hard boundary violations) or architecture-warning (violations and warnings) gate on the architecture module\'s boundary findings, judged under the policy pack in force: .vibgrate/architecture.toml (policy = "hexagonal-v1" | "layered-v1"), VIBGRATE_ARCHITECTURE_POLICY, or vg build --policy; default hexagonal-v1. The pack is named in the output. See docs/architecture-policies.md',
+    'Fail on warn or error. architecture-finding (hard boundary violations) or architecture-warning (violations and warnings) gate on the architecture module\'s boundary findings, judged under the policy pack in force: .vibgrate/architecture.toml (policy = "hexagonal-v1" | "layered-v1" | "vertical-v1", plus any [[overlay]] rules), VIBGRATE_ARCHITECTURE_POLICY, or vg build --policy; default hexagonal-v1. The pack is named in the output. See docs/architecture-policies.md',
   )
   .option('--baseline <file>', 'Compare against baseline')
   .option('--changed-only', 'Only scan changed files')
@@ -625,7 +628,8 @@ export const scanCommand = new Command('scan')
           onParseProgress: (done, total) => report(done, total, 'parsing'),
         });
         builtGraph = result.graph;
-        writeArtifacts(result.graph, { root: rootDir });
+        const written = writeArtifacts(result.graph, { root: rootDir });
+        if (written.architecturePolicyError) console.error(chalk.red(`\narchitecture policy: ${written.architecturePolicyError}`));
         // Freshness snapshot → lets `vg serve`/`vg ask` auto-refresh this map
         // when the working tree drifts (see engine/freshness.ts).
         writeSnapshot(rootDir, result.graph.provenance.corpusHash, result.fileStats, {
@@ -711,7 +715,7 @@ export const scanCommand = new Command('scan')
       const hardOnly = opts.failOn === 'architecture-finding';
       const gate = architectureFindings(rootDir, hardOnly);
       if (gate === null) {
-        console.error(chalk.red('\n--fail-on architecture-finding: the architecture module did not classify this map (install it with `vg module install arch`).'));
+        console.error(chalk.red('\n--fail-on architecture-finding: the architecture module did not classify this map (install it with `vg module install arch`; a rejected .vibgrate/architecture.toml is reported above).'));
         process.exit(2);
       }
       const { policy, rows } = gate;

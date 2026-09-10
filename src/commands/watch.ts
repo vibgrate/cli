@@ -61,12 +61,13 @@ export function registerWatch(program: Command): void {
             fast: opts.fast === true,
             noGround: false,
           });
-          writeArtifacts(result.graph, {
+          const written = writeArtifacts(result.graph, {
             root,
             html: opts.html !== false,
             report: opts.report !== false,
             graphPath: global.graph,
           });
+          if (written.architecturePolicyError) info(c.red(`vg watch · architecture policy: ${written.architecturePolicyError}`));
           writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats);
           const { counts } = result.graph.meta;
           info(

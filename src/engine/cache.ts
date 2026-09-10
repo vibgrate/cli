@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { stableStringify } from './serialize.js';
+import type { CasStore } from './cas.js';
 import type { FileParse } from './types.js';
 
 /**
@@ -15,6 +16,13 @@ import type { FileParse } from './types.js';
  * mutation-corpus identity gate (incremental-identity.test.ts): warm
  * incremental rebuild ≡ cold full rebuild, byte for byte, across
  * edit/add/delete/rename/touch mutations and the production refresh path.
+ *
+ * This file is a path-keyed *hint* over the content-addressed store
+ * (`cas.ts`): a miss here falls through to the CAS by content hash, so a
+ * rename, a sibling branch, or another worktree reuses the parse; a fresh
+ * parse is written to both. The CAS is never pruned to the current tree —
+ * only this per-checkout hint is — which is what lets `main → feature → main`
+ * find every `main`-only parse still there.
  */
 
 // Bumped to /4: optional mtime+size fingerprint for stat-skip fast path.
@@ -35,7 +43,11 @@ interface CacheFile {
 }
 
 export interface ParseCache {
-  get(rel: string, hash: string): FileParse | undefined;
+  /**
+   * Parse for `rel` at content `hash`. `lang` enables the content-addressed
+   * fallback (a parse is a function of bytes *and* language).
+   */
+  get(rel: string, hash: string, lang?: string): FileParse | undefined;
   /** Fast path: mtime+size match → reuse parse without re-reading bytes. */
   getByStat(rel: string, mtimeMs: number, size: number): { parse: FileParse; hash: string } | undefined;
   set(rel: string, parse: FileParse, stat?: { mtimeMs: number; size: number }): void;
@@ -56,8 +68,9 @@ function cachePath(root: string): string {
 
 export function loadCache(
   root: string,
-  opts: { toolVersion: string; grammars: string; disabled?: boolean },
+  opts: { toolVersion: string; grammars: string; disabled?: boolean; cas?: CasStore | null },
 ): ParseCache {
+  const cas = opts.cas ?? null;
   const file = cachePath(root);
   let data: CacheFile = {
     version: CACHE_VERSION,
@@ -84,9 +97,15 @@ export function loadCache(
   }
 
   return {
-    get(rel, hash) {
+    get(rel, hash, lang) {
       const entry = data.entries[rel];
-      return entry && entry.hash === hash ? entry.parse : undefined;
+      if (entry && entry.hash === hash) return entry.parse;
+      if (!cas || !lang) return undefined;
+      const shared = cas.getParse(hash, lang, rel);
+      if (!shared) return undefined;
+      // Warm the path hint so the next build takes the stat fast path.
+      data.entries[rel] = { hash, parse: shared };
+      return shared;
     },
     getByStat(rel, mtimeMs, size) {
       const entry = data.entries[rel];
@@ -103,6 +122,7 @@ export function loadCache(
         mtimeMs: stat?.mtimeMs,
         size: stat?.size,
       };
+      cas?.putParse(parse);
     },
     prune(currentRels) {
       for (const rel of Object.keys(data.entries)) {

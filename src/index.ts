@@ -48,11 +48,19 @@ export {
   getNodeEmbeddings,
   cosine,
   nodeEmbedText,
+  nodeEmbedTextV1,
   embeddingsPath,
   embeddingsPathFor,
   embeddingsCached,
+  embedModelSpec,
+  queryEmbedText,
+  EMBED_MODELS,
+  EMBED_TEXT_VERSION,
 } from './engine/embeddings.js';
-export type { Embedder, LoadEmbedderOptions } from './engine/embeddings.js';
+export type { Embedder, LoadEmbedderOptions, EmbedModelSpec } from './engine/embeddings.js';
+// Content-addressed store: parses and vectors shared across refs, paths, and worktrees.
+export { casRoot, casRepositoryDir, openParseCas, openVectorCas, loadRefManifest, CasStore } from './engine/cas.js';
+export type { CasStats, RefManifest, ManifestEntry } from './engine/cas.js';
 export { findNodes, resolveOne, nodeById } from './engine/lookup.js';
 export { impactOf } from './engine/impact.js';
 export type { ImpactResult, ImpactItem } from './engine/impact.js';

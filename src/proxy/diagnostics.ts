@@ -23,8 +23,8 @@ export async function proxyDiagnostics(env: NodeJS.ProcessEnv = process.env, opt
   const port = knobEnv.int('VG_PROXY_PORT', env, { min: 1, max: 65535 });
   const host = knobEnv.string('VG_PROXY_HOST', env) ?? '127.0.0.1';
   const state = readProxyState(port, env);
-  if (!state) rows.push({ name: 'proxy', status: 'info', summary: `not running on port ${port} (no state file at ${proxyStatePath(port, env)})`, hint: 'start it with `vg serve --compress`' });
-  else if (!pidAlive(state.pid)) rows.push({ name: 'proxy', status: 'warn', summary: `stale state file for pid ${state.pid} on port ${port}`, hint: 'run `vg serve stop` to clean up, then `vg serve --compress`' });
+  if (!state) rows.push({ name: 'proxy', status: 'info', summary: `not running on port ${port} (no state file at ${proxyStatePath(port, env)})`, hint: 'start it with `vg serve --compress --background` (or `vg install <agent> --compress`, which starts it for you)' });
+  else if (!pidAlive(state.pid)) rows.push({ name: 'proxy', status: 'warn', summary: `stale state file for pid ${state.pid} on port ${port}`, hint: 'run `vg serve stop` to clean up, then `vg serve --compress --background`' });
   else {
     let live = true;
     if (opts.probe !== false) live = (await probeProxy(state.url, { fetch: opts.fetch, token: state.token })).ok;
