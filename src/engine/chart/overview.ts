@@ -3,7 +3,6 @@
  */
 import type { VgGraph } from '../../schema.js';
 import type { HaileSidecar } from '../haile/types.js';
-import { findHaileSymbol } from '../haile/sidecar.js';
 import { policyLabel } from './labels.js';
 import {
   ARCH_OVERVIEW_MAGIC,
@@ -13,6 +12,7 @@ import {
   type ArchPackageNode,
 } from './arch-types.js';
 import { indexPackages, isSymbolNode } from './packages.js';
+import { architectureBound, dominantRoleLabel, indexSymbols, mixPhrase, resolveRole } from './layout.js';
 
 const L0_EDGE_KINDS = new Set([
   'import',
@@ -27,6 +27,8 @@ const L0_EDGE_KINDS = new Set([
 
 export function projectOverview(graph: VgGraph, sidecar: HaileSidecar | null): ArchOverview {
   const { packages, packageOf } = indexPackages(graph);
+  const bound = architectureBound(graph, sidecar, true);
+  const symbolIndex = bound ? indexSymbols(sidecar) : indexSymbols(null);
   const symbolCount = graph.nodes.filter(isSymbolNode).length;
   const cards: ArchPackageNode[] = [];
 
@@ -34,14 +36,27 @@ export function projectOverview(graph: VgGraph, sidecar: HaileSidecar | null): A
     let symbols = 0;
     let findings = 0;
     let missingSteps = 0;
+    let unclassified = 0;
+    const histogram: Record<string, number> = {};
     for (const node of graph.nodes) {
       if (packageOf.get(node.id) !== pkg.id) continue;
       if (!isSymbolNode(node)) continue;
       symbols += 1;
-      const symbol = findHaileSymbol(sidecar, node.id);
-      if (symbol?.findings?.some((f) => f && typeof f.message === 'string')) findings += 1;
+      const symbol = symbolIndex.get(node.id);
+      if (symbol?.findings?.some((f) => f && typeof f.message === 'string' && typeof f.line === 'number' && f.line > 0)) {
+        findings += 1;
+      }
       const gaps = (symbol as { extract_gaps?: unknown[] } | undefined)?.extract_gaps;
       if (Array.isArray(gaps) && gaps.length > 0) missingSteps += 1;
+      const role = bound ? resolveRole(symbol) : '';
+      if (!role || role === 'unknown') unclassified += 1;
+      else histogram[role] = (histogram[role] ?? 0) + 1;
+    }
+    const fromModules = sidecar?.modules?.find((m) => m.path === pkg.path || m.path.endsWith(`/${pkg.path}`));
+    if (fromModules?.role_histogram) {
+      for (const [role, n] of Object.entries(fromModules.role_histogram)) {
+        if (typeof n === 'number') histogram[role] = Math.max(histogram[role] ?? 0, n);
+      }
     }
     cards.push({
       id: pkg.id,
@@ -51,8 +66,10 @@ export function projectOverview(graph: VgGraph, sidecar: HaileSidecar | null): A
       symbols,
       findings,
       missingSteps,
-      job: jobOf(pkg.kind, pkg.path, pkg.name),
-      policy: sidecar?.policy ?? null,
+      job: bound ? dominantRoleLabel(histogram) : jobOf(pkg.kind, pkg.path, pkg.name),
+      policy: bound ? (sidecar?.policy ?? null) : null,
+      mix: bound ? mixPhrase(histogram, symbols, findings) : `${symbols} symbols`,
+      unclassified,
     });
   }
 
@@ -91,7 +108,7 @@ export function projectOverview(graph: VgGraph, sidecar: HaileSidecar | null): A
     packages: visible,
     edges,
     meta: {
-      architectureLoaded: Boolean(sidecar),
+      architectureLoaded: bound,
       policy: sidecar?.policy ?? null,
       policyLabel: sidecar ? policyLabel(sidecar.policy) : null,
       symbols: symbolCount,

@@ -7,12 +7,19 @@
 export const ARCH_OVERVIEW_MAGIC = 'vg.arch.overview.v1' as const;
 export const ARCH_SLICE_MAGIC = 'vg.arch.slice.v1' as const;
 export const SLICE_CARD_CAP = 120;
+export const LANE_CARD_CAP = 12;
 export const OVERVIEW_PACKAGE_CAP = 200;
 export const INSPECTOR_NEIGHBOUR_CAP = 40;
 
 export type ArchZoom = 'workspace' | 'slice';
 export type ArchSliceView = 'job' | 'calls' | 'missing' | 'problems';
 export type ArchPolicyId = 'layered-v1' | 'hexagonal-v1' | 'kind';
+export type ArchPageHost = 'browser' | 'vscode';
+
+export function parseArchView(raw: string | null | undefined): ArchSliceView {
+  if (raw === 'calls' || raw === 'missing' || raw === 'problems') return raw;
+  return 'job';
+}
 
 export interface ArchPackageNode {
   id: string;
@@ -24,6 +31,9 @@ export interface ArchPackageNode {
   missingSteps: number;
   job: string;
   policy: string | null;
+  /** Dominant-role mix, e.g. "32 symbols · 3 UI · 1 service · 0 findings". */
+  mix?: string;
+  unclassified?: number;
 }
 
 export interface ArchPackageEdge {
@@ -52,6 +62,19 @@ export interface ArchOverview {
   meta: ArchOverviewMeta;
 }
 
+export interface ArchCardLink {
+  id: string;
+  name: string;
+}
+
+export interface ArchCardMember {
+  id: string;
+  name: string;
+  job: string;
+  file: string;
+  line: number | null;
+}
+
 export interface ArchCard {
   id: string;
   title: string;
@@ -67,6 +90,13 @@ export interface ArchCard {
   pulse: boolean;
   missingStep: boolean;
   ghost?: boolean;
+  intent?: string | null;
+  callsOut?: number;
+  calls?: ArchCardLink[];
+  calledBy?: ArchCardLink[];
+  members?: ArchCardMember[];
+  types?: string[];
+  guard?: boolean;
 }
 
 export interface ArchSliceColumn {
@@ -91,6 +121,8 @@ export interface ArchSlice {
   guards: ArchCard[];
   edges: ArchSliceEdge[];
   overflow: Record<string, number>;
+  overflowHint?: Record<string, string>;
+  emptyHint?: string | null;
   focusCardId: string | null;
 }
 

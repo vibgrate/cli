@@ -52,9 +52,11 @@ import {
 } from '../engine/haile/architecture-callables.js';
 import { haileModuleStatus } from '../install/haile-module.js';
 import { readHaileSidecar } from '../engine/haile/sidecar.js';
-import { projectOverview } from '../engine/chart/overview.js';
-import { projectSlice } from '../engine/chart/slice.js';
-import type { ArchOverview, ArchSlice } from '../engine/chart/arch-types.js';
+import { loadHaileProvider } from '../engine/haile/haile-provider.js';
+import { overviewOf, sliceOf } from '../engine/chart/server.js';
+import { architecturePageHtml } from '../engine/chart/page.js';
+import { showJsonFor } from '../engine/chart/model.js';
+import { parseArchView, type ArchOverview, type ArchSlice } from '../engine/chart/arch-types.js';
 import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
 import { loadGraphPreferIndex } from '../engine/index-db.js';
@@ -737,6 +739,9 @@ export class VibgrateLanguageServer {
     this.conn.onRequest('vibgrate/score/forProject', (_m, params) => this.onScoreForProject(params));
     this.conn.onRequest('vibgrate/architecture', (_m, params) => this.onArchitecture(params));
     this.conn.onRequest('vibgrate/architecture/projects', () => this.onArchitectureProjects());
+    this.conn.onRequest('vibgrate/architecture/page', (_m, params) => this.onArchitecturePage(params));
+    this.conn.onRequest('vibgrate/architecture/slice', (_m, params) => this.onArchitectureSlice(params));
+    this.conn.onRequest('vibgrate/architecture/node', (_m, params) => this.onArchitectureNode(params));
     // Trend data for the panel sparkline (plan §5.6). Entries carry their
     // methodology so the client can break the line across a change — the one
     // trend rule v3 imposes. Empty history is an empty array, not an error.
@@ -1662,7 +1667,7 @@ export class VibgrateLanguageServer {
    * scanning, or the archetype/layer scanner is disabled) rather than an empty
    * shape a client might mistake for "no layers detected".
    */
-  private onArchitecture(params: unknown): ArchitectureResponse | null {
+  private async onArchitecture(params: unknown): Promise<ArchitectureResponse | null> {
     const p = params as { path?: string } | undefined;
     const a = this.artifact;
     if (!a) return null;
@@ -1672,7 +1677,7 @@ export class VibgrateLanguageServer {
       return {
         ...architectureWire(arch),
         ...this.architectureCallables('__repo__'),
-        ...this.architectureMap('__repo__'),
+        ...(await this.architectureMap('__repo__')),
       };
     }
     const project = projectByPath(a, p.path);
@@ -1682,7 +1687,7 @@ export class VibgrateLanguageServer {
       return {
         ...architectureWire(arch),
         ...this.architectureCallables(p.path),
-        ...this.architectureMap(p.path),
+        ...(await this.architectureMap(p.path)),
       };
     }
     return {
@@ -1690,7 +1695,7 @@ export class VibgrateLanguageServer {
       manifestPath: manifestRelativePath(project),
       lockfilePath: lockfileRelativePath(this.opts.root, project),
       ...this.architectureCallables(p.path),
-      ...this.architectureMap(p.path),
+      ...(await this.architectureMap(p.path)),
     };
   }
 
@@ -1698,23 +1703,101 @@ export class VibgrateLanguageServer {
    * Hierarchical map payloads for the Architecture board. Best-effort: a
    * missing graph omits the fields rather than failing the file-layer response.
    */
-  private architectureMap(scopePath: string): Pick<ArchitectureResponse, 'overview' | 'slice'> {
-    const graph = this.graph;
+  private async architectureMap(scopePath: string): Promise<Pick<ArchitectureResponse, 'overview' | 'slice'>> {
+    const graph = this.graphForArchitecture();
     if (!graph) return {};
     try {
-      const graphPath = resolveGraphPath(this.opts.root);
-      const sidecar = readHaileSidecar(graphPath, { corpusHash: graph.provenance?.corpusHash });
-      const overview = projectOverview(graph, sidecar);
+      const sidecar = this.architectureSidecar(graph);
+      const provider = await loadHaileProvider();
+      const overview = overviewOf(graph, sidecar, provider);
       if (!scopePath || scopePath === '__repo__') return { overview };
       const want = scopePath.replace(/\\/g, '/');
       const pkg = overview.packages.find(
         (p) => p.path === want || p.path.endsWith(`/${want}`) || p.id === want || p.name === want,
       );
       if (!pkg) return { overview };
-      return { overview, slice: projectSlice(graph, sidecar, { packageId: pkg.id }) };
+      return {
+        overview,
+        slice: sliceOf(graph, sidecar, provider, { packageId: pkg.id, view: 'job', architecture: true, tests: false }),
+      };
     } catch {
       return {};
     }
+  }
+
+  /**
+   * `vibgrate/architecture/page` — HTML for the Architecture board (VS Code
+   * webview or `vg show arch`). Overview is included so the host can paint L0
+   * without a second round trip.
+   */
+  private async onArchitecturePage(params: unknown): Promise<{ html: string; overview: ArchOverview | null } | null> {
+    const p = params as { host?: string; nonce?: string } | undefined;
+    const host = p?.host === 'vscode' ? 'vscode' : 'browser';
+    const nonce = typeof p?.nonce === 'string' ? p.nonce : undefined;
+    try {
+      const provider = await loadHaileProvider();
+      const html = architecturePageHtml(provider, { host, nonce });
+      const graph = this.graphForArchitecture();
+      if (!graph) return { html, overview: null };
+      const sidecar = this.architectureSidecar(graph);
+      return { html, overview: overviewOf(graph, sidecar, provider) };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * `vibgrate/architecture/slice` — one package's column map.
+   */
+  private async onArchitectureSlice(params: unknown): Promise<ArchSlice | null> {
+    const p = params as {
+      packageId?: string;
+      view?: string;
+      focus?: string;
+      architecture?: boolean;
+      tests?: boolean;
+    };
+    const graph = this.graphForArchitecture();
+    if (!graph || typeof p?.packageId !== 'string' || !p.packageId) return null;
+    try {
+      const sidecar = this.architectureSidecar(graph);
+      const provider = await loadHaileProvider();
+      return sliceOf(graph, sidecar, provider, {
+        packageId: p.packageId,
+        view: parseArchView(p.view),
+        focus: typeof p.focus === 'string' ? p.focus : undefined,
+        architecture: p.architecture !== false,
+        tests: p.tests === true,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * `vibgrate/architecture/node` — inspector payload for a card (`vg show --json`).
+   */
+  private onArchitectureNode(params: unknown): unknown {
+    const p = params as { id?: string };
+    const graph = this.graphForArchitecture();
+    if (!graph || typeof p?.id !== 'string' || !p.id) return null;
+    const node = graph.nodes.find((n) => n.id === p.id || n.qualifiedName === p.id || n.name === p.id);
+    if (!node) return null;
+    try {
+      return showJsonFor(graph, node, this.architectureSidecar(graph));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Disk graph is enough for the board even when the daemon owns the in-memory copy. */
+  private graphForArchitecture(): VgGraph | null {
+    return this.graph ?? loadGraph(this.opts.root);
+  }
+
+  private architectureSidecar(graph: VgGraph) {
+    const graphPath = resolveGraphPath(this.opts.root);
+    return readHaileSidecar(graphPath, { corpusHash: graph.provenance?.corpusHash });
   }
 
   /**

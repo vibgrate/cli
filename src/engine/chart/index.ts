@@ -1,4 +1,4 @@
-export { chartPage } from './page.js';
+export { chartPage, architecturePageHtml } from './page.js';
 export { startChartServer, DEFAULT_CHART_HOST, DEFAULT_CHART_PORT, overviewOf, sliceOf } from './server.js';
 export type { ChartServer, ChartListenOptions } from './server.js';
 export { projectChart, showJsonFor, pathJson, searchNodes, searchGraph, viewNode } from './model.js';
@@ -6,4 +6,5 @@ export type { ChartPayload, ChartNodeView, ChartMeta } from './model.js';
 export { projectOverview, locateInOverview } from './overview.js';
 export { projectSlice } from './slice.js';
 export type { ArchOverview, ArchSlice, ArchCard, ArchPackageNode } from './arch-types.js';
+export { parseArchView } from './arch-types.js';
 export { roleLabel, purposeLabel, kindLabel, policyLabel } from './labels.js';

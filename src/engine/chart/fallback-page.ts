@@ -1,10 +1,15 @@
 /**
  * Tiny architecture map served when the Architecture module does not render a page.
  * Workspace packages, then a column slice. No interaction framework, no CDN.
+ * VS Code hosts the same page over postMessage (`data-host="vscode"`).
  */
-export function fallbackArchPage(): string {
+import type { ArchPageHost } from './arch-types.js';
+
+export function fallbackArchPage(opts?: { host?: ArchPageHost; nonce?: string }): string {
+  const host: ArchPageHost = opts?.host === 'vscode' ? 'vscode' : 'browser';
+  const nonce = opts?.nonce ?? '';
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-host="${host}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -13,11 +18,24 @@ export function fallbackArchPage(): string {
 :root {
   --bg:#0b0f0c; --s1:#141c16; --s2:#1b241d; --line:#2a362c;
   --t:#e8f0e9; --tm:#9aab9e; --tl:#6b7a6e; --cyan:#38bdf8; --green:#22c55e;
-  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif; --link:var(--cyan);
 }
 [data-theme="light"] {
   --bg:#f4f1ea; --s1:#fffdf8; --s2:#fff; --line:#d9d3c6;
   --t:#1c241d; --tm:#5d675f; --tl:#7e877f;
+}
+[data-host="vscode"] {
+  --bg:var(--vscode-editor-background,#0b0f0c);
+  --s1:var(--vscode-editorWidget-background,#141c16);
+  --s2:var(--vscode-input-background,#1b241d);
+  --line:var(--vscode-widget-border,var(--vscode-panel-border,#2a362c));
+  --t:var(--vscode-foreground,#e8f0e9);
+  --tm:var(--vscode-descriptionForeground,#9aab9e);
+  --tl:var(--vscode-descriptionForeground,#6b7a6e);
+  --sans:var(--vscode-font-family,system-ui);
+  --link:var(--vscode-textLink-foreground,var(--cyan));
+  --cyan:var(--vscode-charts-blue,#38bdf8);
+  --green:var(--vscode-charts-green,#22c55e);
 }
 * { box-sizing:border-box; }
 html,body { margin:0; height:100%; background:var(--bg); color:var(--t); font-family:var(--sans); }
@@ -41,9 +59,10 @@ button { font:inherit; color:inherit; cursor:pointer; height:34px; padding:0 10p
 .col { flex:1; min-width:200px; }
 .col h2 { margin:0 0 8px; font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--tl); }
 .col .stack { display:flex; flex-direction:column; gap:8px; }
-.more { font-size:12px; color:var(--tl); padding:6px; }
+.more { font-size:12px; color:var(--tl); padding:6px; background:none; border:none; height:auto; text-align:left; }
+.openfile { background:none; border:none; padding:0; height:auto; color:var(--link); text-decoration:underline; cursor:pointer; font:inherit; text-align:left; }
 .lbl { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--tl); margin:14px 0 6px; }
-a { color:var(--cyan); }
+a { color:var(--link); }
 @media (max-width:860px) { .work { grid-template-columns:1fr; } .drawer { border-left:0; border-top:1px solid var(--line); } }
 </style>
 </head>
@@ -59,8 +78,15 @@ a { color:var(--cyan); }
   <div class="stage" id="stage"></div>
   <aside class="drawer" id="drawer"><p class="lbl">Details</p><p id="empty">Select a package, then a card.</p></aside>
 </div>
-<script>
-const state = { zoom:"workspace", packageId:null, focus:null, overview:null, slice:null };
+<script nonce="${nonce}">
+const HOST=document.documentElement.getAttribute("data-host")||"browser";
+const vscode=(function(){try{return HOST==="vscode"?acquireVsCodeApi():null}catch(e){return null}})();
+if(HOST==="vscode"){
+  document.getElementById("theme").hidden=true;
+  const light=document.body.classList.contains("vscode-light")||document.body.classList.contains("vscode-high-contrast-light");
+  document.documentElement.setAttribute("data-theme",light?"light":"dark");
+}
+const state = { zoom:"workspace", packageId:null, focus:null, overview:null, slice:null, pendingPackage:null };
 function esc(s){
   return String(s==null?"":s).replace(/[&<>"']/g, function(c){
     if (c==="&") return "&amp;";
@@ -71,31 +97,45 @@ function esc(s){
   });
 }
 function readHash(){
+  if (HOST==="vscode") return {};
   const p = new URLSearchParams((location.hash||"").replace(/^#/,""));
   return { zoom:p.get("zoom")||"workspace", package:p.get("package"), n:p.get("n"), view:p.get("view") };
 }
 function writeHash(){
+  if (HOST==="vscode") return;
   const p = new URLSearchParams();
   p.set("zoom", state.zoom);
   if (state.packageId) p.set("package", state.packageId);
   if (state.focus) p.set("n", state.focus);
   const next = p.toString();
-  if (location.hash.replace(/^#/,"") !== next) history.replaceState(null,"","#"+next);
+  try { if (location.hash.replace(/^#/,"") !== next) history.replaceState(null,"","#"+next); } catch (e) {}
 }
-async function boot(){
-  const ov = await fetch("/api/overview");
-  if (!ov.ok) { document.getElementById("note").textContent = "Could not load the map. Run vg first."; return; }
-  state.overview = await ov.json();
+function api(path, cb){
+  if (vscode) { window.__wait = window.__wait || {}; window.__wait[path] = cb; vscode.postMessage({ type:"fetch", path:path }); return; }
+  fetch(path).then(function(r){ return r.ok ? r.json() : Promise.reject(); }).then(cb).catch(function(){
+    document.getElementById("note").textContent = "Could not load the map. Run vg first.";
+  });
+}
+window.addEventListener("message", function(e){
+  const m = e.data; if (!m) return;
+  if (m.type === "init" && m.overview) { state.overview = m.overview; if (m.packageId) state.pendingPackage = m.packageId; afterOverview(); }
+  if (m.type === "slice" && m.slice) { state.slice = m.slice; drawSlice(); }
+  if (m.type === "node" && m.node) { openCardFromNode(m.node, m.card); }
+  if (m.type === "fetch-result" && window.__wait && window.__wait[m.path]) { window.__wait[m.path](m.body); delete window.__wait[m.path]; }
+});
+function afterOverview(){
   const m = state.overview.meta;
   document.title = m.title || "Code map";
   document.getElementById("subtitle").textContent = " · " + m.packages + " packages · " + m.symbols + " symbols";
   const h = readHash();
-  if (h.zoom === "slice" && h.package) {
-    state.focus = h.n;
-    await openSlice(h.package);
-  } else {
-    drawWorkspace();
-  }
+  const pack = state.pendingPackage || (h.zoom === "slice" ? h.package : null);
+  state.pendingPackage = null;
+  if (pack) { state.focus = h.n || state.focus; openSlice(pack); }
+  else drawWorkspace();
+}
+function boot(){
+  if (vscode) { vscode.postMessage({ type:"ready" }); return; }
+  api("/api/overview", function(body){ state.overview = body; afterOverview(); });
 }
 function drawWorkspace(){
   state.zoom = "workspace"; state.slice = null; state.packageId = null;
@@ -111,23 +151,23 @@ function drawWorkspace(){
     const b = document.createElement("button");
     b.className = "pkg";
     b.type = "button";
-    b.innerHTML = "<strong>"+esc(pkg.name)+"</strong><small>"+esc(pkg.job)+" · "+pkg.symbols+" symbols"
-      +(pkg.findings? " · "+pkg.findings+" rule break"+(pkg.findings===1?"":"s"):"")+"</small>";
-    b.onclick = () => openSlice(pkg.id);
-    b.ondblclick = () => openSlice(pkg.id);
+    b.innerHTML = "<strong>"+esc(pkg.name)+"</strong><small>"+esc(pkg.mix || (pkg.job+" · "+pkg.symbols+" symbols"))+"</small>";
+    b.onclick = function(){ openSlice(pkg.id); };
     grid.appendChild(b);
   }
   writeHash();
 }
-async function openSlice(packageId){
+function openSlice(packageId){
+  if (vscode) { vscode.postMessage({ type:"openSlice", packageId:packageId, view:"job", focus:state.focus, arch:true }); return; }
   const url = "/api/slice?package="+encodeURIComponent(packageId)+(state.focus? "&focus="+encodeURIComponent(state.focus):"");
-  const res = await fetch(url);
-  if (!res.ok) { document.getElementById("note").textContent = "Could not open that package."; return; }
-  state.slice = await res.json();
+  api(url, function(body){ state.slice = body; drawSlice(); });
+}
+function drawSlice(){
   state.zoom = "slice";
   state.packageId = state.slice.packageId;
   document.getElementById("back").hidden = false;
-  document.getElementById("note").innerHTML = "<b>"+esc(state.slice.packageName)+"</b> · column slice. Tests are hidden. Double-click a workspace card to return.";
+  document.getElementById("note").innerHTML = "<b>"+esc(state.slice.packageName)+"</b> · column slice. Tests are hidden."
+    +(state.slice.emptyHint? " "+esc(state.slice.emptyHint):"");
   const stage = document.getElementById("stage");
   const cols = document.createElement("div");
   cols.className = "cols";
@@ -141,16 +181,19 @@ async function openSlice(packageId){
       const b = document.createElement("button");
       b.className = "card";
       b.type = "button";
-      b.style.borderLeftColor = card.color || "var(--cyan)";
-      b.innerHTML = "<strong>"+esc(card.title)+"</strong><small>"+esc(card.subtitle)+"</small>";
-      b.onclick = () => openCard(card);
+      if (HOST !== "vscode" && card.color) b.style.borderLeftColor = card.color;
+      b.innerHTML = "<strong>"+esc(card.title)+"</strong><small>"+esc(card.subtitle)+"</small>"
+        +(card.intent? "<small>"+esc(card.intent)+"</small>":"");
+      b.onclick = function(){ openCard(card); };
       stack.appendChild(b);
     }
     const extra = state.slice.overflow && state.slice.overflow[col.id];
     if (extra) {
-      const more = document.createElement("div");
+      const more = document.createElement("button");
       more.className = "more";
-      more.textContent = "+ " + extra + " more in this lane";
+      more.type = "button";
+      const hint = state.slice.overflowHint && state.slice.overflowHint[col.id];
+      more.textContent = hint ? "+ " + hint : "+ " + extra + " more in this lane";
       stack.appendChild(more);
     }
     wrap.appendChild(stack);
@@ -160,27 +203,39 @@ async function openSlice(packageId){
   stage.appendChild(cols);
   writeHash();
   if (state.slice.focusCardId) {
-    const card = state.slice.columns.flatMap(c => c.cards).concat(state.slice.guards||[]).find(c => c.id === state.slice.focusCardId);
+    const card = state.slice.columns.flatMap(function(c){ return c.cards; }).concat(state.slice.guards||[]).find(function(c){ return c.id === state.slice.focusCardId; });
     if (card) openCard(card);
   }
 }
-async function openCard(card){
+function openCard(card){
   state.focus = card.symbolId;
   writeHash();
-  const res = await fetch("/api/node/"+encodeURIComponent(card.symbolId));
+  if (vscode) { vscode.postMessage({ type:"node", id:card.symbolId, card:card }); return; }
+  api("/api/node/"+encodeURIComponent(card.symbolId), function(n){ openCardFromNode(n, card); });
+}
+function openCardFromNode(n, card){
   const drawer = document.getElementById("drawer");
-  if (!res.ok) { drawer.textContent = "Not found."; return; }
-  const n = await res.json();
   const calls = (n.calls||[]).slice(0,40);
   const called = (n.calledBy||[]).slice(0,40);
+  const lifted = (card && card.calls && card.calls.length) ? card.calls.map(function(x){ return x.name; }) : calls;
+  const liftedBy = (card && card.calledBy && card.calledBy.length) ? card.calledBy.map(function(x){ return x.name; }) : called;
+  const file = n.file || (card && card.file) || "";
+  const line = n.line || (card && card.line) || 0;
   drawer.innerHTML = "<h2>"+esc(n.name||card.title)+"</h2>"
-    + "<p>"+esc((n.view&&n.view.intent)||card.subtitle||"")+"</p>"
-    + "<p class=lbl>Where</p><p>"+esc(n.file)+(n.line? ", line "+n.line:"")+"</p>"
-    + "<p class=lbl>Calls</p>" + (calls.length? "<ul>"+calls.map(x=>"<li>"+esc(x)+"</li>").join("")+"</ul>":"<p>Doesn't call anything else on this map.</p>")
-    + "<p class=lbl>Called by</p>" + (called.length? "<ul>"+called.map(x=>"<li>"+esc(x)+"</li>").join("")+"</ul>":"<p>Nothing on this map calls this.</p>");
+    + "<p>"+esc((card && card.job) || ((n.view&&n.view.job)||""))+"</p>"
+    + "<p>"+esc((card && card.intent) || ((n.view&&n.view.intent)|| (card && card.subtitle) || ""))+"</p>"
+    + "<p class=lbl>Where</p><p>"+(file ? "<button type=button class=openfile data-file='"+esc(file)+"' data-line='"+(line||1)+"'>"+esc(file)+(line? ", line "+line:"")+"</button>" : "")+"</p>"
+    + "<p class=lbl>Calls</p>" + (lifted.length? "<ul>"+lifted.map(function(x){return "<li>"+esc(x)+"</li>";}).join("")+"</ul>":"<p>No calls in this slice.</p>")
+    + "<p class=lbl>Called by</p>" + (liftedBy.length? "<ul>"+liftedBy.map(function(x){return "<li>"+esc(x)+"</li>";}).join("")+"</ul>":"<p>No callers in this slice.</p>");
+  const btn = drawer.querySelector(".openfile");
+  if (btn) btn.onclick = function(){
+    const f = btn.getAttribute("data-file");
+    const ln = parseInt(btn.getAttribute("data-line")||"1", 10) || 1;
+    if (vscode) vscode.postMessage({ type:"openFile", file:f, line:ln });
+  };
 }
-document.getElementById("back").onclick = () => { state.focus = null; drawWorkspace(); };
-document.getElementById("theme").onclick = () => {
+document.getElementById("back").onclick = function(){ state.focus = null; drawWorkspace(); };
+document.getElementById("theme").onclick = function(){
   const light = document.documentElement.dataset.theme === "light";
   document.documentElement.dataset.theme = light ? "" : "light";
 };

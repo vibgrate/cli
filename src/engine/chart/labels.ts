@@ -22,6 +22,9 @@ export const ROLE_LABEL: Record<string, string> = {
   utility: 'Helper',
   test_support: 'Test helper',
   unknown: 'Unclassified',
+  entry_point: 'Entry',
+  worker: 'Worker',
+  messaging: 'Messaging',
 };
 
 export const PURPOSE_LABEL: Record<string, string> = {
@@ -38,8 +41,11 @@ export const PURPOSE_LABEL: Record<string, string> = {
   decrypt: 'Decrypts',
   publish: 'Publishes an event',
   subscribe: 'Listens for events',
+  consume: 'Listens for events',
   cache: 'Caches',
   log: 'Logs',
+  orchestrate: 'Orchestrates',
+  file_io: 'Reads or writes files',
 };
 
 export const KIND_LABEL: Record<string, string> = {
