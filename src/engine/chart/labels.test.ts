@@ -24,28 +24,18 @@ describe('chart page chrome', () => {
   it('is English-only and hides internals', () => {
     const html = chartPage();
     expect(html).toContain('Code map');
-    expect(html).toContain('By job');
-    expect(html).toContain('Architecture on');
-    expect(html).toContain('Missing steps');
+    expect(html).toContain('Workspace');
     expect(html).not.toContain('HAILE');
     expect(html).not.toContain('confidence');
     expect(html).not.toContain('node_id');
   });
 
-  it('lets the map scroll and zoom instead of clipping to a fixed viewport', () => {
+  it('opens on packages, not a 29k-symbol camera', () => {
     const html = chartPage();
-    expect(html).not.toContain('viewBox="0 0 1120 760"');
-    expect(html).toMatch(/\.canvas\s*\{[^}]*overflow:\s*auto/);
-    expect(html).toContain('id="canvas"');
-    expect(html).toContain('id="zoom-in"');
-    expect(html).toContain('id="zoom-out"');
-    expect(html).toContain('id="zoom-fit"');
-    expect(html).toContain('aria-label="Zoom in"');
-    expect(html).toContain('Scroll or drag');
-    expect(html).toContain('function sizeMap(');
-    expect(html).toContain('function zoomBy(');
-    expect(html).toContain('e.ctrlKey || e.metaKey');
-    expect(html).toContain('c.scrollBy');
-    expect(html).toContain('svg.style.height');
+    expect(html).toContain('/api/overview');
+    expect(html).toContain('/api/slice');
+    expect(html).not.toContain('/api/graph');
+    expect(html).not.toContain('function sizeMap(');
+    expect(html).not.toContain('LANE_X');
   });
 });

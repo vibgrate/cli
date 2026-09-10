@@ -80,6 +80,17 @@ describe('ActiveGraphCache', () => {
     expect(cache.get('r', 'keep')).toBeDefined();
   });
 
+  it('evictRepository drops every slot for that repo and nothing else', () => {
+    const cache = new ActiveGraphCache();
+    cache.put('keep', 'main', tinyGraph('keep'));
+    cache.put('gone', 'main', tinyGraph('gone-main'));
+    cache.put('gone', 'feat', tinyGraph('gone-feat'));
+    expect(cache.evictRepository('gone')).toHaveLength(2);
+    expect(cache.get('gone', 'main')).toBeUndefined();
+    expect(cache.get('keep', 'main')).toBeDefined();
+    expect(cache.size()).toBe(1);
+  });
+
   it('lists slots with evictable flags', () => {
     let t = 0;
     const cache = new ActiveGraphCache({ now: () => t, idleTimeoutMs: 50 });

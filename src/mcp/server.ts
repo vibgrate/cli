@@ -13,6 +13,7 @@ import { TOOLS, budgetSuffix, listedToolNames, warmEmbedderInBackground, type To
 import { COMPRESS_TOOLS, memoryVgTools } from './compress-tools.js';
 import { isRelevantChange } from '../engine/watch-filter.js';
 import { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
+import { envForNamedVgdSocket } from '../runtime/vgd/attach.js';
 import { renderToolResult } from './response.js';
 import { recordSaving, sanitizeClient, PER_FILE_TOKENS, SAVINGS_TOOLS, type Outcome } from '../engine/savings.js';
 import type { SessionStats } from './serve-stats.js';
@@ -89,6 +90,13 @@ export interface ServeOptions {
   /** `--no-daemon`: never auto-start or use the local runtime. */
   daemon?: boolean;
   /**
+   * Talk to this vgd socket instead of the default. Tests and custom runtimes
+   * use it so a process can own a daemon without racing another. When set,
+   * auto-start is off and CI/VG_NO_DAEMON are ignored — naming a socket is an
+   * opt-in.
+   */
+  socketPath?: string;
+  /**
    * Event-driven refresh: recursive fs.watch on the workspace so a save
    * rebuilds in ~400 ms instead of waiting out the freshness poll (default
    * true when refresh is on; `--no-watch` opts out). Where recursive watch is
@@ -154,6 +162,11 @@ export class GraphSource {
    * failure mode is "this process watches again", never "nobody watches".
    */
   private daemonOwnsFreshness = false;
+  /**
+   * Slot vgd is serving for this workspace. When set (and freshness is
+   * deferred), this process holds **no** `VgGraph` — tools go over `run-tool`.
+   */
+  private daemonSlot: { repositoryId: string; gitRef: string; socketPath: string } | null = null;
   private cached: VgGraph | null = null;
   /** Project root used for freshness probes and rebuilds. */
   readonly root: string;
@@ -190,17 +203,32 @@ export class GraphSource {
   }
 
   /**
-   * Hand freshness to the daemon: stop probing on every call and stop watching.
-   * The daemon pushes `slot-changed` and we reload from disk then.
+   * Hand freshness AND the map to the daemon: drop any cached copy, stop
+   * probing, stop watching. Tools then run via `run-tool` against the slot.
    */
-  deferFreshnessToDaemon(): void {
+  deferFreshnessToDaemon(slot: { repositoryId: string; gitRef: string; socketPath: string }): void {
+    this.daemonSlot = slot;
     this.daemonOwnsFreshness = true;
+    this.cached = null;
+    this.cachedMtimeMs = -1;
+    this.pendingChanges.clear();
     this.stopWatching();
+  }
+
+  /** Slot vgd is serving, or null when this process still owns the map. */
+  get attachedDaemon(): { repositoryId: string; gitRef: string; socketPath: string } | null {
+    return this.daemonOwnsFreshness ? this.daemonSlot : null;
+  }
+
+  onDaemonSlotChanged(change: { gitRef: string }): void {
+    if (this.daemonSlot) this.daemonSlot = { ...this.daemonSlot, gitRef: change.gitRef };
+    this.pendingChanges.clear();
   }
 
   /** The daemon went away — resume owning freshness locally. */
   resumeLocalFreshness(): void {
     this.daemonOwnsFreshness = false;
+    this.daemonSlot = null;
     this.startWatching();
   }
 
@@ -210,8 +238,14 @@ export class GraphSource {
     this.pendingChanges.clear();
   }
 
-  /** Current graph: auto-refreshed if the tree drifted, reloaded if the file changed. */
+  /**
+   * Current graph: auto-refreshed if the tree drifted, reloaded if the file changed.
+   * Throws when vgd owns the map — callers must use `run-tool`, not load a copy.
+   */
   async get(): Promise<VgGraph> {
+    if (this.daemonOwnsFreshness) {
+      throw new Error('vgd owns this map — this process holds no copy');
+    }
     if (this.refresh && !this.daemonOwnsFreshness) await this.maybeRefresh();
     // JSON when present, else the standalone snapshot (global-store mode);
     // throws if neither exists → surfaced as tool error.
@@ -312,53 +346,93 @@ export class GraphSource {
 }
 
 /**
- * Prefer the daemon's watcher to our own.
+ * Attach this serve process to vgd when a runtime is available: ensure the
+ * map is in a slot, subscribe to pushes, and drop any local copy. `--no-daemon`
+ * and a missing runtime keep the in-process map (and optional watcher).
  *
- * Both notice the same edits and both drive the same incremental rebuild, so
- * running them together means two inotify registrations over one tree and two
- * rebuilds racing for one lock. The daemon wins when it is there: it is the
- * process that already holds the map and, unlike this one, is shared by every
- * other client on the machine.
- *
- * Standing down is conditional on the daemon *confirming* the subscription,
- * and reversed the instant that connection drops — a dead daemon degrades this
+ * Standing down is conditional on the daemon confirming the subscription, and
+ * reversed the instant that connection drops — a dead daemon degrades this
  * server to watching for itself, never to nothing watching at all.
- *
- * The confirmation has to be about *this* repository. The daemon only watches
- * a repo once it holds that repo's slot, so a subscription it acknowledges for
- * a workspace it has no map for would push nothing, forever — and this server
- * would have retired its own watcher to listen to silence. Publishing first is
- * what makes the acknowledgement mean something: it hands the daemon the map,
- * which is what starts its watcher, and answers with the repository id to
- * scope the subscription to.
  */
-async function watchViaDaemonOrLocally(source: GraphSource, opts: ServeOptions): Promise<void> {
+export async function attachGraphSource(source: GraphSource, opts: ServeOptions): Promise<void> {
+  const wantWatch = opts.refresh !== false && opts.watch !== false;
   if (opts.daemon === false) {
-    source.startWatching();
+    if (wantWatch) source.startWatching();
     return;
   }
   try {
-    const [{ publishGraphToVgd }, { subscribeToSlots }] = await Promise.all([
-      import('../runtime/vgd/publish.js'),
+    const [{ attachVgd, envForNamedVgdSocket: namedEnv }, { vgdRequest }, { subscribeToSlots }] = await Promise.all([
+      import('../runtime/vgd/attach.js'),
+      import('../runtime/vgd/client.js'),
       import('../runtime/vgd/slot-subscription.js'),
     ]);
-    // Never starts a daemon; "not-running" simply means we watch locally.
-    const published = await publishGraphToVgd(opts.root ?? source.root);
-    if (published.status === 'published' || published.status === 'current') {
-      const subscription = await subscribeToSlots({
-        repositoryId: published.repositoryId,
-        onChange: () => source.reloadFromDisk(),
-        onDetach: () => source.resumeLocalFreshness(),
+    const root = opts.root ?? source.root;
+    const attached = await attachVgd(root, {
+      autoStart: opts.socketPath ? false : true,
+      publish: false,
+      socketPath: opts.socketPath,
+      env: opts.socketPath ? namedEnv() : undefined,
+    });
+    if (attached.status !== 'attached' || !attached.socketPath) {
+      if (wantWatch) source.startWatching();
+      return;
+    }
+    const ensured = await vgdRequest(
+      { op: 'ensure-graph', root, graphPath: source.graphPath },
+      { socketPath: attached.socketPath },
+    );
+    if (!ensured.ok || !('stored' in ensured)) {
+      if (wantWatch) source.startWatching();
+      return;
+    }
+    const socketPath = attached.socketPath;
+    const subscription = await subscribeToSlots({
+      socketPath,
+      repositoryId: ensured.repositoryId,
+      onChange: (change) => source.onDaemonSlotChanged(change),
+      onDetach: () => source.resumeLocalFreshness(),
+    });
+    if (subscription.active) {
+      source.deferFreshnessToDaemon({
+        repositoryId: ensured.repositoryId,
+        gitRef: ensured.gitRef,
+        socketPath,
       });
-      if (subscription.active) {
-        source.deferFreshnessToDaemon();
-        return;
-      }
+      return;
     }
   } catch {
     /* no daemon, or it cannot push — watch locally */
   }
-  source.startWatching();
+  if (wantWatch) source.startWatching();
+}
+
+async function runToolViaDaemon(
+  slot: { repositoryId: string; gitRef: string; socketPath: string },
+  name: string,
+  args: Record<string, unknown>,
+  ctx: { local: boolean; dedup: boolean; seen: Set<string> },
+): Promise<unknown> {
+  const { vgdRequest } = await import('../runtime/vgd/client.js');
+  const res = await vgdRequest(
+    {
+      op: 'run-tool',
+      repositoryId: slot.repositoryId,
+      gitRef: slot.gitRef,
+      name,
+      args,
+      local: ctx.local || undefined,
+      dedup: ctx.dedup || undefined,
+      seen: ctx.seen.size ? [...ctx.seen] : undefined,
+    },
+    { socketPath: slot.socketPath },
+  );
+  if (!res.ok) throw new Error(res.error);
+  if (!('tool' in res) || !('result' in res)) throw new Error('the local runtime returned no tool result');
+  if (Array.isArray(res.seen)) {
+    ctx.seen.clear();
+    for (const id of res.seen) ctx.seen.add(id);
+  }
+  return res.result;
 }
 
 export function createServer(source: GraphSource, opts: ServeOptions = {}): Server {
@@ -373,7 +447,12 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
   // and every tool answers exactly as it does today.
   const semanticSession = local
     ? undefined
-    : new DaemonSemanticSession(root, { disabled: opts.daemon === false });
+    : new DaemonSemanticSession(root, {
+        disabled: opts.daemon === false,
+        socketPath: opts.socketPath,
+        autoStart: opts.socketPath ? false : undefined,
+        env: opts.socketPath ? envForNamedVgdSocket() : undefined,
+      });
   // Per-session memory of node ids whose full detail was already returned — the
   // basis for opt-in cross-call dedup (`--dedup`). Scoped to this server
   // instance so it never leaks across sessions. Node ids are content-addressed
@@ -432,8 +511,20 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
     // when no map is loadable yet the description ships without the line.
     let budget = '';
     try {
-      const graph = await source.get();
-      budget = budgetSuffix(new Set(graph.nodes.map((n) => n.file)).size);
+      const slot = source.attachedDaemon;
+      if (slot) {
+        const { vgdRequest } = await import('../runtime/vgd/client.js');
+        const summary = await vgdRequest(
+          { op: 'graph-summary', repositoryId: slot.repositoryId, gitRef: slot.gitRef },
+          { socketPath: slot.socketPath },
+        );
+        if (summary.ok && 'summary' in summary) {
+          budget = budgetSuffix(summary.summary.fileCount ?? summary.summary.nodeCount);
+        }
+      } else {
+        const graph = await source.get();
+        budget = budgetSuffix(new Set(graph.nodes.map((n) => n.file)).size);
+      }
     } catch {
       /* no map yet — plain description */
     }
@@ -452,30 +543,43 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
     if (!tool) {
       return errorResult(`unknown tool "${request.params.name}"`);
     }
-    let graph: VgGraph;
-    if (tool.graphless) {
-      // Compression / memory tools answer with or without a map.
-      graph = NO_GRAPH;
-    } else {
-      try {
-        graph = await source.get();
-      } catch {
-        return errorResult(
-          'no code map found. Run `vg` in the project to build .vibgrate/graph.json, then retry.',
-        );
-      }
-    }
     const startedAt = Date.now();
     try {
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-      const result = await tool.handler(graph, args, {
-        root,
-        local,
-        dedup,
-        seen,
-        graphPath: source.graphPath,
-        semanticSession,
-      });
+      let result: unknown;
+      if (tool.graphless) {
+        result = await tool.handler(NO_GRAPH, args, {
+          root,
+          local,
+          dedup,
+          seen,
+          graphPath: source.graphPath,
+          semanticSession,
+        });
+      } else if (source.attachedDaemon) {
+        result = await runToolViaDaemon(source.attachedDaemon, tool.name, args, {
+          local,
+          dedup,
+          seen,
+        });
+      } else {
+        let graph: VgGraph;
+        try {
+          graph = await source.get();
+        } catch {
+          return errorResult(
+            'no code map found. Run `vg` in the project to build .vibgrate/graph.json, then retry.',
+          );
+        }
+        result = await tool.handler(graph, args, {
+          root,
+          local,
+          dedup,
+          seen,
+          graphPath: source.graphPath,
+          semanticSession,
+        });
+      }
       const ms = Date.now() - startedAt;
       // Live, in-memory session stats for the serve status display — always on
       // when a serve process passed them (nothing leaves the process).
@@ -514,13 +618,11 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
 
 export async function serveStdio(graphPath: string, opts: ServeOptions = {}): Promise<void> {
   const source = new GraphSource(graphPath, opts.refresh !== false, { root: opts.root });
-  const wantWatch = opts.refresh !== false && opts.watch !== false;
-  if (wantWatch) await watchViaDaemonOrLocally(source, opts);
+  await attachGraphSource(source, opts);
   const server = createServer(source, opts);
-  // Start the semantic-model warm-up as soon as the server boots, so the first
-  // orient/query_graph doesn't pay a cold download. Non-blocking: navigation
-  // answers lexically until the model is ready, then upgrades to semantic.
-  warmEmbedderInBackground(opts.local);
+  // When vgd holds the map, it also holds the embed worker — warming a second
+  // copy in this process is the duplication this attach exists to prevent.
+  if (!source.attachedDaemon) warmEmbedderInBackground(opts.local);
   await server.connect(new StdioServerTransport());
 }
 

@@ -7,11 +7,17 @@ import { WorkspaceRegistry } from './registry.js';
 import { vgdPidPath, vgdSocketPath } from './paths.js';
 import { queryGraph, queryGraphSemantic } from '../../engine/query.js';
 import { loadGraph } from '../../engine/load.js';
+import { resolveGraphPath } from '../../engine/artifacts.js';
+import { globalGraphPathForRef } from '../paths.js';
+import { clearDetectGitRefCache, detectGitRef } from '../git-ref.js';
+import { mapFileStat } from '../../engine/snapshot.js';
 import { impactOf } from '../../engine/impact.js';
 import { resolveOne } from '../../engine/lookup.js';
+import { runGraphQuery, type GraphQueryParams } from '../../lsp/graph-query.js';
+import { TOOLS } from '../../mcp/tools.js';
 import { getVgdHostBroker, type VgdHostBroker } from './host-broker.js';
 import { EmbedBroker } from './embed-broker.js';
-import { FreshnessSupervisor } from './freshness.js';
+import { FreshnessSupervisor, spawnRebuild, DEFAULT_REBUILD_TIMEOUT_MS } from './freshness.js';
 import { DepContextCache } from './dep-cache.js';
 import type { VgGraph } from '../../schema.js';
 
@@ -34,6 +40,11 @@ export interface VgdServerOptions {
   depCache?: DepContextCache;
   /** Watch registered workspaces and rebuild on drift (default true). */
   watch?: boolean;
+  /**
+   * Rebuild a repo that has no on-disk map (`ensure-graph`). Default is a
+   * detached `vg build --no-daemon --no-warm` child. Tests inject a writer.
+   */
+  rebuild?: (root: string) => Promise<{ ok: boolean; error?: string }>;
   /**
    * Diagnostic sink. `vg daemon start` points this at stdout so the daemon's
    * work — graph publishes, branch switches, index builds — is visible while
@@ -67,10 +78,7 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
   const registry = options.registry ?? new WorkspaceRegistry();
   const hostBroker = options.hostBroker ?? getVgdHostBroker();
   const log = options.log ?? ((): void => {});
-  // Semantic warm: the index is slot-scoped like the graph, so it attaches to
-  // the registry's lifecycle rather than being managed alongside it by hand.
-  const embedBroker = options.embedBroker ?? new EmbedBroker({ log });
-  embedBroker.setGraphProvider((repositoryId, gitRef) => registry.graphs.get(repositoryId, gitRef)?.graph);
+  const watchEnabled = options.watch !== false;
   // Freshness belongs where the graphs are. Reloading is the daemon's own
   // cheap disk read; the expensive rebuild happens in a child (see freshness.ts).
   const freshness =
@@ -85,7 +93,21 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
       },
       select: (repositoryId, gitRef) => registry.selectGitRef(repositoryId, gitRef),
     });
-  const watchEnabled = options.watch !== false;
+  // Semantic warm: the index is slot-scoped like the graph, so it attaches to
+  // the registry's lifecycle rather than being managed alongside it by hand.
+  // Skip warming a slot whose repo is mid-rebuild — those vectors will be
+  // dropped the moment the child lands.
+  const embedBroker =
+    options.embedBroker ??
+    new EmbedBroker({
+      log,
+      isRebuilding: (repositoryId) =>
+        watchEnabled && freshness.list().some((s) => s.repositoryId === repositoryId && s.building),
+    });
+  embedBroker.setGraphProvider((repositoryId, gitRef) => registry.graphs.get(repositoryId, gitRef)?.graph);
+  const rebuildImpl =
+    options.rebuild ?? ((root: string) => spawnRebuild(root, DEFAULT_REBUILD_TIMEOUT_MS));
+  const inflightEnsure = new Map<string, Promise<VgdResponse>>();
   // Shared dependency context: one manifest walk per daemon instead of one per
   // process, per call. Invalidated by the freshness watcher below, which is
   // already the component that notices a manifest write.
@@ -162,6 +184,8 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
             embedBroker,
             freshness: watchEnabled ? freshness : undefined,
             depCache,
+            rebuild: rebuildImpl,
+            inflightEnsure,
             subscribe: (repositoryId) => {
               subscribers.set(socket, { repositoryId });
               log(`watch-slots: subscriber attached${repositoryId ? ` for ${repositoryId}` : ' (all repositories)'}`);
@@ -176,6 +200,19 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
         ).then(
           (response) => {
             socket.write(JSON.stringify(response) + '\n');
+          },
+          (err) => {
+            try {
+              socket.write(
+                JSON.stringify({
+                  ok: false,
+                  error: err instanceof Error ? err.message : String(err),
+                  code: 'internal',
+                }) + '\n',
+              );
+            } catch {
+              /* socket already gone */
+            }
           },
         );
       }
@@ -206,6 +243,17 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
       embedBroker.stop();
       freshness.stopAll();
       depCache.clear();
+      // watch-slots connections stay open for the life of the client.
+      // `net.Server.close()` waits for them, so a daemon stop with an LSP or
+      // `vg serve` still subscribed would hang until those processes exited.
+      // Destroying them is what fires the client's onDetach → local watch.
+      for (const socket of subscribers.keys()) {
+        try {
+          socket.destroy();
+        } catch {
+          /* already gone */
+        }
+      }
       subscribers.clear();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       try {
@@ -232,6 +280,8 @@ async function handleLine(
     embedBroker: EmbedBroker;
     freshness?: FreshnessSupervisor;
     depCache: DepContextCache;
+    rebuild: (root: string) => Promise<{ ok: boolean; error?: string }>;
+    inflightEnsure: Map<string, Promise<VgdResponse>>;
     /** Hold this connection open as a slot subscriber. */
     subscribe?: (repositoryId?: string) => void;
     log: (message: string) => void;
@@ -248,7 +298,8 @@ async function handleLine(
   switch (req.op) {
     case 'ping':
       return { ok: true, pong: true, version: VGD_PROTOCOL_VERSION };
-    case 'status':
+    case 'status': {
+      const mem = process.memoryUsage();
       return {
         ok: true,
         pid: ctx.pid,
@@ -258,8 +309,15 @@ async function handleLine(
         version: VGD_PROTOCOL_VERSION,
         socketPath: ctx.socketPath,
         cliVersion: VERSION,
+        memory: {
+          rss: mem.rss,
+          heapUsed: mem.heapUsed,
+          graphSlots: ctx.registry.graphs.size(),
+          embedSlots: ctx.embedBroker.status().slots.length,
+        },
         freshness: ctx.freshness?.list() ?? [],
       };
+    }
     case 'shutdown': {
       if (!ctx.onShutdownRequest) {
         return {
@@ -434,6 +492,9 @@ async function handleLine(
       return { ok: true, workspaces: ctx.registry.list() };
     case 'register': {
       const known = ctx.registry.size();
+      // The process-lifetime git-ref cache is wrong in a daemon that outlives
+      // checkouts. Re-detect on every register so a branch switch is visible.
+      clearDetectGitRefCache(req.root);
       const workspace = ctx.registry.register(req.root, ctx.now, { label: req.label, role: req.role });
       // A repo the daemon has not seen before is the interesting case — that is
       // when a warm daemon still has cold work to do.
@@ -461,6 +522,13 @@ async function handleLine(
         ctx.log(`select-git-ref: ${req.repositoryId} ${before ?? '(none)'} → ${req.gitRef}`);
       }
       ctx.registry.selectGitRef(req.repositoryId, req.gitRef);
+      // A selected ref with no resident slot is not "serve some other branch".
+      // Try the on-disk snapshot for that ref so a checkout the daemon has
+      // seen before is instant; otherwise queries return no_graph until
+      // ensure-graph rebuilds it.
+      if (!ctx.registry.graphs.get(req.repositoryId, req.gitRef)) {
+        loadRefFromDisk(ctx, req.repositoryId, req.gitRef);
+      }
       return { ok: true, selected: true, repositoryId: req.repositoryId, gitRef: req.gitRef };
     }
     case 'put-graph': {
@@ -484,29 +552,61 @@ async function handleLine(
       }
     }
     case 'load-graph': {
-      // Load from disk inside the daemon: the snapshot-first loader decodes
-      // the binary sidecar (msgpack) when fresh — no multi-MB JSON line ever
-      // crosses the socket, which is what made put-graph publishes slow on
-      // large repos.
-      const record = ctx.registry.register(req.root, ctx.now, { gitRef: req.gitRef });
-      const gitRef = req.gitRef ?? record.gitRef ?? 'HEAD';
-      ctx.log(`load-graph: ${record.id}@${gitRef} from ${req.root}`);
-      const graph = loadGraph(req.root, req.graphPath);
-      if (!graph) {
-        return {
-          ok: false,
-          error: `no code map found for ${req.root} — run \`vg build\` (or bare \`vg\`) first`,
-          code: 'no_map',
-        };
+      return loadGraphIntoSlot(ctx, req.root, req.gitRef, req.graphPath, { rebuildIfMissing: false });
+    }
+    case 'ensure-graph': {
+      // Single-flight per root: two clients asking at once share one child
+      // rebuild rather than two `vg build` processes fighting over one lock.
+      const key = path.resolve(req.root);
+      const existing = ctx.inflightEnsure.get(key);
+      if (existing) return existing;
+      const work = loadGraphIntoSlot(ctx, req.root, req.gitRef, req.graphPath, { rebuildIfMissing: true }).finally(
+        () => {
+          if (ctx.inflightEnsure.get(key) === work) ctx.inflightEnsure.delete(key);
+        },
+      );
+      ctx.inflightEnsure.set(key, work);
+      return work;
+    }
+    case 'graph-query': {
+      const resolved = ctx.registry.resolveGraph(req.repositoryId, req.gitRef);
+      if (!resolved) {
+        return { ok: false, error: 'no ActiveGraph loaded for repository — put-graph first', code: 'no_graph' };
       }
-      ctx.registry.putGraph(record.id, gitRef, graph);
-      startWatching(ctx, record.id, gitRef);
+      const record = ctx.registry.getById(req.repositoryId);
+      const root = record?.root ?? '.';
+      const params: GraphQueryParams = {
+        mode: req.mode as GraphQueryParams['mode'],
+        question: req.question,
+        semantic: req.semantic,
+        budget: req.budget,
+        limit: req.limit,
+        name: req.name,
+        depth: req.depth,
+        a: req.a,
+        b: req.b,
+        callers: req.callers,
+      };
+      const result = await runGraphQuery(resolved.graph, params, {
+        root,
+        offline: false,
+        semantic: req.semantic !== false,
+        rank: async (question) => {
+          const ranking = await ctx.embedBroker.rank(req.repositoryId, resolved.gitRef, question);
+          if (!ranking?.ranked.length) return null;
+          return {
+            ranked: ranking.ranked,
+            vectors: ranking.vectors,
+            model: ctx.embedBroker.status().model,
+          };
+        },
+      });
       return {
         ok: true,
-        stored: true,
-        repositoryId: record.id,
-        gitRef,
-        nodeCount: graph.nodes?.length ?? 0,
+        graphQuery: true,
+        repositoryId: req.repositoryId,
+        gitRef: resolved.gitRef,
+        result,
       };
     }
     case 'query-graph': {
@@ -595,10 +695,174 @@ async function handleLine(
           languages: g.meta?.languages ?? [],
           corpusHash: g.provenance?.corpusHash ?? null,
           root: g.meta?.root ?? null,
+          fileCount: fileCountOf(g),
         },
       };
     }
+    case 'run-tool': {
+      const resolved = ctx.registry.resolveGraph(req.repositoryId, req.gitRef);
+      if (!resolved) {
+        return { ok: false, error: 'no ActiveGraph loaded for repository — put-graph first', code: 'no_graph' };
+      }
+      const tool = TOOLS.find((t) => t.name === req.name);
+      if (!tool) {
+        return { ok: false, error: `unknown tool "${req.name}"`, code: 'unknown_tool' };
+      }
+      const record = ctx.registry.getById(req.repositoryId);
+      const seen = new Set(req.seen ?? []);
+      try {
+        const result = await tool.handler(resolved.graph, req.args ?? {}, {
+          root: record?.root ?? '.',
+          local: req.local,
+          dedup: req.dedup,
+          seen,
+          graphPath: record?.graphPath,
+          rank: async (question) => {
+            const ranking = await ctx.embedBroker.rank(req.repositoryId, resolved.gitRef, question);
+            if (!ranking?.ranked.length) return null;
+            return {
+              ranked: ranking.ranked,
+              vectors: ranking.vectors,
+              model: ctx.embedBroker.status().model,
+            };
+          },
+        });
+        return { ok: true, tool: true, name: req.name, result, seen: [...seen] };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          code: 'tool_failed',
+        };
+      }
+    }
   }
+}
+
+/**
+ * Put this repo's on-disk map into a slot, or — when `rebuildIfMissing` — spawn
+ * a child `vg build` and then load. Idempotent: a slot that already holds a
+ * map as new as the disk file is left alone, so a second publish does not
+ * drop the semantic index.
+ */
+async function loadGraphIntoSlot(
+  ctx: {
+    registry: WorkspaceRegistry;
+    freshness?: FreshnessSupervisor;
+    rebuild: (root: string) => Promise<{ ok: boolean; error?: string }>;
+    log: (message: string) => void;
+    now: () => Date;
+  },
+  root: string,
+  gitRefArg: string | undefined,
+  graphPath: string | undefined,
+  options: { rebuildIfMissing: boolean },
+): Promise<VgdResponse> {
+  clearDetectGitRefCache(root);
+  const record = ctx.registry.register(root, ctx.now, { gitRef: gitRefArg });
+  const gitRef = gitRefArg ?? record.gitRef ?? 'HEAD';
+  const held = alreadyHeldSlot(ctx.registry, record.id, gitRef, root, graphPath);
+  if (held) {
+    startWatching(ctx, record.id, gitRef);
+    ctx.log(`load-graph: ${record.id}@${gitRef} already held (${held.nodeCount} nodes) — not reloading`);
+    return {
+      ok: true,
+      stored: true,
+      repositoryId: record.id,
+      gitRef: held.gitRef,
+      nodeCount: held.nodeCount,
+      alreadyHeld: true,
+    };
+  }
+
+  ctx.log(`load-graph: ${record.id}@${gitRef} from ${root}`);
+  let graph = loadGraph(root, graphPath);
+  let rebuilt = false;
+  if (!graph && options.rebuildIfMissing) {
+    ctx.log(`ensure-graph: no map for ${root} — rebuilding in a child`);
+    const result = await ctx.rebuild(root);
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: result.error ?? `could not build a code map for ${root}`,
+        code: 'rebuild_failed',
+      };
+    }
+    graph = loadGraph(root, graphPath);
+    rebuilt = true;
+  }
+  if (!graph) {
+    return {
+      ok: false,
+      error: `no code map found for ${root} — run \`vg build\` (or bare \`vg\`) first`,
+      code: 'no_map',
+    };
+  }
+  ctx.registry.putGraph(record.id, gitRef, graph);
+  startWatching(ctx, record.id, gitRef);
+  return {
+    ok: true,
+    stored: true,
+    repositoryId: record.id,
+    gitRef,
+    nodeCount: graph.nodes?.length ?? 0,
+    rebuilt: rebuilt || undefined,
+  };
+}
+
+function alreadyHeldSlot(
+  registry: WorkspaceRegistry,
+  repositoryId: string,
+  gitRef: string,
+  root: string,
+  graphPath: string | undefined,
+): { gitRef: string; nodeCount: number } | null {
+  const slot =
+    (gitRef ? registry.graphs.get(repositoryId, gitRef) : undefined) ?? registry.graphs.current(repositoryId);
+  if (!slot || slot.nodeCount <= 0) return null;
+  try {
+    const file = resolveGraphPath(root, graphPath);
+    const st = mapFileStat(file);
+    // Disk is newer than the slot — a `vg build` landed since we loaded.
+    if (st.mtimeMs > slot.loadedAt) return null;
+  } catch {
+    // No on-disk file: keep the resident slot rather than dropping it.
+  }
+  return { gitRef: slot.gitRef, nodeCount: slot.nodeCount };
+}
+
+/**
+ * Load a (repositoryId, gitRef) slot from disk without shipping the graph over
+ * the socket. Used by `select-git-ref` so a previously built branch is instant.
+ */
+function loadRefFromDisk(
+  ctx: { registry: WorkspaceRegistry; freshness?: FreshnessSupervisor; log: (message: string) => void; now: () => Date },
+  repositoryId: string,
+  gitRef: string,
+): void {
+  const record = ctx.registry.getById(repositoryId);
+  if (!record) return;
+  const fromRefPath = loadGraph(record.root, globalGraphPathForRef(record.root, gitRef));
+  if (fromRefPath) {
+    ctx.registry.putGraph(repositoryId, gitRef, fromRefPath);
+    startWatching(ctx, repositoryId, gitRef);
+    ctx.log(`select-git-ref: loaded ${repositoryId}@${gitRef} from disk (${fromRefPath.nodes?.length ?? 0} nodes)`);
+    return;
+  }
+  // In-repo / current-HEAD snapshot only if this process is actually on that ref.
+  clearDetectGitRefCache(record.root);
+  if (detectGitRef(record.root).ref !== gitRef) return;
+  const current = loadGraph(record.root);
+  if (!current) return;
+  ctx.registry.putGraph(repositoryId, gitRef, current);
+  startWatching(ctx, repositoryId, gitRef);
+  ctx.log(`select-git-ref: loaded ${repositoryId}@${gitRef} from HEAD snapshot (${current.nodes?.length ?? 0} nodes)`);
+}
+
+function fileCountOf(graph: VgGraph): number {
+  const files = new Set<string>();
+  for (const n of graph.nodes ?? []) if (n.file) files.add(n.file);
+  return files.size;
 }
 
 /**

@@ -51,9 +51,30 @@ export interface HaileClassification {
   findings?: { rule: string; severity: string; message: string }[];
 }
 
+export type ArchZoom = 'workspace' | 'slice';
+
 export interface HaileProvider {
   version(): string;
   classify(input: HaileClassifyInput): HaileClassification | null;
+  /** L0 workspace map. Absent on older modules — the host builds its own. */
+  projectOverview?(graph: unknown, sidecar: unknown): unknown;
+  /** L1 column slice. Absent on older modules — the host builds its own. */
+  projectSlice?(
+    graph: unknown,
+    sidecar: unknown,
+    spec: {
+      packageId: string;
+      view: 'job' | 'calls' | 'missing' | 'problems';
+      focus?: string;
+      cap?: number;
+      architecture?: boolean;
+      tests?: boolean;
+    },
+  ): unknown;
+  /** Full map HTML. Absent → the host serves a tiny package list. */
+  renderArchPage?(opts: { host: 'browser' | 'vscode'; theme?: 'dark' | 'light' | 'hc' }): string;
+  /** Directory of UI assets (React Flow pack). Served at /arch-ui/. */
+  archUiAssets?(): string | null;
 }
 
 function disabled(): boolean {

@@ -27,6 +27,11 @@ export function defaultVgdTimeoutMs(op: VgdRequest['op']): number {
     case 'load-graph':
     case 'host-load':
       return 120_000; // large payload / disk load / model load
+    case 'ensure-graph':
+      return 600_000; // may spawn `vg build` in a child and wait for it
+    case 'graph-query':
+    case 'run-tool':
+      return 60_000; // ask/impact / MCP tool over a large resident map
     case 'host-generate':
       return 300_000; // local model generation
     case 'embed-index':

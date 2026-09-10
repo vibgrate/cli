@@ -1615,7 +1615,7 @@ vg show arch --no-open --json    # print the URL and counts; keep serving
 | `--focus <name>` | — | Open the map on this symbol |
 | `--no-open` | — | Print the URL without opening a browser |
 
-The map draws the same facts as `vg show`, `vg path`, and `vg impact` so a human can walk them: **by job** (handlers, guards, services, models — Architecture module on), **by cluster** (the graph areas), **who calls whom**, **missing steps** (a call exists in source but not on the map), and **problems** (architecture-rule breaks anchored on a line). Scroll or drag to move; pinch, Ctrl-scroll, or the + / − buttons to zoom. With the Architecture module off it is the raw graph — never a guess. The page is served inline from loopback with no external assets, and `q` / Ctrl-C stops it. `vg show chart` is the pre-rename spelling and still works as a silent alias for one release. See [docs/show-arch.md](./docs/show-arch.md).
+The map opens on the **workspace** (one card per package), then drills into a **column slice** (UI / endpoint → application → store). Same-file functions collapse; tests stay hidden; at most 120 cards. Filters (**by job**, **by cluster**, **who calls whom**, **missing steps**, **problems**) apply inside that zoom. With the Architecture module off it is the raw graph’s kinds in the same columns — never a guess. The page is served inline from loopback with no external assets, and `q` / Ctrl-C stops it. `vg show chart` is the pre-rename spelling and still works as a silent alias for one release. See [docs/show-arch.md](./docs/show-arch.md).
 
 #### vg show savings
 

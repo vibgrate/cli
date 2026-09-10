@@ -54,6 +54,9 @@ export async function publishGraphToVgd(root: string, options: VgdPublishOptions
     );
     if (!loaded.ok) return { status: 'failed', error: loaded.error };
     if (!('stored' in loaded)) return { status: 'failed', error: 'vgd did not store the map' };
+    if (loaded.alreadyHeld) {
+      return { status: 'current', repositoryId: loaded.repositoryId, gitRef: loaded.gitRef };
+    }
 
     let semantic: string | undefined;
     if (options.warmSemantic) {

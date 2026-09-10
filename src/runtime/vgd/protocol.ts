@@ -59,12 +59,55 @@ export type VgdRequest =
    * the map already exists on disk.
    */
   | { op: 'load-graph'; root: string; gitRef?: string; graphPath?: string }
+  /**
+   * Make this repo's map the ActiveGraph. Loads from disk when a snapshot
+   * exists; otherwise rebuilds in a child (`vg build --no-daemon`) and then
+   * loads. Clients must not `buildGraph` / `loadGraph` themselves when a
+   * daemon is running — this is the only supported way to get a map into a
+   * slot.
+   */
+  | { op: 'ensure-graph'; root: string; gitRef?: string; graphPath?: string }
+  /**
+   * Run an editor/CLI graph query (ask / areas / hubs / impact / path / show /
+   * tree) against the ActiveGraph. The result is the query payload, never the
+   * map — callers that go through this op do not need a local copy.
+   */
+  | {
+      op: 'graph-query';
+      repositoryId: string;
+      gitRef?: string;
+      mode: string;
+      question?: string;
+      semantic?: boolean;
+      budget?: number;
+      limit?: number;
+      name?: string;
+      depth?: number;
+      a?: string;
+      b?: string;
+      callers?: boolean;
+    }
   /** Lexical/structural query against the ActiveGraph for a repository. */
   | { op: 'query-graph'; repositoryId: string; query: string; limit?: number; gitRef?: string; semantic?: boolean }
   /** Blast-radius impact for a symbol id or qualified name. */
   | { op: 'impact-of'; repositoryId: string; symbol: string; depth?: number; gitRef?: string }
   /** Compact graph meta for the current (or named) slot — not the full graph. */
   | { op: 'graph-summary'; repositoryId: string; gitRef?: string }
+  /**
+   * Run a `vg serve` MCP tool against the resident ActiveGraph. The result is
+   * the tool payload, never the map — `vg serve` must not cache a copy when
+   * vgd is running.
+   */
+  | {
+      op: 'run-tool';
+      repositoryId: string;
+      gitRef?: string;
+      name: string;
+      args?: Record<string, unknown>;
+      local?: boolean;
+      dedup?: boolean;
+      seen?: string[];
+    }
   /** Semantic warm (docs/VGD-SEMANTIC-WARM-SPEC.md): worker + per-slot index state. */
   | { op: 'embed-status'; repositoryId?: string }
   /** Embed one string in the daemon's warm worker; the caller ranks locally. */
@@ -147,6 +190,8 @@ export type VgdResponse =
       socketPath: string;
       /** Calendar version of the CLI process serving this socket. */
       cliVersion?: string;
+      /** Resident process cost — rss/heap of the daemon, not its children. */
+      memory?: { rss: number; heapUsed: number; graphSlots: number; embedSlots: number };
       /** What the daemon is watching, and what it is mid-rebuild on. */
       freshness?: Array<{
         repositoryId: string;
@@ -207,7 +252,19 @@ export type VgdResponse =
       buildMs?: number;
     }
   | { ok: true; selected: true; repositoryId: string; gitRef: string }
-  | { ok: true; stored: true; repositoryId: string; gitRef: string; nodeCount: number }
+  | {
+      ok: true;
+      stored: true;
+      repositoryId: string;
+      gitRef: string;
+      nodeCount: number;
+      /** Slot already held this map — load was a no-op (no embed invalidation). */
+      alreadyHeld?: boolean;
+      /** `ensure-graph` had to spawn a rebuild child because no snapshot existed. */
+      rebuilt?: boolean;
+    }
+  | { ok: true; graphQuery: true; repositoryId: string; gitRef: string; result: unknown }
+  | { ok: true; tool: true; name: string; result: unknown; seen?: string[] }
   | {
       ok: true;
       query: string;
@@ -239,6 +296,8 @@ export type VgdResponse =
         languages: string[];
         corpusHash: string | null;
         root: string | null;
+        /** Distinct files in the map — used by `vg serve` for the orient budget line. */
+        fileCount?: number;
       };
     }
   | {
@@ -306,16 +365,45 @@ export function parseRequest(line: string): VgdRequest | { error: string } {
     if (!graph || typeof graph !== 'object') return { error: 'put-graph requires graph object' };
     return { op: 'put-graph', repositoryId: repositoryId.trim(), gitRef: gitRef.trim(), graph };
   }
-  if (op === 'load-graph') {
+  if (op === 'load-graph' || op === 'ensure-graph') {
     const root = (raw as { root?: unknown }).root;
     const gitRef = (raw as { gitRef?: unknown }).gitRef;
     const graphPath = (raw as { graphPath?: unknown }).graphPath;
-    if (typeof root !== 'string' || !root.trim()) return { error: 'load-graph requires a non-empty root' };
+    if (typeof root !== 'string' || !root.trim()) return { error: `${op} requires a non-empty root` };
     return {
-      op: 'load-graph',
+      op,
       root: root.trim(),
       gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
       graphPath: typeof graphPath === 'string' && graphPath.trim() ? graphPath.trim() : undefined,
+    };
+  }
+  if (op === 'graph-query') {
+    const repositoryId = (raw as { repositoryId?: unknown }).repositoryId;
+    const mode = (raw as { mode?: unknown }).mode;
+    if (typeof repositoryId !== 'string' || !repositoryId.trim()) return { error: 'graph-query requires repositoryId' };
+    if (typeof mode !== 'string' || !mode.trim()) return { error: 'graph-query requires mode' };
+    const gitRef = (raw as { gitRef?: unknown }).gitRef;
+    const question = (raw as { question?: unknown }).question;
+    const name = (raw as { name?: unknown }).name;
+    const a = (raw as { a?: unknown }).a;
+    const b = (raw as { b?: unknown }).b;
+    const budget = (raw as { budget?: unknown }).budget;
+    const limit = (raw as { limit?: unknown }).limit;
+    const depth = (raw as { depth?: unknown }).depth;
+    return {
+      op: 'graph-query',
+      repositoryId: repositoryId.trim(),
+      gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
+      mode: mode.trim(),
+      question: typeof question === 'string' ? question : undefined,
+      semantic: (raw as { semantic?: unknown }).semantic === true ? true : undefined,
+      budget: typeof budget === 'number' && budget > 0 ? Math.min(Math.floor(budget), 20_000) : undefined,
+      limit: typeof limit === 'number' && limit > 0 ? Math.min(Math.floor(limit), 200) : undefined,
+      name: typeof name === 'string' && name.trim() ? name.trim() : undefined,
+      depth: typeof depth === 'number' && depth > 0 ? Math.min(Math.floor(depth), 12) : undefined,
+      a: typeof a === 'string' && a.trim() ? a.trim() : undefined,
+      b: typeof b === 'string' && b.trim() ? b.trim() : undefined,
+      callers: (raw as { callers?: unknown }).callers === true ? true : undefined,
     };
   }
   if (op === 'embed-status') {
@@ -408,6 +496,28 @@ export function parseRequest(line: string): VgdRequest | { error: string } {
       symbol: symbol.trim(),
       depth: typeof depth === 'number' && depth > 0 ? Math.min(Math.floor(depth), 12) : undefined,
       gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
+    };
+  }
+  if (op === 'run-tool') {
+    const repositoryId = (raw as { repositoryId?: unknown }).repositoryId;
+    const name = (raw as { name?: unknown }).name;
+    if (typeof repositoryId !== 'string' || !repositoryId.trim()) return { error: 'run-tool requires repositoryId' };
+    if (typeof name !== 'string' || !name.trim()) return { error: 'run-tool requires name' };
+    const gitRef = (raw as { gitRef?: unknown }).gitRef;
+    const args = (raw as { args?: unknown }).args;
+    const seenRaw = (raw as { seen?: unknown }).seen;
+    const seen = Array.isArray(seenRaw)
+      ? seenRaw.filter((x): x is string => typeof x === 'string').slice(0, 10_000)
+      : undefined;
+    return {
+      op: 'run-tool',
+      repositoryId: repositoryId.trim(),
+      gitRef: typeof gitRef === 'string' && gitRef.trim() ? gitRef.trim() : undefined,
+      name: name.trim().slice(0, 80),
+      args: args && typeof args === 'object' && !Array.isArray(args) ? (args as Record<string, unknown>) : {},
+      local: (raw as { local?: unknown }).local === true ? true : undefined,
+      dedup: (raw as { dedup?: unknown }).dedup === true ? true : undefined,
+      seen,
     };
   }
   if (op === 'graph-summary') {

@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { mapFileExists } from '../engine/snapshot.js';
-import { serveStdio, createServer, GraphSource, type ServeOptions } from '../mcp/server.js';
+import { serveStdio, createServer, GraphSource, attachGraphSource, type ServeOptions } from '../mcp/server.js';
 import { StatsSharer, statsEndpoint, telemetryOptOut } from '../engine/stats-share.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { driftCount } from '../engine/freshness.js';
@@ -390,7 +390,7 @@ async function serveHttp(
   // and refresh debounce live across requests (re-parsing per request would be
   // wasteful and would probe freshness on every call).
   const source = new GraphSource(graphPath, opts.refresh !== false, { root: opts.root });
-  if (opts.refresh !== false && opts.watch !== false) source.startWatching();
+  await attachGraphSource(source, opts);
 
   const httpServer = createHttp(async (req, res) => {
     if (req.url !== '/mcp') {

@@ -51,12 +51,17 @@ import {
   type ArchitectureCallableWire,
 } from '../engine/haile/architecture-callables.js';
 import { haileModuleStatus } from '../install/haile-module.js';
+import { readHaileSidecar } from '../engine/haile/sidecar.js';
+import { projectOverview } from '../engine/chart/overview.js';
+import { projectSlice } from '../engine/chart/slice.js';
+import type { ArchOverview, ArchSlice } from '../engine/chart/arch-types.js';
 import { writeArtifacts, resolveGraphPath } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
 import { loadGraphPreferIndex } from '../engine/index-db.js';
 import type { RefreshOutcome } from '../engine/refresh.js';
 import { RefreshScheduler } from '../engine/refresh-scheduler.js';
 import { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
+import { envForNamedVgdSocket } from '../runtime/vgd/attach.js';
 import { manifestHash, loadScanCache, writeScanCache, isDependencyFile } from './scan-cache.js';
 import { isSkippedDirName } from '../engine/discover.js';
 import { recordScore, lastEntry, deltaFrom, recentHistory, type ScoreHistoryEntry } from './score-history.js';
@@ -242,6 +247,16 @@ export interface ArchitectureResponse {
    * reading the module cache itself. Only `unavailable` justifies an offer.
    */
   architectureModule?: ArchitectureModuleWire;
+  /**
+   * Workspace map (packages + aggregate edges). Omitted when the code graph
+   * is not loaded. Clients paint this, never the raw  graph.
+   */
+  overview?: ArchOverview;
+  /**
+   * Column slice for a project scope. Omitted at whole-workspace scope or
+   * when the path does not match a package.
+   */
+  slice?: ArchSlice;
 }
 
 export interface ArchitectureModuleWire {
@@ -533,7 +548,7 @@ const DIAGNOSTIC_RULES = new Set([
 
 // ── Server ─────────────────────────────────────────────────────────────────
 
-interface ServerOptions {
+export interface ServerOptions {
   root: string;
   offline: boolean;
   /** Problems-panel diagnostics. OFF unless the client asks (plan §8.1). */
@@ -544,6 +559,11 @@ interface ServerOptions {
   semantic: boolean;
   /** `--no-daemon`: never auto-start or use the local runtime (vgd). */
   daemon?: boolean;
+  /**
+   * Talk to this vgd socket instead of the default. Tests and custom runtimes
+   * use it so a language server can own a daemon without racing another.
+   */
+  socketPath?: string;
 }
 
 export class VibgrateLanguageServer {
@@ -591,6 +611,18 @@ export class VibgrateLanguageServer {
    */
   private daemonOwnsFreshness = false;
   /**
+   * Slot the daemon is serving for this workspace. When set, this process
+   * holds **no** `VgGraph` — queries go over the socket, and a slot-changed
+   * push updates this summary rather than reloading the map from disk.
+   */
+  private daemonSlot: {
+    repositoryId: string;
+    gitRef: string;
+    socketPath?: string;
+    nodeCount: number;
+    corpusHash: string | null;
+  } | null = null;
+  /**
    * The local runtime's semantic index, held for the life of the server.
    * Ranking there means the native embedding backend is never loaded into this
    * process — the failure this server has the least tolerance for, since a
@@ -605,9 +637,15 @@ export class VibgrateLanguageServer {
   constructor(
     private readonly opts: ServerOptions,
     output: NodeJS.WritableStream = process.stdout,
+    input: NodeJS.ReadableStream = process.stdin,
   ) {
-    this.conn = new Connection(process.stdin, output);
-    this.semanticSession = new DaemonSemanticSession(opts.root, { disabled: opts.daemon === false });
+    this.conn = new Connection(input, output);
+    this.semanticSession = new DaemonSemanticSession(opts.root, {
+      disabled: opts.daemon === false,
+      socketPath: opts.socketPath,
+      autoStart: opts.socketPath ? false : undefined,
+      env: opts.socketPath ? envForNamedVgdSocket() : undefined,
+    });
     this.refresher = new RefreshScheduler({
       root: opts.root,
       graphPath: () => resolveGraphPath(opts.root),
@@ -728,6 +766,7 @@ export class VibgrateLanguageServer {
       this.slotSubscription?.close();
       this.slotSubscription = null;
       this.daemonOwnsFreshness = false;
+      this.daemonSlot = null;
       return null;
     });
 
@@ -778,7 +817,7 @@ export class VibgrateLanguageServer {
         // Drop projects under pruned trees (e.g. `.claude/worktrees`) even when
         // replaying a cache written before those dirs were excluded.
         this.artifact = pruneArtifactProjects(cached.artifact);
-        if (this.graph) refineArtifactWithGraph(this.artifact, this.graph, this.fileRoles);
+        this.refineArchitectureInPlace();
         fromCache = true;
       } else {
         const scanOpts: ScanOptions = {
@@ -806,9 +845,9 @@ export class VibgrateLanguageServer {
         writeScanCache(this.opts.root, cacheKey, this.artifact);
       }
 
-      // Graph build can finish while the scan is in flight. Re-refine so
+      // Graph / AST-role refine can land after the first scan. Re-refine so
       // roles recovered (or extracted) after we started still land.
-      if (this.graph) refineArtifactWithGraph(this.artifact, this.graph, this.fileRoles);
+      this.refineArchitectureInPlace();
 
       this.publishScore();
       this.publishScanArtifact(fromCache);
@@ -1143,10 +1182,9 @@ export class VibgrateLanguageServer {
   // ── Graph ────────────────────────────────────────────────────────────────
 
   /**
-   * Load the committed map if one exists, else build it once (this is the
-   * "first activation sets up the graph" step). Fire-and-forget from
-   * `initialized` so it never blocks the drift score; a query that arrives
-   * mid-build awaits the same in-flight promise via the `graphBuilding` guard.
+   * Make a code map available for queries. When a daemon is running it is the
+   * **only** process that holds the graph — this server stores a slot id and
+   * talks to vgd. Local load/build is the `--no-daemon` / no-runtime fallback.
    */
   private async ensureGraph(): Promise<void> {
     if (!this.opts.graph) {
@@ -1155,30 +1193,11 @@ export class VibgrateLanguageServer {
       this.conn.notify('vibgrate/graph/status', { state: 'disabled' } satisfies GraphStatusNotification);
       return;
     }
-    if (this.graph || this.graphBuilding) return;
+    if (this.daemonSlot || this.graph || this.graphBuilding) return;
     this.graphBuilding = true;
     try {
-      const existing = loadGraph(this.opts.root);
-      if (existing) {
-        this.graph = existing;
-        this.fileRoles = fileRolesFromParseCache(this.opts.root);
-        this.refineAndPublishArchitecture();
-        this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
-        void this.deferFreshnessToDaemon();
-        return;
-      }
-
-      this.conn.notify('vibgrate/graph/status', { state: 'building' } satisfies GraphStatusNotification);
-      const result = await buildGraph({ root: this.opts.root });
-      // Leaves `.vibgrate/graph.json` exactly as a manual `vg build` would, so
-      // `vg ask` from a terminal afterward sees the same map.
-      writeArtifacts(result.graph, { root: this.opts.root, html: false, report: false });
-      writeSnapshot(this.opts.root, result.graph.provenance.corpusHash, result.fileStats, {});
-      this.graph = result.graph;
-      this.fileRoles = result.fileRoles;
-      this.refineAndPublishArchitecture();
-      this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
-      void this.deferFreshnessToDaemon();
+      if (this.opts.daemon !== false && (await this.takeGraphFromDaemon())) return;
+      await this.ensureGraphLocal();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.conn.notify('window/logMessage', { type: 3, message: `Vibgrate graph build failed: ${message}` });
@@ -1186,6 +1205,126 @@ export class VibgrateLanguageServer {
     } finally {
       this.graphBuilding = false;
     }
+  }
+
+  /**
+   * Hand the map to vgd (load or rebuild in a child) and subscribe. Returns
+   * true when a daemon answered — including "rebuild failed" — so this process
+   * never also `buildGraph`s. False means no runtime, so the caller falls back.
+   */
+  private async takeGraphFromDaemon(): Promise<boolean> {
+    try {
+      const [{ attachVgd }, { vgdRequest }, { subscribeToSlots }] = await Promise.all([
+        import('../runtime/vgd/attach.js'),
+        import('../runtime/vgd/client.js'),
+        import('../runtime/vgd/slot-subscription.js'),
+      ]);
+      const attached = await attachVgd(this.opts.root, {
+        autoStart: this.opts.socketPath ? false : true,
+        publish: false,
+        disabled: this.opts.daemon === false,
+        socketPath: this.opts.socketPath,
+        env: this.opts.socketPath ? envForNamedVgdSocket() : undefined,
+      });
+      if (attached.status !== 'attached' || !attached.socketPath) return false;
+
+      this.conn.notify('vibgrate/graph/status', { state: 'building' } satisfies GraphStatusNotification);
+      const ensured = await vgdRequest(
+        { op: 'ensure-graph', root: this.opts.root, graphPath: resolveGraphPath(this.opts.root) },
+        { socketPath: attached.socketPath },
+      );
+      if (!ensured.ok || !('stored' in ensured)) {
+        const message = !ensured.ok ? ensured.error : 'the local runtime did not store a code map';
+        this.conn.notify('window/logMessage', { type: 3, message: `Vibgrate graph: ${message}` });
+        this.conn.notify('vibgrate/graph/status', { state: 'error', message } satisfies GraphStatusNotification);
+        return true;
+      }
+
+      let corpusHash: string | null = null;
+      try {
+        const summary = await vgdRequest(
+          { op: 'graph-summary', repositoryId: ensured.repositoryId, gitRef: ensured.gitRef },
+          { socketPath: attached.socketPath },
+        );
+        if (summary.ok && 'summary' in summary) corpusHash = summary.summary.corpusHash;
+      } catch {
+        /* summary is diagnostic — the slot is what matters */
+      }
+
+      this.daemonSlot = {
+        repositoryId: ensured.repositoryId,
+        gitRef: ensured.gitRef,
+        socketPath: attached.socketPath,
+        nodeCount: ensured.nodeCount,
+        corpusHash,
+      };
+      this.fileRoles = fileRolesFromParseCache(this.opts.root);
+      this.refineAndPublishArchitecture();
+
+      const subscription = await subscribeToSlots({
+        socketPath: attached.socketPath,
+        repositoryId: ensured.repositoryId,
+        onChange: (change) => this.onDaemonSlotChanged(change),
+        onDetach: () => {
+          this.daemonOwnsFreshness = false;
+          this.daemonSlot = null;
+          this.slotSubscription = null;
+        },
+      });
+      if (this.shuttingDown) {
+        subscription.close();
+        return true;
+      }
+      if (subscription.active) {
+        this.slotSubscription = subscription;
+        this.daemonOwnsFreshness = true;
+      }
+      this.conn.notify('window/logMessage', {
+        type: 3,
+        message: `Vibgrate graph: served by the local runtime (${ensured.repositoryId}, ${ensured.nodeCount} nodes) — this process holds no copy.`,
+      });
+      this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private onDaemonSlotChanged(change: {
+    gitRef: string;
+    nodeCount: number;
+    corpusHash: string | null;
+  }): void {
+    if (this.daemonSlot) {
+      this.daemonSlot.gitRef = change.gitRef;
+      this.daemonSlot.nodeCount = change.nodeCount;
+      this.daemonSlot.corpusHash = change.corpusHash;
+    }
+    this.fileRoles = fileRolesFromParseCache(this.opts.root);
+    this.refineAndPublishArchitecture();
+  }
+
+  /** `--no-daemon` / no runtime: load or build the map in this process. */
+  private async ensureGraphLocal(): Promise<void> {
+    const existing = loadGraph(this.opts.root);
+    if (existing) {
+      this.graph = existing;
+      this.fileRoles = fileRolesFromParseCache(this.opts.root);
+      this.refineAndPublishArchitecture();
+      this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
+      void this.deferFreshnessToDaemon();
+      return;
+    }
+
+    this.conn.notify('vibgrate/graph/status', { state: 'building' } satisfies GraphStatusNotification);
+    const result = await buildGraph({ root: this.opts.root });
+    writeArtifacts(result.graph, { root: this.opts.root, html: false, report: false });
+    writeSnapshot(this.opts.root, result.graph.provenance.corpusHash, result.fileStats, {});
+    this.graph = result.graph;
+    this.fileRoles = result.fileRoles;
+    this.refineAndPublishArchitecture();
+    this.conn.notify('vibgrate/graph/status', { state: 'ready' } satisfies GraphStatusNotification);
+    void this.deferFreshnessToDaemon();
   }
 
   /**
@@ -1253,6 +1392,7 @@ export class VibgrateLanguageServer {
    */
   private async graphForQuery(): Promise<VgGraph | null> {
     await this.ensureGraph();
+    if (this.daemonSlot) return null;
     if (!this.graph) return null;
     if (!this.daemonOwnsFreshness) await this.refresher.maybeRefresh();
     return this.graph;
@@ -1288,10 +1428,15 @@ export class VibgrateLanguageServer {
    * in-memory refine would leave the first session on the path-only snapshot.
    * Re-push `vibgrate/score` (no-op when the artifact is not ready yet).
    */
+  private refineArchitectureInPlace(): void {
+    if (!this.artifact) return;
+    if (this.graph) refineArtifactWithGraph(this.artifact, this.graph, this.fileRoles);
+    else if (this.fileRoles.length > 0) refineArchitectureWithAstRoles(this.artifact, this.fileRoles);
+  }
+
   private refineAndPublishArchitecture(): void {
-    if (!this.artifact || !this.graph) return;
-    refineArtifactWithGraph(this.artifact, this.graph, this.fileRoles);
-    this.publishScore();
+    this.refineArchitectureInPlace();
+    if (this.artifact) this.publishScore();
   }
 
   private async onGraphQuery(params: unknown): Promise<GraphQueryResult> {
@@ -1307,6 +1452,11 @@ export class VibgrateLanguageServer {
       return { ok: false, mode: p.mode, error: 'disabled', message: 'the local Vibgrate Graph is turned off' };
     }
     const started = Date.now();
+    await this.ensureGraph();
+    if (this.daemonSlot) {
+      trace(`${p.mode} via vgd (${this.daemonSlot.nodeCount} nodes, ${this.daemonSlot.gitRef}) in ${Date.now() - started}ms`);
+      return this.queryViaDaemon(p, trace);
+    }
     const graph = await this.graphForQuery();
     if (!graph) {
       trace(`${p.mode} has no code map yet — it is still building`);
@@ -1323,6 +1473,49 @@ export class VibgrateLanguageServer {
       semanticSession: this.semanticSession,
       log: trace,
     });
+  }
+
+  private async queryViaDaemon(
+    p: GraphQueryParams,
+    trace: (message: string) => void,
+  ): Promise<GraphQueryResult> {
+    const slot = this.daemonSlot;
+    if (!slot) {
+      return { ok: false, mode: p.mode, error: 'not-found', message: 'no code map yet — it is still building' };
+    }
+    try {
+      const { vgdRequest } = await import('../runtime/vgd/client.js');
+      const res = await vgdRequest(
+        {
+          op: 'graph-query',
+          repositoryId: slot.repositoryId,
+          gitRef: slot.gitRef,
+          mode: p.mode,
+          question: p.question,
+          semantic: p.semantic,
+          budget: p.budget,
+          limit: p.limit,
+          name: p.name,
+          depth: p.depth,
+          a: p.a,
+          b: p.b,
+          callers: p.callers,
+        },
+        { socketPath: slot.socketPath },
+      );
+      if (!res.ok) {
+        trace(`${p.mode} failed — ${res.error}`);
+        return { ok: false, mode: p.mode, error: 'not-found', message: res.error };
+      }
+      if (!('result' in res) || !res.result || typeof res.result !== 'object') {
+        return { ok: false, mode: p.mode, error: 'not-found', message: 'the local runtime returned no result' };
+      }
+      return res.result as GraphQueryResult;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      trace(`${p.mode} failed — ${message}`);
+      return { ok: false, mode: p.mode, error: 'not-found', message };
+    }
   }
 
   /**
@@ -1479,16 +1672,49 @@ export class VibgrateLanguageServer {
       return {
         ...architectureWire(arch),
         ...this.architectureCallables('__repo__'),
+        ...this.architectureMap('__repo__'),
       };
     }
     const project = projectByPath(a, p.path);
-    if (!project?.architecture) return null;
+    if (!project?.architecture) {
+      const arch = a.extended?.architecture;
+      if (!arch) return null;
+      return {
+        ...architectureWire(arch),
+        ...this.architectureCallables(p.path),
+        ...this.architectureMap(p.path),
+      };
+    }
     return {
       ...architectureWire(project.architecture),
       manifestPath: manifestRelativePath(project),
       lockfilePath: lockfileRelativePath(this.opts.root, project),
       ...this.architectureCallables(p.path),
+      ...this.architectureMap(p.path),
     };
+  }
+
+  /**
+   * Hierarchical map payloads for the Architecture board. Best-effort: a
+   * missing graph omits the fields rather than failing the file-layer response.
+   */
+  private architectureMap(scopePath: string): Pick<ArchitectureResponse, 'overview' | 'slice'> {
+    const graph = this.graph;
+    if (!graph) return {};
+    try {
+      const graphPath = resolveGraphPath(this.opts.root);
+      const sidecar = readHaileSidecar(graphPath, { corpusHash: graph.provenance?.corpusHash });
+      const overview = projectOverview(graph, sidecar);
+      if (!scopePath || scopePath === '__repo__') return { overview };
+      const want = scopePath.replace(/\\/g, '/');
+      const pkg = overview.packages.find(
+        (p) => p.path === want || p.path.endsWith(`/${want}`) || p.id === want || p.name === want,
+      );
+      if (!pkg) return { overview };
+      return { overview, slice: projectSlice(graph, sidecar, { packageId: pkg.id }) };
+    } catch {
+      return {};
+    }
   }
 
   /**
@@ -1499,7 +1725,7 @@ export class VibgrateLanguageServer {
    */
   private architectureCallables(scopePath: string): Pick<ArchitectureResponse, 'callables' | 'architectureModule'> {
     try {
-      const corpusHash = this.graph?.provenance?.corpusHash;
+      const corpusHash = this.daemonSlot?.corpusHash ?? this.graph?.provenance?.corpusHash;
       const status = haileModuleStatus();
       const summary = status.status === 'present' ? architectureSidecarSummary(this.opts.root, { corpusHash }) : undefined;
       const out: Pick<ArchitectureResponse, 'callables' | 'architectureModule'> = {

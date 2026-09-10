@@ -174,6 +174,20 @@ export class ActiveGraphCache {
     this.currentRef.clear();
   }
 
+  /** Drop every slot for a repository (unregister). Embed indexes follow via onEvict. */
+  evictRepository(repositoryId: string): string[] {
+    const removed: string[] = [];
+    for (const slot of [...this.slots.values()]) {
+      if (slot.repositoryId !== repositoryId) continue;
+      const key = activeGraphSlotKey(slot.repositoryId, slot.gitRef);
+      this.slots.delete(key);
+      removed.push(key);
+      this.notifyEvict(slot);
+    }
+    this.currentRef.delete(repositoryId);
+    return removed;
+  }
+
   private notifyEvict(slot: { repositoryId: string; gitRef: string }): void {
     if (!this.onEvict) return;
     try {

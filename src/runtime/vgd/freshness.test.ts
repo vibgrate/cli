@@ -102,6 +102,8 @@ describe('FreshnessSupervisor — triggers', () => {
     h.fire('source', '.vibgrate/graph.json');
     h.fire('source', 'node_modules/x/index.js');
     h.fire('source', 'dist/bundle.js');
+    h.fire('source', 'obj/Debug/Generated.cs');
+    h.fire('source', 'bin/Release/App.dll');
     await settle();
 
     expect(h.rebuilds).toEqual([]);

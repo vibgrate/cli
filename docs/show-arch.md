@@ -14,25 +14,27 @@ Loopback only by default (`127.0.0.1:7420`). `--port`, `--host`, `--focus`, and 
 
 ## What it is
 
-The same facts as `vg show`, `vg path`, and `vg impact`, drawn so a human can walk them.
+The same facts as `vg show`, `vg path`, and `vg impact`, drawn so a human can walk them — **packages first**, then one project’s column slice. It does not paint every function as a card.
 
-- **By job** — handlers, guards, services, models (architecture module on)
-- **By cluster** — the graph areas
-- **Who calls whom** — call edges only
+1. **Workspace** — one card per package (or cluster, when the graph has no packages). Edges are package-to-package, not every call.
+2. **Slice** — double-click a package. Columns follow the architecture policy: UI / endpoint → application → store (layered) or adapters → application → domain → ports (hexagonal). Same-file, same-role functions collapse to one card. Tests stay hidden unless you ask. At most 120 cards.
+3. **Details** — click a card. The right rail is `vg show --json` for that symbol.
+
+Toolbar filters apply **inside the current zoom**, never across the raw graph.
+
+- **By job** — policy columns (the default slice)
+- **By cluster** — workspace grouped by graph areas
+- **Who calls whom** — call edges only, still collapsed
 - **Missing steps** — a call exists in source but not on the map
 - **Problems** — architecture-rule breaks with a line in this body
 
-Architecture off is the raw graph. Architecture on paints jobs and “writes data / reads data” chips from `graph.arch.json`. No confidence percentages. No taxonomy slugs in the chrome.
-
-Scroll or drag to move around the map. Pinch, Ctrl-scroll, or the + / − buttons to zoom; `0` resets. Arrow keys, Page Up/Down, Home, and End also move the view. Opening a symbol that is off-screen pans it into view.
+Architecture off is the raw graph’s kinds in the same columns. Architecture on paints jobs and “writes data / reads data” chips from `graph.arch.json`. No confidence percentages. No taxonomy slugs in the chrome.
 
 A rose mark is a finding with `line > 0`. A yellow mark is a missing step. They are not the same thing.
 
-`/api/node/:id` is `vg show --json` plus a `view` block of the English labels.
-`/api/path` uses the same shortest-path engine as `vg path`.
-`/api/reach/:id` walks callers (`dir=up`) or callees (`dir=down`).
+`/api/overview` is the workspace map. `/api/slice?package=` is the column view. `/api/graph` is deprecated (it returns the overview). `/api/node/:id` is `vg show --json` plus a `view` block of the English labels. `/api/path` uses the same shortest-path engine as `vg path`. `/api/reach/:id` walks callers (`dir=up`) or callees (`dir=down`).
 
-Deep links use `#n=<id>&view=job`. `vg show arch --focus scanDir` opens that hash.
+Deep links use `#zoom=workspace` or `#zoom=slice&package=<id>&n=<symbol>`. `vg show arch --focus scanDir` opens the owning package’s slice with that symbol selected.
 
 ## What this is not
 

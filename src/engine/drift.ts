@@ -549,12 +549,24 @@ export async function enrichOnline(records: DepRecord[], fetchImpl = globalThis.
   }
 }
 
-function classify(installed: string, latest?: string): DepRecord['drift'] {
+/**
+ * Compare installed vs registry `latest`. Drift is only "behind" — a newer
+ * installed version is current. `@types/node` majors track Node.js majors and
+ * npm `latest` is LTS, not Current, so 26.x vs latest 22.x is not a major lag.
+ */
+export function classify(installed: string, latest?: string): DepRecord['drift'] {
   if (!latest) return 'unknown';
   const a = installed.split('.').map(Number);
   const b = latest.split('.').map(Number);
-  if (a[0] !== b[0]) return 'major';
-  if (a[1] !== b[1]) return 'minor';
-  if (a[2] !== b[2]) return 'patch';
+  const cmp = (i: number): number => (a[i] || 0) - (b[i] || 0);
+  const major = cmp(0);
+  if (major > 0) return 'current';
+  if (major < 0) return 'major';
+  const minor = cmp(1);
+  if (minor > 0) return 'current';
+  if (minor < 0) return 'minor';
+  const patch = cmp(2);
+  if (patch > 0) return 'current';
+  if (patch < 0) return 'patch';
   return 'current';
 }

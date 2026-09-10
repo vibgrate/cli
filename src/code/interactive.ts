@@ -400,15 +400,12 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
           ),
         );
       }
-      // Share warm slot with a running vgd (local process or long-lived daemon).
-      if (runtime.socketPath && graph && branchLoad.gitRef && branchLoad.gitRef !== 'unknown') {
+      // Point vgd at this ref — it already holds the map (or will load it).
+      // Never ship the graph over the socket; that copies tens of MB and
+      // invalidates the daemon's semantic index.
+      if (runtime.socketPath && branchLoad.repositoryId && branchLoad.gitRef && branchLoad.gitRef !== 'unknown') {
         void vgdRequest(
-          {
-            op: 'put-graph',
-            repositoryId: branchLoad.repositoryId,
-            gitRef: branchLoad.gitRef,
-            graph,
-          },
+          { op: 'select-git-ref', repositoryId: branchLoad.repositoryId, gitRef: branchLoad.gitRef },
           { socketPath: runtime.socketPath },
         ).catch(() => {
           /* best-effort IPC */

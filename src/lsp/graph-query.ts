@@ -16,7 +16,7 @@ import { queryGraph, queryGraphSemantic, type QueryResult } from '../engine/quer
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { findHaileSymbol, haileJsonFields, readHaileSidecar } from '../engine/haile/index.js';
 import { loadRoleMap } from '../engine/haile/role-preference.js';
-import type { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
+import type { DaemonRanking, DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import {
   loadEmbedder,
   getNodeEmbeddings,
@@ -62,6 +62,13 @@ export interface GraphQueryContext {
    * ranking never loads the addon here at all.
    */
   semanticSession?: DaemonSemanticSession;
+  /**
+   * Rank this question inside vgd. When set, Ask never loads the embedding
+   * backend in this process — a null ranking means "answer lexically", not
+   * "try onnx in-process". The daemon uses this so `graph-query` cannot pull
+   * the addon into vgd itself.
+   */
+  rank?: (question: string) => Promise<DaemonRanking | null>;
 }
 
 /**
@@ -138,9 +145,23 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
   let note: string | undefined;
   const roles = loadRoleMap(ctx.root, graph.provenance?.corpusHash);
 
-  // The daemon first — and for this process especially, because ranking there
-  // means the native backend is never loaded into the language server at all.
-  if (wantSemantic && ctx.semanticSession) {
+  // Rank where the vectors live. An injected ranker (the daemon's embed
+  // broker, or a long-lived session) means this process never loads the
+  // native backend. A null ranking is "use lexical", not "embed here".
+  if (wantSemantic && ctx.rank) {
+    try {
+      const ranked = await withTimeout(ctx.rank(question), semanticBudgetMs(), 'daemon ranking over budget');
+      if (ranked) {
+        log(`ask: ranked by vgd against ${ranked.vectors} vector(s) — no local model load`);
+        result = await queryGraphSemantic(graph, question, { budget, semanticRanked: ranked.ranked, roles });
+        mode = `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})`;
+      } else {
+        log('ask: vgd ranking not ready — answering lexically');
+      }
+    } catch {
+      log('ask: vgd ranking unavailable — answering lexically');
+    }
+  } else if (wantSemantic && ctx.semanticSession) {
     try {
       const ranked = await withTimeout(
         ctx.semanticSession.rank(question, graph.provenance?.corpusHash),
@@ -157,7 +178,7 @@ async function runAsk(graph: VgGraph, params: GraphQueryParams, ctx: GraphQueryC
     }
   }
 
-  if (wantSemantic && !result) {
+  if (wantSemantic && !result && !ctx.rank) {
     const budgetMs = semanticBudgetMs();
     log(`ask: trying the semantic path (budget ${Math.round(budgetMs / 1000)}s)`);
     let reason: EmbedUnavailable | undefined;

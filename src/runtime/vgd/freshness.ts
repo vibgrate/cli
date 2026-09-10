@@ -314,7 +314,8 @@ function defaultWatch(dir: string, onChange: (filename: string) => void): { clos
  * into the daemon that spawned it, which is both circular and racy — the
  * daemon reloads from disk itself once the child exits.
  */
-function spawnRebuild(root: string, timeoutMs: number): Promise<{ ok: boolean; error?: string }> {
+/** Exported so `ensure-graph` can reuse the same child, not a second builder. */
+export function spawnRebuild(root: string, timeoutMs: number): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {

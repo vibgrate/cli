@@ -77,6 +77,14 @@ describe('watch-event staleness on GraphSource', () => {
     source.stopWatching();
   });
 
+  it('drops the cached copy when vgd takes the map', async () => {
+    const { source } = makeSource(async () => ({ status: 'fresh' }));
+    source.deferFreshnessToDaemon({ repositoryId: 'r', gitRef: 'main', socketPath: '/tmp/vgd.sock' });
+    expect(source.attachedDaemon?.repositoryId).toBe('r');
+    await expect(source.get()).rejects.toThrow(/vgd owns this map/);
+    source.stopWatching();
+  });
+
   it('startWatching reports success and stop is idempotent', () => {
     const { source } = makeSource(async () => ({ status: 'fresh' }));
     expect(source.startWatching()).toBe(true);
@@ -89,8 +97,11 @@ describe('watch-event staleness on GraphSource', () => {
     const { source, root } = makeSource(async () => ({ status: 'locked' }));
     expect(source.startWatching()).toBe(true);
     fs.writeFileSync(path.join(root, 'newfile.ts'), 'export const x = 1;\n');
-    await new Promise((r) => setTimeout(r, 250));
-    const note = source.stalenessNote();
+    let note: string | null = null;
+    for (let i = 0; i < 20 && !note; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      note = source.stalenessNote();
+    }
     expect(note).not.toBeNull();
     expect(note).toContain('newfile.ts');
     source.stopWatching();
@@ -103,6 +114,11 @@ describe('watch filter', () => {
     expect(isRelevantChange(path.join('.git', 'HEAD'))).toBe(false);
     expect(isRelevantChange(path.join('.vibgrate', 'graph.json'))).toBe(false);
     expect(isRelevantChange(path.join('dist', 'out.js'))).toBe(false);
+    expect(isRelevantChange(path.join('obj', 'Debug', 'x.cs'))).toBe(false);
+    expect(isRelevantChange(path.join('bin', 'Release', 'App.dll'))).toBe(false);
+    // Windows recursive watch sometimes reports `/` even on `\`.
+    expect(isRelevantChange('obj/Debug/x.cs')).toBe(false);
+    expect(isRelevantChange('bin\\Release\\App.dll')).toBe(false);
     expect(isRelevantChange(path.join('src', 'payments', 'mandate.ts'))).toBe(true);
   });
 });
