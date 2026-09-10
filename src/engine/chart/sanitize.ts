@@ -35,6 +35,8 @@ export function sanitizeOverview(raw: unknown): ArchOverview | null {
       missingSteps: num(p.missingSteps),
       job: typeof p.job === 'string' ? p.job : 'package',
       policy: typeof p.policy === 'string' ? p.policy : null,
+      ...(typeof p.mix === 'string' ? { mix: p.mix } : {}),
+      ...(typeof p.unclassified === 'number' ? { unclassified: num(p.unclassified) } : {}),
     });
   }
   const edges: ArchPackageEdge[] = [];
@@ -101,6 +103,12 @@ export function sanitizeSlice(raw: unknown): ArchSlice | null {
       if (typeof k === 'string' && typeof v === 'number' && Number.isFinite(v) && v >= 0) overflow[k] = Math.floor(v);
     }
   }
+  const overflowHint: Record<string, string> = {};
+  if (o.overflowHint && typeof o.overflowHint === 'object') {
+    for (const [k, v] of Object.entries(o.overflowHint)) {
+      if (typeof k === 'string' && typeof v === 'string') overflowHint[k] = v;
+    }
+  }
   return {
     magic: ARCH_SLICE_MAGIC,
     packageId: o.packageId,
@@ -110,6 +118,8 @@ export function sanitizeSlice(raw: unknown): ArchSlice | null {
     guards,
     edges,
     overflow,
+    overflowHint,
+    emptyHint: typeof o.emptyHint === 'string' ? o.emptyHint : null,
     focusCardId: typeof o.focusCardId === 'string' ? o.focusCardId : null,
   };
 }
@@ -134,7 +144,17 @@ function sanitizeCard(raw: unknown): ArchCard | null {
     pulse: Boolean(c.pulse),
     missingStep: Boolean(c.missingStep),
     ...(c.ghost ? { ghost: true } : {}),
+    ...(typeof c.intent === 'string' ? { intent: c.intent } : {}),
+    ...(typeof c.callsOut === 'number' ? { callsOut: num(c.callsOut) } : {}),
+    ...(Array.isArray(c.calls) ? { calls: c.calls.filter(isLink).slice(0, 12) } : {}),
+    ...(Array.isArray(c.calledBy) ? { calledBy: c.calledBy.filter(isLink).slice(0, 12) } : {}),
+    ...(Array.isArray(c.types) ? { types: c.types.filter((t): t is string => typeof t === 'string').slice(0, 12) } : {}),
+    ...(c.guard ? { guard: true } : {}),
   };
+}
+
+function isLink(v: unknown): v is { id: string; name: string } {
+  return Boolean(v && typeof v === 'object' && typeof (v as { id?: unknown }).id === 'string' && typeof (v as { name?: unknown }).name === 'string');
 }
 
 function num(v: unknown): number {

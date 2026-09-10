@@ -72,7 +72,12 @@ export interface HaileProvider {
     },
   ): unknown;
   /** Full map HTML. Absent → the host serves a tiny package list. */
-  renderArchPage?(opts: { host: 'browser' | 'vscode'; theme?: 'dark' | 'light' | 'hc' }): string;
+  renderArchPage?(opts: {
+    host: 'browser' | 'vscode';
+    theme?: 'dark' | 'light' | 'hc';
+    nonce?: string;
+    assetBase?: string;
+  }): string;
   /** Directory of UI assets (React Flow pack). Served at /arch-ui/. */
   archUiAssets?(): string | null;
 }

@@ -18,12 +18,12 @@ import type { VgGraph } from '../../schema.js';
 import { originAllowed } from '../../util/origin.js';
 import { CliError, ExitCode } from '../../util/exit.js';
 import { indexFor } from '../relations.js';
-import { chartPage } from './page.js';
+import { architecturePageHtml } from './page.js';
 import { pathJson, searchGraph, showJsonFor } from './model.js';
 import { projectOverview } from './overview.js';
 import { projectSlice } from './slice.js';
 import { sanitizeOverview, sanitizeSlice } from './sanitize.js';
-import type { ArchOverview, ArchSlice, ArchSliceView } from './arch-types.js';
+import { parseArchView, type ArchOverview, type ArchSlice, type ArchSliceView } from './arch-types.js';
 
 export const DEFAULT_CHART_HOST = '127.0.0.1';
 export const DEFAULT_CHART_PORT = 7420;
@@ -93,7 +93,7 @@ function handle(
   const pathName = url.pathname;
 
   if (req.method === 'GET' && (pathName === '/' || pathName === '/index.html')) {
-    send(res, 200, pageHtml(provider), 'text/html');
+    send(res, 200, architecturePageHtml(provider, { host: 'browser' }), 'text/html');
     return;
   }
   if (req.method === 'GET' && pathName.startsWith('/arch-ui/')) {
@@ -110,7 +110,7 @@ function handle(
   }
   if (req.method === 'GET' && pathName === '/api/slice') {
     const packageId = url.searchParams.get('package') ?? '';
-    const view = parseView(url.searchParams.get('view'));
+    const view = parseArchView(url.searchParams.get('view'));
     const focus = url.searchParams.get('focus') ?? undefined;
     const architecture = url.searchParams.get('arch') !== '0';
     const tests = url.searchParams.get('tests') === '1';
@@ -174,7 +174,7 @@ export function overviewOf(
   if (provider?.projectOverview) {
     try {
       const clean = sanitizeOverview(provider.projectOverview(graph, sidecar));
-      if (clean) return clean;
+      if (clean && (clean.meta.architectureLoaded || !sidecar)) return clean;
     } catch {
       /* host fallback */
     }
@@ -211,31 +211,6 @@ export function sliceOf(
     }
   }
   return projectSlice(graph, sidecar, input);
-}
-
-function pageHtml(provider: HaileProvider | null): string {
-  if (provider?.renderArchPage) {
-    try {
-      const html = provider.renderArchPage({ host: 'browser' });
-      if (
-        typeof html === 'string' &&
-        html.includes('<html') &&
-        html.length > 100 &&
-        html.length < 2_000_000 &&
-        !/HAILE/i.test(html)
-      ) {
-        return html;
-      }
-    } catch {
-      /* host fallback */
-    }
-  }
-  return chartPage();
-}
-
-function parseView(raw: string | null): ArchSliceView {
-  if (raw === 'calls' || raw === 'missing' || raw === 'problems') return raw;
-  return 'job';
 }
 
 function serveArchUi(res: ServerResponse, provider: HaileProvider | null, rel: string): void {

@@ -6,7 +6,6 @@ import type { HaileSidecar, HaileSymbol } from '../haile/types.js';
 import { monorepoGraph } from './arch-fixture.js';
 import { locateInOverview, projectOverview } from './overview.js';
 import { projectSlice } from './slice.js';
-import { SLICE_CARD_CAP } from './arch-types.js';
 
 function sidecarWith(symbols: HaileSymbol[]): HaileSidecar {
   return {
@@ -64,6 +63,8 @@ describe('workspace overview', () => {
     expect(api?.findings).toBe(1);
     expect(overview.meta.findings).toBe(1);
     expect(overview.meta.architectureLoaded).toBe(true);
+    expect(api?.mix).toMatch(/finding/);
+    expect(api?.job).not.toBe('package');
   });
 
   it('locates a symbol in its package', () => {
@@ -74,15 +75,14 @@ describe('workspace overview', () => {
 });
 
 describe('project slice', () => {
-  it('hides tests and collapses by file+role under the cap', () => {
+  it('hides tests and does not invent Symbol labels without a sidecar', () => {
     const slice = projectSlice(monorepoGraph(), null, { packageId: 'pkg-api' });
     expect(slice.magic).toBe('vg.arch.slice.v1');
-    expect(slice.columns.length).toBeGreaterThanOrEqual(3);
-    const titles = slice.columns.flatMap((c) => c.cards.map((card) => card.title));
-    expect(titles).not.toContain('makeUser');
-    expect(titles.join(' ')).toMatch(/CreateUser|UsersController/);
-    const painted = slice.columns.reduce((n, c) => n + c.cards.length, 0) + slice.guards.length;
-    expect(painted).toBeLessThanOrEqual(SLICE_CARD_CAP);
+    const cards = slice.columns.flatMap((c) => c.cards);
+    expect(cards.some((c) => c.title === 'makeUser')).toBe(false);
+    expect(cards.every((c) => c.job === 'Unclassified')).toBe(true);
+    expect(cards.every((c) => !/Symbol · Symbol/.test(c.subtitle))).toBe(true);
+    expect(slice.columns.every((c) => c.id === 'unclassified' || c.cards.length === 0)).toBe(true);
   });
 
   it('uses layered columns when the sidecar says so', () => {
@@ -128,8 +128,38 @@ describe('project slice', () => {
     expect(slice.policy).toBe('layered-v1');
     expect(slice.columns.map((c) => c.title)).toEqual(['UI / Endpoint', 'Application', 'Persistence / IO']);
     expect(slice.columns[0]?.cards.some((c) => c.symbolId === 'CreateUser')).toBe(true);
+    expect(slice.columns[0]?.cards[0]?.job).toBe('HTTP handler');
     expect(slice.columns[1]?.cards.some((c) => c.symbolId === 'UserService')).toBe(true);
     expect(slice.columns[2]?.cards.some((c) => c.symbolId === 'SaveUser')).toBe(true);
+    expect(slice.columns.some((c) => c.title === 'Types / IO')).toBe(false);
+  });
+
+  it('puts UI roles in UI / Endpoint and lifts call edges onto the card', () => {
+    const graph = monorepoGraph();
+    const slice = projectSlice(
+      graph,
+      sidecarWith([
+        {
+          node_id: 'HomePage',
+          file_path: 'packages/web/src/HomePage.tsx',
+          name: 'HomePage',
+          qualified_name: 'HomePage',
+          symbol_kind: 'component',
+          role: { primary: 'user_interface', alternatives: [], confidence: 0.9, band: 'high' },
+          purposes: [{ purpose: 'render', confidence: 0.9 }],
+          intent: { text: 'renders the product listing', verbs: ['render'], objects: ['listing'] },
+          evidence: [],
+        },
+      ]),
+      { packageId: 'pkg-web' },
+    );
+    expect(slice.columns[0]?.id).toBe('ui');
+    const home = slice.columns[0]?.cards.find((c) => c.title === 'HomePage');
+    expect(home?.job).toBe('Interface');
+    expect(home?.subtitle).toMatch(/Draws the UI/);
+    expect(home?.intent).toMatch(/product listing/);
+    expect(home?.calls?.some((c) => c.name.includes('CreateUser'))).toBe(true);
+    expect(slice.columns.some((c) => c.id === 'app' && c.cards.length > 0)).toBe(false);
   });
 
   it('keeps a focused symbol when capping', () => {
