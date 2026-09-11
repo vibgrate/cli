@@ -11,12 +11,15 @@ import { resolveGraphPath } from '../engine/artifacts.js';
 import { findHaileSymbol, formatHaileLines, haileJsonFields, readHaileSidecar } from '../engine/haile/index.js';
 import { registerShowArch } from './arch.js';
 import { registerShowSavings } from './show-savings.js';
+import { registerShowSurfaces } from './show-surfaces.js';
 
 /**
  * `vg show <name>` (VG-CLI-SPEC §3.3) — the richest single-node view: what it
  * is, its callers and callees and other edges, its area and importance.
  * `vg show arch` opens the local interactive architecture map of the same graph;
- * `vg show savings` opens the local page for what compression saved.
+ * `vg show savings` opens the local page for what compression saved;
+ * `vg show surfaces` lists the external services, models and MCP servers the
+ * last scan found.
  */
 export function registerShow(program: Command): void {
   const cmd = program
@@ -25,6 +28,7 @@ export function registerShow(program: Command): void {
 
   registerShowArch(cmd);
   registerShowSavings(cmd);
+  registerShowSurfaces(cmd);
 
   cmd
     .argument('<name>', 'qualified name, short name, file:line, glob, or id')

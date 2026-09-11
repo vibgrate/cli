@@ -14,6 +14,53 @@ backward compatible.
 
 ### Added
 
+- **Context compression reads its model facts from the scanning module.**
+  Context windows, output caps, thinking/cache billing and per-1M-token list
+  prices were a pair of hand-maintained tables inside the CLI, which meant a
+  release every time a vendor shipped a model or changed a price — the pricing
+  table still carried a "verified 2026-06" note that nothing enforced. They now
+  live in one place, refreshed on a schedule, alongside the vendor catalog.
+
+  Compression itself is unchanged and still needs no module: an id the catalog
+  does not cover falls through to the same pattern inference and conservative
+  128k default as before, and a price it does not carry falls to the blended
+  rate. Those are the parts that stayed — they are logic, not data. The one
+  rule the seam enforces is direction: a doubtful context limit is dropped
+  rather than clamped, because reading a window too low only makes compression
+  work harder, while reading it too high overflows the model and fails the
+  request.
+
+- **External Surface Inventory — every external service a repo talks to, in one
+  place.** A scan now records the outbound APIs, AI models, MCP servers and SaaS
+  it found — from dependency manifests, environment-variable *names*, config
+  hosts and pinned API versions — grouped into eleven categories (AI &
+  inference, MCP & agent tools, Payments, Auth / identity, Data stores,
+  Messaging, Observability, Cloud / IaaS, Email / comms, Search / vectors, Other
+  SaaS). `vg show surfaces` prints them from the stored scan artifact, with
+  `--json`, `--category`, `--kind` and `--stale-only`; the same inventory drives
+  the dashboard's tech-stack view and the External Surfaces tab in Vibgrate for
+  VS Code.
+- **Freshness verdicts for the models and API versions a repo pins.** A detected
+  model or pinned API version is checked against the Vendor Surface Catalog and
+  reads `current`, `behind`, `deprecated`, `retired` or `unverified`. Two rules
+  hold everywhere: a `behind` is only ever claimed on a dated comparison against
+  a vendor's current flagship, and anything the catalog does not cover reads
+  `unverified` — never `current`. Retirements and deprecations come from vendor
+  announcements read by a person, because a model roster cannot express one: a
+  withdrawn model simply stops appearing in it, and an absence is not a
+  statement. A deprecation carries the vendor's own shutdown date, so the answer
+  is "stops working on 2026-10-23" rather than just "deprecated".
+- **Surface scanning makes no network call.** The vendor catalog — the roster of
+  what each vendor ships and the curated announcements — is compiled into the
+  scanning module, so a scan returns identical verdicts online, offline and
+  air-gapped, with no cache to go stale behind you and nothing to configure.
+  There is no `--offline` switch for surfaces because there is nothing to turn
+  off. The module's own version is the freshness signal, and a weekly job
+  republishes it.
+- **Detection never reads a secret.** URLs are reduced to their bare host,
+  environment variables are matched on name only, and `.env` / `.env.local` are
+  never opened. Nothing credential-shaped reaches the artifact.
+
 - **Your own architecture rules: `[[overlay]]` tables in `.vibgrate/architecture.toml`
   (`vg.arch.policy.v1`).** An overlay attaches to the role and purpose the
   Architecture module discovered for a symbol, under an optional path prefix —

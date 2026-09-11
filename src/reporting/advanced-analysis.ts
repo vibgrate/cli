@@ -21,7 +21,8 @@ import { scanTsModernity } from './scanners/ts-modernity.js';
 import { scanBreakingChangeExposure } from './scanners/breaking-change.js';
 import { scanFileHotspots } from './scanners/file-hotspots.js';
 import { scanSecurityPosture } from './scanners/security-posture.js';
-import { scanServiceDependencies } from './scanners/service-dependencies.js';
+import { emptyServiceDependencies } from './scanners/service-dependencies.js';
+import { scanExternalSurfaces } from './scanners/surfaces/index.js';
 import { scanCodeQuality } from './scanners/code-quality.js';
 import { scanDatabaseSchema } from './scanners/database-schema.js';
 import { scanUiPurpose } from './scanners/ui-purpose.js';
@@ -137,10 +138,26 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
   if (scannerPolicy.serviceDependencies && scanners?.serviceDependencies?.enabled !== false) {
     progress.startStep('services');
     scannerTasks.push(
-      Promise.resolve().then(() => {
-        extended.serviceDependencies = scanServiceDependencies(allProjects);
-        const svcCount = Object.values(extended.serviceDependencies).reduce((sum, arr) => sum + arr.length, 0);
-        progress.completeStep('services', `${svcCount} service${svcCount !== 1 ? 's' : ''} detected`, svcCount);
+      scanExternalSurfaces(rootDir, fileCache, allProjects).then((result) => {
+        if (!result) {
+          // No surface catalog this run (kernel disabled, or the optional
+          // module is not installed). Leave `surfaceInventory` off entirely —
+          // absent means "not scanned", which is not the same fact as an empty
+          // inventory — and emit the legacy buckets empty rather than partial.
+          extended.serviceDependencies = emptyServiceDependencies();
+          progress.completeStep('services', 'catalog unavailable', 0);
+          return;
+        }
+        extended.serviceDependencies = result.serviceDependencies;
+        extended.surfaceInventory = result.inventory;
+        const svcCount = Object.values(result.serviceDependencies).reduce((sum, arr) => sum + arr.length, 0);
+        const { counts } = result.inventory;
+        const detail = [
+          `${svcCount} service${svcCount !== 1 ? 's' : ''}`,
+          counts.models > 0 ? `${counts.models} model${counts.models !== 1 ? 's' : ''}` : '',
+          counts.mcpServers > 0 ? `${counts.mcpServers} MCP` : '',
+        ].filter(Boolean).join(', ');
+        progress.completeStep('services', detail, svcCount + counts.providers);
       }),
     );
   }

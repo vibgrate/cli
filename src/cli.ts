@@ -5,6 +5,7 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Command, CommanderError } from 'commander';
 import { VERSION } from './version.js';
+import { primeModelCatalog } from './engine/model-catalog-provider.js';
 import { resolveCliInvocation, NPX_INVOCATION } from './util/cli-invocation.js';
 import { registerBuild, runBuild } from './commands/build.js';
 import { registerStatus } from './commands/status.js';
@@ -367,6 +368,15 @@ export async function main(argv = process.argv): Promise<void> {
     // the user-visible warning when the module cannot be provisioned.
     kickHaileReadiness();
   }
+
+  // Prime the model catalog — context windows, output caps and list prices for
+  // context compression. The consumers (`modelInfo`, `priceFor`) are deep inside
+  // the compression pipeline and the proxy's per-request cost accounting and are
+  // synchronous, so the one await that makes them work lives here. It reads an
+  // already-installed local file, never the network, and a missing or broken
+  // module simply leaves compression on its own inference — so this never
+  // blocks a command and never fails one.
+  await primeModelCatalog();
 
   // We need cwd for path-based dispatch; read -C/--cwd from the raw args.
   const cwd = readCwd(raw);

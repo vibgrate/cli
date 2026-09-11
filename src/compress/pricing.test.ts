@@ -1,7 +1,23 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it } from 'vitest';
+import { resetModelCatalog } from '../engine/model-catalog-provider.js';
+import { useFixtureCatalog, useNoCatalog } from './__fixtures__/model-catalog.js';
+import { resetPriceTableForTests } from './pricing.js';
+import { resetModelIndexForTests } from './models.js';
+
+beforeEach(() => {
+  resetModelIndexForTests();
+  resetPriceTableForTests();
+  useFixtureCatalog();
+});
+afterEach(() => {
+  resetModelIndexForTests();
+  resetPriceTableForTests();
+  resetModelCatalog();
+});
+
 import { BLENDED_PRICE, costUsd, inferPrice, priceFor, savingsUsd } from './pricing.js';
 
 const dirs: string[] = [];
@@ -15,18 +31,33 @@ function tmpEnv(): NodeJS.ProcessEnv {
 }
 
 describe('priceFor', () => {
-  it('returns table prices with cache rates', () => {
+  it('returns catalogued prices with cache rates', () => {
+    // WHICH prices ship is asserted over the data file itself, in the
+    // relevance package. What matters here is that a catalogued rate is
+    // returned verbatim, and that a rate the vendor does not publish falls to
+    // the provider's standard multiplier rather than being quoted as zero.
     const env = tmpEnv();
     expect(priceFor('claude-opus-5', env)).toEqual({ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 });
-    expect(priceFor('claude-fable-5-1', env)).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 });
     expect(priceFor('gpt-4o', env)).toEqual({ input: 2.5, output: 10, cacheRead: 1.25, cacheWrite: 2.5 });
-    expect(priceFor('gpt-4', env).cacheRead).toBe(15);
   });
+
   it('resolves aliases, gateway ids and dated snapshots', () => {
     const env = tmpEnv();
     expect(priceFor('claude-haiku-4-5-20251001', env).input).toBe(1);
-    expect(priceFor('openrouter/openai/gpt-4o-mini', env).input).toBe(0.15);
-    expect(priceFor('us.anthropic.claude-sonnet-4-6-v1:0', env).input).toBe(3);
+    expect(priceFor('openrouter/anthropic/claude-opus-5', env).input).toBe(5);
+    expect(priceFor('us.anthropic.claude-haiku-4-5-20251001-v1:0', env).input).toBe(1);
+  });
+
+  it('still quotes a rate with no module installed', () => {
+    // A saving figure has to exist whether or not the catalog does, so an
+    // uncatalogued id goes to inference and anything inference cannot place
+    // goes to the blended rate. Compression never stops on a missing price.
+    useNoCatalog();
+    resetModelIndexForTests();
+    resetPriceTableForTests();
+    const env = tmpEnv();
+    expect(priceFor('claude-opus-5', env)).toMatchObject({ input: 5, output: 25 });
+    expect(priceFor('total-mystery-model', env)).toEqual(BLENDED_PRICE);
   });
   it('infers unknown ids and falls back to the blended rate', () => {
     expect(inferPrice('claude-opus-9')).toMatchObject({ input: 5, output: 25 });
@@ -62,19 +93,13 @@ describe('costUsd', () => {
 });
 
 describe('Sep-2026 price list', () => {
-  it('prices the current OpenAI, Gemini and Grok releases (cached input at the published rate)', () => {
-    expect(priceFor('gpt-6-astra')).toMatchObject({ input: 10, output: 50, cacheRead: 1 });
-    expect(priceFor('gpt-5.6-sol')).toMatchObject({ input: 4, output: 20, cacheRead: 0.4 });
-    expect(priceFor('gpt-5.6-luna')).toMatchObject({ input: 0.2, output: 1.2 });
-    expect(priceFor('gpt-5.5')).toMatchObject({ input: 5, output: 30 });
-    expect(priceFor('gpt-5.3-codex')).toMatchObject({ input: 1.75, output: 14 });
-    expect(priceFor('gemini-3.8-flash')).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075 });
-    expect(priceFor('gemini-3.5-flash-lite')).toMatchObject({ input: 0.3, output: 2.5 });
-    expect(priceFor('grok-4.6')).toMatchObject({ input: 2, output: 6, cacheRead: 0.5 });
-    expect(priceFor('grok-4.3')).toMatchObject({ input: 1.25, output: 2.5 });
-  });
-
+  // Which rates the shipped catalog carries is asserted over the data file
+  // itself, in packages/vibgrate-relevance/tests/model-catalog-data.test.ts.
+  // What belongs here is the inference for an id nobody has priced yet.
   it('infers a sensible rate for the next id in each line', () => {
+    useNoCatalog();
+    resetModelIndexForTests();
+    resetPriceTableForTests();
     expect(inferPrice('gpt-6-nova')).toMatchObject({ input: 10, output: 50 });
     expect(inferPrice('gpt-5.6-marte')).toMatchObject({ input: 2, output: 12 });
     expect(inferPrice('gemini-3.9-flash')).toMatchObject({ input: 0.75, output: 3.75 });

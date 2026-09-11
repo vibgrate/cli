@@ -1,9 +1,10 @@
 /**
  * Model registry: context limits, output caps, family, aliases and the
- * thinking-billing flag. Static table + pattern inference for ids we have
- * never seen (`*-1m`, `gpt-4.1-mini`, dated snapshots, gateway prefixes) +
- * user overrides from `VG_MODEL_LIMITS`, `VG_MODEL_ALIAS_MAP`, `VG_1M_MODEL`
- * and the `models.json` file at `modelsConfigPath()`.
+ * thinking-billing flag. The catalog comes from the relevance module (see
+ * `engine/model-catalog-provider.ts`); this file adds pattern inference for ids
+ * nobody has catalogued (`*-1m`, `gpt-4.1-mini`, dated snapshots, gateway
+ * prefixes) and user overrides from `VG_MODEL_LIMITS`, `VG_MODEL_ALIAS_MAP`,
+ * `VG_1M_MODEL` and the `models.json` file at `modelsConfigPath()`.
  *
  * Unknown models resolve to a conservative 128k window (never throws).
  */
@@ -12,6 +13,7 @@ import * as fs from 'node:fs';
 import { env as knobEnv } from './config.js';
 import { modelsConfigPath } from './paths.js';
 import { modelIdCandidates } from './tokenizers.js';
+import { modelCatalogSnapshot } from '../engine/model-catalog-provider.js';
 
 export interface ModelInfo {
   id: string;
@@ -26,160 +28,59 @@ export interface ModelInfo {
 export const DEFAULT_CONTEXT_LIMIT = 128_000;
 export const ONE_MILLION = 1_000_000;
 
-interface Row {
-  id: string;
-  family: string;
-  ctx: number;
-  out?: number;
-  aliases?: string[];
-  thinking?: boolean;
-  cache?: boolean;
-}
-
+/** Thousands, for the window sizes the inference below reasons in. */
 const K = 1000;
 
-const ROWS: Row[] = [
-  // --- Anthropic (all support cache_control) -------------------------------
-  { id: 'claude-fable-5-1', family: 'anthropic', ctx: ONE_MILLION, out: 128 * K, thinking: true, cache: true },
-  { id: 'claude-mythos-5-1', family: 'anthropic', ctx: ONE_MILLION, out: 128 * K, thinking: true, cache: true },
-  { id: 'claude-fable-5', family: 'anthropic', ctx: ONE_MILLION, out: 128 * K, thinking: true, cache: true },
-  { id: 'claude-mythos-5', family: 'anthropic', ctx: ONE_MILLION, out: 128 * K, thinking: true, cache: true },
-  { id: 'claude-opus-5', family: 'anthropic', ctx: ONE_MILLION, out: 128 * K, thinking: true, cache: true },
-  { id: 'claude-opus-4-8', family: 'anthropic', ctx: ONE_MILLION, out: 128 * K, thinking: true, cache: true },
-  { id: 'claude-opus-4-7', family: 'anthropic', ctx: ONE_MILLION, out: 128 * K, thinking: true, cache: true },
-  { id: 'claude-opus-4-6', family: 'anthropic', ctx: ONE_MILLION, out: 128 * K, thinking: true, cache: true },
-  { id: 'claude-sonnet-5', family: 'anthropic', ctx: ONE_MILLION, out: 128 * K, thinking: true, cache: true },
-  { id: 'claude-sonnet-4-6', family: 'anthropic', ctx: ONE_MILLION, out: 128 * K, thinking: true, cache: true },
-  { id: 'claude-haiku-4-5', family: 'anthropic', ctx: 200 * K, out: 64 * K, aliases: ['claude-haiku-4-5-20251001'], cache: true },
-  { id: 'claude-opus-4-5', family: 'anthropic', ctx: 200 * K, out: 64 * K, aliases: ['claude-opus-4-5-20251101'], cache: true },
-  { id: 'claude-opus-4-1', family: 'anthropic', ctx: 200 * K, out: 32 * K, aliases: ['claude-opus-4-1-20250805'], cache: true },
-  { id: 'claude-sonnet-4-5', family: 'anthropic', ctx: 200 * K, out: 64 * K, aliases: ['claude-sonnet-4-5-20250929'], cache: true },
-  { id: 'claude-sonnet-4-0', family: 'anthropic', ctx: 200 * K, out: 64 * K, aliases: ['claude-sonnet-4-20250514', 'claude-sonnet-4'], cache: true },
-  { id: 'claude-opus-4-0', family: 'anthropic', ctx: 200 * K, out: 32 * K, aliases: ['claude-opus-4-20250514', 'claude-opus-4'], cache: true },
-  { id: 'claude-3-7-sonnet-20250219', family: 'anthropic', ctx: 200 * K, out: 64 * K, aliases: ['claude-3-7-sonnet-latest', 'claude-3-7-sonnet'], cache: true },
-  { id: 'claude-3-5-sonnet-20241022', family: 'anthropic', ctx: 200 * K, out: 8192, aliases: ['claude-3-5-sonnet-latest', 'claude-3-5-sonnet-20240620', 'claude-3-5-sonnet'], cache: true },
-  { id: 'claude-3-5-haiku-20241022', family: 'anthropic', ctx: 200 * K, out: 8192, aliases: ['claude-3-5-haiku-latest', 'claude-3-5-haiku'], cache: true },
-  { id: 'claude-3-opus-20240229', family: 'anthropic', ctx: 200 * K, out: 4096, aliases: ['claude-3-opus-latest', 'claude-3-opus'], cache: true },
-  { id: 'claude-3-haiku-20240307', family: 'anthropic', ctx: 200 * K, out: 4096, aliases: ['claude-3-haiku'], cache: true },
-  // --- OpenAI ---------------------------------------------------------------
-  // GPT-5.5 and later (incl. the GPT-5.6 Luna/Terra/Sol family and GPT-6
-  // Astra, Sep 2026) carry a 1,050,000-token window and 128k output.
-  { id: 'gpt-6-astra', family: 'openai', ctx: 1_050_000, out: 128 * K, thinking: true },
-  { id: 'gpt-5.6-sol', family: 'openai', ctx: 1_050_000, out: 128 * K, thinking: true },
-  { id: 'gpt-5.6-terra', family: 'openai', ctx: 1_050_000, out: 128 * K, thinking: true },
-  { id: 'gpt-5.6-luna', family: 'openai', ctx: 1_050_000, out: 128 * K, thinking: true },
-  { id: 'gpt-5.5', family: 'openai', ctx: 1_050_000, out: 128 * K, thinking: true },
-  { id: 'gpt-5.4', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
-  { id: 'gpt-5.4-mini', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
-  { id: 'gpt-5.4-nano', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
-  { id: 'gpt-5.3-codex', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
-  { id: 'gpt-5', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
-  { id: 'gpt-5-mini', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
-  { id: 'gpt-5-nano', family: 'openai', ctx: 400 * K, out: 128 * K, thinking: true },
-  { id: 'gpt-4.1', family: 'openai', ctx: 1_047_576, out: 32768 },
-  { id: 'gpt-4.1-mini', family: 'openai', ctx: 1_047_576, out: 32768 },
-  { id: 'gpt-4.1-nano', family: 'openai', ctx: 1_047_576, out: 32768 },
-  { id: 'gpt-4o', family: 'openai', ctx: 128 * K, out: 16384, aliases: ['gpt-4o-2024-11-20', 'gpt-4o-2024-08-06', 'gpt-4o-2024-05-13', 'chatgpt-4o-latest'] },
-  { id: 'gpt-4o-mini', family: 'openai', ctx: 128 * K, out: 16384, aliases: ['gpt-4o-mini-2024-07-18'] },
-  { id: 'o1', family: 'openai', ctx: 200 * K, out: 100 * K, thinking: true },
-  { id: 'o1-mini', family: 'openai', ctx: 128 * K, out: 65536, thinking: true },
-  { id: 'o3', family: 'openai', ctx: 200 * K, out: 100 * K, thinking: true },
-  { id: 'o3-mini', family: 'openai', ctx: 200 * K, out: 100 * K, thinking: true },
-  { id: 'o4-mini', family: 'openai', ctx: 200 * K, out: 100 * K, thinking: true },
-  { id: 'gpt-4-turbo', family: 'openai', ctx: 128 * K, out: 4096, aliases: ['gpt-4-turbo-preview', 'gpt-4-turbo-2024-04-09'] },
-  { id: 'gpt-4-32k', family: 'openai', ctx: 32768, out: 4096 },
-  { id: 'gpt-4', family: 'openai', ctx: 8192, out: 4096, aliases: ['gpt-4-0613'] },
-  { id: 'gpt-3.5-turbo', family: 'openai', ctx: 16385, out: 4096, aliases: ['gpt-3.5-turbo-0125', 'gpt-3.5-turbo-1106'] },
-  // --- Google ---------------------------------------------------------------
-  // Gemini 3.x (2026): 1M window, 64k output, thinking billed as output.
-  { id: 'gemini-3.8-flash', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
-  { id: 'gemini-3.7-flash', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
-  { id: 'gemini-3.6-flash', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
-  { id: 'gemini-3.5-flash', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
-  { id: 'gemini-3.5-flash-lite', family: 'google', ctx: ONE_MILLION, out: 65536 },
-  { id: 'gemini-3.1-flash-lite', family: 'google', ctx: ONE_MILLION, out: 65536 },
-  { id: 'gemini-3.1-pro-preview', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true, aliases: ['gemini-3.1-pro'] },
-  { id: 'gemini-omni-1.1-flash', family: 'google', ctx: ONE_MILLION, out: 65536, aliases: ['gemini-omni-flash-preview'] },
-  { id: 'gemini-2.5-pro', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
-  { id: 'gemini-2.5-flash', family: 'google', ctx: ONE_MILLION, out: 65536, thinking: true },
-  { id: 'gemini-2.5-flash-lite', family: 'google', ctx: ONE_MILLION, out: 65536 },
-  { id: 'gemini-2.0-flash', family: 'google', ctx: ONE_MILLION, out: 8192, aliases: ['gemini-2.0-flash-exp', 'gemini-2.0-flash-001'] },
-  { id: 'gemini-1.5-pro', family: 'google', ctx: 2 * ONE_MILLION, out: 8192, aliases: ['gemini-1.5-pro-latest'] },
-  { id: 'gemini-1.5-flash', family: 'google', ctx: ONE_MILLION, out: 8192, aliases: ['gemini-1.5-flash-latest'] },
-  // --- Meta -----------------------------------------------------------------
-  { id: 'llama-4-maverick', family: 'meta', ctx: ONE_MILLION, out: 8192 },
-  { id: 'llama-4-scout', family: 'meta', ctx: 10 * ONE_MILLION, out: 8192 },
-  { id: 'llama-3.3-70b', family: 'meta', ctx: 128 * K, out: 4096, aliases: ['llama-3.3-70b-instruct', 'meta-llama/llama-3.3-70b-instruct'] },
-  { id: 'llama-3.1-405b', family: 'meta', ctx: 128 * K, out: 4096, aliases: ['llama-3.1-405b-instruct', 'meta-llama/llama-3.1-405b-instruct'] },
-  { id: 'llama-3.1-70b', family: 'meta', ctx: 128 * K, out: 4096, aliases: ['llama-3.1-70b-instruct', 'meta-llama/llama-3.1-70b-instruct'] },
-  { id: 'llama-3.1-8b', family: 'meta', ctx: 128 * K, out: 4096, aliases: ['llama-3.1-8b-instruct', 'meta-llama/llama-3.1-8b-instruct'] },
-  // --- Mistral --------------------------------------------------------------
-  { id: 'mistral-large', family: 'mistral', ctx: 128 * K, out: 4096, aliases: ['mistral-large-latest'] },
-  { id: 'mistral-medium', family: 'mistral', ctx: 128 * K, out: 4096, aliases: ['mistral-medium-latest'] },
-  { id: 'mistral-small', family: 'mistral', ctx: 32768, out: 4096, aliases: ['mistral-small-latest'] },
-  { id: 'codestral', family: 'mistral', ctx: 32768, out: 4096, aliases: ['codestral-latest'] },
-  { id: 'ministral-8b', family: 'mistral', ctx: 128 * K, out: 4096 },
-  { id: 'mixtral-8x7b', family: 'mistral', ctx: 32768, out: 4096, aliases: ['mixtral-8x7b-instruct'] },
-  { id: 'mistral-7b', family: 'mistral', ctx: 32768, out: 4096, aliases: ['mistral-7b-instruct'] },
-  // --- DeepSeek -------------------------------------------------------------
-  { id: 'deepseek-v4-flash', family: 'deepseek', ctx: ONE_MILLION, out: 384 * K, thinking: true },
-  { id: 'deepseek-v4-pro', family: 'deepseek', ctx: ONE_MILLION, out: 384 * K, thinking: true },
-  { id: 'deepseek-chat', family: 'deepseek', ctx: 128 * K, out: 8192, aliases: ['deepseek-v3'] },
-  { id: 'deepseek-reasoner', family: 'deepseek', ctx: 128 * K, out: 65536, aliases: ['deepseek-r1'], thinking: true },
-  { id: 'deepseek-coder', family: 'deepseek', ctx: 16384, out: 4096 },
-  // --- xAI ------------------------------------------------------------------
-  // Grok 4.5 / 4.6 (2026): 500k window; 4.3 / 4.20: 1M.
-  { id: 'grok-4.6', family: 'xai', ctx: 500 * K, out: 32768, thinking: true },
-  { id: 'grok-4.5', family: 'xai', ctx: 500 * K, out: 32768, thinking: true },
-  { id: 'grok-4.3', family: 'xai', ctx: ONE_MILLION, out: 32768, thinking: true },
-  { id: 'grok-build-0.1', family: 'xai', ctx: 256 * K, out: 32768 },
-  { id: 'grok-4', family: 'xai', ctx: 256 * K, out: 32768, thinking: true },
-  { id: 'grok-3', family: 'xai', ctx: 131072, out: 16384 },
-  { id: 'grok-3-mini', family: 'xai', ctx: 131072, out: 16384, thinking: true },
-  { id: 'grok-code-fast-1', family: 'xai', ctx: 256 * K, out: 32768 },
-  // --- Qwen / Moonshot ------------------------------------------------------
-  { id: 'qwen3-235b', family: 'qwen', ctx: 131072, out: 16384, aliases: ['qwen3-235b-a22b'] },
-  { id: 'qwen2.5-72b', family: 'qwen', ctx: 131072, out: 8192, aliases: ['qwen2.5-72b-instruct'] },
-  { id: 'qwen2.5-coder', family: 'qwen', ctx: 131072, out: 8192, aliases: ['qwen2.5-coder-32b-instruct'] },
-  { id: 'qwen2.5-7b', family: 'qwen', ctx: 131072, out: 8192, aliases: ['qwen2.5-7b-instruct'] },
-  { id: 'qwq-32b', family: 'qwen', ctx: 131072, out: 16384, thinking: true },
-  { id: 'kimi-k2', family: 'moonshot', ctx: 128 * K, out: 16384, aliases: ['moonshot-v1-128k'] },
-  // --- Ollama (local) — ids as `ollama/<name>` or bare tag-less names -------
-  { id: 'ollama/llama3', family: 'ollama', ctx: 8192, out: 4096 },
-  { id: 'ollama/llama3.1', family: 'ollama', ctx: 131072, out: 4096 },
-  { id: 'ollama/llama3.2', family: 'ollama', ctx: 131072, out: 4096 },
-  { id: 'ollama/llama3.3', family: 'ollama', ctx: 131072, out: 4096 },
-  { id: 'ollama/mistral', family: 'ollama', ctx: 32768, out: 4096 },
-  { id: 'ollama/qwen2.5', family: 'ollama', ctx: 32768, out: 4096 },
-  { id: 'ollama/qwen2.5-coder', family: 'ollama', ctx: 32768, out: 4096 },
-  { id: 'ollama/qwen3', family: 'ollama', ctx: 40960, out: 4096 },
-  { id: 'ollama/codellama', family: 'ollama', ctx: 16384, out: 4096 },
-  { id: 'ollama/gemma3', family: 'ollama', ctx: 131072, out: 4096 },
-  { id: 'ollama/gemma2', family: 'ollama', ctx: 8192, out: 4096 },
-  { id: 'ollama/phi3', family: 'ollama', ctx: 131072, out: 4096 },
-  { id: 'ollama/phi4', family: 'ollama', ctx: 16384, out: 4096 },
-  { id: 'ollama/deepseek-r1', family: 'ollama', ctx: 131072, out: 4096 },
-];
-
-function toInfo(r: Row): ModelInfo {
-  const info: ModelInfo = { id: r.id, family: r.family, contextLimit: r.ctx };
-  if (r.out !== undefined) info.maxOutput = r.out;
-  if (r.aliases) info.aliases = [...r.aliases];
-  if (r.thinking) info.billsThinking = true;
-  if (r.cache) info.supportsCacheControl = true;
-  return info;
+/**
+ * The catalog is reached through the module seam, never held here.
+ *
+ * Context windows, output caps and billing flags used to be a ~110-row table in
+ * this file. That meant a CLI release every time a vendor shipped a model, and
+ * it put the whole curated set in every published tarball. It now lives in
+ * `data/models/capabilities.json` in the relevance package, compiled into the
+ * module and refreshed weekly.
+ *
+ * What did NOT move is everything below: the alias and gateway unwrapping, the
+ * pattern inference, `DEFAULT_CONTEXT_LIMIT`, the `models.json` overrides. Those
+ * are logic, and they are what keeps compression working when no module is
+ * installed — every id then falls through to inference and the conservative
+ * default, which is the safe direction to be wrong in.
+ */
+function catalogIndex(): { byId: Map<string, ModelInfo>; aliases: Map<string, string> } {
+  const snapshot = modelCatalogSnapshot();
+  // Rebuilt only when the snapshot identity changes — once per process in
+  // practice, and `null` (no module) is itself a stable identity.
+  if (indexCache && indexCache.source === snapshot) return indexCache.value;
+  const byId = new Map<string, ModelInfo>();
+  const aliases = new Map<string, string>();
+  for (const m of snapshot?.models ?? []) {
+    const info: ModelInfo = { id: m.id, family: m.family, contextLimit: m.contextLimit };
+    if (m.maxOutput !== null) info.maxOutput = m.maxOutput;
+    if (m.aliases.length) info.aliases = [...m.aliases];
+    if (m.billsThinking) info.billsThinking = true;
+    if (m.supportsCacheControl) info.supportsCacheControl = true;
+    byId.set(m.id, info);
+    for (const a of m.aliases) aliases.set(a, m.id);
+  }
+  const value = { byId, aliases };
+  indexCache = { source: snapshot, value };
+  return value;
 }
 
-const REGISTRY: ReadonlyMap<string, ModelInfo> = new Map(ROWS.map((r) => [r.id, toInfo(r)]));
-const ALIASES: ReadonlyMap<string, string> = (() => {
-  const m = new Map<string, string>();
-  for (const r of ROWS) for (const a of r.aliases ?? []) m.set(a.toLowerCase(), r.id);
-  return m;
-})();
+let indexCache: {
+  source: ReturnType<typeof modelCatalogSnapshot>;
+  value: { byId: Map<string, ModelInfo>; aliases: Map<string, string> };
+} | null = null;
+
+/** Reset the derived index (tests only; the seam has its own reset). */
+export function resetModelIndexForTests(): void {
+  indexCache = null;
+}
+
 
 /** Every built-in model (sorted by id). */
 export function knownModels(): ModelInfo[] {
-  return [...REGISTRY.values()]
+  return [...catalogIndex().byId.values()]
     .map((m) => ({ ...m, aliases: m.aliases ? [...m.aliases] : undefined }))
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
@@ -276,8 +177,9 @@ export function canonicalModelId(model: string, env: NodeJS.ProcessEnv = process
   }
   for (const c of modelIdCandidates(raw)) {
     for (const [k, v] of Object.entries(userMap)) if (k.trim().toLowerCase() === c) return v.trim().toLowerCase();
-    if (REGISTRY.has(c)) return c;
-    const alias = ALIASES.get(c);
+    const { byId, aliases: aliasMap } = catalogIndex();
+    if (byId.has(c)) return c;
+    const alias = aliasMap.get(c);
     if (alias) return alias;
     if (config[c]) return c;
   }
@@ -379,18 +281,19 @@ export function modelInfo(model: string, env: NodeJS.ProcessEnv = process.env): 
   const config = loadModelsConfig(env);
 
   let info: ModelInfo | undefined;
-  const reg = REGISTRY.get(canonical);
+  const { byId, aliases: aliasMap } = catalogIndex();
+  const reg = byId.get(canonical);
   if (reg) info = { ...reg, aliases: reg.aliases ? [...reg.aliases] : undefined };
   if (!info) {
     for (const c of modelIdCandidates(canonical)) {
-      const hit = REGISTRY.get(c) ?? (ALIASES.has(c) ? REGISTRY.get(ALIASES.get(c) as string) : undefined);
+      const hit = byId.get(c) ?? (aliasMap.has(c) ? byId.get(aliasMap.get(c) as string) : undefined);
       if (hit) {
         info = { ...hit, id: canonical, aliases: hit.aliases ? [...hit.aliases] : undefined };
         break;
       }
       // longest-prefix match at a version boundary (`gpt-4-32k-0613` → `gpt-4-32k`, never `gpt-4.1` → `gpt-4`)
       let best: ModelInfo | undefined;
-      for (const [id, row] of REGISTRY) {
+      for (const [id, row] of byId) {
         if (!c.startsWith(id)) continue;
         const rest = c.slice(id.length);
         if (rest && !['-', '/', ':', '@', '_'].includes(rest[0])) continue;
@@ -398,6 +301,22 @@ export function modelInfo(model: string, env: NodeJS.ProcessEnv = process.env): 
       }
       if (best) {
         info = { ...best, id: canonical, aliases: best.aliases ? [...best.aliases] : undefined };
+        break;
+      }
+    }
+  }
+  if (!info) {
+    // Nothing catalogued. Inference still has to see through a gateway prefix
+    // (`openrouter/openai/gpt-6-astra` → `gpt-6-astra`), which used to happen
+    // for free: the static table confirmed the unwrapped candidate, so
+    // `canonicalModelId` returned it. With the table gone that confirmation
+    // is absent whenever the module is, so try each candidate here and take
+    // the first that infers to a recognised family. An id no rule recognises
+    // still lands on the conservative default below — the safe direction.
+    for (const c of modelIdCandidates(canonical || raw)) {
+      const guess = inferModelInfo(c);
+      if (guess.family !== 'unknown') {
+        info = { ...guess, id: canonical || raw };
         break;
       }
     }

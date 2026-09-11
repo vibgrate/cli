@@ -1767,6 +1767,166 @@ export interface StandardsRecommendations {
   frameworks: FrameworkCoverage[];
 }
 
+// ── External Surface Inventory (vg-surfaces/1.0) ──
+//
+// The surfaces a repo talks to *outside its lockfile*: vendor APIs, AI models
+// (provider + id), MCP servers and their commands, and other third-party SaaS.
+// Detection is static and offline-first; freshness against what the vendor
+// ships today is an enrichment layer that may honestly answer "unknown".
+//
+// These are the open TYPES only. The mapping from an observed package, host,
+// env-key name or model id to the vendor behind it is curated data compiled
+// into the optional relevance module, not a table in this package.
+
+export type SurfaceKind = 'api' | 'model' | 'mcp' | 'saas';
+
+export type SurfaceCategory =
+  | 'ai'
+  | 'mcp'
+  | 'payment'
+  | 'auth'
+  | 'email'
+  | 'cloud'
+  | 'databases'
+  | 'messaging'
+  | 'observability'
+  | 'crm'
+  | 'storage'
+  | 'search'
+  | 'other';
+
+/** What evidence produced a surface, lowest detection rank first. */
+export type DetectionSignal =
+  | 'sdk-package'
+  | 'env-key'
+  | 'http-host'
+  | 'iac-resource'
+  | 'sdk-import'
+  | 'model-literal'
+  | 'agent-config'
+  | 'mcp-config';
+
+/**
+ * How the detected id compares to what the vendor ships today. `unknown` is a
+ * first-class answer, not a failure: it means the catalog does not cover this
+ * surface, and is always preferred to a guessed `behind`.
+ */
+export type FreshnessStatus = 'current' | 'behind' | 'deprecated' | 'retired' | 'unknown';
+
+/**
+ * Where the vendor catalog behind a freshness verdict came from.
+ *
+ * Only `module` in practice: the catalog is compiled into the relevance module
+ * and the CLI makes no network call for it, so a scan is identical online,
+ * offline and air-gapped. `none` means no module was loaded and nothing was
+ * compared. The old `live`/`cache`/`manifest` values are gone with the fetch
+ * path they described.
+ */
+export type CatalogSource = 'module' | 'none';
+
+export interface SurfaceEvidence {
+  signal: DetectionSignal;
+  /** Repo-relative POSIX path. */
+  file: string;
+  span?: { start: number; end: number };
+  /** At most 80 characters, secret-redacted. Never a credential value. */
+  snippet?: string;
+  /** 0–1 confidence in this single piece of evidence. */
+  confidence: number;
+}
+
+export interface SurfaceProvider {
+  /** Canonical slug, e.g. `openai`, `stripe`. */
+  id: string;
+  displayName: string;
+  /** Resolves through the dashboard's product-icon map. No pixels in the artifact. */
+  iconId: string;
+  category: SurfaceCategory;
+  homepage?: string;
+}
+
+export interface SurfaceFreshness {
+  status: FreshnessStatus;
+  /** The model id or API version as found in the repo. */
+  detected: string | null;
+  /** The vendor's current id/version — `null` when the catalog is silent. */
+  latest: string | null;
+  /** ISO date the `latest` knowledge is good as of. */
+  latestAt?: string;
+  /** Current flagships or supported versions to move to. */
+  alternatives: string[];
+  catalogSource: CatalogSource;
+  catalogGeneratedAt?: string;
+}
+
+export interface ExternalSurface {
+  /** Content hash of `kind|provider.id|detectedId` — stable across runs. */
+  id: string;
+  kind: SurfaceKind;
+  provider: SurfaceProvider;
+  /** `gpt-4o-mini` | `2024-04-10` | `@modelcontextprotocol/server-github`. */
+  detectedId: string;
+  displayName: string;
+  /** SDK or protocol version when known; `null` when not detected. */
+  version?: string | null;
+  freshness: SurfaceFreshness;
+  confidence: 'high' | 'medium' | 'low';
+  /** Sorted by (file, span.start, signal). */
+  evidence: SurfaceEvidence[];
+  callSites: number;
+  /** Project paths within the scan, sorted. */
+  projects: string[];
+  /** Collapsed raw ids, e.g. the dated variants of one model family. */
+  aliases?: string[];
+  metadata?: {
+    hosts?: string[];
+    /** Environment variable NAMES only — never values. */
+    envKeys?: string[];
+    packages?: string[];
+    sdkPackage?: string;
+    sdkVersion?: string | null;
+    mcpCommand?: string;
+    mcpArgs?: string[];
+    mcpTools?: string[];
+    transport?: 'stdio' | 'sse' | 'http';
+    /** Host only — never a URL carrying query tokens. */
+    mcpUrlHost?: string;
+  };
+}
+
+export interface SurfaceInventory {
+  schema: 'vg-surfaces/1.0';
+  /** The only nondeterministic field; pin it in fixtures. */
+  generatedAt: string;
+  catalog: {
+    source: CatalogSource;
+    generatedAt?: string;
+    version?: string;
+    /** True when the catalog's knowledge is more than 7 days old. */
+    stale: boolean;
+  };
+  counts: {
+    providers: number;
+    apis: number;
+    models: number;
+    mcpServers: number;
+    saas: number;
+    behind: number;
+    deprecated: number;
+    retired: number;
+    unknown: number;
+  };
+  /** Sorted by (kind, provider.id, detectedId). */
+  surfaces: ExternalSurface[];
+  /**
+   * External hosts no catalogued provider claims, deduped and capped at 50.
+   * Counted rather than classified — naming a vendor we cannot identify would
+   * be a guess, and an unbounded list would let a link-heavy repo inflate the
+   * artifact.
+   */
+  unknownHosts: string[];
+}
+
 export interface ExtendedScanResults {
   platformMatrix?: PlatformMatrixResult;
   dependencyRisk?: DependencyRiskResult;
@@ -1804,6 +1964,17 @@ export interface ExtendedScanResults {
    * confidence signal.
    */
   runtimeCatalogInfo?: RuntimeCatalogInfo;
+  /**
+   * The external surfaces the scanned code talks to — vendor APIs, AI models,
+   * MCP servers and third-party SaaS — with an honest comparison against what
+   * each vendor ships today.
+   *
+   * Additive: `serviceDependencies` stays populated and unchanged, and a
+   * dashboard that does not know this field simply ignores it. Present but
+   * empty means "we looked and found none"; absent means the scanner did not
+   * run (an older CLI, or a max-privacy scan).
+   */
+  surfaceInventory?: SurfaceInventory;
 }
 
 /** Confidence/freshness disclosure for the Runtime Catalog used in a scan. */
