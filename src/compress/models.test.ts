@@ -1,12 +1,21 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { resetModelCatalog } from '../engine/model-catalog-provider.js';
+import { useFixtureCatalog, useNoCatalog } from './__fixtures__/model-catalog.js';
+import { resetModelIndexForTests } from './models.js';
 import { billsPriorThinking, canonicalModelId, contextLimitFor, DEFAULT_CONTEXT_LIMIT, inferModelInfo, knownModels, loadModelsConfig, modelInfo, ONE_MILLION } from './models.js';
 
 const dirs: string[] = [];
+beforeEach(() => {
+  resetModelIndexForTests();
+  useFixtureCatalog();
+});
 afterEach(() => {
   for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  resetModelIndexForTests();
+  resetModelCatalog();
 });
 
 function tmpEnv(): NodeJS.ProcessEnv {
@@ -16,18 +25,39 @@ function tmpEnv(): NodeJS.ProcessEnv {
 }
 
 describe('registry', () => {
-  it('knows the major families', () => {
-    const ids = knownModels().map((m) => m.id);
-    for (const id of ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5', 'gpt-5', 'gpt-4.1', 'gpt-4o', 'o3', 'gemini-2.5-pro', 'llama-3.3-70b', 'mistral-large', 'deepseek-chat', 'grok-4', 'qwen2.5-72b', 'ollama/llama3']) expect(ids).toContain(id);
+  it('surfaces whatever the catalog carries, and nothing when it carries none', () => {
+    // WHICH models ship is asserted where the data lives (the relevance
+    // package). What matters here is that this file no longer holds a table:
+    // the list is exactly what the seam handed over, and with no module
+    // installed it is empty and every id falls through to inference.
+    expect(knownModels().map((m) => m.id).sort()).toEqual(['claude-haiku-4-5', 'claude-opus-5', 'gpt-4o', 'house-model-1']);
     expect(knownModels()).toEqual(knownModels());
+
+    useNoCatalog();
+    resetModelIndexForTests();
+    expect(knownModels()).toEqual([]);
   });
-  it('resolves exact ids, aliases and dated snapshots', () => {
+  it('resolves exact ids, aliases and dated snapshots from the catalog', () => {
     const env = tmpEnv();
     expect(modelInfo('claude-opus-5', env)).toMatchObject({ family: 'anthropic', contextLimit: ONE_MILLION, maxOutput: 128_000, billsThinking: true, supportsCacheControl: true });
     expect(modelInfo('claude-haiku-4-5-20251001', env)).toMatchObject({ id: 'claude-haiku-4-5', contextLimit: 200_000 });
-    expect(modelInfo('claude-sonnet-4-20250514', env).id).toBe('claude-sonnet-4-0');
     expect(modelInfo('gpt-4o-2024-08-06', env).contextLimit).toBe(128_000);
     expect(modelInfo('GPT-4O', env).id).toBe('gpt-4o');
+  });
+
+  it('falls back to inference, never upward, when no module is installed', () => {
+    // The safe direction: a window that reads too low makes compression work
+    // harder than it needs to; one that reads too high overflows the model and
+    // the request fails. So an uncatalogued id gets inference or the
+    // conservative default — never a borrowed figure from a bigger sibling.
+    useNoCatalog();
+    resetModelIndexForTests();
+    const env = tmpEnv();
+    // Inference still recognises the family and keeps compression sharp…
+    expect(modelInfo('claude-opus-5', env).family).toBe('anthropic');
+    // …and anything it cannot place lands on the conservative default.
+    expect(modelInfo('house-model-1', env).contextLimit).toBe(DEFAULT_CONTEXT_LIMIT);
+    expect(modelInfo('some-model-nobody-ships', env).contextLimit).toBe(DEFAULT_CONTEXT_LIMIT);
   });
   it('unwraps gateway ids and never confuses gpt-4.1 with gpt-4', () => {
     const env = tmpEnv();
@@ -89,20 +119,13 @@ describe('billsPriorThinking', () => {
 });
 
 describe('Sep-2026 model generation', () => {
-  it('knows the current OpenAI, Gemini and Grok releases by exact id', () => {
-    expect(modelInfo('gpt-6-astra')).toMatchObject({ family: 'openai', contextLimit: 1_050_000, maxOutput: 128_000, billsThinking: true });
-    expect(modelInfo('gpt-5.6-sol').contextLimit).toBe(1_050_000);
-    expect(modelInfo('gpt-5.5').contextLimit).toBe(1_050_000);
-    expect(modelInfo('gpt-5.4-mini').contextLimit).toBe(400_000);
-    expect(modelInfo('gpt-5.3-codex').family).toBe('openai');
-    expect(modelInfo('gemini-3.8-flash')).toMatchObject({ family: 'google', contextLimit: 1_000_000, billsThinking: true });
-    expect(modelInfo('gemini-3.1-pro').id).toBe('gemini-3.1-pro-preview');
-    expect(modelInfo('gemini-omni-flash-preview').id).toBe('gemini-omni-1.1-flash');
-    expect(modelInfo('grok-4.6')).toMatchObject({ family: 'xai', contextLimit: 500_000, billsThinking: true });
-    expect(modelInfo('grok-4.3').contextLimit).toBe(1_000_000);
-  });
-
+  // Which ids the shipped catalog carries is asserted over the data file
+  // itself, in packages/vibgrate-relevance/tests/model-catalog-data.test.ts.
+  // What belongs here is the inference that has to hold for a release nobody
+  // has catalogued yet — including when no module is installed at all.
   it('infers the next releases in each line instead of falling to the 128k bucket', () => {
+    useNoCatalog();
+    resetModelIndexForTests();
     // A GPT-6 or GPT-5.7 id nobody has registered yet keeps the 1.05M window;
     // before this rule `gpt-6-*` fell through `/^gpt-/` to 128k / 16k output.
     expect(modelInfo('gpt-6-nova').contextLimit).toBe(1_050_000);

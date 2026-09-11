@@ -1,6 +1,23 @@
-import { describe, it, expect } from 'vitest';
-import { scanServiceDependencies } from './service-dependencies.js';
-import type { ProjectScan, DependencyRow } from '../../core-open/index.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { emptyServiceDependencies, scanServiceDependencies, toServiceDependencies } from './service-dependencies.js';
+import { observePackages } from './surfaces/index.js';
+import { resetSurfaceCatalogCache } from '../../engine/surface-provider.js';
+import type { DependencyRow, ProjectScan } from '../../core-open/index.js';
+
+/**
+ * The vendor table this scanner used to inline now lives in the surface
+ * catalog, so what is tested here is the **contract**: which packages get
+ * observed, how the catalog's rows fold back into the ten legacy buckets, and
+ * that an unavailable catalog degrades to empty rather than to a stale partial.
+ *
+ * The vendor expectations themselves — that `stripe` is Stripe and lands in
+ * `payment`, that `@aws-sdk/client-s3` appears in both `cloud` and `storage` —
+ * are asserted against the real catalog in the monorepo, next to the data:
+ * `packages/vibgrate-relevance/tests/legacy-service-buckets.test.ts`.
+ */
 
 function makeDep(pkg: string, version: string | null = '1.0.0'): DependencyRow {
   return {
@@ -14,9 +31,9 @@ function makeDep(pkg: string, version: string | null = '1.0.0'): DependencyRow {
   };
 }
 
-function makeProject(name: string, deps: DependencyRow[]): ProjectScan {
+function makeProject(name: string, deps: DependencyRow[], type: ProjectScan['type'] = 'node'): ProjectScan {
   return {
-    type: 'node',
+    type,
     name,
     path: `/test/${name}`,
     frameworks: [],
@@ -25,297 +42,163 @@ function makeProject(name: string, deps: DependencyRow[]): ProjectScan {
   };
 }
 
+/**
+ * A stand-in catalog module. It answers the one call the scanner makes, so the
+ * fold-back logic can be tested deterministically without shipping vendor data
+ * into this package — which is the whole point of the split.
+ */
+const STUB_ROWS = [
+  { bucket: 'payment', name: 'Stripe', package: 'stripe', version: '14.0.0' },
+  { bucket: 'observability', name: 'Winston', package: 'winston', version: '3.0.0' },
+  { bucket: 'observability', name: 'Datadog', package: 'dd-trace', version: '5.0.0' },
+  { bucket: 'observability', name: 'MiniSearch', package: 'minisearch', version: null },
+  { bucket: 'cloud', name: 'AWS S3', package: '@aws-sdk/client-s3', version: '3.600.0' },
+  { bucket: 'storage', name: 'AWS S3', package: '@aws-sdk/client-s3', version: '3.600.0' },
+  { bucket: 'not-a-real-bucket', name: 'Nope', package: 'nope', version: null },
+];
+
+let stubDir: string;
+const previousPath = process.env.VIBGRATE_RELEVANCE_PATH;
+
+beforeAll(() => {
+  stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-surface-stub-'));
+  fs.writeFileSync(
+    path.join(stubDir, 'index.js'),
+    `export function createSurfaceCatalog() {
+       return {
+         classify: (observations) => ({
+           inventory: { schema: 'vg-surfaces/1.0', catalog: {}, counts: {}, surfaces: [], unknownHosts: [] },
+           serviceDependencies: ${JSON.stringify(STUB_ROWS)}.filter(
+             (r) => (observations.packages ?? []).some((p) => p.name === r.package),
+           ),
+         }),
+         search: () => [],
+         get: () => null,
+         info: () => ({ version: '0', generatedAt: '2026-09-11', providers: 0 }),
+       };
+     }\n`,
+  );
+});
+
+afterAll(() => {
+  fs.rmSync(stubDir, { recursive: true, force: true });
+});
+
+afterEach(() => {
+  if (previousPath === undefined) delete process.env.VIBGRATE_RELEVANCE_PATH;
+  else process.env.VIBGRATE_RELEVANCE_PATH = previousPath;
+  resetSurfaceCatalogCache();
+});
+
+function useStub(): void {
+  process.env.VIBGRATE_RELEVANCE_PATH = stubDir;
+  resetSurfaceCatalogCache();
+}
+
+describe('observePackages', () => {
+  it('reports package names and versions without knowing any vendor', () => {
+    const observed = observePackages([makeProject('shop', [makeDep('stripe', '14.0.0'), makeDep('lodash')])]);
+    expect(observed).toEqual([
+      { eco: 'npm', name: 'lodash', version: '1.0.0', file: '/test/shop/package.json', project: '/test/shop' },
+      { eco: 'npm', name: 'stripe', version: '14.0.0', file: '/test/shop/package.json', project: '/test/shop' },
+    ]);
+  });
+
+  it('keeps the first version seen when projects disagree', () => {
+    const observed = observePackages([
+      makeProject('a', [makeDep('stripe', '12.0.0')]),
+      makeProject('b', [makeDep('stripe', '14.0.0')]),
+    ]);
+    expect(observed).toHaveLength(1);
+    expect(observed[0].version).toBe('12.0.0');
+  });
+
+  it('preserves a null version rather than inventing one', () => {
+    expect(observePackages([makeProject('nullver', [makeDep('stripe', null)])])[0].version).toBeNull();
+  });
+
+  it('tags each ecosystem so non-Node repos are not silently dropped', () => {
+    const observed = observePackages([
+      makeProject('api', [makeDep('stripe')], 'python'),
+      makeProject('svc', [makeDep('github.com/stripe/stripe-go')], 'go'),
+    ]);
+    expect(observed.map((o) => o.eco).sort()).toEqual(['go', 'pypi']);
+  });
+
+  it('skips project types with no manifest ecosystem', () => {
+    expect(observePackages([makeProject('mobile', [makeDep('stripe')], 'swift')])).toEqual([]);
+  });
+});
+
+describe('toServiceDependencies', () => {
+  it('folds catalog rows into the ten legacy buckets', () => {
+    const result = toServiceDependencies(STUB_ROWS);
+    expect(result.payment).toEqual([{ name: 'Stripe', package: 'stripe', version: '14.0.0' }]);
+    expect(result.cloud.map((i) => i.name)).toContain('AWS S3');
+    expect(result.storage.map((i) => i.name)).toContain('AWS S3');
+  });
+
+  it('drops a bucket the artifact does not define', () => {
+    const result = toServiceDependencies(STUB_ROWS);
+    expect(Object.keys(result).sort()).toEqual(
+      ['auth', 'cloud', 'crm', 'databases', 'email', 'messaging', 'observability', 'payment', 'search', 'storage'],
+    );
+    expect(JSON.stringify(result)).not.toContain('Nope');
+  });
+
+  it('sorts within a bucket the way the artifact always has', () => {
+    // Locale-aware, not byte order: 'MiniSearch' sorts after 'Datadog' and
+    // before 'Winston', where a byte sort would put every capital first.
+    expect(toServiceDependencies(STUB_ROWS).observability.map((i) => i.name)).toEqual([
+      'Datadog',
+      'MiniSearch',
+      'Winston',
+    ]);
+  });
+
+  it('returns all ten buckets empty for no rows', () => {
+    const result = toServiceDependencies([]);
+    for (const items of Object.values(result)) expect(items).toEqual([]);
+    expect(result).toEqual(emptyServiceDependencies());
+  });
+});
+
 describe('scanServiceDependencies', () => {
-  it('returns empty arrays for empty projects', () => {
-    const result = scanServiceDependencies([]);
-    expect(result.payment).toEqual([]);
-    expect(result.auth).toEqual([]);
-    expect(result.email).toEqual([]);
-    expect(result.cloud).toEqual([]);
-    expect(result.databases).toEqual([]);
-    expect(result.messaging).toEqual([]);
-    expect(result.observability).toEqual([]);
-    expect(result.crm).toEqual([]);
-    expect(result.storage).toEqual([]);
-    expect(result.search).toEqual([]);
+  it('classifies observed packages through the catalog', async () => {
+    useStub();
+    const result = await scanServiceDependencies([makeProject('shop', [makeDep('stripe', '14.0.0')])]);
+    expect(result.payment).toEqual([{ name: 'Stripe', package: 'stripe', version: '14.0.0' }]);
   });
 
-  it('returns empty when no matching packages', () => {
-    const project = makeProject('clean', [
-      makeDep('express'),
-      makeDep('lodash'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    for (const category of Object.values(result)) {
-      expect(category).toEqual([]);
+  it('returns empty buckets for projects with no matching packages', async () => {
+    useStub();
+    const result = await scanServiceDependencies([makeProject('clean', [makeDep('express'), makeDep('lodash')])]);
+    for (const items of Object.values(result)) expect(items).toEqual([]);
+  });
+
+  it('returns empty buckets — never a stale partial — when no catalog is available', async () => {
+    process.env.VIBGRATE_RELEVANCE_PATH = path.join(stubDir, 'does-not-exist');
+    resetSurfaceCatalogCache();
+    const result = await scanServiceDependencies([makeProject('shop', [makeDep('stripe', '14.0.0')])]);
+    expect(result).toEqual(emptyServiceDependencies());
+  });
+
+  it('survives a catalog that throws', async () => {
+    const brokenDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-surface-broken-'));
+    fs.writeFileSync(
+      path.join(brokenDir, 'index.js'),
+      `export function createSurfaceCatalog() {
+         return { classify: () => { throw new Error('boom'); }, search: () => [], get: () => null, info: () => ({}) };
+       }\n`,
+    );
+    process.env.VIBGRATE_RELEVANCE_PATH = brokenDir;
+    resetSurfaceCatalogCache();
+    try {
+      await expect(scanServiceDependencies([makeProject('shop', [makeDep('stripe')])])).resolves.toEqual(
+        emptyServiceDependencies(),
+      );
+    } finally {
+      fs.rmSync(brokenDir, { recursive: true, force: true });
     }
-  });
-
-  // ── Payment ──
-
-  it('detects payment SDKs', () => {
-    const project = makeProject('shop', [
-      makeDep('stripe', '14.0.0'),
-      makeDep('@stripe/stripe-js', '2.0.0'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.payment).toHaveLength(2);
-    const stripe = result.payment.find((p) => p.package === 'stripe');
-    expect(stripe).toBeDefined();
-    expect(stripe!.name).toBe('Stripe');
-    expect(stripe!.version).toBe('14.0.0');
-  });
-
-  it('detects braintree and paypal', () => {
-    const project = makeProject('payments', [
-      makeDep('braintree', '3.0.0'),
-      makeDep('@paypal/checkout-server-sdk', '1.0.0'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.payment.map((p) => p.name)).toContain('Braintree');
-    expect(result.payment.map((p) => p.name)).toContain('PayPal');
-  });
-
-  // ── Auth ──
-
-  it('detects auth SDKs', () => {
-    const project = makeProject('secure', [
-      makeDep('passport', '0.7.0'),
-      makeDep('jsonwebtoken', '9.0.0'),
-      makeDep('next-auth', '4.24.0'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.auth).toHaveLength(3);
-    expect(result.auth.map((p) => p.name)).toContain('Passport.js');
-    expect(result.auth.map((p) => p.name)).toContain('JWT');
-    expect(result.auth.map((p) => p.name)).toContain('NextAuth');
-  });
-
-  it('detects auth0 and clerk', () => {
-    const project = makeProject('auth', [
-      makeDep('auth0'),
-      makeDep('@clerk/clerk-sdk-node'),
-      makeDep('@clerk/react', '6.1.2'),
-      makeDep('@okta/okta-auth-js'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.auth.map((p) => p.name)).toContain('Auth0');
-    expect(result.auth.map((p) => p.name)).toContain('Clerk (Node)');
-    expect(result.auth.map((p) => p.name)).toContain('Clerk (React)');
-    expect(result.auth.map((p) => p.name)).toContain('Okta');
-  });
-
-  // ── Email ──
-
-  it('detects email SDKs', () => {
-    const project = makeProject('email', [
-      makeDep('@sendgrid/mail'),
-      makeDep('nodemailer'),
-      makeDep('resend'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.email).toHaveLength(3);
-    expect(result.email.map((p) => p.name)).toContain('SendGrid');
-    expect(result.email.map((p) => p.name)).toContain('Nodemailer');
-    expect(result.email.map((p) => p.name)).toContain('Resend');
-  });
-
-  // ── Cloud ──
-
-  it('detects cloud SDKs', () => {
-    const project = makeProject('infra', [
-      makeDep('@aws-sdk/client-s3'),
-      makeDep('@azure/identity'),
-      makeDep('@google-cloud/storage'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.cloud).toHaveLength(3);
-    expect(result.cloud.map((p) => p.name)).toContain('AWS S3');
-    expect(result.cloud.map((p) => p.name)).toContain('Azure Identity');
-    expect(result.cloud.map((p) => p.name)).toContain('GCP Storage');
-  });
-
-  it('detects aws-sdk v2 in cloud', () => {
-    const project = makeProject('legacy', [makeDep('aws-sdk', '2.1595.0')]);
-    const result = scanServiceDependencies([project]);
-    expect(result.cloud.map((p) => p.name)).toContain('AWS SDK v2');
-  });
-
-  // ── Databases ──
-
-  it('detects database SDKs', () => {
-    const project = makeProject('db', [
-      makeDep('pg'),
-      makeDep('@prisma/client'),
-      makeDep('ioredis'),
-      makeDep('mongodb'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.databases).toHaveLength(4);
-    expect(result.databases.map((p) => p.name)).toContain('PostgreSQL');
-    expect(result.databases.map((p) => p.name)).toContain('Prisma');
-    expect(result.databases.map((p) => p.name)).toContain('Redis (ioredis)');
-    expect(result.databases.map((p) => p.name)).toContain('MongoDB');
-  });
-
-  it('detects ORM and query builder packages', () => {
-    const project = makeProject('data', [
-      makeDep('drizzle-orm'),
-      makeDep('typeorm'),
-      makeDep('sequelize'),
-      makeDep('knex'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.databases.map((p) => p.name)).toContain('Drizzle');
-    expect(result.databases.map((p) => p.name)).toContain('TypeORM');
-    expect(result.databases.map((p) => p.name)).toContain('Sequelize');
-    expect(result.databases.map((p) => p.name)).toContain('Knex');
-  });
-
-  // ── Messaging ──
-
-  it('detects messaging SDKs', () => {
-    const project = makeProject('queue', [
-      makeDep('@aws-sdk/client-sqs'),
-      makeDep('kafkajs'),
-      makeDep('bullmq'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.messaging).toHaveLength(3);
-    expect(result.messaging.map((p) => p.name)).toContain('AWS SQS');
-    expect(result.messaging.map((p) => p.name)).toContain('Kafka');
-    expect(result.messaging.map((p) => p.name)).toContain('BullMQ');
-  });
-
-  it('detects rabbitmq via amqplib', () => {
-    const project = makeProject('mq', [makeDep('amqplib')]);
-    const result = scanServiceDependencies([project]);
-    expect(result.messaging.map((p) => p.name)).toContain('RabbitMQ');
-  });
-
-  // ── Observability ──
-
-  it('detects observability SDKs', () => {
-    const project = makeProject('monitor', [
-      makeDep('@sentry/node'),
-      makeDep('@opentelemetry/api'),
-      makeDep('dd-trace'),
-      makeDep('winston'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.observability).toHaveLength(4);
-    expect(result.observability.map((p) => p.name)).toContain('Sentry (Node)');
-    expect(result.observability.map((p) => p.name)).toContain('OpenTelemetry API');
-    expect(result.observability.map((p) => p.name)).toContain('Datadog');
-    expect(result.observability.map((p) => p.name)).toContain('Winston');
-  });
-
-  // ── CRM ──
-
-  it('detects CRM and communication SDKs', () => {
-    const project = makeProject('integrations', [
-      makeDep('@slack/web-api'),
-      makeDep('hubspot-api-client'),
-      makeDep('discord.js'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.crm).toHaveLength(3);
-    expect(result.crm.map((p) => p.name)).toContain('Slack Web API');
-    expect(result.crm.map((p) => p.name)).toContain('HubSpot');
-    expect(result.crm.map((p) => p.name)).toContain('Discord');
-  });
-
-  // ── Storage ──
-
-  it('detects storage SDKs', () => {
-    const project = makeProject('files', [
-      makeDep('minio'),
-      makeDep('cloudinary'),
-      makeDep('@supabase/storage-js'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.storage).toHaveLength(3);
-    expect(result.storage.map((p) => p.name)).toContain('MinIO');
-    expect(result.storage.map((p) => p.name)).toContain('Cloudinary');
-    expect(result.storage.map((p) => p.name)).toContain('Supabase Storage');
-  });
-
-  // ── Search ──
-
-  it('detects search SDKs', () => {
-    const project = makeProject('search', [
-      makeDep('@elastic/elasticsearch'),
-      makeDep('algoliasearch'),
-      makeDep('meilisearch'),
-      makeDep('typesense'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.search).toHaveLength(4);
-    expect(result.search.map((p) => p.name)).toContain('Elasticsearch');
-    expect(result.search.map((p) => p.name)).toContain('Algolia');
-    expect(result.search.map((p) => p.name)).toContain('Meilisearch');
-    expect(result.search.map((p) => p.name)).toContain('Typesense');
-  });
-
-  // ── Cross-cutting ──
-
-  it('uses first version found across projects', () => {
-    const p1 = makeProject('a', [makeDep('stripe', '12.0.0')]);
-    const p2 = makeProject('b', [makeDep('stripe', '14.0.0')]);
-    const result = scanServiceDependencies([p1, p2]);
-    expect(result.payment).toHaveLength(1);
-    expect(result.payment[0]!.version).toBe('12.0.0');
-  });
-
-  it('handles null versions', () => {
-    const project = makeProject('nullver', [makeDep('stripe', null)]);
-    const result = scanServiceDependencies([project]);
-    expect(result.payment[0]!.version).toBeNull();
-  });
-
-  it('sorts items alphabetically by display name within category', () => {
-    const project = makeProject('sorted', [
-      makeDep('winston'),
-      makeDep('dd-trace'),
-      makeDep('@sentry/node'),
-      makeDep('pino'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    const names = result.observability.map((p) => p.name);
-    expect(names).toEqual([...names].sort());
-  });
-
-  it('detects packages shared between cloud and storage', () => {
-    // @aws-sdk/client-s3 appears in both cloud and storage categories
-    const project = makeProject('dual', [makeDep('@aws-sdk/client-s3', '3.600.0')]);
-    const result = scanServiceDependencies([project]);
-    expect(result.cloud.map((p) => p.name)).toContain('AWS S3');
-    expect(result.storage.map((p) => p.name)).toContain('AWS S3');
-  });
-
-  it('handles many dependencies across multiple categories', () => {
-    const project = makeProject('full', [
-      makeDep('stripe'),
-      makeDep('passport'),
-      makeDep('@sendgrid/mail'),
-      makeDep('@aws-sdk/client-s3'),
-      makeDep('pg'),
-      makeDep('kafkajs'),
-      makeDep('@sentry/node'),
-      makeDep('@slack/web-api'),
-      makeDep('minio'),
-      makeDep('algoliasearch'),
-    ]);
-    const result = scanServiceDependencies([project]);
-    expect(result.payment.length).toBeGreaterThan(0);
-    expect(result.auth.length).toBeGreaterThan(0);
-    expect(result.email.length).toBeGreaterThan(0);
-    expect(result.cloud.length).toBeGreaterThan(0);
-    expect(result.databases.length).toBeGreaterThan(0);
-    expect(result.messaging.length).toBeGreaterThan(0);
-    expect(result.observability.length).toBeGreaterThan(0);
-    expect(result.crm.length).toBeGreaterThan(0);
-    expect(result.storage.length).toBeGreaterThan(0);
-    expect(result.search.length).toBeGreaterThan(0);
   });
 });

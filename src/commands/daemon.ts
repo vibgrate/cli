@@ -19,6 +19,23 @@ import { c, info, json } from '../util/output.js';
  * attaches via `startCodeRuntimeSession` (ensures this standalone daemon).
  * No overlays yet. Safe to start/stop; does not mutate repos.
  */
+/**
+ * Options for a `vg daemon` subcommand: the global set plus `--socket`.
+ *
+ * `--socket` is declared on the `daemon` parent, and the program runs with
+ * `enablePositionalOptions()` — so an option typed *after* the subcommand name
+ * belongs to the subcommand, and a leaf that does not declare `--socket`
+ * rejects it as unknown and exits 1. That is not a typo-level problem: the
+ * background spawn re-invokes this CLI as `daemon start --socket <path>` with
+ * stdio ignored, so every `vg daemon ensure` and every auto-start died on an
+ * unknown-option error nobody could see, while a plain foreground
+ * `vg daemon start` worked. {@link socketOf} always checked the leaf first;
+ * this is what gives it something to find.
+ */
+function applyDaemonOptions(cmd: Command): Command {
+  return applyGlobalOptions(cmd).option('--socket <path>', 'override the daemon socket path');
+}
+
 export function registerDaemon(program: Command): void {
   const cmd = program
     .command('daemon')
@@ -119,7 +136,7 @@ export function registerDaemon(program: Command): void {
         }
       }
     });
-  applyGlobalOptions(status);
+  applyDaemonOptions(status);
 
   const start = cmd
     .command('start')
@@ -187,7 +204,7 @@ export function registerDaemon(program: Command): void {
       // Keep the event loop alive until signal.
       await new Promise(() => {});
     });
-  applyGlobalOptions(start);
+  applyDaemonOptions(start);
 
   /**
    * Idempotent start for host UIs (VS Code) and agents: if vgd is already
@@ -228,7 +245,7 @@ export function registerDaemon(program: Command): void {
         }
       }
     });
-  applyGlobalOptions(ensure);
+  applyDaemonOptions(ensure);
 
   const stop = cmd
     .command('stop')
@@ -258,7 +275,7 @@ export function registerDaemon(program: Command): void {
         );
       }
     });
-  applyGlobalOptions(stop);
+  applyDaemonOptions(stop);
 
   const restart = cmd
     .command('restart')
@@ -290,7 +307,7 @@ export function registerDaemon(program: Command): void {
         info(`vgd · restarted pid ${pid} · ${c.dim(socketPath)}`);
       }
     });
-  applyGlobalOptions(restart);
+  applyDaemonOptions(restart);
 
   const register = cmd
     .command('register')
@@ -312,7 +329,7 @@ export function registerDaemon(program: Command): void {
         info(c.dim(`  graph ${res.workspace.graphPath}`));
       }
     });
-  applyGlobalOptions(register);
+  applyDaemonOptions(register);
 
   const list = cmd
     .command('list')
@@ -335,7 +352,7 @@ export function registerDaemon(program: Command): void {
         }
       }
     });
-  applyGlobalOptions(list);
+  applyDaemonOptions(list);
 
   const federation = cmd
     .command('federation')
@@ -368,7 +385,7 @@ export function registerDaemon(program: Command): void {
         }
       }
     });
-  applyGlobalOptions(federation);
+  applyDaemonOptions(federation);
 
   /**
    * Load the on-disk code map for a workspace into vgd's ActiveGraph cache so
@@ -428,7 +445,7 @@ export function registerDaemon(program: Command): void {
         info(c.dim(`  repositoryId ${put.repositoryId}`));
       }
     });
-  applyGlobalOptions(publish);
+  applyDaemonOptions(publish);
 
   const query = cmd
     .command('query')
@@ -467,7 +484,7 @@ export function registerDaemon(program: Command): void {
         }
       }
     });
-  applyGlobalOptions(query);
+  applyDaemonOptions(query);
 
   const impact = cmd
     .command('impact')
@@ -503,7 +520,7 @@ export function registerDaemon(program: Command): void {
         }
       }
     });
-  applyGlobalOptions(impact);
+  applyDaemonOptions(impact);
 
   const graphs = cmd
     .command('graphs')
@@ -532,7 +549,7 @@ export function registerDaemon(program: Command): void {
         }
       }
     });
-  applyGlobalOptions(graphs);
+  applyDaemonOptions(graphs);
 
   applyGlobalOptions(cmd);
 }

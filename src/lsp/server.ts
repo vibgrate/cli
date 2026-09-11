@@ -24,7 +24,14 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import * as semver from 'semver';
 
 import { runCoreScan, refineArchitectureWithGraph, refineArchitectureWithAstRoles } from '../core-open/index.js';
-import type { ScanArtifact, ScanOptions, DependencyRow, ProjectScan } from '../core-open/index.js';
+import type {
+  DependencyRow,
+  ProjectScan,
+  ScanArtifact,
+  ScanOptions,
+  SurfaceInventory,
+  ToolingInventoryResult,
+} from '../core-open/index.js';
 
 /** Element type of `ScanArtifact.findings` — avoids a deep-path type import. */
 type Finding = NonNullable<ScanArtifact['findings']>[number];
@@ -267,6 +274,30 @@ export interface ArchitectureResponse {
    * when the path does not match a package.
    */
   slice?: ArchSlice;
+  /**
+   * External Surfaces — the tech stack and the third-party surfaces this code
+   * talks to, for the Architecture view's Externals tab. A pure projection of
+   * `extended.toolingInventory` and `extended.surfaceInventory`; omitted when
+   * the scan produced neither, so a client can tell "not scanned" from
+   * "none found".
+   */
+  externals?: ArchitectureExternalsWire;
+}
+
+/** One labelled row of the tech stack, e.g. "Frontend" -> React 19.3.0. */
+export interface TechStackGroupWire {
+  label: string;
+  items: Array<{ name: string; version: string | null }>;
+}
+
+export interface ArchitectureExternalsWire {
+  techStack?: TechStackGroupWire[];
+  /**
+   * The surface inventory verbatim from the artifact. Category, icon id and
+   * freshness are the catalog's verdicts — the client renders them and never
+   * re-derives one, exactly as it never re-derives a drift band.
+   */
+  surfaces?: SurfaceInventory;
 }
 
 export interface ArchitectureModuleWire {
@@ -384,6 +415,39 @@ function architectureWire(arch: {
   if (arch.generatedBy) out.generatedBy = arch.generatedBy;
   if (arch.sourceContract) out.sourceContract = arch.sourceContract;
   return out;
+}
+
+/**
+ * Tech-stack group labels, in render order. The artifact's keys are camelCase
+ * field names; these are what a reader sees.
+ */
+const TECH_STACK_LABELS: Array<[keyof ToolingInventoryResult, string]> = [
+  ['frontend', 'Frontend'],
+  ['metaFrameworks', 'Meta-frameworks'],
+  ['bundlers', 'Bundlers'],
+  ['css', 'CSS'],
+  ['backend', 'Backend'],
+  ['orm', 'ORM'],
+  ['testing', 'Testing'],
+  ['lintFormat', 'Lint & format'],
+  ['apiMessaging', 'API & messaging'],
+  ['observability', 'Observability'],
+];
+
+/**
+ * Project the tooling inventory into labelled groups. Returns `undefined`
+ * — not `[]` — when the scanner produced nothing, so the client can tell
+ * "not scanned" from "scanned, nothing found".
+ */
+function techStackGroups(inventory: ToolingInventoryResult | undefined): TechStackGroupWire[] | undefined {
+  if (!inventory) return undefined;
+  const groups: TechStackGroupWire[] = [];
+  for (const [key, label] of TECH_STACK_LABELS) {
+    const items = inventory[key];
+    if (!items?.length) continue;
+    groups.push({ label, items: items.map((i) => ({ name: i.name, version: i.version })) });
+  }
+  return groups.length > 0 ? groups : undefined;
 }
 
 /**
@@ -1688,6 +1752,7 @@ export class VibgrateLanguageServer {
         ...architectureWire(arch),
         ...this.architectureCallables('__repo__'),
         ...(await this.architectureMap('__repo__')),
+        ...this.architectureExternals(),
       };
     }
     const project = projectByPath(a, p.path);
@@ -1698,6 +1763,7 @@ export class VibgrateLanguageServer {
         ...architectureWire(arch),
         ...this.architectureCallables(p.path),
         ...(await this.architectureMap(p.path)),
+        ...this.architectureExternals(),
       };
     }
     return {
@@ -1706,7 +1772,23 @@ export class VibgrateLanguageServer {
       lockfilePath: lockfileRelativePath(this.opts.root, project),
       ...this.architectureCallables(p.path),
       ...(await this.architectureMap(p.path)),
+      ...this.architectureExternals(),
     };
+  }
+
+  /**
+   * The Externals tab's payload: the tech stack and the external surface
+   * inventory, exactly as the scan produced them. Both halves are optional and
+   * independent — a scan can carry a tech stack with no inventory (no surface
+   * catalog available) — so each is omitted rather than emptied.
+   */
+  private architectureExternals(): Pick<ArchitectureResponse, 'externals'> {
+    const extended = this.artifact?.extended;
+    if (!extended) return {};
+    const techStack = techStackGroups(extended.toolingInventory);
+    const surfaces = extended.surfaceInventory;
+    if (!techStack && !surfaces) return {};
+    return { externals: { ...(techStack ? { techStack } : {}), ...(surfaces ? { surfaces } : {}) } };
   }
 
   /**

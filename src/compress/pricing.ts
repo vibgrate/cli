@@ -1,13 +1,14 @@
 /**
- * USD-per-1M-token pricing. Static table (first-party list prices, verified
- * 2026-06) + pattern inference for unseen ids + user overrides from
- * `VG_MODEL_PRICES` (JSON) and `models.json`, with a blended fallback so a
- * savings figure always exists. Cache-read / cache-write rates default to the
- * provider's standard multiplier when a row omits them.
+ * USD-per-1M-token pricing. First-party list prices from the relevance module
+ * (see `engine/model-catalog-provider.ts`) + pattern inference for unseen ids +
+ * user overrides from `VG_MODEL_PRICES` (JSON) and `models.json`, with a
+ * blended fallback so a savings figure always exists. Cache-read / cache-write
+ * rates default to the provider's standard multiplier when a row omits them.
  */
 
 import { env as knobEnv } from './config.js';
 import { canonicalModelId, loadModelsConfig, modelInfo } from './models.js';
+import { modelCatalogSnapshot } from '../engine/model-catalog-provider.js';
 import { modelIdCandidates } from './tokenizers.js';
 
 export interface Price {
@@ -20,6 +21,46 @@ export interface Price {
 /** Used when nothing else prices a model (mid-tier frontier rate). */
 export const BLENDED_PRICE: Readonly<Price> = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
 
+/**
+ * List prices come from the relevance module, never from a table here.
+ *
+ * They used to be a ~93-row map in this file, carrying a "verified 2026-06"
+ * comment that nothing enforced — a price a vendor changed the next week was
+ * still quoted to users until the next CLI release. They now live in
+ * `data/models/capabilities.json` in the relevance package, compiled into the
+ * module and refreshed weekly.
+ *
+ * `inferPrice`, `BLENDED_PRICE` and the user overrides below did NOT move: they
+ * are what quotes a saving when no module is installed or no row covers an id,
+ * and compression must keep working in both cases.
+ */
+function priceTable(): Map<string, Price> {
+  const snapshot = modelCatalogSnapshot();
+  if (tableCache && tableCache.source === snapshot) return tableCache.value;
+  const value = new Map<string, Price>();
+  for (const m of snapshot?.models ?? []) {
+    if (!m.price) continue;
+    const p: Price = { input: m.price.input, output: m.price.output };
+    // `null` means the vendor publishes no such rate; the resolver below then
+    // applies the provider's standard multiplier rather than quoting zero.
+    if (m.price.cacheRead !== null) p.cacheRead = m.price.cacheRead;
+    if (m.price.cacheWrite !== null) p.cacheWrite = m.price.cacheWrite;
+    value.set(m.id, p);
+  }
+  tableCache = { source: snapshot, value };
+  return value;
+}
+
+let tableCache: {
+  source: ReturnType<typeof modelCatalogSnapshot>;
+  value: Map<string, Price>;
+} | null = null;
+
+/** Reset the derived price table (tests only; the seam has its own reset). */
+export function resetPriceTableForTests(): void {
+  tableCache = null;
+}
+
 const P = (input: number, output: number, cacheRead?: number, cacheWrite?: number): Price => {
   const p: Price = { input, output };
   if (cacheRead !== undefined) p.cacheRead = cacheRead;
@@ -27,114 +68,9 @@ const P = (input: number, output: number, cacheRead?: number, cacheWrite?: numbe
   return p;
 };
 
-const TABLE: Readonly<Record<string, Price>> = {
-  // Anthropic
-  'claude-fable-5-1': P(10, 50, 0.25, 12.5),
-  'claude-mythos-5-1': P(10, 50, 0.25, 12.5),
-  'claude-fable-5': P(10, 50, 1, 12.5),
-  'claude-mythos-5': P(10, 50, 1, 12.5),
-  'claude-opus-5': P(5, 25, 0.5, 6.25),
-  'claude-opus-4-8': P(5, 25, 0.5, 6.25),
-  'claude-opus-4-7': P(5, 25, 0.5, 6.25),
-  'claude-opus-4-6': P(5, 25, 0.5, 6.25),
-  'claude-sonnet-5': P(2, 10, 0.2, 2.5),
-  'claude-sonnet-4-6': P(3, 15, 0.3, 3.75),
-  'claude-haiku-4-5': P(1, 5, 0.1, 1.25),
-  'claude-opus-4-5': P(5, 25, 0.5, 6.25),
-  'claude-opus-4-1': P(15, 75, 1.5, 18.75),
-  'claude-sonnet-4-5': P(3, 15, 0.3, 3.75),
-  'claude-sonnet-4-0': P(3, 15, 0.3, 3.75),
-  'claude-opus-4-0': P(15, 75, 1.5, 18.75),
-  'claude-3-7-sonnet-20250219': P(3, 15, 0.3, 3.75),
-  'claude-3-5-sonnet-20241022': P(3, 15, 0.3, 3.75),
-  'claude-3-5-haiku-20241022': P(0.8, 4, 0.08, 1),
-  'claude-3-opus-20240229': P(15, 75, 1.5, 18.75),
-  'claude-3-haiku-20240307': P(0.25, 1.25, 0.03, 0.3),
-  // OpenAI
-  // OpenAI (Sep 2026 list; cached input = 10% of input)
-  'gpt-6-astra': P(10, 50, 1),
-  'gpt-5.6-sol': P(4, 20, 0.4),
-  'gpt-5.6-terra': P(2, 12, 0.2),
-  'gpt-5.6-luna': P(0.2, 1.2, 0.02),
-  'gpt-5.5': P(5, 30, 0.5),
-  'gpt-5.4': P(2.5, 15, 0.25),
-  'gpt-5.4-mini': P(0.75, 4.5, 0.075),
-  'gpt-5.4-nano': P(0.2, 1.25, 0.02),
-  'gpt-5.3-codex': P(1.75, 14, 0.175),
-  'gpt-5': P(1.25, 10, 0.125),
-  'gpt-5-mini': P(0.25, 2, 0.025),
-  'gpt-5-nano': P(0.05, 0.4, 0.005),
-  'gpt-4.1': P(2, 8, 0.5),
-  'gpt-4.1-mini': P(0.4, 1.6, 0.1),
-  'gpt-4.1-nano': P(0.1, 0.4, 0.025),
-  'gpt-4o': P(2.5, 10, 1.25),
-  'gpt-4o-mini': P(0.15, 0.6, 0.075),
-  o1: P(15, 60, 7.5),
-  'o1-mini': P(1.1, 4.4, 0.55),
-  o3: P(2, 8, 0.5),
-  'o3-mini': P(1.1, 4.4, 0.55),
-  'o4-mini': P(1.1, 4.4, 0.275),
-  'gpt-4-turbo': P(10, 30, 5),
-  'gpt-4-32k': P(60, 120),
-  'gpt-4': P(30, 60),
-  'gpt-3.5-turbo': P(0.5, 1.5, 0.25),
-  // Google (Gemini 3.6–3.8 Flash: introductory rate through 2026-12-31, then 1.5 / 7.5 / 0.15)
-  'gemini-3.8-flash': P(0.75, 3.75, 0.075),
-  'gemini-3.7-flash': P(0.75, 3.75, 0.075),
-  'gemini-3.6-flash': P(0.75, 3.75, 0.075),
-  'gemini-3.5-flash': P(1.5, 9, 0.15),
-  'gemini-3.5-flash-lite': P(0.3, 2.5, 0.03),
-  'gemini-3.1-flash-lite': P(0.3, 2.5, 0.03),
-  'gemini-3.1-pro-preview': P(2, 12, 0.2),
-  'gemini-omni-1.1-flash': P(1.5, 9, 0.15),
-  'gemini-2.5-pro': P(1.25, 10, 0.31),
-  'gemini-2.5-flash': P(0.3, 2.5, 0.075),
-  'gemini-2.5-flash-lite': P(0.1, 0.4, 0.025),
-  'gemini-2.0-flash': P(0.1, 0.4, 0.025),
-  'gemini-1.5-pro': P(1.25, 5, 0.3125),
-  'gemini-1.5-flash': P(0.075, 0.3, 0.01875),
-  // Meta (typical hosted rates)
-  'llama-4-maverick': P(0.2, 0.6),
-  'llama-4-scout': P(0.15, 0.5),
-  'llama-3.3-70b': P(0.6, 0.6),
-  'llama-3.1-405b': P(3, 3),
-  'llama-3.1-70b': P(0.6, 0.6),
-  'llama-3.1-8b': P(0.1, 0.1),
-  // Mistral
-  'mistral-large': P(2, 6),
-  'mistral-medium': P(0.4, 2),
-  'mistral-small': P(0.1, 0.3),
-  codestral: P(0.3, 0.9),
-  'ministral-8b': P(0.1, 0.1),
-  'mixtral-8x7b': P(0.7, 0.7),
-  'mistral-7b': P(0.25, 0.25),
-  // DeepSeek
-  'deepseek-v4-flash': P(0.14, 0.28, 0.0028),
-  'deepseek-v4-pro': P(0.435, 0.87, 0.003625),
-  'deepseek-chat': P(0.27, 1.1, 0.07),
-  'deepseek-reasoner': P(0.55, 2.19, 0.14),
-  'deepseek-coder': P(0.14, 0.28),
-  // xAI (base tier, prompts under 200k tokens)
-  'grok-4.6': P(2, 6, 0.5),
-  'grok-4.5': P(2, 6, 0.3),
-  'grok-4.3': P(1.25, 2.5, 0.2),
-  'grok-build-0.1': P(1, 2, 0.2),
-  'grok-4': P(3, 15, 0.75),
-  'grok-3': P(3, 15, 0.75),
-  'grok-3-mini': P(0.3, 0.5, 0.075),
-  'grok-code-fast-1': P(0.2, 1.5, 0.02),
-  // Qwen / Moonshot (hosted)
-  'qwen3-235b': P(0.2, 0.6),
-  'qwen2.5-72b': P(0.4, 1.2),
-  'qwen2.5-coder': P(0.2, 0.6),
-  'qwen2.5-7b': P(0.05, 0.1),
-  'qwq-32b': P(0.15, 0.4),
-  'kimi-k2': P(0.6, 2.5, 0.15),
-};
-
+/** A locally-run model costs nothing per token. */
 const FREE: Readonly<Price> = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-/** Pattern-based pricing for ids the table does not know (null = no guess). */
 export function inferPrice(id: string): Price | null {
   const s = id.toLowerCase();
   if (/^ollama\//.test(s) || /:latest$|:\d+b$/.test(s) || /local/.test(s)) return { ...FREE };
@@ -218,7 +154,7 @@ export function priceFor(model: string, env: NodeJS.ProcessEnv = process.env): P
 
   let base: Price | null = null;
   for (const c of candidates) {
-    const hit = TABLE[c];
+    const hit = priceTable().get(c);
     if (hit) {
       base = { ...hit };
       break;
@@ -227,14 +163,15 @@ export function priceFor(model: string, env: NodeJS.ProcessEnv = process.env): P
   if (!base) {
     for (const c of candidates) {
       let best: string | undefined;
-      for (const id of Object.keys(TABLE)) {
+      const table = priceTable();
+      for (const id of table.keys()) {
         if (!c.startsWith(id)) continue;
         const rest = c.slice(id.length);
         if (rest && !['-', '/', ':', '@', '_'].includes(rest[0])) continue;
         if (!best || id.length > best.length) best = id;
       }
       if (best) {
-        base = { ...TABLE[best] };
+        base = { ...(table.get(best) as Price) };
         break;
       }
     }
