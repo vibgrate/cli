@@ -791,7 +791,12 @@ export interface ScanReachabilityResult {
 export interface ScanOptions {
   out?: string;
   format: OutputFormat;
-  failOn?: 'warn' | 'error';
+  /**
+   * Raw `--fail-on` value. The open engine honours `warn` and `error`; the CLI
+   * parses the full comma list (architecture and security-pack gates) itself
+   * and applies those gates after the scan, so the type is deliberately wide.
+   */
+  failOn?: string;
   baseline?: string;
   changedOnly?: boolean;
   concurrency: number;
@@ -1975,6 +1980,66 @@ export interface ExtendedScanResults {
    * run (an older CLI, or a max-privacy scan).
    */
   surfaceInventory?: SurfaceInventory;
+  /**
+   * Security-pack findings evaluated by the Architecture module over the
+   * host-built fact document (`vg scan --iac`). Absent means no pack ran — the
+   * module was not installed, or no pack was requested. Never fabricated: an
+   * empty `findings` array only ever comes from the module itself, so "no
+   * field" reads as "not evaluated", not "nothing found". Nothing here enters
+   * `graph.json` or any hashed payload.
+   */
+  security?: SecuritySection;
+}
+
+// ── Security packs (`vg scan --iac`, docs/CLI-SECURITY-PACKS-PLAN.md §2.3) ──
+
+/** Severity as stamped by the pack; never derived from a rank. */
+export type SecuritySeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+
+/**
+ * One finding from a security pack. Produced by the Architecture module and
+ * passed through by the host after sanitisation — the host never contains a
+ * rule. `id` is content-addressed by the module (pack, rule, address, node
+ * and the attributes the rule read), so it survives a move of the block and
+ * changes only when the evaluated attribute changes.
+ */
+export interface SecurityFinding {
+  /** 32 lowercase hex characters. */
+  id: string;
+  /** Pack id, e.g. `iac-cis-v1`. */
+  pack: string;
+  /** Version of the pack that produced the finding. */
+  packVersion: string;
+  /** Rule id within the pack, e.g. `aws-s3-public`. */
+  rule: string;
+  severity: SecuritySeverity;
+  /** Templated from the rule, the address and safe scalars — never a secret value. */
+  message: string;
+  /** Repo-relative path, forward slashes. */
+  path: string;
+  /** 1-based line; evidence only, never part of the id. */
+  line?: number;
+  /** Identity within the file (`aws_s3_bucket.logs`, `default/Deployment/api`). */
+  address?: string;
+  /** Graph node id (32 hex) when the fact was bound to the code map. */
+  node?: string;
+  owasp?: string[];
+  cwe?: string[];
+  cis?: string[];
+}
+
+/** The `extended.security` section — the module's `vg.security.v1` result after sanitisation. */
+export interface SecuritySection {
+  schema: 'vg.security.v1';
+  /** Module engine stamp, e.g. `haile-fast/2026.903.5`. */
+  engine: string;
+  /** Requested pack → its version, or `unavailable` when the installed module does not carry it. */
+  packs: Record<string, string>;
+  facts: { received: number; evaluated: number; rejected: number };
+  /** Facts the module dropped, by input index, with a fixed reason string. */
+  rejected?: Array<{ index: number; reason: string }>;
+  /** Sorted by (path, line, address, rule, id). */
+  findings: SecurityFinding[];
 }
 
 /** Confidence/freshness disclosure for the Runtime Catalog used in a scan. */

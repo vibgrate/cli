@@ -38,6 +38,37 @@ after the scan (with `always()`, so findings still surface when the gate fails).
 Prefer raw CLI steps? `npx @vibgrate/cli scan --vulns --format sarif --out
 vibgrate-vulns.sarif --fail-on error`, then upload the file yourself.
 
+## Infrastructure misconfiguration gate (`--iac`)
+
+The same scan can evaluate Terraform, Kubernetes, Helm and Dockerfile facts
+against the Architecture module's `iac-cis-v1` pack and gate on the result.
+Findings carry content-addressed ids, so the SARIF you upload tracks the same
+alert across rebases instead of re-opening it when a line moves.
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+
+steps:
+  - uses: actions/checkout@v4
+  - run: npx @vibgrate/cli scan --full --format sarif --out vibgrate.sarif --fail-on iac-finding
+  - uses: github/codeql-action/upload-sarif@v3
+    if: always()
+    with:
+      sarif_file: vibgrate.sarif
+      category: vibgrate
+```
+
+`--fail-on iac-finding` exits 2 on a high or critical infrastructure finding;
+`--fail-on iac-finding=medium` lowers the bar, and a comma list combines it
+with the drift gate (`--fail-on error,iac-finding`). The gate needs the code
+map the scan builds and the Architecture module, which the CLI provisions on
+first use; on an air-gapped runner install it with `vg module install arch`
+from a bundle or set `VIBGRATE_ARCH_PATH`. A gate that cannot be evaluated
+exits 2 with a one-line reason rather than passing. Rule catalogue and output
+shapes: [`../security-packs.md`](../security-packs.md).
+
 ## Drift gate behavior
 
 The CI template uses existing scan-time gates:

@@ -263,7 +263,12 @@ export interface ScanArtifact {
 export interface ScanOptions {
   out?: string;
   format: OutputFormat;
-  failOn?: 'warn' | 'error';
+  /**
+   * Raw `--fail-on` value. Parsed by `src/security/gate.ts` (`warn`, `error`,
+   * the architecture gates and the security-pack gates, comma-separated), so
+   * the type is deliberately wide. Kept in step with core-open's `ScanOptions`.
+   */
+  failOn?: string;
   baseline?: string;
   changedOnly?: boolean;
   concurrency: number;

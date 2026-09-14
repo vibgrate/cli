@@ -5,11 +5,14 @@
  * the CLI loads through a provider seam. This core manages the shared
  * lifecycle without touching the user's project: it installs into the
  * vibgrate modules cache dir via a direct registry tarball fetch with an
- * integrity check — never a `package.json` mutation, never a postinstall
- * script execution (the tarball is unpacked, nothing in it is run at install
- * time). Per-module policy (consent posture, auto-provisioning, error
- * loudness) lives with each module's own wrapper (relevance-module.ts,
- * hcs-module.ts, haile-module.ts) — this file is mechanism only.
+ * integrity check — never a mutation of the *project's* `package.json`, never
+ * a postinstall script execution (the tarball is unpacked, nothing in it is
+ * run at install time). The cache dir itself does get a tiny
+ * `{ "type": "module" }` package.json so Node does not treat the unpacked
+ * `index.js` as typeless and walk up to an ancestor (often `~/package.json`).
+ * Per-module policy (consent posture, auto-provisioning, error loudness)
+ * lives with each module's own wrapper (relevance-module.ts, hcs-module.ts,
+ * haile-module.ts) — this file is mechanism only.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -98,12 +101,58 @@ export function moduleInstalledAt(dir: string): { installed: boolean; version?: 
       version?: string;
     };
     if (fs.existsSync(path.join(dir, 'index.js'))) {
+      // Existing installs (pre-ESM-marker) get healed on the next status
+      // check — every `vg` already calls this via kickRelevanceReadiness —
+      // so a Node warning does not wait for the next module reinstall.
+      ensureModuleEsmPackageJson(dir);
       return { installed: true, version: meta.version };
     }
   } catch {
     /* not installed */
   }
   return { installed: false };
+}
+
+/**
+ * Write a tiny `{ "type": "module" }` package.json next to a managed module's
+ * `index.js`. The unpack maps `package/dist/*` onto the module root and
+ * deliberately does not copy the published package.json (`main` would still
+ * say `./dist/index.js`). Without a local type marker, Node 22 walks up to
+ * the nearest ancestor package.json — commonly `~/package.json` — and emits
+ * `MODULE_TYPELESS_PACKAGE_JSON` on every `import()` of the ESM `index.js`.
+ *
+ * Only writes into a directory that already has `.module.json` (the cache
+ * layout we own). A custom `VIBGRATE_*_PATH` stub is left alone. Never
+ * touches the user's project package.json.
+ */
+export function ensureModuleEsmPackageJson(moduleDir: string): void {
+  try {
+    const markerPath = path.join(moduleDir, '.module.json');
+    const indexPath = path.join(moduleDir, 'index.js');
+    if (!fs.existsSync(markerPath) || !fs.existsSync(indexPath)) return;
+    const pkgPath = path.join(moduleDir, 'package.json');
+    try {
+      const existing = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { type?: unknown };
+      if (existing && existing.type === 'module') return;
+    } catch {
+      /* missing or unreadable — write */
+    }
+    let name: string | undefined;
+    let version: string | undefined;
+    try {
+      const meta = JSON.parse(fs.readFileSync(markerPath, 'utf8')) as { name?: unknown; version?: unknown };
+      if (typeof meta.name === 'string') name = meta.name;
+      if (typeof meta.version === 'string') version = meta.version;
+    } catch {
+      /* still write the type marker */
+    }
+    const body: Record<string, unknown> = { private: true, type: 'module' };
+    if (name) body.name = name;
+    if (version) body.version = version;
+    fs.writeFileSync(pkgPath, `${JSON.stringify(body)}\n`);
+  } catch {
+    /* best-effort: a missing marker is a Node warning, not a failed command */
+  }
 }
 
 /**
@@ -167,11 +216,6 @@ export function untar(data: Buffer): Array<{ name: string; body: Buffer }> {
 }
 
 /**
- * Fetch, verify, and unpack a module into its cache dir. The loadable surface
- * is the tarball's `package/dist/*` mapped to the module root (so
- * `<dir>/index.js` is the seam's entrypoint), plus LICENSE/README.
- */
-/**
  * The registry's `dist-tags.latest` for a module package, or null when the
  * registry is unreachable or the package has no published version. Read-only:
  * fetches metadata only, never a tarball.
@@ -188,6 +232,13 @@ export async function latestModuleVersion(npmName: string, opts: InstallOptions 
   }
 }
 
+/**
+ * Fetch, verify, and unpack a module into its cache dir. The loadable surface
+ * is the tarball's `package/dist/*` mapped to the module root (so
+ * `<dir>/index.js` is the seam's entrypoint), plus LICENSE/README. A tiny
+ * `{ "type": "module" }` package.json is written next to `index.js` so Node
+ * treats the entry as ESM without walking up to an ancestor package.json.
+ */
 export async function installModule(mod: ModuleDescriptor, opts: InstallOptions = {}): Promise<InstallResult> {
   if (kernelDisabled()) return { status: 'disabled', detail: 'VIBGRATE_NO_KERNEL is set' };
   const existing = moduleInstalledAt(mod.dir());
@@ -232,6 +283,7 @@ export async function installModule(mod: ModuleDescriptor, opts: InstallOptions 
       return { status: 'unavailable', detail: 'package layout not recognized (no dist/index.js)' };
     }
     fs.writeFileSync(path.join(dir, '.module.json'), JSON.stringify({ name: mod.npmName, version }));
+    ensureModuleEsmPackageJson(dir);
     mod.onChanged?.();
     return { status: 'installed', version };
   } catch (e) {

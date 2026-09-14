@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { VgGraph } from '../../schema.js';
-import { kernelDisabled } from '../../install/module-core.js';
+import { ensureModuleEsmPackageJson, kernelDisabled } from '../../install/module-core.js';
 import { haileModuleDir, haileModulePathOverride } from './haile-provider.js';
 import type { HaileModuleSummary, HaileProfile, HaileSidecar, HaileSymbol } from './types.js';
 import {
@@ -54,7 +54,9 @@ function resolveHaileModuleEntry(): string | null {
     try {
       if (fs.statSync(p).isDirectory()) {
         const idx = path.join(p, 'index.js');
-        return fs.existsSync(idx) ? idx : null;
+        if (!fs.existsSync(idx)) return null;
+        ensureModuleEsmPackageJson(p);
+        return idx;
       }
     } catch {
       /* treat as a file path */
@@ -62,7 +64,9 @@ function resolveHaileModuleEntry(): string | null {
     return fs.existsSync(p) ? p : null;
   }
   const idx = path.join(haileModuleDir(), 'index.js');
-  return fs.existsSync(idx) ? idx : null;
+  if (!fs.existsSync(idx)) return null;
+  ensureModuleEsmPackageJson(haileModuleDir());
+  return idx;
 }
 
 export function serializeSidecar(sidecar: HaileSidecar): string {
@@ -70,9 +74,9 @@ export function serializeSidecar(sidecar: HaileSidecar): string {
 }
 
 /** Write an already-built classify document. Does not classify. */
-export function writeSidecarDocument(sidecar: HaileSidecar, graphPath: string): string | null {
+export function writeSidecarDocument(sidecar: HaileSidecar, graphPath: string, dest?: string): string | null {
   try {
-    const file = haileSidecarPathFor(graphPath);
+    const file = dest ?? haileSidecarPathFor(graphPath);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, serializeSidecar(sidecar));
@@ -97,7 +101,7 @@ export function writeSidecarDocument(sidecar: HaileSidecar, graphPath: string): 
 export function writeHaileSidecarFor(
   graph: VgGraph,
   graphPath: string,
-  options: { profile?: HaileProfile; policy?: HailePolicy; root?: string } = {},
+  options: { profile?: HaileProfile; policy?: HailePolicy; root?: string; out?: string } = {},
 ): string | null {
   const root = options.root ?? path.dirname(path.dirname(graphPath));
   // Fail loud on a bad overlay even when the module is absent: the file is
@@ -107,7 +111,7 @@ export function writeHaileSidecarFor(
   try {
     const entry = resolveHaileModuleEntry();
     if (!entry) return null;
-    const file = haileSidecarPathFor(graphPath);
+    const file = options.out ?? haileSidecarPathFor(graphPath);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const profile = options.profile ?? DEFAULT_PROFILE;
     // The policy comes from the flag, then the environment, then
@@ -134,7 +138,7 @@ export function writeHaileSidecarFor(
       if (written.magic !== HAILE_MAGIC || !Array.isArray(written.symbols)) return null;
       if (!isHailePolicy(written.policy)) written.policy = policy;
       applyArchitectureOverlays(written, document.overlays);
-      if (!writeSidecarDocument(written, graphPath)) return null;
+      if (!writeSidecarDocument(written, graphPath, file)) return null;
     }
     return file;
   } catch {

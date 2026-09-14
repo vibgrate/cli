@@ -34,6 +34,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { ensureModuleEsmPackageJson } from '../install/module-core.js';
 
 /** Per-1M-token list prices. `null` where the vendor publishes no such rate. */
 export interface CatalogPrice {
@@ -168,6 +169,7 @@ export async function primeModelCatalog(env: NodeJS.ProcessEnv = process.env): P
   if (!file) return;
   try {
     if (!fs.existsSync(file)) return;
+    ensureModuleEsmPackageJson(path.dirname(file));
     const mod = (await import(pathToFileURL(file).href)) as {
       createModelCatalog?: () => { table?: () => unknown } | null;
     };

@@ -45,6 +45,16 @@ export interface ToolchainNodeDraft {
   doc?: string;
   /** Baseline importance 0..1; centrality analysis refines it later. */
   importance?: number;
+  /**
+   * Closed, per-format projection of the declaration's attributes, consumed
+   * only by the security fact builder (`src/security/facts.ts`) — the shapes
+   * are pinned in `packages/vibgrate-haile/docs/facts.md` §2.2. Never
+   * serialised into the graph: `toGraphNode` does not copy it, so `graph.json`
+   * is byte-identical with or without it. Never contains a secret *value*:
+   * secret-shaped keys are redacted at ingest and environment values are
+   * projected as `{ name, literal: true }`, never as the value.
+   */
+  attrs?: Record<string, unknown>;
 }
 
 /** An edge between two drafts, addressed by their `qualifiedName`s. */

@@ -61,6 +61,20 @@ describe('classifyProjectContext / isDocPath', () => {
     expect(classifyProjectContext('yarn.lock')).toBeNull();
   });
 
+  it('discovers Terraform anywhere and Kubernetes manifest directories at any depth', () => {
+    // The security packs evaluate these facts, so they must be discovered
+    // wherever they live — not only under a root-level terraform/ or k8s/.
+    expect(classifyProjectContext('terraform/main.tf')).toBe('infra');
+    expect(classifyProjectContext('infra/main.tf')).toBe('infra');
+    expect(classifyProjectContext('modules/vpc/main.tofu')).toBe('infra');
+    expect(classifyProjectContext('k8s/deployment.yaml')).toBe('infra');
+    expect(classifyProjectContext('services/api/k8s/deployment.yaml')).toBe('infra');
+    expect(classifyProjectContext('services/api/manifests/worker.yml')).toBe('infra');
+    expect(classifyProjectContext('deploy/app.yaml')).toBe('infra');
+    // Unrelated YAML in a source tree is still not project context.
+    expect(classifyProjectContext('src/fixtures/data.yaml')).toBeNull();
+  });
+
   it('exports a stable exact-basename catalogue', () => {
     const names = projectContextExactBasenames();
     expect(names).toContain('package.json');

@@ -24,6 +24,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { ensureModuleEsmPackageJson } from '../install/module-core.js';
 import type { ExternalSurface, SurfaceInventory } from '../core-open/index.js';
 
 // ── observations (what this package is allowed to know) ────────────────────
@@ -170,6 +171,7 @@ export async function loadSurfaceCatalog(): Promise<SurfaceCatalog | null> {
   for (const p of candidatePaths()) {
     if (!fs.existsSync(p)) continue;
     try {
+      ensureModuleEsmPackageJson(path.dirname(p));
       const mod = (await import(pathToFileURL(p).href)) as {
         createSurfaceCatalog?: () => SurfaceCatalog | null;
       };

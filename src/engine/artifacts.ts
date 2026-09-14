@@ -251,7 +251,9 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
   // graph (the sidecar would also self-invalidate via corpusHash, but a
   // removed/replaced graph must take its derived artifacts with it).
   deleteTagsSidecarFor(graphPath);
-  deleteHaileSidecarFor(graphPath);
+  // Keep graph.arch.json until a replacement classifies. Wiping it first left
+  // Architecture on with every card Unclassified for the whole classify spawn
+  // (or forever, if classify timed out or the module was missing).
 
   if (storeMode) {
     if (!writeGraphSnapshot(graphPath, graph, { standalone: true })) {
@@ -306,7 +308,9 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
   // Architecture sidecar is derived and must not enter graph.json. Best-effort:
   // a classify fault never fails the build — except a user overlay that does
   // not validate, which the caller must surface. --max-privacy / --no-graph
-  // never reach writeArtifacts (see shouldBuildCodeMap).
+  // never reach writeArtifacts (see shouldBuildCodeMap). The live classify
+  // file is replaced in place (atomic rename inside the writer); it is not
+  // deleted first.
   try {
     writeHaileSidecarFor(graph, graphPath, { root: options.root, ...(options.policy ? { policy: options.policy as HailePolicy } : {}) });
   } catch (err) {

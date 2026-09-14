@@ -50,6 +50,27 @@ describe('sbom helpers', () => {
     expect(sbom.packages[0].name).toBe('chalk');
   });
 
+  it('folds lockfile-only packages in as transitive components alongside the direct ones', () => {
+    const sbom = toCycloneDx(makeArtifact('5.3.0', 90), [
+      { package: 'ansi-styles', version: '6.2.1' },
+      { package: 'chalk', version: '5.3.0' }, // already reported as direct — must not duplicate
+    ]) as {
+      components: Array<{ name: string; version: string; properties: Array<{ name: string; value: string }> }>;
+    };
+    expect(sbom.components).toHaveLength(2);
+    const scopeOf = (name: string): string | undefined =>
+      sbom.components.find((c) => c.name === name)?.properties.find((p) => p.name === 'vibgrate:scope')?.value;
+    expect(scopeOf('chalk')).toBe('direct');
+    expect(scopeOf('ansi-styles')).toBe('transitive');
+  });
+
+  it('SPDX likewise includes transitive lockfile packages', () => {
+    const sbom = toSpdx(makeArtifact('5.3.0', 90), [{ package: 'ansi-styles', version: '6.2.1' }]) as {
+      packages: Array<{ name: string }>;
+    };
+    expect(sbom.packages.map((p) => p.name)).toEqual(['chalk', 'ansi-styles']);
+  });
+
   it('produces a deterministic serialNumber for identical content', () => {
     const a = toCycloneDx(makeArtifact('5.3.0', 90)) as { serialNumber: string };
     const b = toCycloneDx(makeArtifact('5.3.0', 90)) as { serialNumber: string };

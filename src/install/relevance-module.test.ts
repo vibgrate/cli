@@ -15,6 +15,7 @@ import {
   readConsent,
   writeConsent,
 } from './relevance-module.js';
+import { ensureModuleEsmPackageJson } from './module-core.js';
 import { relevanceModuleDir, resetRelevanceProviderCache, loadRelevanceProvider } from '../engine/relevance-provider.js';
 
 let tmp: string;
@@ -111,6 +112,12 @@ describe('installRelevanceModule', () => {
     expect(result).toMatchObject({ status: 'installed', version: '1.2.3' });
     expect(moduleInstalled()).toMatchObject({ installed: true, version: '1.2.3' });
     expect(fs.existsSync(path.join(relevanceModuleDir(), 'index.js'))).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(relevanceModuleDir(), 'package.json'), 'utf8'))).toMatchObject({
+      name: '@vibgrate/relevance',
+      version: '1.2.3',
+      private: true,
+      type: 'module',
+    });
 
     resetRelevanceProviderCache();
     const provider = await loadRelevanceProvider();
@@ -118,6 +125,42 @@ describe('installRelevanceModule', () => {
 
     removeRelevanceModule();
     expect(moduleInstalled().installed).toBe(false);
+  });
+
+  it('heals a pre-marker install so Node does not warn about a typeless ancestor package.json', async () => {
+    // Same layout as a real machine: ~/.cache/vibgrate/modules/relevance with
+    // only index.js + .module.json, and a ~/package.json without "type".
+    fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({ name: 'home-trap' }));
+    const dir = relevanceModuleDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'index.js'), PROVIDER_JS);
+    fs.writeFileSync(path.join(dir, '.module.json'), JSON.stringify({ name: '@vibgrate/relevance', version: '1.2.3' }));
+
+    const seen: string[] = [];
+    const onWarn = (w: Error & { code?: string }): void => {
+      if (w.code === 'MODULE_TYPELESS_PACKAGE_JSON') seen.push(w.message);
+    };
+    process.on('warning', onWarn);
+    try {
+      expect(moduleInstalled()).toMatchObject({ installed: true, version: '1.2.3' });
+      expect(JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).type).toBe('module');
+
+      resetRelevanceProviderCache();
+      const provider = await loadRelevanceProvider();
+      expect(provider?.version()).toBe('tarball-relevance@1');
+      await new Promise((r) => setImmediate(r));
+    } finally {
+      process.off('warning', onWarn);
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it('does not write a package.json into an unmanaged directory', () => {
+    const stray = path.join(tmp, 'stray');
+    fs.mkdirSync(stray);
+    fs.writeFileSync(path.join(stray, 'index.js'), PROVIDER_JS);
+    ensureModuleEsmPackageJson(stray);
+    expect(fs.existsSync(path.join(stray, 'package.json'))).toBe(false);
   });
 
   it('refuses a tarball that fails the integrity check, leaving nothing behind', async () => {

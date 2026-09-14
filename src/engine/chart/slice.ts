@@ -245,6 +245,8 @@ export function projectSlice(graph: VgGraph, sidecar: HaileSidecar | null, spec:
   let emptyHint: string | null = null;
   if (bound && !hasUi) {
     emptyHint = 'No UI adapters in this package · CLI / library';
+  } else if (!bound && spec.architecture !== false) {
+    emptyHint = 'Architecture jobs are still catching up with this map. Reopen the slice in a moment.';
   }
 
   return {

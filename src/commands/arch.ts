@@ -56,7 +56,7 @@ function configure(chart: Command): void {
         await server.close();
         throw new CliError('no map found — run `vg` to build one first', ExitCode.NOT_FOUND);
       }
-      const sidecar = readHaileSidecar(graphPath, { corpusHash: graph.provenance?.corpusHash });
+      const sidecar = readHaileSidecar(graphPath);
       const provider = await loadHaileProvider();
       const overview = overviewOf(graph, sidecar, provider);
       const located = opts.focus ? locateInOverview(graph, opts.focus) : null;

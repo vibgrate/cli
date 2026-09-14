@@ -200,6 +200,127 @@ function pipfileLock(root: string, name: string): string | undefined {
   return undefined;
 }
 
+export interface LockfileComponent {
+  package: string;
+  version: string;
+}
+
+/**
+ * Enumerate every package a JS lockfile actually resolves — the full
+ * transitive tree, not just the names declared in package.json.
+ *
+ * `lockfileVersion` above answers a narrower question ("what version does
+ * *this* declared dependency resolve to") and stays a point lookup by
+ * design. An SBOM needs the opposite shape: the whole installed graph, since
+ * that is what a vulnerability scanner or supply-chain review actually
+ * walks. Tries npm, then pnpm, then yarn; returns `undefined` when none is
+ * present or parseable — honest degradation, same as `lockfileVersion`.
+ */
+export function fullDependencyTree(root: string): LockfileComponent[] | undefined {
+  return npmLockTree(root) ?? pnpmLockTree(root) ?? yarnLockTree(root);
+}
+
+function sortComponents(map: Map<string, LockfileComponent>): LockfileComponent[] {
+  return [...map.values()].sort((a, b) => a.package.localeCompare(b.package) || a.version.localeCompare(b.version));
+}
+
+/** npm `package-lock.json` v2/v3 `packages` map, falling back to v1's nested `dependencies` tree. */
+function npmLockTree(root: string): LockfileComponent[] | undefined {
+  let data: {
+    packages?: Record<string, { version?: string }>;
+    dependencies?: Record<string, { version?: string; dependencies?: Record<string, unknown> }>;
+  };
+  try {
+    data = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
+  } catch {
+    return undefined;
+  }
+  const out = new Map<string, LockfileComponent>();
+  if (data.packages && typeof data.packages === 'object') {
+    for (const [key, val] of Object.entries(data.packages)) {
+      if (!key) continue; // "" is the root project itself, not a dependency
+      const m = /node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(key);
+      const version = val?.version;
+      if (m && typeof version === 'string') out.set(`${m[1]}@${version}`, { package: m[1], version });
+    }
+  } else if (data.dependencies && typeof data.dependencies === 'object') {
+    walkNpmV1Tree(data.dependencies, out);
+  }
+  return out.size ? sortComponents(out) : undefined;
+}
+
+function walkNpmV1Tree(
+  deps: Record<string, { version?: string; dependencies?: Record<string, unknown> }>,
+  out: Map<string, LockfileComponent>,
+): void {
+  for (const [name, val] of Object.entries(deps)) {
+    if (typeof val?.version === 'string') out.set(`${name}@${val.version}`, { package: name, version: val.version });
+    if (val?.dependencies && typeof val.dependencies === 'object') {
+      walkNpmV1Tree(val.dependencies as Record<string, { version?: string; dependencies?: Record<string, unknown> }>, out);
+    }
+  }
+}
+
+/**
+ * `pnpm-lock.yaml` `packages:` section — every resolved package, v9-style
+ * (`name@version:` / `'@scope/name@version':`) and v6-style
+ * (`/name/version:` / `/@scope/name/version:`), peer suffixes stripped.
+ */
+function pnpmLockTree(root: string): LockfileComponent[] | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(root, 'pnpm-lock.yaml'), 'utf8');
+  } catch {
+    return undefined;
+  }
+  const section = sectionOf(text, 'packages');
+  if (!section) return undefined;
+  const out = new Map<string, LockfileComponent>();
+  const v9 = /^ {2}'?(@[^/'\n]+\/[^@/'\n]+|[^@/'\n]+)@([^:'\n(]+)(?:\([^)]*\))?'?:\s*$/gm;
+  const v6 = /^ {2}\/(@[^/'\n]+\/[^@/'\n]+|[^@/'\n]+)\/([^:'\n(]+)(?:\([^)]*\))?:\s*$/gm;
+  for (const re of [v9, v6]) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(section))) {
+      const name = m[1];
+      const version = m[2].trim();
+      if (name && version) out.set(`${name}@${version}`, { package: name, version });
+    }
+  }
+  return out.size ? sortComponents(out) : undefined;
+}
+
+/** `yarn.lock` — every block's header name(s) paired with its resolved `version`. */
+function yarnLockTree(root: string): LockfileComponent[] | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(root, 'yarn.lock'), 'utf8');
+  } catch {
+    return undefined;
+  }
+  const out = new Map<string, LockfileComponent>();
+  let pendingNames: string[] = [];
+  for (const line of text.split('\n')) {
+    if (line && !/^\s/.test(line) && !line.startsWith('#')) {
+      pendingNames = line
+        .replace(/:\s*$/, '')
+        .split(',')
+        .map((spec) => {
+          const s = spec.trim().replace(/^"|"$/g, '');
+          const at = s.lastIndexOf('@');
+          return at > 0 ? s.slice(0, at) : '';
+        })
+        .filter(Boolean);
+    } else if (pendingNames.length) {
+      const m = /^\s+version:?\s+"?([^"\s]+)"?/.exec(line);
+      if (m) {
+        for (const name of pendingNames) out.set(`${name}@${m[1]}`, { package: name, version: m[1] });
+        pendingNames = [];
+      }
+    }
+  }
+  return out.size ? sortComponents(out) : undefined;
+}
+
 /** npm `package-lock.json` — JSON, deterministic, no dependency. */
 function packageLockVersion(root: string, name: string): string | undefined {
   let data: { packages?: Record<string, { version?: string }>; dependencies?: Record<string, { version?: string }> };

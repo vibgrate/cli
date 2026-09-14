@@ -13,8 +13,9 @@
  */
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { modulesBaseDir } from '../../install/module-core.js';
+import { ensureModuleEsmPackageJson, modulesBaseDir } from '../../install/module-core.js';
 
 export type HaileProfile = 'strict' | 'balanced' | 'exploratory';
 
@@ -81,6 +82,16 @@ export interface HaileProvider {
   }): string;
   /** Directory of UI assets (React Flow pack). Served at /arch-ui/. */
   archUiAssets?(): string | null;
+  /**
+   * Evaluate security packs over a `vg.facts.v1` fact document
+   * (`packages/vibgrate-haile/docs/facts.md`). Returns the module's
+   * `vg.security.v1` result, or `null` when the kernel abstained (malformed
+   * document, unknown top-level key) or its output did not parse. Absent on
+   * modules that predate the packs — the host then reports the module as
+   * missing for `--iac`, never an empty pass. The host sanitises the result
+   * at its trust boundary (`src/security/sanitize.ts`).
+   */
+  evalFacts?(document: unknown): unknown | null;
 }
 
 function disabled(): boolean {
@@ -131,7 +142,18 @@ export async function loadHaileProvider(): Promise<HaileProvider | null> {
   for (const p of candidatePaths()) {
     if (!fs.existsSync(p)) continue;
     try {
-      const mod = (await import(pathToFileURL(p).href)) as {
+      ensureModuleEsmPackageJson(path.dirname(p));
+      // Key the import on the entry's contents: Node caches ESM by URL for
+      // the life of the process, so a module replaced on disk mid-run (the
+      // scan provisioning an update, `vg update`) would otherwise reload as
+      // the old build. mtime alone is too coarse — two writes within the
+      // same millisecond (as happens when a test provisions an update right
+      // after install) hash to the same query string and silently reload
+      // the stale module — so key on a content hash instead; a changed
+      // build always gets a fresh instance, and the memo above keeps this
+      // to one import per process in the normal case.
+      const digest = crypto.createHash('sha1').update(fs.readFileSync(p)).digest('hex');
+      const mod = (await import(`${pathToFileURL(p).href}?v=${digest}`)) as {
         createHaileProvider?: () => HaileProvider | null;
       };
       const provider = mod.createHaileProvider?.();

@@ -9,6 +9,7 @@ import {
   PURPOSE_LABEL,
   ROLE_COLOR,
   ROLE_LABEL,
+  kindLabel,
   purposeLabel,
   roleLabel,
 } from './labels.js';
@@ -90,15 +91,16 @@ const HEX_ROLE: Record<string, LaneId> = {
 };
 
 export function architectureBound(
-  graph: VgGraph,
+  _graph: VgGraph,
   sidecar: HaileSidecar | null,
   architectureFlag: boolean,
 ): boolean {
   if (architectureFlag === false) return false;
-  if (!sidecar) return false;
-  const hash = graph.provenance?.corpusHash;
-  if (!hash || !sidecar.corpus_hash) return false;
-  return sidecar.corpus_hash === hash;
+  // A sibling classify file still paints jobs when its corpus_hash is from
+  // the previous rebuild. Requiring a match blanked Architecture on for the
+  // whole classify spawn. Node ids that survived keep their jobs; new ids
+  // stay unclassified until the replacement file lands.
+  return Boolean(sidecar);
 }
 
 export function indexSymbols(sidecar: HaileSidecar | null): Map<string, HaileSymbol> {
@@ -308,8 +310,8 @@ export function jobColor(role: string, bound: boolean): string {
   return ROLE_COLOR[role] ?? '#94a3b8';
 }
 
-export function jobLabel(role: string, bound: boolean, _kind: string): string {
-  if (!bound) return 'Unclassified';
+export function jobLabel(role: string, bound: boolean, kind: string): string {
+  if (!bound) return kindLabel(kind);
   if (!role || role === 'unknown') return 'Unclassified';
   return ROLE_LABEL[role] ?? roleLabel(role);
 }

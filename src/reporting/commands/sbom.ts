@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { pathExists, readJsonFile, writeTextFile } from '../utils/fs.js';
 import type { DependencyRow, ScanArtifact } from '../types.js';
+import { fullDependencyTree, type LockfileComponent } from '../../engine/lockfile.js';
 import { vexCommand } from './vex.js';
 
 type SbomFormat = 'cyclonedx' | 'spdx';
@@ -14,6 +15,8 @@ interface FlattenedDependency {
   currentSpec: string;
   drift: DependencyRow['drift'];
   majorsBehind: number | null;
+  /** 'direct' comes from a scanned manifest; 'transitive' is lockfile-only. */
+  scope: 'direct' | 'transitive';
 }
 
 /**
@@ -54,29 +57,57 @@ function sbomSerialSeed(format: string, artifact: ScanArtifact, deps: FlattenedD
     artifact.rootPath ?? '',
     artifact.timestamp ?? '',
     artifact.vibgrateVersion ?? '',
-    ...deps.map((d) => `${d.package}|${d.version}|${d.currentSpec}|${d.project}|${d.drift}|${d.majorsBehind ?? ''}`),
+    ...deps.map((d) => `${d.package}|${d.version}|${d.currentSpec}|${d.project}|${d.drift}|${d.majorsBehind ?? ''}|${d.scope}`),
   ].join('\n');
 }
 
-export function flattenDependencies(artifact: ScanArtifact): FlattenedDependency[] {
+/**
+ * Direct, scanned manifest dependencies plus (when `lockfileDeps` is given)
+ * every additional package the lockfile resolves that the manifest scan
+ * doesn't see — the transitive tree. Manifest scanning intentionally stays
+ * lockfile-free for the code graph (see `engine/manifests.ts`), which is
+ * right for that use case but wrong for an SBOM: "16 packages I typed into
+ * package.json" is not the installed dependency surface a vulnerability or
+ * supply-chain review needs. Deduped by exact name@version so a package
+ * already reported as direct isn't repeated as transitive.
+ */
+export function flattenDependencies(artifact: ScanArtifact, lockfileDeps: LockfileComponent[] = []): FlattenedDependency[] {
   const rows: FlattenedDependency[] = [];
+  const seen = new Set<string>();
   for (const project of artifact.projects) {
     for (const dep of project.dependencies) {
+      const version = dep.resolvedVersion ?? dep.currentSpec;
+      seen.add(`${dep.package}@${version}`);
       rows.push({
         project: project.name,
         package: dep.package,
-        version: dep.resolvedVersion ?? dep.currentSpec,
+        version,
         currentSpec: dep.currentSpec,
         drift: dep.drift,
         majorsBehind: dep.majorsBehind,
+        scope: 'direct',
       });
     }
+  }
+  for (const dep of lockfileDeps) {
+    const key = `${dep.package}@${dep.version}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({
+      project: artifact.rootPath,
+      package: dep.package,
+      version: dep.version,
+      currentSpec: dep.version,
+      drift: 'unknown',
+      majorsBehind: null,
+      scope: 'transitive',
+    });
   }
   return rows;
 }
 
-export function toCycloneDx(artifact: ScanArtifact): Record<string, unknown> {
-  const dependencies = flattenDependencies(artifact);
+export function toCycloneDx(artifact: ScanArtifact, lockfileDeps: LockfileComponent[] = []): Record<string, unknown> {
+  const dependencies = flattenDependencies(artifact, lockfileDeps);
   return {
     bomFormat: 'CycloneDX',
     specVersion: '1.5',
@@ -105,13 +136,14 @@ export function toCycloneDx(artifact: ScanArtifact): Record<string, unknown> {
         { name: 'vibgrate:currentSpec', value: dep.currentSpec },
         { name: 'vibgrate:drift', value: dep.drift },
         { name: 'vibgrate:majorsBehind', value: String(dep.majorsBehind ?? 'unknown') },
+        { name: 'vibgrate:scope', value: dep.scope },
       ],
     })),
   };
 }
 
-export function toSpdx(artifact: ScanArtifact): Record<string, unknown> {
-  const dependencies = flattenDependencies(artifact);
+export function toSpdx(artifact: ScanArtifact, lockfileDeps: LockfileComponent[] = []): Record<string, unknown> {
+  const dependencies = flattenDependencies(artifact, lockfileDeps);
   return {
     spdxVersion: 'SPDX-2.3',
     dataLicense: 'CC0-1.0',
@@ -140,7 +172,7 @@ export function toSpdx(artifact: ScanArtifact): Record<string, unknown> {
           annotationType: 'OTHER',
           annotator: 'Tool: @vibgrate/cli',
           annotationDate: artifact.timestamp,
-          comment: `project=${dep.project}; drift=${dep.drift}; majorsBehind=${dep.majorsBehind ?? 'unknown'}`,
+          comment: `project=${dep.project}; drift=${dep.drift}; majorsBehind=${dep.majorsBehind ?? 'unknown'}; scope=${dep.scope}`,
         },
       ],
     })),
@@ -218,7 +250,9 @@ const exportCommand = new Command('export')
   .option('--in <file>', 'Input artifact file', '.vibgrate/scan_result.json')
   .option('--out <file>', 'Output SBOM file')
   .option('--format <format>', 'SBOM format (cyclonedx|spdx)', 'cyclonedx')
-  .action(async (opts: { in: string; out?: string; format: string }) => {
+  .option('--root <dir>', 'Project root to read the lockfile from', '.')
+  .option('--no-transitive', 'Report only direct, manifest-declared dependencies')
+  .action(async (opts: { in: string; out?: string; format: string; root: string; transitive: boolean }) => {
     const artifact = await readArtifactOrExit(opts.in);
     const format = opts.format.toLowerCase() as SbomFormat;
 
@@ -227,7 +261,13 @@ const exportCommand = new Command('export')
       process.exit(1);
     }
 
-    const sbom = format === 'cyclonedx' ? toCycloneDx(artifact) : toSpdx(artifact);
+    // Manifest scanning only sees what's declared in package.json (by design —
+    // see engine/manifests.ts), which is a fraction of what's actually
+    // installed. Pull the full resolved tree from the lockfile so the SBOM
+    // reflects real supply-chain exposure, not just direct dependencies.
+    const lockfileDeps = opts.transitive ? (fullDependencyTree(path.resolve(opts.root)) ?? []) : [];
+
+    const sbom = format === 'cyclonedx' ? toCycloneDx(artifact, lockfileDeps) : toSpdx(artifact, lockfileDeps);
     const body = JSON.stringify(sbom, null, 2);
 
     if (opts.out) {

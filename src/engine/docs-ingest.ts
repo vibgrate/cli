@@ -266,7 +266,14 @@ const PATH_PATTERNS: Array<{ re: RegExp; category: DocCategory }> = [
   { re: /^k8s\/.+\.ya?ml$/i, category: 'infra' },
   { re: /^kubernetes\/.+\.ya?ml$/i, category: 'infra' },
   { re: /^infra\/.+\.ya?ml$/i, category: 'infra' },
-  { re: /^terraform\/.+\.tf$/i, category: 'infra' },
+  // Kubernetes manifest directories at any depth (`services/api/k8s/…`) — the
+  // security packs evaluate these, so a manifest nested under a service
+  // directory must be discovered too, not only a root-level `k8s/`.
+  { re: /(^|\/)(k8s|kubernetes|manifests)\/.+\.ya?ml$/i, category: 'infra' },
+  // Terraform / OpenTofu wherever it lives. A `.tf` file is infrastructure by
+  // extension; the old root-`terraform/`-only rule left `infra/main.tf` and
+  // per-module trees out of the graph and out of the misconfiguration packs.
+  { re: /\.(tf|tofu)$/i, category: 'infra' },
   // API contracts by path
   { re: /(^|\/)(openapi|swagger)(\.|\/)/i, category: 'api-contract' },
   { re: /(^|\/)api(-)?(spec|schema|contracts?)\//i, category: 'api-contract' },
