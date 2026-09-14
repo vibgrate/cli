@@ -14,6 +14,21 @@ backward compatible.
 
 ### Added
 
+- **`vg sbom export` now reports the full resolved dependency tree, not just
+  direct manifest deps.** SBOM export previously flattened only the packages
+  a project's manifest scan sees — the names typed into `package.json` (or
+  `go.mod`, `build.gradle.kts`, etc.), which by design skips lockfiles so the
+  code graph stays noise-free. For an SBOM that's backwards: a "per-release
+  SBOM" exists to give vulnerability/supply-chain visibility across the
+  *installed* dependency graph, and a project with one dependency in
+  `package.json` can easily resolve to hundreds once its own dependencies'
+  dependencies are counted. `vg sbom export` now also reads
+  `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` from `--root` (defaults
+  to the current directory) and folds every transitive package in alongside
+  the direct ones, each tagged with a `vibgrate:scope` (`direct` or
+  `transitive`) property so the two remain distinguishable. Pass
+  `--no-transitive` to restore the old, direct-only output.
+
 - **Context compression reads its model facts from the scanning module.**
   Context windows, output caps, thinking/cache billing and per-1M-token list
   prices were a pair of hand-maintained tables inside the CLI, which meant a

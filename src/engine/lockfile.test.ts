@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { lockfileVersion } from './lockfile.js';
+import { lockfileVersion, fullDependencyTree } from './lockfile.js';
 
 /**
  * The point of reading lockfiles at all is that `node_modules` is empty in CI
@@ -129,5 +129,71 @@ describe('lockfileVersion — npm precedence', () => {
 
   it('returns undefined when there is no lockfile at all', () => {
     expect(lockfileVersion(root, 'npm', 'commander')).toBeUndefined();
+  });
+});
+
+describe('fullDependencyTree', () => {
+  it('reads the full transitive graph from an npm v2/v3 package-lock.json, not just direct deps', () => {
+    write(
+      'package-lock.json',
+      JSON.stringify({
+        packages: {
+          '': { name: 'app' },
+          'node_modules/commander': { version: '15.0.0' },
+          'node_modules/commander/node_modules/ansi-styles': { version: '4.3.0' },
+          'node_modules/chalk': { version: '5.3.0' },
+        },
+      }),
+    );
+    const tree = fullDependencyTree(root);
+    expect(tree).toEqual([
+      { package: 'ansi-styles', version: '4.3.0' },
+      { package: 'chalk', version: '5.3.0' },
+      { package: 'commander', version: '15.0.0' },
+    ]);
+  });
+
+  it('reads npm v1 nested dependencies recursively', () => {
+    write(
+      'package-lock.json',
+      JSON.stringify({
+        dependencies: {
+          commander: {
+            version: '15.0.0',
+            dependencies: { 'ansi-styles': { version: '4.3.0' } },
+          },
+        },
+      }),
+    );
+    expect(fullDependencyTree(root)).toEqual([
+      { package: 'ansi-styles', version: '4.3.0' },
+      { package: 'commander', version: '15.0.0' },
+    ]);
+  });
+
+  it('reads every resolved package from a pnpm v9 lockfile, including scoped and peer-suffixed names', () => {
+    write('pnpm-lock.yaml', V9);
+    const tree = fullDependencyTree(root);
+    expect(tree).toContainEqual({ package: 'commander', version: '99.0.0' });
+  });
+
+  it('reads every resolved package from a yarn.lock', () => {
+    write(
+      'yarn.lock',
+      ['commander@^15.0.0:', '  version "15.2.1"', '', 'chalk@^5.0.0, chalk@^5.3.0:', '  version "5.3.0"', ''].join('\n'),
+    );
+    expect(fullDependencyTree(root)).toEqual([
+      { package: 'chalk', version: '5.3.0' },
+      { package: 'commander', version: '15.2.1' },
+    ]);
+  });
+
+  it('returns undefined when there is no lockfile at all', () => {
+    expect(fullDependencyTree(root)).toBeUndefined();
+  });
+
+  it('never throws on a malformed package-lock.json', () => {
+    write('package-lock.json', '{ not valid json');
+    expect(fullDependencyTree(root)).toBeUndefined();
   });
 });

@@ -627,7 +627,7 @@ Ready-to-use workflows: `examples/github-actions/vibgrate-review.yml` and
 Export [SBOMs](https://vibgrate.com/glossary/sbom) from an existing scan artifact or compare two artifacts.
 
 ```bash
-vg sbom export [--in <file>] [--format cyclonedx|spdx] [--out <file>]
+vg sbom export [--in <file>] [--format cyclonedx|spdx] [--out <file>] [--root <dir>] [--no-transitive]
 vg sbom delta --from <file> --to <file> [--out <file>]
 vg sbom vex [--from <file>] [--statement <json>...] [--product <ref>] [--out <file>]
 ```
@@ -639,6 +639,14 @@ vg sbom vex [--from <file>] [--statement <json>...] [--product <ref>] [--out <fi
 | `vg sbom vex` | Emit a spec-compliant OpenVEX document (exploitability statements) for attestation |
 
 Use this to treat SBOMs as operational intelligence instead of static compliance output.
+
+`vg sbom export` reports the full resolved dependency tree, not just what's declared
+in the manifest: it reads `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` (npm,
+pnpm, and yarn) from `--root` (defaults to the current directory) and folds every
+transitive package in alongside the directly-scanned ones. Each component carries a
+`vibgrate:scope` property (`direct` or `transitive`) so consumers can still tell the
+two apart. Pass `--no-transitive` to report only the manifest-declared dependencies,
+matching pre-existing output.
 
 `vg sbom vex` is input-agnostic: it assembles a complete OpenVEX document from the statements you supply (`--from <file>` and/or repeatable `--statement`), so it works regardless of which scanner flagged the components. A zero-statement document is valid and honest — it asserts no known affected components.
 

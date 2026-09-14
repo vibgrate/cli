@@ -2,7 +2,7 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import chalk from 'chalk';
-import type { ScanArtifact, BillingSummary, ExtendedScanResults, InventoryItem, ServiceDependencyItem, ArchitectureResult } from '../types.js';
+import type { ScanArtifact, BillingSummary, ExtendedScanResults, InventoryItem, ServiceDependencyItem, ArchitectureResult, SecurityFinding, SecuritySection } from '../types.js';
 import { driftBar } from '../ui/bar.js';
 import { titleBox, panelBox } from '../ui/box.js';
 
@@ -561,6 +561,12 @@ function formatExtended(ext: ExtendedScanResults): string[] {
     lines.push(`    ${checks.join(chalk.dim(' · '))}`);
     lines.push('');
   }
+  // ── Infrastructure findings (security packs, `--iac`) ──
+  // Printed whenever a pack ran, even with zero findings: "none" from the
+  // module is a result, an absent section is not (see ExtendedScanResults.security).
+  if (ext.security) {
+    lines.push(...formatSecuritySection(ext.security));
+  }
   // ── Platform Matrix (compact) ──
   if (ext.platformMatrix) {
     const pm = ext.platformMatrix;
@@ -626,6 +632,41 @@ function formatExtended(ext: ExtendedScanResults): string[] {
     }
   }
 
+  return lines;
+}
+
+/** Rows shown before the section is cut with an "… N more" line. */
+const SECURITY_ROWS_MAX = 50;
+
+/** `pack@version` list for a section header, sorted by pack id. */
+export function securityPacksLabel(section: SecuritySection): string {
+  return Object.keys(section.packs)
+    .sort()
+    .map((pack) => `${pack}@${section.packs[pack]}`)
+    .join(', ');
+}
+
+/** One row per finding, in the module's order: `path:line  address  rule [severity]: message`. */
+export function securityFindingRow(f: SecurityFinding): string {
+  const where = typeof f.line === 'number' ? `${f.path}:${f.line}` : f.path;
+  return `${where}  ${f.address ?? ''}  ${f.rule} [${f.severity}]: ${f.message}`;
+}
+
+function formatSecuritySection(section: SecuritySection): string[] {
+  const lines: string[] = [];
+  lines.push(chalk.bold.underline(`  Infrastructure findings (${securityPacksLabel(section)} · ${section.engine})`));
+  if (section.findings.length === 0) {
+    lines.push(chalk.dim('    none'));
+  } else {
+    for (const f of section.findings.slice(0, SECURITY_ROWS_MAX)) {
+      const colour = f.severity === 'critical' || f.severity === 'high' ? chalk.red : f.severity === 'medium' ? chalk.yellow : chalk.dim;
+      lines.push(`    ${colour(securityFindingRow(f))}`);
+    }
+    if (section.findings.length > SECURITY_ROWS_MAX) {
+      lines.push(chalk.dim(`    … ${section.findings.length - SECURITY_ROWS_MAX} more`));
+    }
+  }
+  lines.push('');
   return lines;
 }
 

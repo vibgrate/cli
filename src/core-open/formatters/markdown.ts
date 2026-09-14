@@ -2,6 +2,10 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import type { ScanArtifact } from '../types.js';
+import { securityPacksLabel } from './text.js';
+
+/** Rows shown before the infrastructure-findings table is cut with an "… N more" line. */
+const SECURITY_ROWS_MAX = 50;
 
 /**
  * Format a billable project-equivalent figure to at most 2 decimal places,
@@ -138,6 +142,28 @@ export function formatMarkdown(artifact: ScanArtifact): string {
     for (const rec of std.recommended.slice(0, 10)) {
       const flag = rec.complianceRelevant ? ' _(compliance)_' : '';
       lines.push(`  - **${rec.name}** — ${rec.reason}${flag}`);
+    }
+    lines.push('');
+  }
+  // Infrastructure findings (security packs, `--iac`). Present whenever a pack
+  // ran — zero findings from the module is a result worth printing.
+  if (artifact.extended?.security) {
+    const sec = artifact.extended.security;
+    lines.push(`## Infrastructure Findings (${securityPacksLabel(sec)} · ${sec.engine})`);
+    lines.push('');
+    if (sec.findings.length === 0) {
+      lines.push('_none_');
+    } else {
+      lines.push(`| Severity | Rule | Location | Address | Message |`);
+      lines.push(`|----------|------|----------|---------|---------|`);
+      for (const f of sec.findings.slice(0, SECURITY_ROWS_MAX)) {
+        const where = typeof f.line === 'number' ? `${f.path}:${f.line}` : f.path;
+        lines.push(`| ${f.severity} | ${f.pack}/${f.rule} | ${where} | ${f.address ?? ''} | ${f.message} |`);
+      }
+      if (sec.findings.length > SECURITY_ROWS_MAX) {
+        lines.push('');
+        lines.push(`… ${sec.findings.length - SECURITY_ROWS_MAX} more`);
+      }
     }
     lines.push('');
   }

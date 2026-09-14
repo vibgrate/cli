@@ -190,11 +190,11 @@ export function parseLabels(args: string): { key: string; value: string }[] {
 }
 
 /**
- * Split LABEL arguments on unquoted whitespace, honouring double quotes (with
- * `\"` and `\\` escapes) and single quotes, and dropping the quotes. A quoted
- * key (`"com.example.a b"=1`) is preserved as one token.
+ * Split LABEL / ENV / ARG arguments on unquoted whitespace, honouring double
+ * quotes (with `\"` and `\\` escapes) and single quotes, and dropping the
+ * quotes. A quoted key (`"com.example.a b"=1`) is preserved as one token.
  */
-function tokenizeLabelArgs(args: string): string[] {
+export function tokenizeLabelArgs(args: string): string[] {
   const tokens: string[] = [];
   let current = '';
   let quote: '"' | "'" | null = null;
@@ -264,6 +264,59 @@ export function copySourcePaths(args: string, hasFromFlag: boolean): string[] {
     .sort();
 }
 
+// ── `attrs` projection (packages/vibgrate-haile/docs/facts.md §2.2) ─────────
+
+/** Cap on projected strings (facts.md §2 "Caps"). */
+const ATTRS_MAX_STRING = 256;
+const ATTRS_MAX_ITEMS = 64;
+
+function capString(value: string): string {
+  return value.length > ATTRS_MAX_STRING ? value.slice(0, ATTRS_MAX_STRING) : value;
+}
+
+/** The per-stage projection: what the security fact builder reads for a `docker.stage` fact. */
+interface StageAttrs {
+  file: string;
+  stage: string;
+  index: number;
+  /** The last `FROM` in the file — the image that ships. Set once the whole file is read. */
+  final: boolean;
+  from: string | { stage: string } | { expr: string };
+  /** `USER` instructions in order, user part only (group dropped), as written. */
+  user: string[];
+  env: { key: string; literal: boolean }[];
+  arg: { key: string; hasDefault: boolean }[];
+  expose: string[];
+  /** A `HEALTHCHECK` other than `NONE`. */
+  healthcheck: boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * `ENV K=V K2=V2` and the legacy `ENV K V` form, projected to key plus
+ * whether the value is a literal (non-empty and not a `$` expansion). The
+ * value is never kept — that is the whole point of the projection.
+ */
+export function parseEnvKeys(args: string): { key: string; literal: boolean }[] {
+  return parseLabels(args).map(({ key, value }) => ({
+    key,
+    literal: value.length > 0 && !value.startsWith('$'),
+  }));
+}
+
+/** `ARG NAME[=default] [NAME2[=default]]` → keys plus whether a default was declared. Defaults are never kept. */
+export function parseArgKeys(args: string): { key: string; hasDefault: boolean }[] {
+  const out: { key: string; hasDefault: boolean }[] = [];
+  for (const token of tokenizeLabelArgs(args)) {
+    if (token.startsWith('--')) continue;
+    const eq = token.indexOf('=');
+    const key = eq >= 0 ? token.slice(0, eq) : token;
+    if (!key) continue;
+    out.push({ key, hasDefault: eq >= 0 });
+  }
+  return out;
+}
+
 export const dockerfileExtractor: ToolchainExtractor = {
   format: 'dockerfile',
 
@@ -293,10 +346,14 @@ export const dockerfileExtractor: ToolchainExtractor = {
     });
 
     const stages = new Map<string, string>(); // stage name (lowercased) → address
+    /** stage name (lowercased) → the name as written (or its index), for `from: { stage }`. */
+    const stageNames = new Map<string, string>();
     /** stage address → candidate repo paths that stage copies from the context. */
     const copySources = new Map<string, Set<string>>();
     let stageIndex = 0;
     let currentStage: string | null = null;
+    /** The projection of the stage being read; `final` is stamped after the loop. */
+    let currentAttrs: StageAttrs | null = null;
 
     for (const line of logicalLines(source)) {
       if (nodes.length >= TOOLCHAIN_NODES_PER_FILE_MAX) {
@@ -310,8 +367,31 @@ export const dockerfileExtractor: ToolchainExtractor = {
           if (!from) break;
           const stageName = from.stage ?? String(stageIndex);
           const stageAddress = `${fileAddress}#${stageName}`;
+          // A base image that is another stage in this file is a stage edge;
+          // otherwise it is an external registry image. Resolved before this
+          // stage registers itself, so `FROM x AS x` does not point at itself.
+          const baseStage = stages.get(from.image.toLowerCase());
+          const baseStageName = stageNames.get(from.image.toLowerCase());
           stages.set(stageName.toLowerCase(), stageAddress);
+          stageNames.set(stageName.toLowerCase(), stageName);
           currentStage = stageAddress;
+          currentAttrs = {
+            file: posixRel,
+            stage: stageName,
+            index: stageIndex,
+            final: false,
+            from:
+              baseStage && baseStage !== stageAddress && baseStageName !== undefined
+                ? { stage: baseStageName }
+                : from.image.includes('$')
+                  ? { expr: capString(from.image) }
+                  : capString(from.image),
+            user: [],
+            env: [],
+            arg: [],
+            expose: [],
+            healthcheck: false,
+          };
           stageIndex++;
 
           nodes.push({
@@ -322,12 +402,10 @@ export const dockerfileExtractor: ToolchainExtractor = {
             signature: 'dockerfile.stage',
             doc: safeDoc(`from ${from.image}`),
             importance: 0.4,
+            attrs: currentAttrs,
           });
           edges.push({ kind: 'contains', from: fileAddress, to: stageAddress, confidence: 1 });
 
-          // A base image that is another stage in this file is a stage edge;
-          // otherwise it is an external registry image.
-          const baseStage = stages.get(from.image.toLowerCase());
           if (baseStage && baseStage !== stageAddress) {
             edges.push({
               kind: 'builds_from',
@@ -413,9 +491,41 @@ export const dockerfileExtractor: ToolchainExtractor = {
           break;
         }
 
+        case 'USER': {
+          // `USER user[:group]` — the user part as written (`root`, `0`, `node`, `$APP_USER`).
+          const user = line.args.split(/\s+/)[0]?.split(':')[0] ?? '';
+          if (currentAttrs && user && currentAttrs.user.length < ATTRS_MAX_ITEMS) currentAttrs.user.push(capString(user));
+          break;
+        }
+
+        case 'ENV': {
+          if (!currentAttrs) break;
+          for (const entry of parseEnvKeys(line.args)) {
+            if (currentAttrs.env.length >= ATTRS_MAX_ITEMS) break;
+            currentAttrs.env.push({ key: capString(entry.key), literal: entry.literal });
+          }
+          break;
+        }
+
+        case 'ARG': {
+          if (!currentAttrs) break; // a pre-FROM `ARG` scopes to `FROM` lines, not to a stage
+          for (const entry of parseArgKeys(line.args)) {
+            if (currentAttrs.arg.length >= ATTRS_MAX_ITEMS) break;
+            currentAttrs.arg.push({ key: capString(entry.key), hasDefault: entry.hasDefault });
+          }
+          break;
+        }
+
+        case 'HEALTHCHECK': {
+          // `HEALTHCHECK NONE` disables any inherited check and does not count as one.
+          if (currentAttrs && line.args.trim().toUpperCase() !== 'NONE') currentAttrs.healthcheck = true;
+          break;
+        }
+
         case 'EXPOSE': {
           if (!currentStage) break;
           for (const port of parseExpose(line.args)) {
+            if (currentAttrs && currentAttrs.expose.length < ATTRS_MAX_ITEMS) currentAttrs.expose.push(capString(port));
             const portAddress = `port:${port}`;
             nodes.push({
               kind: 'property',
@@ -434,6 +544,9 @@ export const dockerfileExtractor: ToolchainExtractor = {
           break;
       }
     }
+
+    // Only the last stage ships, and only now do we know which one that is.
+    if (currentAttrs) currentAttrs.final = true;
 
     const copySourcesByStage: Record<string, string[]> = {};
     for (const stage of [...copySources.keys()].sort()) {

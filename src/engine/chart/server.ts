@@ -49,7 +49,7 @@ export async function startChartServer(opts: ChartListenOptions): Promise<ChartS
   if (!graph) {
     throw new CliError('no map found — run `vg` to build one first', ExitCode.NOT_FOUND);
   }
-  const sidecar = readHaileSidecar(graphPath, { corpusHash: graph.provenance?.corpusHash });
+  const sidecar = readHaileSidecar(graphPath);
   const provider = await loadHaileProvider();
   const host = opts.host ?? DEFAULT_CHART_HOST;
   const requested = opts.port ?? DEFAULT_CHART_PORT;

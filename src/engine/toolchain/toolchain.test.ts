@@ -2,11 +2,11 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { extractToolchain } from './index.js';
+import { extractToolchain, extractToolchainDrafts } from './index.js';
 import { terraformExtractor } from './terraform.js';
 import { kubernetesExtractor } from './kubernetes.js';
 import { composeExtractor } from './compose.js';
-import { dockerfileExtractor, logicalLines, copySourcePaths, parseLabels } from './dockerfile.js';
+import { dockerfileExtractor, logicalLines, copySourcePaths, parseLabels, parseEnvKeys, parseArgKeys } from './dockerfile.js';
 import { githubActionsExtractor, imagesBuiltBy, terraformAppliedDirs } from './workflows.js';
 import { helmExtractor } from './helm.js';
 import { buildProjectProfile } from './profile.js';
@@ -154,6 +154,147 @@ resource "aws_instance" "web" {
     const result = await terraformExtractor.extract('infra/broken.tf', 'resource "a" "b" {');
     expect(result.warnings?.join(' ')).toMatch(/syntax error|no tree/);
   });
+
+  describe('attrs projection (facts.md §2.2)', () => {
+    const source = `resource "aws_security_group" "web" {
+  name        = "web"
+  from_port   = 22
+  protocol    = -1
+  enabled     = true
+  nothing     = null
+  cidr_blocks = ["0.0.0.0/0", "10.0.0.0/8"]
+  tags        = { env = "prod", "quoted key" = 1, db_password = "tag-secret-sentinel" }
+  vpc_id      = aws_vpc.main.id
+  description = "\${var.prefix}-web"
+  count_text  = lower("A")
+  choice      = var.a ? 1 : 2
+  paren       = (443)
+  escaped     = "say \\"hi\\""
+  master_password = "hunter2-sentinel"
+  ingress {
+    from_port   = 22
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    from_port = 80
+  }
+  dynamic "egress" {
+    for_each = var.rules
+    content { from_port = 1 }
+  }
+  root_block_device { encrypted = false }
+}
+`;
+
+    async function bodyOf(src: string, address = 'aws_security_group.web') {
+      const result = await terraformExtractor.extract('infra/main.tf', src);
+      const node = result.nodes.find((n) => n.qualifiedName === address);
+      return { node, attrs: node?.attrs as Record<string, unknown> | undefined, result };
+    }
+
+    it('projects literals, tuples and objects as JSON values', async () => {
+      const { attrs } = await bodyOf(source);
+      expect(attrs).toMatchObject({ type: 'aws_security_group', name: 'web', mode: 'managed' });
+      const body = attrs?.body as Record<string, unknown>;
+      expect(body.name).toBe('web');
+      expect(body.from_port).toBe(22);
+      expect(body.protocol).toBe(-1);
+      expect(body.enabled).toBe(true);
+      expect(body.nothing).toBeNull();
+      expect(body.cidr_blocks).toEqual(['0.0.0.0/0', '10.0.0.0/8']);
+      expect(body.tags).toEqual({ env: 'prod', 'quoted key': 1, db_password: { redacted: true } });
+      expect(body.paren).toBe(443);
+      expect(body.escaped).toBe('say "hi"');
+    });
+
+    it('turns every non-literal expression into { expr }', async () => {
+      const { attrs } = await bodyOf(source);
+      const body = attrs?.body as Record<string, unknown>;
+      expect(body.vpc_id).toEqual({ expr: 'aws_vpc.main.id' });
+      // A quoted template with an interpolation is an expression, not a string.
+      expect(body.description).toEqual({ expr: '"${var.prefix}-web"' });
+      expect(body.count_text).toEqual({ expr: 'lower("A")' });
+      expect(body.choice).toEqual({ expr: 'var.a ? 1 : 2' });
+    });
+
+    it('groups nested blocks by type in source order and records dynamic blocks', async () => {
+      const { attrs } = await bodyOf(source);
+      const body = attrs?.body as Record<string, unknown>;
+      expect(body.ingress).toEqual([
+        { from_port: 22, cidr_blocks: ['0.0.0.0/0'] },
+        { from_port: 80 },
+      ]);
+      expect(body.egress).toEqual([{ dynamic: 'egress' }]);
+      expect(body.root_block_device).toEqual([{ encrypted: false }]);
+    });
+
+    it('redacts secret-shaped keys and never carries the value (GUARDRAILS §1.1)', async () => {
+      const { attrs } = await bodyOf(source);
+      const body = attrs?.body as Record<string, unknown>;
+      expect(body.master_password).toEqual({ redacted: true });
+      const serialised = JSON.stringify(attrs);
+      expect(serialised).not.toContain('hunter2-sentinel');
+      expect(serialised).not.toContain('tag-secret-sentinel');
+    });
+
+    it('marks data sources as mode data and addresses them under data.', async () => {
+      const { attrs } = await bodyOf('data "aws_ami" "ubuntu" { most_recent = true }', 'data.aws_ami.ubuntu');
+      expect(attrs).toEqual({ type: 'aws_ami', name: 'ubuntu', mode: 'data', body: { most_recent: true } });
+    });
+
+    it('projects module and provider coordinates only when literal', async () => {
+      const src = `module "vpc" { source = "terraform-aws-modules/vpc/aws" version = "5.1.0" }
+module "dyn" { source = var.src }
+provider "aws" { region = "eu-west-1" }
+terraform { required_providers { aws = { source = "hashicorp/aws", version = "~> 5.0" } } }
+variable "x" { default = 1 }
+`;
+      const result = await terraformExtractor.extract('infra/main.tf', src);
+      const byName = new Map(result.nodes.map((n) => [n.qualifiedName, n.attrs]));
+      expect(byName.get('module.vpc')).toEqual({ name: 'vpc', source: 'terraform-aws-modules/vpc/aws', version: '5.1.0' });
+      expect(byName.get('module.dyn')).toEqual({ name: 'dyn' });
+      // First declaration of an address wins (the graph's rule): here the
+      // `provider "aws"` block precedes `required_providers`, so its projection
+      // — name only, no source — is the one that lands.
+      expect(byName.get('provider.aws')).toEqual({ name: 'aws' });
+      expect(byName.get('var.x')).toBeUndefined();
+
+      // With `required_providers` first, the declared coordinates land.
+      const declaredFirst = await terraformExtractor.extract(
+        'infra/versions.tf',
+        'terraform { required_providers { aws = { source = "hashicorp/aws", version = "~> 5.0" } } }\nprovider "aws" {}\n',
+      );
+      expect(declaredFirst.nodes.find((n) => n.qualifiedName === 'provider.aws')?.attrs).toEqual({
+        name: 'aws',
+        source: 'hashicorp/aws',
+        version: '~> 5.0',
+      });
+    });
+
+    it('caps depth, keys, items and string length', async () => {
+      const keys = Array.from({ length: 70 }, (_, i) => `k${i} = ${i}`).join('\n');
+      const items = Array.from({ length: 70 }, (_, i) => String(i)).join(', ');
+      // Hyphenated so it reads as prose, not as the 40+ char blob redaction scrubs.
+      const long = 'ab-'.repeat(100);
+      const deep = 'a { b { c { d { e { f { g { h = 1 } } } } } } }';
+      const { attrs } = await bodyOf(`resource "aws_security_group" "web" {\n${keys}\nlist = [${items}]\nlong = "${long}"\n${deep}\n}`);
+      const body = attrs?.body as Record<string, unknown>;
+      expect(Object.keys(body)).toHaveLength(64);
+      expect(body.list).toBeUndefined(); // the 65th key never lands
+      const { attrs: capped } = await bodyOf(`resource "aws_security_group" "web" {\nlist = [${items}]\nlong = "${long}"\n${deep}\n}`);
+      const cappedBody = capped?.body as Record<string, unknown>;
+      expect(cappedBody.list).toHaveLength(64);
+      expect((cappedBody.long as string).length).toBe(256);
+      // Depth: body(1) → a[](2) → {}(3) → b[](4) → {}(5) → c[](6) → {}(7) is over the cap, so `c` is dropped.
+      expect(cappedBody.a).toEqual([{ b: [{}] }]);
+    });
+
+    it('is deterministic: same bytes, same projection', async () => {
+      const a = await terraformExtractor.extract('infra/main.tf', source);
+      const b = await terraformExtractor.extract('infra/main.tf', source);
+      expect(JSON.stringify(a.nodes.map((n) => n.attrs))).toBe(JSON.stringify(b.nodes.map((n) => n.attrs)));
+    });
+  });
 });
 
 describe('kubernetes extractor', () => {
@@ -237,6 +378,143 @@ spec:
     const result = await kubernetesExtractor.extract('k8s/bad.yaml', 'apiVersion: v1\nkind: [unclosed');
     expect(result.nodes).toEqual([]);
     expect(result.warnings?.length).toBeGreaterThan(0);
+  });
+
+  describe('attrs projection (facts.md §2.2)', () => {
+    const workload = `apiVersion: apps/v1
+kind: Deployment
+metadata: { name: api }
+spec:
+  template:
+    spec:
+      hostNetwork: true
+      securityContext: { runAsNonRoot: true, runAsUser: 1000 }
+      serviceAccountName: api
+      automountServiceAccountToken: false
+      initContainers:
+        - name: init
+          image: busybox
+      containers:
+        - name: api
+          image: ghcr.io/acme/api:1.2.3
+          securityContext: { privileged: true, runAsUser: 0, allowPrivilegeEscalation: true, readOnlyRootFilesystem: false, capabilities: { add: [NET_ADMIN], drop: [ALL] } }
+          resources: { limits: { cpu: 500m, memory: 256Mi }, requests: { cpu: 100m } }
+          env:
+            - { name: DB_PASSWORD, value: plaintext-sentinel-value }
+            - { name: EMPTY, value: "" }
+            - { name: TOKEN, valueFrom: { secretKeyRef: { name: s, key: t } } }
+            - { name: CM, valueFrom: { configMapKeyRef: { name: c, key: k } } }
+            - { name: POD, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: BARE }
+          ports: [{ containerPort: 8080 }, { containerPort: 9090 }]
+`;
+
+    it('projects the workload spec: host namespaces, security contexts, resources, env sources, ports', async () => {
+      const result = await kubernetesExtractor.extract('k8s/api.yaml', workload);
+      const attrs = result.nodes.find((n) => n.qualifiedName === 'default/Deployment/api')?.attrs;
+      expect(attrs).toEqual({
+        apiVersion: 'apps/v1',
+        kind: 'Deployment',
+        name: 'api',
+        namespace: 'default',
+        spec: {
+          hostNetwork: true,
+          securityContext: { runAsNonRoot: true, runAsUser: 1000 },
+          serviceAccountName: 'api',
+          automountServiceAccountToken: false,
+          containers: [
+            { name: 'init', image: 'busybox', kind: 'initContainer' },
+            {
+              name: 'api',
+              image: 'ghcr.io/acme/api:1.2.3',
+              kind: 'container',
+              securityContext: {
+                privileged: true,
+                runAsUser: 0,
+                allowPrivilegeEscalation: true,
+                readOnlyRootFilesystem: false,
+                capabilities: { add: ['NET_ADMIN'], drop: ['ALL'] },
+              },
+              resources: { limits: { cpu: '500m', memory: '256Mi' }, requests: { cpu: '100m' } },
+              env: [
+                { name: 'DB_PASSWORD', literal: true },
+                { name: 'EMPTY', literal: true },
+                { name: 'TOKEN', fromSecret: true },
+                { name: 'CM', fromConfigMap: true },
+                { name: 'POD', fromField: true },
+                { name: 'BARE' },
+              ],
+              ports: [8080, 9090],
+            },
+          ],
+        },
+      });
+    });
+
+    it('never projects an environment value (GUARDRAILS §1.1)', async () => {
+      const result = await kubernetesExtractor.extract('k8s/api.yaml', workload);
+      const attrs = result.nodes.find((n) => n.qualifiedName === 'default/Deployment/api')?.attrs;
+      expect(JSON.stringify(attrs)).not.toContain('plaintext-sentinel-value');
+    });
+
+    it('leaves undeclared keys absent rather than defaulting them', async () => {
+      const result = await kubernetesExtractor.extract(
+        'k8s/min.yaml',
+        'apiVersion: v1\nkind: Pod\nmetadata: { name: p, namespace: prod }\nspec:\n  containers: [{ name: c, image: nginx }]\n',
+      );
+      const attrs = result.nodes.find((n) => n.qualifiedName === 'prod/Pod/p')?.attrs;
+      expect(attrs).toEqual({
+        apiVersion: 'v1',
+        kind: 'Pod',
+        name: 'p',
+        namespace: 'prod',
+        spec: { containers: [{ name: 'c', image: 'nginx', kind: 'container' }] },
+      });
+    });
+
+    it('projects RBAC rules and bindings, Service type and ports, and {} for other kinds', async () => {
+      const result = await kubernetesExtractor.extract(
+        'k8s/rbac.yaml',
+        `apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: admin }
+rules:
+  - { apiGroups: ["*"], resources: ["*"], verbs: ["*"] }
+  - { nonResourceURLs: ["/healthz"], verbs: [get] }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: b, namespace: prod }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin }
+subjects: [{ kind: ServiceAccount, name: default, namespace: prod }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: svc }
+spec: { type: LoadBalancer, ports: [{ port: 80 }, { port: 443, targetPort: 8443 }] }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: cm }
+data: { key: value }
+`,
+      );
+      const byName = new Map(result.nodes.map((n) => [n.qualifiedName, n.attrs]));
+      expect(byName.get('default/ClusterRole/admin')?.spec).toEqual({
+        rules: [
+          { apiGroups: ['*'], resources: ['*'], verbs: ['*'] },
+          { nonResourceURLs: ['/healthz'], verbs: ['get'] },
+        ],
+      });
+      expect(byName.get('prod/RoleBinding/b')?.spec).toEqual({
+        roleRef: { kind: 'ClusterRole', name: 'cluster-admin' },
+        subjects: [{ kind: 'ServiceAccount', name: 'default', namespace: 'prod' }],
+      });
+      expect(byName.get('default/Service/svc')?.spec).toEqual({ type: 'LoadBalancer', ports: [80, 443] });
+      expect(byName.get('default/ConfigMap/cm')?.spec).toEqual({});
+      // Image nodes are not facts and carry no projection.
+      expect(result.nodes.filter((n) => n.kind === 'image').every((n) => n.attrs === undefined)).toBe(true);
+    });
   });
 });
 
@@ -375,6 +653,105 @@ LABEL org.opencontainers.image.title="Acme Web"
     // Same bytes, same output.
     expect(await dockerfileExtractor.extract('Dockerfile', source)).toEqual(result);
   });
+
+  describe('attrs projection (facts.md §2.2)', () => {
+    const source = `ARG BASE=node:22
+FROM node:22-alpine AS build
+ARG NPM_TOKEN=npm-token-sentinel
+ARG PLAIN
+ENV NODE_ENV=production API_TOKEN="api-token-sentinel" HOME=
+ENV LEGACY some value with spaces
+ENV EXPANDED=$HOME/bin
+USER root:root
+HEALTHCHECK NONE
+FROM build AS runtime
+USER node
+EXPOSE 8080 9229/tcp
+HEALTHCHECK --interval=30s CMD curl -f http://localhost/ || exit 1
+FROM $BASE
+`;
+
+    it('projects each stage with from, user, env keys, arg keys, expose and healthcheck', async () => {
+      const result = await dockerfileExtractor.extract('api/Dockerfile', source);
+      const byName = new Map(result.nodes.map((n) => [n.qualifiedName, n.attrs]));
+      expect(byName.get('api/Dockerfile')).toBeUndefined();
+      expect(byName.get('dockerfile:api/Dockerfile')).toBeUndefined();
+      expect(byName.get('dockerfile:api/Dockerfile#build')).toEqual({
+        file: 'api/Dockerfile',
+        stage: 'build',
+        index: 0,
+        final: false,
+        from: 'node:22-alpine',
+        user: ['root'],
+        env: [
+          { key: 'NODE_ENV', literal: true },
+          { key: 'API_TOKEN', literal: true },
+          { key: 'HOME', literal: false },
+          { key: 'LEGACY', literal: true },
+          { key: 'EXPANDED', literal: false },
+        ],
+        arg: [
+          { key: 'NPM_TOKEN', hasDefault: true },
+          { key: 'PLAIN', hasDefault: false },
+        ],
+        expose: [],
+        healthcheck: false,
+      });
+      expect(byName.get('dockerfile:api/Dockerfile#runtime')).toEqual({
+        file: 'api/Dockerfile',
+        stage: 'runtime',
+        index: 1,
+        final: false,
+        from: { stage: 'build' },
+        user: ['node'],
+        env: [],
+        arg: [],
+        expose: ['8080', '9229/tcp'],
+        healthcheck: true,
+      });
+      // Only the last FROM is final; a build-arg base image is an expression.
+      expect(byName.get('dockerfile:api/Dockerfile#2')).toEqual({
+        file: 'api/Dockerfile',
+        stage: '2',
+        index: 2,
+        final: true,
+        from: { expr: '$BASE' },
+        user: [],
+        env: [],
+        arg: [],
+        expose: [],
+        healthcheck: false,
+      });
+    });
+
+    it('never projects an ENV or ARG value (GUARDRAILS §1.1)', async () => {
+      const result = await dockerfileExtractor.extract('api/Dockerfile', source);
+      const serialised = JSON.stringify(result.nodes.map((n) => n.attrs));
+      expect(serialised).not.toContain('api-token-sentinel');
+      expect(serialised).not.toContain('npm-token-sentinel');
+      expect(serialised).not.toContain('production');
+    });
+
+    it('parses ENV in both forms and ARG with or without a default', () => {
+      expect(parseEnvKeys('A=1 B="two words" C= D=$X')).toEqual([
+        { key: 'A', literal: true },
+        { key: 'B', literal: true },
+        { key: 'C', literal: false },
+        { key: 'D', literal: false },
+      ]);
+      expect(parseEnvKeys('LEGACY a b c')).toEqual([{ key: 'LEGACY', literal: true }]);
+      expect(parseArgKeys('A=1 B')).toEqual([
+        { key: 'A', hasDefault: true },
+        { key: 'B', hasDefault: false },
+      ]);
+    });
+
+    it('marks the single stage of a one-FROM file as final', async () => {
+      const result = await dockerfileExtractor.extract('Dockerfile', 'FROM nginx\nUSER 0:0\n');
+      const stage = result.nodes.find((n) => n.signature === 'dockerfile.stage')?.attrs;
+      expect(stage).toMatchObject({ stage: '0', index: 0, final: true, from: 'nginx', user: ['0'] });
+    });
+  });
 });
 
 describe('github actions extractor', () => {
@@ -457,6 +834,27 @@ describe('helm extractor', () => {
 
   it('does not claim a bare values.yaml outside a chart', () => {
     expect(helmExtractor.matches('config/values.yaml', 'other-config', '')).toBe(false);
+  });
+
+  it('projects the chart identity and dependency coordinates as attrs (facts.md §2.2)', async () => {
+    const result = await helmExtractor.extract(
+      'charts/api/Chart.yaml',
+      'name: api\nversion: 1.4.0\nappVersion: "2.0.1"\ndependencies:\n  - name: redis\n    version: 17.x\n    repository: https://charts.bitnami.com/bitnami\n  - name: bare\n',
+    );
+    const chart = result.nodes.find((n) => n.qualifiedName === 'chart:api');
+    expect(chart?.attrs).toEqual({
+      name: 'api',
+      version: '1.4.0',
+      appVersion: '2.0.1',
+      dependencies: [
+        { name: 'redis', version: '17.x', repository: 'https://charts.bitnami.com/bitnami' },
+        { name: 'bare' },
+      ],
+    });
+    // Dependency nodes and values images carry no projection of their own.
+    expect(result.nodes.find((n) => n.qualifiedName === 'chart:redis')?.attrs).toBeUndefined();
+    const minimal = await helmExtractor.extract('charts/x/Chart.yaml', 'name: x\n');
+    expect(minimal.nodes[0]?.attrs).toEqual({ name: 'x', dependencies: [] });
   });
 });
 
@@ -543,6 +941,41 @@ describe('extractToolchain', () => {
     const { docs } = fixture({ 'README.md': '# hello\n', 'src/index.ts': 'export const a = 1;\n' });
     const result = await extractToolchain(docs);
     expect(result.nodes).toEqual([]);
+  });
+
+  it('never serialises a draft attrs projection into the graph', async () => {
+    const { docs } = fixture({
+      ...files,
+      'infra/sg.tf': 'resource "aws_security_group" "web" {\n  ingress { from_port = 22 cidr_blocks = ["0.0.0.0/0"] }\n  master_password = "graph-secret-sentinel"\n}\n',
+    });
+    const { nodes, edges } = await extractToolchain(docs);
+    const drafts = await extractToolchainDrafts(docs);
+    // The drafts do carry projections…
+    expect(drafts.some((d) => d.draft.attrs !== undefined)).toBe(true);
+    // …and none of them reaches a graph node: the graph is byte-identical with
+    // or without attrs support, and a redacted value stays out of graph.json.
+    for (const node of nodes) expect(Object.hasOwn(node, 'attrs')).toBe(false);
+    const serialised = JSON.stringify({ nodes, edges });
+    expect(serialised).not.toContain('attrs');
+    expect(serialised).not.toContain('graph-secret-sentinel');
+  });
+
+  it('gives every draft the exact node id the graph uses, in the graph’s file order', async () => {
+    const { docs } = fixture(files);
+    const { nodes } = await extractToolchain(docs);
+    const drafts = await extractToolchainDrafts([...docs].reverse());
+    const graphIds = new Set(nodes.map((n) => n.id));
+    expect(drafts.length).toBe(nodes.length);
+    for (const record of drafts) {
+      expect(graphIds.has(record.nodeId)).toBe(true);
+      const node = nodes.find((n) => n.id === record.nodeId)!;
+      expect(node.qualifiedName).toBe(record.draft.qualifiedName);
+      expect(node.file).toBe(record.rel);
+      expect(node.lang).toBe(record.format);
+    }
+    // Sorted path order, independent of discovery order.
+    const rels = drafts.map((d) => d.rel);
+    expect(rels).toEqual([...rels].sort((a, b) => a.localeCompare(b, 'en')));
   });
 });
 

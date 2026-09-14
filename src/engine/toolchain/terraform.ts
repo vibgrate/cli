@@ -1,6 +1,8 @@
 import type { Node } from 'web-tree-sitter';
 import { toolchainParser } from './grammars.js';
 import { LineIndex, safeDoc, TOOLCHAIN_NODES_PER_FILE_MAX } from './util.js';
+import { redactSecrets } from '../../core-open/utils/redact.js';
+import { isSecretShapedKey } from '../../security/secret-keys.js';
 import type {
   ToolchainEdgeDraft,
   ToolchainExtraction,
@@ -238,6 +240,224 @@ function terraformAddress(parts: string[]): string | null {
   return rest.length ? `${head}.${rest[0]}` : null;
 }
 
+// ── `attrs` projection (packages/vibgrate-haile/docs/facts.md §2.2) ─────────
+//
+// A closed, literal-only view of a block body for the security fact builder.
+// Literals become JSON values, nested blocks become arrays grouped by block
+// type, and *anything* the file does not state literally — an interpolation,
+// a reference, a function call, a conditional — becomes `{ expr }` so a rule
+// can abstain instead of guessing. Never serialised into the graph.
+
+/** Caps the host enforces on a projection (facts.md §2 "Caps"). */
+const ATTRS_MAX_DEPTH = 6;
+const ATTRS_MAX_KEYS = 64;
+const ATTRS_MAX_ITEMS = 64;
+const ATTRS_MAX_STRING = 256;
+
+/**
+ * A projected string: credential-shaped substrings are redacted at ingest
+ * (GUARDRAILS §1.1 — the projection is in-memory only, but it crosses into
+ * the module and feeds a digest, so it is scrubbed before it does), then
+ * length-capped.
+ */
+function projectedString(text: string): string {
+  const redacted = redactSecrets(text);
+  return redacted.length > ATTRS_MAX_STRING ? redacted.slice(0, ATTRS_MAX_STRING) : redacted;
+}
+
+/**
+ * The `{ expr }` placeholder for a non-literal expression. Whitespace is
+ * collapsed so a CRLF checkout of the same file yields the same text (and so
+ * the same finding id) as an LF one.
+ */
+function exprPlaceholder(expr: Node): { expr: string } {
+  return { expr: projectedString(expr.text.replace(/\s+/g, ' ').trim()) };
+}
+
+/** Unescape the common HCL quoted-template escapes (`\"`, `\\`, `\n`, `\r`, `\t`). */
+function unescapeTemplateLiteral(raw: string): string {
+  return raw.replace(/\\(["\\nrt])/g, (_, ch: string) =>
+    ch === 'n' ? '\n' : ch === 'r' ? '\r' : ch === 't' ? '\t' : ch,
+  );
+}
+
+/**
+ * Strip `expression` wrappers (including parentheses) down to the node that
+ * says what the expression *is*. An expression with several named children
+ * (`aws_s3_bucket.logs.id` is `variable_expr` + `get_attr`s) is returned as
+ * is — it is a reference, not a literal.
+ */
+function unwrapExpression(expr: Node): Node {
+  let current = expr;
+  while (current.type === 'expression') {
+    const named = current.namedChildren.filter((c): c is Node => !!c);
+    if (named.length !== 1) return current;
+    current = named[0];
+  }
+  return current;
+}
+
+/** A `literal_value` node → string | number | boolean | null, or a placeholder when it is none of those. */
+function projectLiteral(literal: Node, expr: Node): unknown {
+  const child = literal.namedChildren.find((c): c is Node => !!c);
+  if (!child) return exprPlaceholder(expr);
+  switch (child.type) {
+    case 'string_lit':
+      return projectedString(unescapeTemplateLiteral(stringLitValue(child)));
+    case 'numeric_lit': {
+      const value = Number(child.text);
+      return Number.isFinite(value) ? value : exprPlaceholder(expr);
+    }
+    case 'bool_lit':
+      return child.text === 'true';
+    case 'null_lit':
+      return null;
+    default:
+      return exprPlaceholder(expr);
+  }
+}
+
+/**
+ * Project one expression at nesting `depth` (the depth of the value itself;
+ * `body` is depth 1, its values depth 2). Beyond the cap everything is a
+ * placeholder, so the projection is bounded whatever the file does.
+ */
+function projectExpr(expr: Node, depth: number): unknown {
+  if (depth > ATTRS_MAX_DEPTH) return exprPlaceholder(expr);
+  const node = unwrapExpression(expr);
+  switch (node.type) {
+    case 'literal_value':
+      return projectLiteral(node, expr);
+    case 'collection_value': {
+      const inner = node.namedChildren.find((c): c is Node => !!c && (c.type === 'tuple' || c.type === 'object'));
+      if (inner?.type === 'tuple') return projectTuple(inner, depth);
+      if (inner?.type === 'object') return projectObjectLiteral(inner, depth);
+      return exprPlaceholder(expr);
+    }
+    case 'operation': {
+      // `-1` parses as a unary operation over a numeric literal; it is still a
+      // literal number (`from_port = -1`), not something to abstain on.
+      const unary = node.namedChildren.find((c): c is Node => !!c && c.type === 'unary_operation');
+      if (unary && unary.text.startsWith('-')) {
+        const operands = unary.namedChildren.filter((c): c is Node => !!c);
+        const literal = operands.length === 1 && operands[0].type === 'literal_value' ? operands[0] : null;
+        const numeric = literal?.namedChildren.find((c): c is Node => !!c && c.type === 'numeric_lit');
+        if (numeric) {
+          const value = -Number(numeric.text);
+          if (Number.isFinite(value)) return value;
+        }
+      }
+      return exprPlaceholder(expr);
+    }
+    default:
+      return exprPlaceholder(expr);
+  }
+}
+
+/** `[a, b, …]` → array, capped. */
+function projectTuple(tuple: Node, depth: number): unknown[] {
+  const out: unknown[] = [];
+  for (const child of tuple.namedChildren) {
+    if (child?.type !== 'expression') continue;
+    if (out.length >= ATTRS_MAX_ITEMS) break;
+    out.push(projectExpr(child, depth + 1));
+  }
+  return out;
+}
+
+/** The key of an `object_elem`: a bare identifier, a quoted string, or the expression text. */
+function objectElemKey(keyExpr: Node): string {
+  const node = unwrapExpression(keyExpr);
+  if (node.type === 'variable_expr') return node.text;
+  if (node.type === 'literal_value') {
+    const lit = node.namedChildren.find((c): c is Node => !!c && c.type === 'string_lit');
+    if (lit) return unescapeTemplateLiteral(stringLitValue(lit));
+  }
+  return keyExpr.text.trim();
+}
+
+/** `{ k = v, … }` → object, capped; secret-shaped keys keep their presence, never their value. */
+function projectObjectLiteral(object: Node, depth: number): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  let keys = 0;
+  for (const elem of object.namedChildren) {
+    if (elem?.type !== 'object_elem') continue;
+    const parts = elem.namedChildren.filter((c): c is Node => !!c && c.type === 'expression');
+    if (parts.length < 2) continue;
+    const key = objectElemKey(parts[0]);
+    if (!key || Object.hasOwn(out, key)) continue;
+    if (keys >= ATTRS_MAX_KEYS) break;
+    out[key] = isSecretShapedKey(key) ? { redacted: true } : projectExpr(parts[1], depth + 1);
+    keys++;
+  }
+  return out;
+}
+
+/**
+ * Project a block body: attributes as values, nested blocks grouped by block
+ * type into arrays in source order (`ingress: [{…}, {…}]`), `dynamic "x" {}`
+ * recorded as `{ dynamic: "x" }` under `x`, and secret-shaped attribute keys
+ * as `{ redacted: true }`. `depth` is the depth of the object being built.
+ */
+function projectBody(body: Node, depth: number): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  let keys = 0;
+  for (const child of body.namedChildren) {
+    if (!child) continue;
+    if (child.type === 'attribute') {
+      let name = '';
+      let expr: Node | null = null;
+      for (const part of child.namedChildren) {
+        if (!part) continue;
+        if (!name && part.type === 'identifier') name = part.text;
+        else if (part.type === 'expression') expr = part;
+      }
+      // A repeated attribute is an HCL error; the first declaration wins here.
+      if (!name || !expr || Object.hasOwn(out, name)) continue;
+      if (keys >= ATTRS_MAX_KEYS) continue;
+      out[name] = isSecretShapedKey(name) ? { redacted: true } : projectExpr(expr, depth + 1);
+      keys++;
+      continue;
+    }
+    if (child.type !== 'block') continue;
+    const { type, labels } = blockHead(child);
+    if (!type) continue;
+    // The array sits at depth + 1 and each entry at depth + 2.
+    if (depth + 2 > ATTRS_MAX_DEPTH) continue;
+    let key = type;
+    let entry: Record<string, unknown>;
+    if (type === 'dynamic') {
+      if (!labels[0]) continue;
+      key = labels[0];
+      entry = { dynamic: labels[0] };
+    } else {
+      const inner = blockBody(child);
+      entry = inner ? projectBody(inner, depth + 2) : {};
+    }
+    const existing = out[key];
+    if (Array.isArray(existing)) {
+      if (existing.length < ATTRS_MAX_ITEMS) existing.push(entry);
+    } else if (existing === undefined) {
+      if (keys >= ATTRS_MAX_KEYS) continue;
+      out[key] = [entry];
+      keys++;
+    }
+    // An attribute already owns this key: the attribute wins, the block is dropped.
+  }
+  return out;
+}
+
+/** A literal string attribute of a body, or undefined when absent or not a plain string. */
+function literalStringAttribute(body: Node | null, name: string): string | undefined {
+  if (!body) return undefined;
+  for (const attr of attributes(body)) {
+    if (attr.name !== name || !attr.expr) continue;
+    const value = projectExpr(attr.expr, ATTRS_MAX_DEPTH);
+    return typeof value === 'string' ? value : undefined;
+  }
+  return undefined;
+}
+
 /**
  * `required_providers` inside a `terraform` block. The nested shape is exactly
  * what the old regex could not read:
@@ -292,6 +512,11 @@ function extractRequiredProviders(
           [source && `source ${source}`, version && `version ${version}`].filter(Boolean).join(', '),
         ),
         importance: 0.4,
+        attrs: {
+          name: attr.name,
+          ...(source !== undefined ? { source: projectedString(source) } : {}),
+          ...(version !== undefined ? { version: projectedString(version) } : {}),
+        },
       });
     }
   }
@@ -338,6 +563,41 @@ function findFirst(node: Node, type: string): Node | null {
     }
   }
   return null;
+}
+
+/**
+ * The `attrs` projection for a top-level block, keyed by block type:
+ * `resource` / `data` → `{ type, name, mode, body }`; `module` and
+ * `provider` → `{ name, source?, version? }` (present only when literal).
+ * Variables and outputs carry none — they are not fact kinds.
+ */
+function blockAttrs(
+  type: string,
+  labels: string[],
+  body: Node | null,
+): { attrs?: Record<string, unknown> } {
+  if (type === 'resource' || type === 'data') {
+    return {
+      attrs: {
+        type: labels[0],
+        name: labels[1],
+        mode: type === 'data' ? 'data' : 'managed',
+        body: body ? projectBody(body, 1) : {},
+      },
+    };
+  }
+  if (type === 'module' || type === 'provider') {
+    const source = literalStringAttribute(body, 'source');
+    const version = literalStringAttribute(body, 'version');
+    return {
+      attrs: {
+        name: labels[0],
+        ...(source !== undefined ? { source } : {}),
+        ...(version !== undefined ? { version } : {}),
+      },
+    };
+  }
+  return {};
 }
 
 export const terraformExtractor: ToolchainExtractor = {
@@ -415,6 +675,7 @@ export const terraformExtractor: ToolchainExtractor = {
         signature: spec.signature,
         doc: safeDoc(summaryParts.join(', ')),
         importance: spec.importance,
+        ...blockAttrs(type, labels, body),
       });
 
       if (!body) continue;

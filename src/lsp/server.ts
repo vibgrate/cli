@@ -1921,9 +1921,9 @@ export class VibgrateLanguageServer {
     return this.graph ?? loadGraph(this.opts.root);
   }
 
-  private architectureSidecar(graph: VgGraph) {
+  private architectureSidecar(_graph: VgGraph) {
     const graphPath = resolveGraphPath(this.opts.root);
-    return readHaileSidecar(graphPath, { corpusHash: graph.provenance?.corpusHash });
+    return readHaileSidecar(graphPath);
   }
 
   /**

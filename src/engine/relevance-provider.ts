@@ -34,6 +34,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { ensureModuleEsmPackageJson } from '../install/module-core.js';
 
 export interface RelevanceExpansion {
   /** Single lowercase word, ready for identifier-part matching. */
@@ -217,6 +218,7 @@ export async function loadRelevanceProvider(): Promise<RelevanceProvider | null>
   for (const p of candidatePaths()) {
     if (!fs.existsSync(p)) continue;
     try {
+      ensureModuleEsmPackageJson(path.dirname(p));
       const mod = (await import(pathToFileURL(p).href)) as {
         createRelevanceProvider?: () => RelevanceProvider;
       };

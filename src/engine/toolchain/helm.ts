@@ -54,6 +54,11 @@ function collectValuesImages(value: unknown, prefix: string[], out: Map<string, 
   }
 }
 
+/** Cap on projected strings (facts.md §2 "Caps"). */
+function capChartString(value: string): string {
+  return value.length > 256 ? value.slice(0, 256) : value;
+}
+
 export const helmExtractor: ToolchainExtractor = {
   format: 'helm',
 
@@ -84,6 +89,22 @@ export const helmExtractor: ToolchainExtractor = {
       const appVersion = getString(doc.value, ['appVersion']);
       const address = `chart:${name}`;
 
+      // The `attrs` projection (facts.md §2.2 `helm.chart`): identity plus the
+      // declared dependency coordinates. Keys are present only when declared.
+      const dependencies: Record<string, string>[] = [];
+      for (const dependency of getArray(doc.value, ['dependencies'])) {
+        if (dependencies.length >= 64) break;
+        const depName = getString(dependency, ['name']);
+        if (!depName) continue;
+        const depVersion = getString(dependency, ['version']);
+        const repository = getString(dependency, ['repository']);
+        dependencies.push({
+          name: capChartString(depName),
+          ...(depVersion !== undefined ? { version: capChartString(depVersion) } : {}),
+          ...(repository !== undefined ? { repository: capChartString(repository) } : {}),
+        });
+      }
+
       nodes.push({
         kind: 'chart',
         name,
@@ -96,6 +117,12 @@ export const helmExtractor: ToolchainExtractor = {
             .join(', '),
         ),
         importance: 0.7,
+        attrs: {
+          name: capChartString(name),
+          ...(version !== undefined ? { version: capChartString(version) } : {}),
+          ...(appVersion !== undefined ? { appVersion: capChartString(appVersion) } : {}),
+          dependencies,
+        },
       });
 
       // Declared subchart dependencies.

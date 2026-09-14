@@ -86,6 +86,7 @@ describe('ensureHaileModule (default-install posture)', () => {
     const io = { fetchImpl: registryFetch(makeTarball(PROVIDER_JS)) };
     expect((await ensureHaileModule(io)).status).toBe('installed');
     expect(haileModuleInstalled()).toMatchObject({ installed: true, version: '0.1.1' });
+    expect(JSON.parse(fs.readFileSync(path.join(haileModuleDir(), 'package.json'), 'utf8')).type).toBe('module');
     expect((await ensureHaileModule(io)).status).toBe('already-installed');
     removeHaileModule();
     expect(haileModuleInstalled().installed).toBe(false);

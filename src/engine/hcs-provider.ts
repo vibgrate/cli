@@ -25,7 +25,7 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { modulesBaseDir } from '../install/module-core.js';
+import { ensureModuleEsmPackageJson, modulesBaseDir } from '../install/module-core.js';
 
 /**
  * String-in/string-out mirror of the engine's WASM entry points. All results
@@ -108,6 +108,7 @@ export async function loadHcsEngine(): Promise<HcsEngine | null> {
   for (const p of candidatePaths()) {
     if (!fs.existsSync(p)) continue;
     try {
+      ensureModuleEsmPackageJson(path.dirname(p));
       const mod = (await import(pathToFileURL(p).href)) as {
         createHcsEngine?: () => HcsEngine | Promise<HcsEngine>;
       };

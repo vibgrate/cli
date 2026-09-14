@@ -38,6 +38,13 @@ import { isUsableHaileSymbol } from '../../engine/haile/format.js';
 import { writeSnapshot } from '../../engine/freshness.js';
 import { detectAiAssistant, printAiContextPrompt } from '../ai-context-prompt.js';
 import { resolveCliInvocation } from '../../util/cli-invocation.js';
+import { usageError } from '../../util/exit.js';
+import { runSecurityPacks, type SecurityRunResult } from '../../security/run-packs.js';
+import { evaluateSecurityGate, lowestThreshold, parseFailOn } from '../../security/gate.js';
+import { securityFindingRow, securityPacksLabel } from '../../core-open/formatters/text.js';
+
+/** The security packs `--iac` requests from the Architecture module. */
+const IAC_PACKS = ['iac-cis-v1'] as const;
 
 /**
  * Whether `scan` should build the local code map after scoring drift.
@@ -364,8 +371,8 @@ export const scanCommand = new Command('scan')
   .option('--out <file>', 'Output file path')
   .option('--format <format>', 'Output format (text|json|sarif|md)', 'text')
   .option(
-    '--fail-on <level>',
-    'Fail on warn or error. architecture-finding (hard boundary violations) or architecture-warning (violations and warnings) gate on the architecture module\'s boundary findings, judged under the policy pack in force: .vibgrate/architecture.toml (policy = "hexagonal-v1" | "layered-v1" | "vertical-v1", plus any [[overlay]] rules), VIBGRATE_ARCHITECTURE_POLICY, or vg build --policy; default hexagonal-v1. The pack is named in the output. See docs/architecture-policies.md',
+    '--fail-on <gates>',
+    'Fail on warn or error. architecture-finding (hard boundary violations) or architecture-warning (violations and warnings) gate on the architecture module\'s boundary findings, judged under the policy pack in force: .vibgrate/architecture.toml (policy = "hexagonal-v1" | "layered-v1" | "vertical-v1", plus any [[overlay]] rules), VIBGRATE_ARCHITECTURE_POLICY, or vg build --policy; default hexagonal-v1. The pack is named in the output. See docs/architecture-policies.md. iac-finding[=<severity>] fails on infrastructure findings from the iac-cis-v1 pack at or above <severity> (critical|high|medium|low|info; default high) and needs --iac (or --full) plus the code map — it exits 2 when the Architecture module is missing rather than passing an unevaluated tree; security-finding[=<severity>] is the umbrella across every security pack that ran. Comma-separated: at most one of warn/error/architecture-* plus any security gates, e.g. --fail-on error,iac-finding=medium',
   )
   .option('--baseline <file>', 'Compare against baseline')
   .option('--changed-only', 'Only scan changed files')
@@ -384,8 +391,9 @@ export const scanCommand = new Command('scan')
   .option('--no-local-artifacts', 'Do not write .vibgrate JSON artifacts to disk')
   .option('--max-privacy', 'Enable strongest privacy mode (minimal scanners, no local artifacts)')
   .option('--offline', 'Run without network calls; do not upload results')
-  .option('--full', 'Comprehensive scan: turns on known-vulnerability detection (= --vulns) and, when a standards policy exists, a banned-dependency report — on top of drift scoring and the code map')
+  .option('--full', 'Comprehensive scan: turns on known-vulnerability detection (= --vulns), infrastructure misconfiguration rules (= --iac) and, when a standards policy exists, a banned-dependency report — on top of drift scoring and the code map')
   .option('--vulns', 'Also scan installed dependencies for known vulnerabilities (OSV online, or advisories from --package-manifest when offline)')
+  .option('--iac', "Evaluate infrastructure misconfiguration rules (Terraform, Kubernetes, Helm, Dockerfiles) with the Architecture module's iac-cis-v1 pack; needs the code map")
   .option('--package-manifest <file>', 'Use local package-version manifest JSON/ZIP (for offline mode)')
   .option('--project-scan-timeout <seconds>', 'Per-project scan timeout in seconds (default: 180)')
   .option('--drift-budget <score>', 'Fail if DriftScore is above budget (0-100)')
@@ -416,6 +424,7 @@ export const scanCommand = new Command('scan')
     offline?: boolean;
     full?: boolean;
     vulns?: boolean;
+    iac?: boolean;
     packageManifest?: string;
     projectScanTimeout?: string;
     driftBudget?: string;
@@ -432,6 +441,14 @@ export const scanCommand = new Command('scan')
       console.error(chalk.red(`Path does not exist: ${rootDir}`));
       process.exit(1);
     }
+
+    // `--fail-on` is parsed up front so a typo is a usage error before a long
+    // scan, not after it. One legacy value keeps its meaning exactly; the
+    // security gates are evaluated after the scan against `extended.security`.
+    const failOn = parseFailOn(opts.failOn);
+    if (failOn.invalid) throw usageError(failOn.invalid);
+    // `--full` is the comprehensive umbrella: it also turns on the infrastructure pack.
+    const wantIac = Boolean(opts.iac || opts.full);
 
     const hasDsn = !!resolveDsn(opts.dsn);
     let willPush = !opts.offline && (opts.push || hasDsn);
@@ -568,7 +585,7 @@ export const scanCommand = new Command('scan')
       vibgrateVersion: VERSION,
       out: opts.out,
       format: (opts.format as 'text' | 'json' | 'sarif' | 'md') || 'text',
-      failOn: opts.failOn as 'warn' | 'error' | undefined,
+      failOn: opts.failOn,
       baseline: opts.baseline,
       changedOnly: opts.changedOnly,
       exclude: opts.exclude,
@@ -620,6 +637,13 @@ export const scanCommand = new Command('scan')
     // Retained by the postScan hook so the reachability query below can run
     // against the freshly built map without a second (memory-heavy) build.
     let builtGraph: VgGraph | null = null;
+    // Outcome of the infrastructure pack run (`--iac`). `null` means it never
+    // ran: no code map, or the map build failed before it. Only an `ok` run
+    // puts `extended.security` on the artifact — the section is never
+    // fabricated, so the gate below can tell "evaluated, clean" from "not run".
+    // (Typed via a cast rather than `: T | null = null` so TypeScript does not
+    // narrow it to `null` for good — it is assigned inside the hook below.)
+    let iacRun = null as SecurityRunResult | null;
     if (wantGraph) {
       scanOpts.postScan = async (report, ctx) => {
         const result = await buildGraph({
@@ -647,8 +671,32 @@ export const scanCommand = new Command('scan')
           { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
           architectureGraphView(result.graph),
         );
+        // Infrastructure packs run here, after the map, so facts bind to the
+        // node ids the graph just assigned — and before runCoreScan assembles
+        // the artifact, so the section is on it for every formatter and the
+        // upload. `ctx.extended` is the very object the artifact carries.
         const { counts } = result.graph.meta;
-        return `${counts.nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} edges`;
+        let detail = `${counts.nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} edges`;
+        if (wantIac) {
+          try {
+            // Provision the module on first use the way `vg build` does —
+            // bounded, consent-respecting, never under --offline (plan §2.8).
+            iacRun = await runSecurityPacks({
+              root: rootDir,
+              exclude: opts.exclude,
+              packs: IAC_PACKS,
+              provision: { offline: Boolean(opts.offline) },
+            });
+          } catch {
+            iacRun = { status: 'abstained' };
+          }
+          if (iacRun.status === 'ok') {
+            ctx.extended.security = iacRun.section;
+            const n = iacRun.section.findings.length;
+            detail += ` · ${n} infrastructure finding${n === 1 ? '' : 's'}`;
+          }
+        }
+        return detail;
       };
     }
 
@@ -704,15 +752,81 @@ export const scanCommand = new Command('scan')
       reportStandards(rootDir);
     }
 
+    // `--iac` status line: the packs either ran (the section is on the
+    // artifact and already printed) or they did not, and then the reason is
+    // said out loud — an unevaluated tree must never read as a clean one.
+    if (wantIac) {
+      const securityGateRequested = failOn.security.length > 0;
+      if (!wantGraph) {
+        if (securityGateRequested || !opts.quiet) {
+          console.error(chalk.red('\n--iac needs the code map: remove --no-graph / --max-privacy / --no-local-artifacts.'));
+        }
+        if (securityGateRequested) process.exit(2);
+      } else if (!opts.quiet) {
+        const notEvaluated = 'no infrastructure findings were evaluated.';
+        if (iacRun === null) {
+          console.error(chalk.yellow(`iac-cis-v1: the code map build failed before infrastructure rules ran; ${notEvaluated}`));
+        } else if (iacRun.status === 'ok' && (iacRun.provision?.action === 'installed' || iacRun.provision?.action === 'updated')) {
+          // Say when a scan provisioned the module, so a first run that took
+          // longer than usual has a visible reason.
+          const v = iacRun.provision.version ? ` ${iacRun.provision.version}` : '';
+          console.error(chalk.dim(`iac-cis-v1: Architecture module${v} ${iacRun.provision.action} for infrastructure rules.`));
+        } else if (iacRun.status === 'module-missing') {
+          const why = iacRun.provision;
+          const hint = 'run `vg module install arch` (or set VIBGRATE_ARCH_PATH)';
+          let reason: string;
+          switch (why?.action) {
+            case 'skipped-offline':
+              reason = `is not installed and --offline skipped provisioning — install it from a bundle: ${hint}`;
+              break;
+            case 'disabled':
+              reason = 'is not installed and VIBGRATE_NO_KERNEL disables it';
+              break;
+            case 'declined':
+              reason = 'is not installed and its install was declined — opt in with `vg module install arch`';
+              break;
+            case 'unavailable':
+              reason = `is not installed and could not be provisioned${why.detail ? ` (${why.detail})` : ''} — ${hint}`;
+              break;
+            default:
+              reason = `is not installed — ${hint}`;
+          }
+          console.error(chalk.yellow(`iac-cis-v1: the Architecture module ${reason}; ${notEvaluated}`));
+        } else if (iacRun.status === 'module-outdated') {
+          const why = iacRun.provision;
+          const installed = iacRun.version ? ` (${iacRun.version})` : '';
+          let reason: string;
+          switch (why?.action) {
+            case 'no-newer-version':
+              reason = `predates infrastructure packs and the published module${why.latest ? ` (${why.latest})` : ''} does not carry them yet`;
+              break;
+            case 'skipped-offline':
+              reason = 'predates infrastructure packs and --offline skipped the update — run `vg update` (or set VIBGRATE_ARCH_PATH)';
+              break;
+            case 'unavailable':
+              reason = `predates infrastructure packs and could not be updated${why.detail ? ` (${why.detail})` : ''} — run \`vg update\``;
+              break;
+            default:
+              reason = 'predates infrastructure packs — run `vg update`';
+          }
+          console.error(chalk.yellow(`iac-cis-v1: the installed Architecture module${installed} ${reason}; ${notEvaluated}`));
+        } else if (iacRun.status === 'abstained') {
+          console.error(chalk.yellow('iac-cis-v1: the installed Architecture module did not evaluate this tree — run `vg module install arch` to update it; no infrastructure findings were evaluated.'));
+        } else if (iacRun.section.packs['iac-cis-v1'] === 'unavailable') {
+          console.error(chalk.yellow('iac-cis-v1: the installed Architecture module does not carry this pack — run `vg module install arch` to update it; no infrastructure findings were evaluated.'));
+        }
+      }
+    }
+
     // Architecture gate: boundary findings from the module's policy pack,
     // read off the sidecar this scan's code map just produced. The map is
     // the evidence, so the gate needs it (no --no-graph / --max-privacy).
-    if (opts.failOn === 'architecture-finding' || opts.failOn === 'architecture-warning') {
+    if (failOn.legacy === 'architecture-finding' || failOn.legacy === 'architecture-warning') {
       if (!wantGraph) {
         console.error(chalk.red('\n--fail-on architecture-finding needs the code map: remove --no-graph / --max-privacy / --no-local-artifacts.'));
         process.exit(2);
       }
-      const hardOnly = opts.failOn === 'architecture-finding';
+      const hardOnly = failOn.legacy === 'architecture-finding';
       const gate = architectureFindings(rootDir, hardOnly);
       if (gate === null) {
         console.error(chalk.red('\n--fail-on architecture-finding: the architecture module did not classify this map (install it with `vg module install arch`; a rejected .vibgrate/architecture.toml is reported above).'));
@@ -731,18 +845,46 @@ export const scanCommand = new Command('scan')
     }
 
     // Check fail-on thresholds
-    if (opts.failOn) {
+    if (failOn.legacy === 'error' || failOn.legacy === 'warn') {
       const hasErrors = artifact.findings.some((f: { level: string }) => f.level === 'error');
       const hasWarnings = artifact.findings.some((f: { level: string }) => f.level === 'warning');
 
-      if (opts.failOn === 'error' && hasErrors) {
+      if (failOn.legacy === 'error' && hasErrors) {
         console.error(chalk.red(`\nFailing: ${artifact.findings.filter((f: { level: string }) => f.level === 'error').length} error finding(s) detected.`));
         process.exit(2);
       }
-      if (opts.failOn === 'warn' && (hasErrors || hasWarnings)) {
+      if (failOn.legacy === 'warn' && (hasErrors || hasWarnings)) {
         console.error(chalk.red(`\nFailing: findings detected at warn level or above.`));
         process.exit(2);
       }
+    }
+
+    // Security-pack gate (plan §2.7): judged on `extended.security`, which is
+    // only ever present when the module evaluated the tree. Absent → exit 2
+    // with the reason, never a pass; a pack the module does not carry → the
+    // same. Thresholds compare the pack's own severity.
+    if (failOn.security.length > 0) {
+      const gateName = `--fail-on ${failOn.security.map((r) => (r.cls === 'iac' ? 'iac-finding' : 'security-finding')).join(',')}`;
+      const section = artifact.extended?.security;
+      if (!section) {
+        console.error(chalk.red(`\n${gateName}: no infrastructure findings were evaluated (module missing or --iac not requested)`));
+        process.exit(2);
+      }
+      const threshold = lowestThreshold(failOn.security);
+      const outcome = evaluateSecurityGate(section, failOn.security);
+      if (outcome.unavailable.length > 0) {
+        console.error(chalk.red(`\n${gateName}: pack ${outcome.unavailable.join(', ')} is not available in the installed Architecture module (run \`vg module install arch\` to update it); no infrastructure findings were evaluated.`));
+        process.exit(2);
+      }
+      const packNames = Object.keys(section.packs).sort().join(', ');
+      if (outcome.failed) {
+        const n = outcome.matched.length;
+        console.error(chalk.red(`\nFailing: ${n} infrastructure finding${n === 1 ? '' : 's'} at or above ${threshold} (${packNames}).`));
+        for (const f of outcome.matched.slice(0, 50)) console.error(chalk.dim(`  ${securityFindingRow(f)}`));
+        if (n > 50) console.error(chalk.dim(`  … ${n - 50} more`));
+        process.exit(2);
+      }
+      if (!opts.quiet) console.error(chalk.dim(`\niac gate: no findings at or above ${threshold} (${securityPacksLabel(section)}).`));
     }
 
     if (scanOpts.driftBudget !== undefined && artifact.drift.score > scanOpts.driftBudget) {

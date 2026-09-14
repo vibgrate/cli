@@ -10,7 +10,12 @@ import { terraformExtractor } from './terraform.js';
 import { githubActionsExtractor, gitlabCiExtractor } from './workflows.js';
 import { linkToolchain } from './link.js';
 import { safeDoc, TOOLCHAIN_FILE_MAX_BYTES, toPosix } from './util.js';
-import type { ToolchainExtractor, ToolchainFormat, ToolchainNodeDraft } from './types.js';
+import type {
+  ToolchainExtraction,
+  ToolchainExtractor,
+  ToolchainFormat,
+  ToolchainNodeDraft,
+} from './types.js';
 
 /**
  * Toolchain extraction — the structural pass over the infrastructure, CI and
@@ -104,25 +109,25 @@ export function extractorFor(doc: DiscoveredDoc, head: string): ToolchainExtract
   return null;
 }
 
-/**
- * Run structural extraction over the discovered document set.
- *
- * Never throws: a malformed manifest, an unreadable file or a missing grammar
- * degrades to a warning and zero structure for that file. Infrastructure files
- * are frequently templated, partial or generated, and a scanner that dies on
- * one of them is a scanner nobody keeps installed.
- */
-export async function extractToolchain(
-  docs: DiscoveredDoc[],
-  options: ExtractToolchainOptions = {},
-): Promise<ToolchainResult> {
-  if (!docs.length) return EMPTY_RESULT;
+/** One file's extraction, as read and extracted in discovery order. */
+interface FileExtraction {
+  rel: string;
+  format: ToolchainFormat;
+  extraction: ToolchainExtraction;
+}
 
-  const nodes = new Map<string, GraphNode>();
-  const edges = new Map<string, GraphEdge>();
+/**
+ * Read and extract every discovered file, in sorted path order. The single
+ * reading pass shared by the graph build ({@link extractToolchain}) and the
+ * security fact builder ({@link extractToolchainDrafts}), so the two can never
+ * disagree about which files were read or what came out of them.
+ *
+ * Never throws: an oversized or unreadable file is skipped, a failing
+ * extractor becomes a warning.
+ */
+async function readExtractions(docs: DiscoveredDoc[]): Promise<{ files: FileExtraction[]; warnings: string[] }> {
+  const files: FileExtraction[] = [];
   const warnings: string[] = [];
-  const counts: Record<string, number> = {};
-  const stageCopySources = new Map<string, string[]>();
 
   // Sorted path order keeps the output stable regardless of discovery order.
   const ordered = [...docs].sort((a, b) => toPosix(a.rel).localeCompare(toPosix(b.rel), 'en'));
@@ -143,38 +148,101 @@ export async function extractToolchain(
     if (!extractor) continue;
 
     const rel = toPosix(doc.rel);
-    let extraction;
     try {
-      extraction = await extractor.extract(rel, source);
+      files.push({ rel, format: extractor.format, extraction: await extractor.extract(rel, source) });
     } catch (err) {
       warnings.push(`${rel}: ${extractor.format} extraction failed (${(err as Error).message})`);
-      continue;
     }
+  }
 
+  return { files, warnings };
+}
+
+/** The node id of a draft — the one construction both the graph and the fact builder use. */
+function draftNodeId(draft: ToolchainNodeDraft, rel: string): string {
+  return nodeId({
+    kind: draft.kind,
+    qualifiedName: draft.qualifiedName,
+    file: rel,
+    signature: draft.signature,
+  });
+}
+
+/** A draft with the file it came from and the node id the graph gives it. */
+export interface ToolchainDraftRecord {
+  /** Repo-relative POSIX path. */
+  rel: string;
+  format: ToolchainFormat;
+  draft: ToolchainNodeDraft;
+  /** `nodeId({ kind, qualifiedName, file: rel, signature })` — identical to the graph node's id. */
+  nodeId: string;
+}
+
+/**
+ * The node drafts of the toolchain corpus, with their graph node ids, without
+ * touching the graph path. Same discovery order, same reading pass, same
+ * first-declaration-wins dedupe as {@link extractToolchain}, so a fact built
+ * from a draft binds to exactly the node the graph already has. Used by the
+ * security fact builder; the drafts' `attrs` are the only thing it reads that
+ * the graph does not.
+ */
+export async function extractToolchainDrafts(docs: DiscoveredDoc[]): Promise<ToolchainDraftRecord[]> {
+  if (!docs.length) return [];
+  const { files } = await readExtractions(docs);
+  const out: ToolchainDraftRecord[] = [];
+  const seen = new Set<string>();
+  for (const { rel, format, extraction } of files) {
+    for (const draft of extraction.nodes) {
+      const id = draftNodeId(draft, rel);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({ rel, format, draft, nodeId: id });
+    }
+  }
+  return out;
+}
+
+/**
+ * Run structural extraction over the discovered document set.
+ *
+ * Never throws: a malformed manifest, an unreadable file or a missing grammar
+ * degrades to a warning and zero structure for that file. Infrastructure files
+ * are frequently templated, partial or generated, and a scanner that dies on
+ * one of them is a scanner nobody keeps installed.
+ */
+export async function extractToolchain(
+  docs: DiscoveredDoc[],
+  options: ExtractToolchainOptions = {},
+): Promise<ToolchainResult> {
+  if (!docs.length) return EMPTY_RESULT;
+
+  const nodes = new Map<string, GraphNode>();
+  const edges = new Map<string, GraphEdge>();
+  const counts: Record<string, number> = {};
+  const stageCopySources = new Map<string, string[]>();
+
+  const { files, warnings } = await readExtractions(docs);
+
+  for (const { rel, format, extraction } of files) {
     if (extraction.warnings?.length) warnings.push(...extraction.warnings);
     for (const [stage, paths] of Object.entries(extraction.linkHints?.copySourcesByStage ?? {})) {
       if (paths.length) stageCopySources.set(stage, paths);
     }
     if (!extraction.nodes.length) continue;
 
-    counts[extractor.format] = (counts[extractor.format] ?? 0) + 1;
+    counts[format] = (counts[format] ?? 0) + 1;
 
     // Drafts → graph nodes. `qualifiedName` is scoped by file, so two files
     // declaring `service:web` stay distinct nodes.
     const idByQualifiedName = new Map<string, string>();
     for (const draft of extraction.nodes) {
-      const id = nodeId({
-        kind: draft.kind,
-        qualifiedName: draft.qualifiedName,
-        file: rel,
-        signature: draft.signature,
-      });
+      const id = draftNodeId(draft, rel);
       // First declaration of a name in a file wins; a repeat is the same thing.
       if (!idByQualifiedName.has(draft.qualifiedName)) {
         idByQualifiedName.set(draft.qualifiedName, id);
       }
       if (nodes.has(id)) continue;
-      nodes.set(id, toGraphNode(id, draft, rel, extractor.format));
+      nodes.set(id, toGraphNode(id, draft, rel, format));
     }
 
     for (const draft of extraction.edges) {
@@ -233,6 +301,11 @@ function byEdgeOrder(a: GraphEdge, b: GraphEdge): number {
   );
 }
 
+/**
+ * Draft → graph node. Copies the identity and display fields only: a draft's
+ * `attrs` (the security fact projection) is deliberately not among them, so
+ * `graph.json` is byte-identical whether or not an extractor filled it in.
+ */
 function toGraphNode(
   id: string,
   draft: ToolchainNodeDraft,

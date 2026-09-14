@@ -1,8 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { formatSarif } from '../formatters/sarif.js';
+// The SARIF writer lives in core-open (vendored under src/core-open); the
+// reporting-side copy was a stale duplicate and is gone. These tests keep
+// exercising the live writer.
+import { formatSarif as formatSarifCore } from '../../core-open/formatters/sarif.js';
 import { formatMarkdown } from '../formatters/markdown.js';
 import { formatText } from '../formatters/text.js';
 import type { ScanArtifact } from '../types.js';
+
+// The reporting-side artifact type has drifted from core-open's (a stale
+// `LayerSummary`); the SARIF writer only reads the shared fields, so the
+// fixtures below are handed over as is.
+const formatSarif = formatSarifCore as unknown as (artifact: ScanArtifact) => object;
 
 function makeArtifact(overrides: Partial<ScanArtifact> = {}): ScanArtifact {
   return {

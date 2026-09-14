@@ -111,6 +111,7 @@ export const kubernetesExtractor: ToolchainExtractor = {
         signature: `k8s.${kind}`,
         doc: safeDoc(describeObject(doc.value, kind)),
         importance: isWorkload ? 0.6 : 0.4,
+        attrs: projectObjectAttrs(doc.value, kind, name, podPath),
       });
 
       if (isWorkload) {
@@ -142,6 +143,211 @@ export const kubernetesExtractor: ToolchainExtractor = {
     return { nodes, edges, warnings };
   },
 };
+
+// ── `attrs` projection (packages/vibgrate-haile/docs/facts.md §2.2) ─────────
+//
+// The closed view of a manifest the security fact builder hands to the
+// Architecture module. Only declared keys are projected — an absent key means
+// "not declared", never a default — and an environment variable is recorded
+// by name plus *where* its value comes from, never the value itself.
+
+/** Caps the host enforces on a projection (facts.md §2 "Caps"). */
+const ATTRS_MAX_ITEMS = 64;
+const ATTRS_MAX_STRING = 256;
+
+function capString(value: string): string {
+  return value.length > ATTRS_MAX_STRING ? value.slice(0, ATTRS_MAX_STRING) : value;
+}
+
+/** A declared boolean at `path`, or undefined. */
+function boolAt(value: unknown, path: (string | number)[]): boolean | undefined {
+  const found = getPath(value, path);
+  return typeof found === 'boolean' ? found : undefined;
+}
+
+/** A declared finite number at `path`, or undefined. */
+function numberAt(value: unknown, path: (string | number)[]): number | undefined {
+  const found = getPath(value, path);
+  return typeof found === 'number' && Number.isFinite(found) ? found : undefined;
+}
+
+/** A declared string at `path` (numbers/booleans stringified), capped, or undefined. */
+function stringAt(value: unknown, path: (string | number)[]): string | undefined {
+  const found = getString(value, path);
+  return found === undefined ? undefined : capString(found);
+}
+
+/** A declared array of strings at `path`, scalars stringified, capped, or undefined. */
+function stringArrayAt(value: unknown, path: (string | number)[]): string[] | undefined {
+  const found = getPath(value, path);
+  if (!Array.isArray(found)) return undefined;
+  return found
+    .filter((item) => typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean')
+    .slice(0, ATTRS_MAX_ITEMS)
+    .map((item) => capString(String(item)));
+}
+
+/** Copy the declared subset of keys from `value` into a fresh object; undefined when none is declared. */
+function declared(entries: Record<string, unknown>): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(entries)) {
+    if (val !== undefined) out[key] = val;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** `{ apiVersion, kind, name, namespace, spec }` for every emitted object. */
+function projectObjectAttrs(
+  value: unknown,
+  kind: string,
+  name: string,
+  podPath: (string | number)[] | null,
+): Record<string, unknown> {
+  return {
+    apiVersion: capString(getString(value, ['apiVersion']) ?? ''),
+    kind: capString(kind),
+    name: capString(name),
+    namespace: capString(getString(value, ['metadata', 'namespace']) ?? 'default'),
+    spec: projectSpec(value, kind, podPath),
+  };
+}
+
+function projectSpec(value: unknown, kind: string, podPath: (string | number)[] | null): Record<string, unknown> {
+  if (podPath) return projectPodSpec(value, podPath);
+  if (kind === 'Role' || kind === 'ClusterRole') {
+    const rules = getArray(value, ['rules']).slice(0, ATTRS_MAX_ITEMS).map((rule) =>
+      declared({
+        apiGroups: stringArrayAt(rule, ['apiGroups']),
+        resources: stringArrayAt(rule, ['resources']),
+        verbs: stringArrayAt(rule, ['verbs']),
+        nonResourceURLs: stringArrayAt(rule, ['nonResourceURLs']),
+      }) ?? {},
+    );
+    return { rules };
+  }
+  if (kind === 'RoleBinding' || kind === 'ClusterRoleBinding') {
+    const roleRef = declared({
+      kind: stringAt(value, ['roleRef', 'kind']),
+      name: stringAt(value, ['roleRef', 'name']),
+    });
+    const subjects = getArray(value, ['subjects']).slice(0, ATTRS_MAX_ITEMS).map((subject) =>
+      declared({
+        kind: stringAt(subject, ['kind']),
+        name: stringAt(subject, ['name']),
+        namespace: stringAt(subject, ['namespace']),
+      }) ?? {},
+    );
+    return { ...(roleRef ? { roleRef } : {}), subjects };
+  }
+  if (kind === 'Service') {
+    const ports = getArray(value, ['spec', 'ports'])
+      .map((p) => numberAt(p, ['port']))
+      .filter((p): p is number => p !== undefined)
+      .slice(0, ATTRS_MAX_ITEMS);
+    return declared({ type: stringAt(value, ['spec', 'type']), ports }) ?? {};
+  }
+  return {};
+}
+
+/** The workload projection: host namespaces, pod security context, service account, containers. */
+function projectPodSpec(value: unknown, podPath: (string | number)[]): Record<string, unknown> {
+  const pod = getPath(value, podPath);
+  const containers: Record<string, unknown>[] = [];
+  for (const field of CONTAINER_FIELDS) {
+    const kind = field === 'containers' ? 'container' : field === 'initContainers' ? 'initContainer' : 'ephemeralContainer';
+    for (const container of getArray(pod, [field])) {
+      if (containers.length >= ATTRS_MAX_ITEMS) break;
+      containers.push(projectContainer(container, kind));
+    }
+  }
+  return (
+    declared({
+      hostNetwork: boolAt(pod, ['hostNetwork']),
+      hostPID: boolAt(pod, ['hostPID']),
+      hostIPC: boolAt(pod, ['hostIPC']),
+      securityContext: declared({
+        runAsNonRoot: boolAt(pod, ['securityContext', 'runAsNonRoot']),
+        runAsUser: numberAt(pod, ['securityContext', 'runAsUser']),
+        runAsGroup: numberAt(pod, ['securityContext', 'runAsGroup']),
+        fsGroup: numberAt(pod, ['securityContext', 'fsGroup']),
+      }),
+      serviceAccountName: stringAt(pod, ['serviceAccountName']),
+      automountServiceAccountToken: boolAt(pod, ['automountServiceAccountToken']),
+      containers,
+    }) ?? { containers }
+  );
+}
+
+function projectContainer(container: unknown, kind: string): Record<string, unknown> {
+  const securityContext = declared({
+    privileged: boolAt(container, ['securityContext', 'privileged']),
+    runAsNonRoot: boolAt(container, ['securityContext', 'runAsNonRoot']),
+    runAsUser: numberAt(container, ['securityContext', 'runAsUser']),
+    runAsGroup: numberAt(container, ['securityContext', 'runAsGroup']),
+    allowPrivilegeEscalation: boolAt(container, ['securityContext', 'allowPrivilegeEscalation']),
+    readOnlyRootFilesystem: boolAt(container, ['securityContext', 'readOnlyRootFilesystem']),
+    capabilities: declared({
+      add: stringArrayAt(container, ['securityContext', 'capabilities', 'add']),
+      drop: stringArrayAt(container, ['securityContext', 'capabilities', 'drop']),
+    }),
+  });
+  const resources = declared({
+    limits: declared({
+      cpu: stringAt(container, ['resources', 'limits', 'cpu']),
+      memory: stringAt(container, ['resources', 'limits', 'memory']),
+    }),
+    requests: declared({
+      cpu: stringAt(container, ['resources', 'requests', 'cpu']),
+      memory: stringAt(container, ['resources', 'requests', 'memory']),
+    }),
+  });
+  const envList = getPath(container, ['env']);
+  const env = Array.isArray(envList) ? projectEnv(envList) : undefined;
+  const portList = getPath(container, ['ports']);
+  const ports = Array.isArray(portList)
+    ? portList
+        .map((p) => numberAt(p, ['containerPort']))
+        .filter((p): p is number => p !== undefined)
+        .slice(0, ATTRS_MAX_ITEMS)
+    : undefined;
+  return (
+    declared({
+      name: stringAt(container, ['name']),
+      image: stringAt(container, ['image']),
+      kind,
+      securityContext,
+      resources,
+      env,
+      ports,
+    }) ?? { kind }
+  );
+}
+
+/**
+ * Environment entries by name and *source* only. `literal: true` records that
+ * a `value:` was declared — the value itself is never projected, so a
+ * plaintext secret in a manifest is reported by its key and nothing else.
+ */
+function projectEnv(entries: unknown[]): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const entry of entries) {
+    if (out.length >= ATTRS_MAX_ITEMS) break;
+    const name = stringAt(entry, ['name']);
+    if (name === undefined) continue;
+    const row: Record<string, unknown> = { name };
+    if (entry && typeof entry === 'object' && Object.hasOwn(entry, 'value')) row.literal = true;
+    else if (getPath(entry, ['valueFrom', 'secretKeyRef']) !== undefined) row.fromSecret = true;
+    else if (getPath(entry, ['valueFrom', 'configMapKeyRef']) !== undefined) row.fromConfigMap = true;
+    else if (
+      getPath(entry, ['valueFrom', 'fieldRef']) !== undefined ||
+      getPath(entry, ['valueFrom', 'resourceFieldRef']) !== undefined
+    ) {
+      row.fromField = true;
+    }
+    out.push(row);
+  }
+  return out;
+}
 
 /** Container nodes plus their `builds_from` image edges. */
 function extractContainers(
