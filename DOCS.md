@@ -460,12 +460,18 @@ for?*
 
 ```bash
 vg review                            # the working tree + index, vs HEAD
+vg review --in-place                 # the same, stated explicitly
+vg review --local                    # deterministic scanners; no hosted model
+vg review --loop                     # review → deterministic patch → re-review
 vg review --base origin/main         # merge-base of HEAD and the base branch
 vg review explain arch-01            # the evidence behind one finding
 ```
 
 | Flag                  | Default | Description                                                                |
 | --------------------- | ------- | -------------------------------------------------------------------------- |
+| `--in-place`          | off     | Review the working tree as-is (already the default without `--base`)        |
+| `--local` (global)    | off     | Deterministic pass on this machine — never a hosted model (implies `--offline`) |
+| `--loop`              | off     | Explicit review → apply deterministic patches → re-review. Never automatic. CLI only. |
 | `--base <ref>`        | —       | Review HEAD against the merge-base with `<ref>`                             |
 | `--format <fmt>`      | `text`  | `text`, `json` (the receipt), `sarif` (security findings only), `md`        |
 | `-o, --out <file>`    | —       | Write the formatted result to a file                                        |
@@ -597,6 +603,17 @@ validated_taint = true
 Read from the **trusted base branch** when `--base` is given, so a pull request
 cannot weaken the policy applied to itself.
 
+Team markdown packs live under `.vibgrate/review/` — the same tree the GitHub
+App reads. `ignore.md` drops matching finding paths; `policy.md` is attached to
+the human report; `merge.md` is evaluated locally (docs-only may approve; a
+change to `merge.md` itself is refused); `checks/*.md` each produce one CLI
+pass or a skipped-with-reason line. Custom checks have no extra correctness
+engine on the CLI either.
+
+`--loop` applies only deterministic `package.json` version bumps it can compute
+(from a known current → latest pair). It does not rewrite lockfiles, does not
+open a hosted branch, and never starts unless you pass the flag.
+
 Declaring `target_pattern` is what turns a layering observation into a
 *regression*. Without it, a dependency that skips a tier is reported as a medium
 finding about the repository's own majority — because a majority is not the same
@@ -647,6 +664,17 @@ transitive package in alongside the directly-scanned ones. Each component carrie
 `vibgrate:scope` property (`direct` or `transitive`) so consumers can still tell the
 two apart. Pass `--no-transitive` to report only the manifest-declared dependencies,
 matching pre-existing output.
+
+Every component also carries a [purl](https://github.com/package-url/purl-spec)
+(`pkg:npm/<name>@<version>`, scoped names as their own namespace segment) — as the
+CycloneDX `purl` field and `bom-ref`, and as the SPDX `externalRefs` PACKAGE-MANAGER
+reference — so a vulnerability scanner can match components without re-deriving an
+identifier. When the lockfile format resolves real dependency edges (npm
+`package-lock.json` v2/v3 today; pnpm and yarn report components without edges), the
+SBOM also carries the resolved dependency graph: CycloneDX's top-level `dependencies`
+array, or SPDX `DEPENDS_ON` relationships. Where edges aren't resolvable, that section
+is left out entirely rather than shipping a graph that claims "no dependencies" when
+the truth is "not tracked".
 
 `vg sbom vex` is input-agnostic: it assembles a complete OpenVEX document from the statements you supply (`--from <file>` and/or repeatable `--statement`), so it works regardless of which scanner flagged the components. A zero-statement document is valid and honest — it asserts no known affected components.
 

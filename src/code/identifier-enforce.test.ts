@@ -28,6 +28,18 @@ describe('identifier-enforce', () => {
     expect(r.ok).toBe(true);
   });
 
+  it('does not invent-check Hello in a $1 regex substitution when callablesOnly', () => {
+    const r = enforceIdentifiersInText('Hello, $1!', trie, { callablesOnly: true });
+    expect(r.ok).toBe(true);
+    expect(r.unknown).not.toContain('Hello');
+  });
+
+  it('still blocks an invented callable after stripping strings', () => {
+    const r = enforceIdentifiersInText('return "Hello, " + ghostFn() + "!";', trie, { callablesOnly: true });
+    expect(r.ok).toBe(false);
+    expect(r.unknown).toContain('ghostFn');
+  });
+
   it('blocks unknown identifiers in text', () => {
     const r = enforceIdentifiersInText('return ghostFn();', trie);
     expect(r.ok).toBe(false);

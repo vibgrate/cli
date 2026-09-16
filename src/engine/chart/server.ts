@@ -25,6 +25,8 @@ import { projectSlice } from './slice.js';
 import { sanitizeOverview, sanitizeSlice } from './sanitize.js';
 import { parseArchView, type ArchOverview, type ArchSlice, type ArchSliceView } from './arch-types.js';
 import { defaultBoardLayout, readBoardLayout, writeBoardLayout, BOARD_LAYOUT_MAGIC, type ArchBoardLayout } from './board-layout.js';
+import { loadExternalSurfaces, withExternalLane } from './external-lane.js';
+import { loadReachabilityFindings, withVulnBadges } from './vuln-annotations.js';
 
 export const DEFAULT_CHART_HOST = '127.0.0.1';
 export const DEFAULT_CHART_PORT = 7420;
@@ -136,15 +138,21 @@ async function handle(
     const capRaw = Number(url.searchParams.get('cap') ?? '');
     json(
       res,
-      sliceOf(graph, sidecar, provider, {
-        packageId,
-        view,
-        focus,
-        architecture,
-        tests,
-        expand,
-        cap: Number.isFinite(capRaw) && capRaw > 0 ? capRaw : undefined,
-      }),
+      sliceOf(
+        graph,
+        sidecar,
+        provider,
+        {
+          packageId,
+          view,
+          focus,
+          architecture,
+          tests,
+          expand,
+          cap: Number.isFinite(capRaw) && capRaw > 0 ? capRaw : undefined,
+        },
+        root,
+      ),
     );
     return;
   }
@@ -226,6 +234,7 @@ export function sliceOf(
     cap?: number;
     expand?: boolean;
   },
+  root?: string,
 ): ArchSlice {
   const resolved = spec.packageId || projectOverview(graph, sidecar).packages[0]?.id || 'root';
   const input = {
@@ -237,15 +246,19 @@ export function sliceOf(
     cap: spec.cap,
     expand: spec.expand,
   };
+  let slice: ArchSlice | undefined;
   if (provider?.projectSlice) {
     try {
-      const clean = sanitizeSlice(provider.projectSlice(graph, sidecar, input));
-      if (clean) return clean;
+      slice = sanitizeSlice(provider.projectSlice(graph, sidecar, input)) ?? undefined;
     } catch {
       /* host fallback */
     }
   }
-  return projectSlice(graph, sidecar, input);
+  slice ??= projectSlice(graph, sidecar, input);
+  if (!root) return slice;
+  slice = withExternalLane(slice, loadExternalSurfaces(root));
+  slice = withVulnBadges(slice, loadReachabilityFindings(root));
+  return slice;
 }
 
 function serveArchUi(res: ServerResponse, provider: HaileProvider | null, rel: string): void {

@@ -3,7 +3,16 @@
 import type { GraphEdge, GraphNode, VgGraph } from '../../schema.js';
 import type { HaileCallable, HaileSymbolKind } from './types.js';
 
-const CALLABLE_KINDS = new Set(['function', 'method', 'route', 'test', 'component', 'job']);
+const CALLABLE_KINDS = new Set([
+  'function',
+  'method',
+  'route',
+  'test',
+  'component',
+  'job',
+  'class',
+  'interface',
+]);
 
 export function isCallableKind(kind: string): boolean {
   return CALLABLE_KINDS.has(kind);
@@ -21,6 +30,10 @@ export function symbolKindOf(kind: string): HaileSymbolKind {
       return 'job';
     case 'component':
       return 'handler';
+    case 'class':
+      return 'type';
+    case 'interface':
+      return 'interface';
     default:
       return 'function';
   }

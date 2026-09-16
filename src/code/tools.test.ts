@@ -6,7 +6,7 @@ import {
   resolveAgentToolCall,
   type ToolContext,
 } from './tools.js';
-import { fixtureGraph } from './graph-fixture.js';
+import { fixtureGraph, fixtureGraphWithFiles } from './graph-fixture.js';
 import type { CodeFs } from './session.js';
 import type { ToolCall } from './types.js';
 
@@ -97,6 +97,33 @@ describe('MCP / foreign-agent tool aliases', () => {
     const r = resolveAgentToolCall(call('impact_of', { name: 'scanDir' }));
     expect(r.name).toBe('graph_impact');
     expect(r.arguments.symbol).toBe('scanDir');
+  });
+
+  it('maps a hyphenated edit-file name onto edit_file', () => {
+    const r = resolveAgentToolCall(call('edit-file', { path: 'src/scan.ts', search: 'a', replace: 'b' }));
+    expect(r.name).toBe('edit_file');
+    expect(r.arguments).toEqual({ path: 'src/scan.ts', search: 'a', replace: 'b' });
+  });
+
+  it('maps a spaced read file name onto read_file', () => {
+    const r = resolveAgentToolCall(call('read file', { path: 'src/greet.ts' }));
+    expect(r.name).toBe('read_file');
+    expect(r.arguments).toEqual({ path: 'src/greet.ts' });
+  });
+
+  it('maps doubled-underscore Flow names onto the advertised tool', () => {
+    expect(resolveAgentToolCall(call('read__file', { path: 'src/gREET.ts' })).name).toBe('read_file');
+    expect(resolveAgentToolCall(call('read___file', { path: 'src/gREET.ts' })).name).toBe('read_file');
+    expect(resolveAgentToolCall(call('edit__file', { path: 'src/greet.ts', search: 'a', replace: 'b' })).name).toBe(
+      'edit_file',
+    );
+  });
+
+  it('maps a spaced apply patch name onto apply_patch and does not unknown-tool', async () => {
+    const resolved = resolveAgentToolCall(call('apply patch', { patch: { operations: [] } }));
+    expect(resolved.name).toBe('apply_patch');
+    const r = await executeTool(call('apply patch', { patch: { operations: [] } }), ctx());
+    expect(r.content).not.toMatch(/unknown tool/);
   });
 
   it('maps namespaced MCP names that VG Code already owns', () => {
@@ -249,6 +276,151 @@ describe('mutating tools (gated)', () => {
     expect(r.mutated).toBe(false);
     expect(c.files['src/scan.ts']).toContain('const timeout = 0;');
     expect(r.content).toContain('declined');
+  });
+
+  it('edit_file case-folds src/gREET.ts onto src/greet.ts and applies', async () => {
+    const greet = 'export function greet(name: string) { return `hi ${name}`; }\n';
+    const c = ctx({
+      graph: fixtureGraphWithFiles(['src/greet.ts']),
+    });
+    c.files['src/greet.ts'] = greet;
+    const r = await executeTool(
+      call('edit_file', {
+        path: 'src/gREET.ts',
+        search: 'return `hi ${name}`;',
+        replace: 'return `Hello, ${name}!`;',
+      }),
+      c,
+    );
+    expect(r.mutated).toBe(true);
+    expect(r.content).toMatch(/resolved path from src\/gREET\.ts → src\/greet\.ts/);
+    expect(c.files['src/greet.ts']).toContain('Hello, ${name}!');
+    expect(c.files['src/gREET.ts']).toBeUndefined();
+  });
+
+  it('edit_file regex SEARCH + Hello, $1! is not identifier-blocked', async () => {
+    const { buildIdentifierTrieFromGraph } = await import('../runtime/identifier-trie.js');
+    const greet = 'export function greet(name: string) { return `hi ${name}`; }\n';
+    const c = ctx({ graph: fixtureGraphWithFiles(['src/greet.ts']) });
+    c.files['src/greet.ts'] = greet;
+    c.identifierTrie = buildIdentifierTrieFromGraph({
+      nodes: c.graph.nodes.map((n) => ({ name: n.name, qualifiedName: n.qualifiedName, id: n.id })),
+    });
+    c.enforceIdentifiers = true;
+    const r = await executeTool(
+      call('edit_file', { path: 'src/gREET.ts', search: 'hi \\(\\w+\\)', replace: 'Hello, $1!' }),
+      c,
+    );
+    expect(r.mutated).toBe(false);
+    expect(r.content).not.toMatch(/blocked:.*Hello/);
+    expect(r.content).toMatch(/literal snippet|exact current snippet/);
+    expect(c.files['src/greet.ts']).toBe(greet);
+  });
+
+  it('edit_file still allows Hello inside a quoted literal after identifier strip', async () => {
+    const { buildIdentifierTrieFromGraph } = await import('../runtime/identifier-trie.js');
+    const greet = 'export function greet(name: string) { return `hi ${name}`; }\n';
+    const c = ctx({ graph: fixtureGraphWithFiles(['src/greet.ts']) });
+    c.files['src/greet.ts'] = greet;
+    c.identifierTrie = buildIdentifierTrieFromGraph({
+      nodes: c.graph.nodes.map((n) => ({ name: n.name, qualifiedName: n.qualifiedName, id: n.id })),
+    });
+    c.enforceIdentifiers = true;
+    const r = await executeTool(
+      call('edit_file', {
+        path: 'src/greet.ts',
+        search: 'return `hi ${name}`;',
+        replace: 'return "Hello, " + name + "!";',
+      }),
+      c,
+    );
+    expect(r.mutated).toBe(true);
+    expect(c.files['src/greet.ts']).toContain('Hello, ');
+  });
+
+  it('edit_file rejects a regex-like SEARCH with a literal-snippet message', async () => {
+    const greet = 'export function greet(name: string) { return `hi ${name}`; }\n';
+    const c = ctx({ graph: fixtureGraphWithFiles(['src/greet.ts']) });
+    c.files['src/greet.ts'] = greet;
+    const r = await executeTool(
+      call('edit_file', { path: 'src/gREET.ts', search: 'hi \\(\\w+\\)', replace: 'Hello, $1!' }),
+      c,
+    );
+    expect(r.mutated).toBe(false);
+    expect(c.files['src/greet.ts']).toBe(greet);
+    expect(r.content).toMatch(/literal snippet/);
+    expect(r.content).not.toMatch(/treated as regex|interpreted as regex/i);
+    expect(r.content).toContain('hi ${name}');
+  });
+
+  it('edit_file trims padded path and SEARCH/REPLACE', async () => {
+    const greet = 'export function greet(name: string) { return `hi ${name}`; }\n';
+    const c = ctx({ graph: fixtureGraphWithFiles(['src/greet.ts']) });
+    c.files['src/greet.ts'] = greet;
+    const r = await executeTool(
+      call('edit_file', {
+        path: '  src/greet.ts  ',
+        search: '  return `hi ${name}`;  ',
+        replace: '  return `Hello, ${name}!`;  ',
+      }),
+      c,
+    );
+    expect(r.mutated).toBe(true);
+    expect(c.files['src/greet.ts']).toContain('Hello, ${name}!');
+    expect(c.files['src/greet.ts']).not.toMatch(/^\s+return/);
+  });
+
+  it('edit_file space-squeezes src/gre et.ts onto src/greet.ts', async () => {
+    const greet = 'export function greet(name: string) { return `hi ${name}`; }\n';
+    const c = ctx({ graph: fixtureGraphWithFiles(['src/greet.ts']) });
+    c.files['src/greet.ts'] = greet;
+    const r = await executeTool(
+      call('edit_file', {
+        path: 'src/gre et.ts',
+        search: 'return `hi ${name}`;',
+        replace: 'return `Hello, ${name}!`;',
+      }),
+      c,
+    );
+    expect(r.mutated).toBe(true);
+    expect(r.content).toMatch(/resolved path from src\/gre et\.ts → src\/greet\.ts/);
+    expect(c.files['src/greet.ts']).toContain('Hello, ${name}!');
+  });
+
+  it('read_file canonicalizes when the FS exists() is case-insensitive', async () => {
+    const greet = 'export function greet() {}\n';
+    const files: Record<string, string | null> = { 'src/greet.ts': greet };
+    const keyOf = (f: string) => Object.keys(files).find((k) => k.toLowerCase() === f.toLowerCase());
+    const fsImpl: CodeFs = {
+      read: (f) => {
+        const k = keyOf(f);
+        return k !== undefined ? files[k] : null;
+      },
+      write: (f, c) => {
+        const k = keyOf(f);
+        files[k ?? f] = c;
+      },
+      remove: (f) => {
+        const k = keyOf(f);
+        if (k) files[k] = null;
+      },
+      appendAudit: () => {},
+    };
+    expect(fsImpl.read('src/gREET.ts')).toBe(greet);
+    const c = ctx({ graph: fixtureGraphWithFiles(['src/greet.ts']), fsImpl });
+    const r = await executeTool(call('read_file', { path: 'src/gREET.ts' }), c);
+    expect(r.failed).not.toBe(true);
+    expect(r.content).toMatch(/resolved path from src\/gREET\.ts → src\/greet\.ts/);
+    expect(r.content).toContain('export function greet');
+  });
+
+  it('read_file resolves a unique wrong-case path', async () => {
+    const c = ctx({ graph: fixtureGraphWithFiles(['src/greet.ts']) });
+    c.files['src/greet.ts'] = 'export function greet() {}\n';
+    const r = await executeTool(call('read_file', { path: 'src/gREET.ts' }), c);
+    expect(r.failed).not.toBe(true);
+    expect(r.content).toMatch(/resolved path from src\/gREET\.ts → src\/greet\.ts/);
+    expect(r.content).toContain('export function greet');
   });
 
   it('edit_file reports a non-applying edit without asking for approval', async () => {

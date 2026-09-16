@@ -1,18 +1,17 @@
 /**
- * L0 workspace map: one card per package (or area/root fallback), aggregate edges.
+ * L0 workspace map fallback: one card per package (or area/root fallback), aggregate edges.
+ *
+ * This is deliberately NOT a classifier. It never reads a symbol's role or
+ * purpose — those come only from `@vibgrate/haile` (`HaileProvider.projectOverview`,
+ * see `../haile/haile-provider.ts` and `server.ts`'s `overviewOf`), which is
+ * the sole implementation of Vibgrate's architecture taxonomy. This function
+ * is the honest degraded view used only when that module isn't installed or
+ * fails to load: plain package/file topology, no role-based rollup.
  */
 import type { VgGraph } from '../../schema.js';
 import type { HaileSidecar } from '../haile/types.js';
-import { policyLabel } from './labels.js';
-import {
-  ARCH_OVERVIEW_MAGIC,
-  OVERVIEW_PACKAGE_CAP,
-  type ArchOverview,
-  type ArchPackageEdge,
-  type ArchPackageNode,
-} from './arch-types.js';
+import { ARCH_OVERVIEW_MAGIC, OVERVIEW_PACKAGE_CAP, type ArchOverview, type ArchPackageEdge, type ArchPackageNode } from './arch-types.js';
 import { indexPackages, isSymbolNode } from './packages.js';
-import { architectureBound, dominantRoleLabel, indexSymbols, mixPhrase, resolveRole } from './layout.js';
 
 const L0_EDGE_KINDS = new Set([
   'import',
@@ -25,38 +24,17 @@ const L0_EDGE_KINDS = new Set([
   'triggers',
 ]);
 
-export function projectOverview(graph: VgGraph, sidecar: HaileSidecar | null): ArchOverview {
+export function projectOverview(graph: VgGraph, _sidecar: HaileSidecar | null): ArchOverview {
   const { packages, packageOf } = indexPackages(graph);
-  const bound = architectureBound(graph, sidecar, true);
-  const symbolIndex = bound ? indexSymbols(sidecar) : indexSymbols(null);
   const symbolCount = graph.nodes.filter(isSymbolNode).length;
   const cards: ArchPackageNode[] = [];
 
   for (const pkg of packages) {
     let symbols = 0;
-    let findings = 0;
-    let missingSteps = 0;
-    let unclassified = 0;
-    const histogram: Record<string, number> = {};
     for (const node of graph.nodes) {
       if (packageOf.get(node.id) !== pkg.id) continue;
       if (!isSymbolNode(node)) continue;
       symbols += 1;
-      const symbol = symbolIndex.get(node.id);
-      if (symbol?.findings?.some((f) => f && typeof f.message === 'string' && typeof f.line === 'number' && f.line > 0)) {
-        findings += 1;
-      }
-      const gaps = (symbol as { extract_gaps?: unknown[] } | undefined)?.extract_gaps;
-      if (Array.isArray(gaps) && gaps.length > 0) missingSteps += 1;
-      const role = bound ? resolveRole(symbol) : '';
-      if (!role || role === 'unknown') unclassified += 1;
-      else histogram[role] = (histogram[role] ?? 0) + 1;
-    }
-    const fromModules = sidecar?.modules?.find((m) => m.path === pkg.path || m.path.endsWith(`/${pkg.path}`));
-    if (fromModules?.role_histogram) {
-      for (const [role, n] of Object.entries(fromModules.role_histogram)) {
-        if (typeof n === 'number') histogram[role] = Math.max(histogram[role] ?? 0, n);
-      }
     }
     cards.push({
       id: pkg.id,
@@ -64,12 +42,13 @@ export function projectOverview(graph: VgGraph, sidecar: HaileSidecar | null): A
       path: pkg.path,
       kind: pkg.kind,
       symbols,
-      findings,
-      missingSteps,
-      job: bound ? dominantRoleLabel(histogram) : jobOf(pkg.kind, pkg.path, pkg.name),
-      policy: bound ? (sidecar?.policy ?? null) : null,
-      mix: bound ? mixPhrase(histogram, symbols, findings) : `${symbols} symbols`,
-      unclassified,
+      findings: 0,
+      missingSteps: 0,
+      job: jobOf(pkg.kind, pkg.path, pkg.name),
+      policy: null,
+      lane: 'unclassified',
+      mix: `${symbols} symbols`,
+      unclassified: symbols,
     });
   }
 
@@ -100,21 +79,19 @@ export function projectOverview(graph: VgGraph, sidecar: HaileSidecar | null): A
 
   const root = graph.meta.root || 'repository';
   const title = root === '.' ? 'Code map' : `Code map · ${root}`;
-  const findings = visible.reduce((n, p) => n + p.findings, 0);
-  const missingSteps = visible.reduce((n, p) => n + p.missingSteps, 0);
 
   return {
     magic: ARCH_OVERVIEW_MAGIC,
     packages: visible,
     edges,
     meta: {
-      architectureLoaded: bound,
-      policy: sidecar?.policy ?? null,
-      policyLabel: sidecar ? policyLabel(sidecar.policy) : null,
+      architectureLoaded: false,
+      policy: null,
+      policyLabel: null,
       symbols: symbolCount,
       packages: visible.length,
-      findings,
-      missingSteps,
+      findings: 0,
+      missingSteps: 0,
       title,
     },
   };

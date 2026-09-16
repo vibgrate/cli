@@ -82,7 +82,29 @@ export function formatText(result: RunReviewResult): string {
   lines.push(c.dim('  explain one: `vg review explain <finding-id>` · machine result: `vg review --format json` · check one: `vg review verify <receipt.json>`'));
   // The product does not certify. Say so where a human reads the result.
   lines.push(c.dim('  Review reports change integrity. It is not a proof of security and absence of findings is not a certification.'));
+  if (result.packs?.loaded) lines.push(...formatPacksText(result));
   return lines.join('\n');
+}
+
+function formatPacksText(result: RunReviewResult): string[] {
+  const packs = result.packs;
+  if (!packs) return [];
+  const lines = ['', c.dim('  Review packs (.vibgrate/review/)')];
+  lines.push(c.dim(`    ignore: ${packs.ignore.patterns.length} pattern(s)`));
+  lines.push(c.dim(packs.policy ? '    policy: present' : '    policy: none'));
+  if (packs.mergeDecision) {
+    lines.push(c.dim(`    merge: ${packs.mergeDecision} — ${packs.mergeReasons[0] ?? ''}`));
+  }
+  for (const check of packs.checks) {
+    lines.push(
+      c.dim(
+        check.ran
+          ? `    check ${check.id}: ran (no extra correctness engine)`
+          : `    check ${check.id}: skipped (${check.reason ?? 'unspecified'})`,
+      ),
+    );
+  }
+  return lines;
 }
 
 function severityColor(severity: string): string {
@@ -131,6 +153,23 @@ export function formatMarkdown(result: RunReviewResult): string {
   lines.push(
     '<sub>Vibgrate Review reports change integrity against the declared architecture and security controls. It does not prove code is secure, and absence of findings is not a certification.</sub>',
   );
+  if (result.packs?.loaded) {
+    lines.push('');
+    lines.push('### Review packs');
+    lines.push('');
+    lines.push(`Ignore patterns: ${result.packs.ignore.patterns.length}.`);
+    lines.push(result.packs.policy ? 'Team policy file is present.' : 'No team policy file.');
+    if (result.packs.mergeDecision) {
+      lines.push(`Merge policy: \`${result.packs.mergeDecision}\`. ${result.packs.mergeReasons[0] ?? ''}`);
+    }
+    for (const check of result.packs.checks) {
+      lines.push(
+        check.ran
+          ? `- \`${check.id}\` ran (deterministic pack only; no extra correctness engine).`
+          : `- \`${check.id}\` skipped (${check.reason ?? 'unspecified'}).`,
+      );
+    }
+  }
   return lines.join('\n');
 }
 

@@ -13,6 +13,7 @@
 import { extractIdentifiers, scanIdentifiersAgainstTrie } from '../runtime/identifier-mask.js';
 import type { TrieNode } from '../runtime/identifier-trie.js';
 import type { PatchIR, PatchOperation } from './patch-ir.js';
+import { looksLikeRegexSearch, looksLikeRegexSubstitution } from './workspace-path.js';
 
 export interface IdentifierEnforceResult {
   ok: boolean;
@@ -33,12 +34,34 @@ export interface EnforceIdentifiersOptions {
    * scanning so doc comments do not trip invent-checks.
    */
   codeOnly?: boolean;
+  /**
+   * When true, only identifiers that look like declarations or calls
+   * (`function Foo`, `class Foo`, `Foo(`) are invent-checked. Bare TitleCase
+   * in unquoted prose (`Hello, $1!`) is ignored.
+   */
+  callablesOnly?: boolean;
 }
 
 /**
  * Approximate strip of comments and string-like spans so invent-checks focus
  * on executable code. Conservative: better to under-scan than block prose.
  */
+/** Identifiers that look like declarations or calls — not bare TitleCase prose. */
+function extractCallableIdentifiers(text: string): string[] {
+  const out = new Set<string>();
+  const re =
+    /\b(?:function|class|new)\s+([A-Za-z_][A-Za-z0-9_]{2,})\b|\b([A-Za-z_][A-Za-z0-9_]{2,})\s*\(/g;
+  for (const m of text.matchAll(re)) {
+    const id = m[1] || m[2];
+    if (id) out.add(id);
+  }
+  return [...out];
+}
+
+function scanCallablesAgainstTrie(text: string, trie: TrieNode) {
+  return scanIdentifiersAgainstTrie(extractCallableIdentifiers(text).join(' '), trie);
+}
+
 export function stripNonCodeSpans(text: string): string {
   return text
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
@@ -61,7 +84,9 @@ export function enforceIdentifiersInText(
   if (!trie || text == null || text === '') return { ok: true, unknown: [] };
   const codeOnly = options.codeOnly !== false;
   const scanned = codeOnly ? stripNonCodeSpans(text) : text;
-  const scan = scanIdentifiersAgainstTrie(scanned, trie);
+  const scan = options.callablesOnly
+    ? scanCallablesAgainstTrie(scanned, trie)
+    : scanIdentifiersAgainstTrie(scanned, trie);
   const allow = new Set(options.allow ?? []);
   const unknown = scan.unknown.filter((id) => !allow.has(id));
   if (unknown.length === 0) return { ok: true, unknown: [] };
@@ -125,6 +150,9 @@ export function enforceIdentifiersInPatch(
   for (const op of patch.operations) {
     const body = bodyFromOp(op);
     if (!body) continue;
+    if (op.op === 'replace-text' && (looksLikeRegexSearch(op.search) || looksLikeRegexSubstitution(op.replace))) {
+      continue;
+    }
     const allow = new Set<string>(options.allow ?? []);
     const file = fileFromOp(op);
     if (file && options.readFile) {
@@ -136,7 +164,11 @@ export function enforceIdentifiersInPatch(
     if (op.op === 'replace-text' && typeof op.search === 'string') {
       for (const id of extractIdentifiers(op.search)) allow.add(id);
     }
-    const r = enforceIdentifiersInText(body, trie, { ...options, allow });
+    const r = enforceIdentifiersInText(body, trie, {
+      ...options,
+      allow,
+      callablesOnly: options.callablesOnly ?? op.op === 'replace-text',
+    });
     for (const u of r.unknown) unknown.add(u);
   }
   if (unknown.size === 0) return { ok: true, unknown: [] };

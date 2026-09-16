@@ -1857,15 +1857,21 @@ export class VibgrateLanguageServer {
     try {
       const sidecar = this.architectureSidecar(graph);
       const provider = await loadHaileProvider();
-      return sliceOf(graph, sidecar, provider, {
-        packageId: p.packageId,
-        view: parseArchView(p.view),
-        focus: typeof p.focus === 'string' ? p.focus : undefined,
-        architecture: p.architecture !== false,
-        tests: p.tests === true,
-        cap: typeof p.cap === 'number' && p.cap > 0 ? p.cap : undefined,
-        expand: p.expand === true,
-      });
+      return sliceOf(
+        graph,
+        sidecar,
+        provider,
+        {
+          packageId: p.packageId,
+          view: parseArchView(p.view),
+          focus: typeof p.focus === 'string' ? p.focus : undefined,
+          architecture: p.architecture !== false,
+          tests: p.tests === true,
+          cap: typeof p.cap === 'number' && p.cap > 0 ? p.cap : undefined,
+          expand: p.expand === true,
+        },
+        this.opts.root,
+      );
     } catch {
       return null;
     }

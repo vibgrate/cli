@@ -29,6 +29,25 @@ backward compatible.
   `transitive`) property so the two remain distinguishable. Pass
   `--no-transitive` to restore the old, direct-only output.
 
+- **`vg sbom export` components now carry a purl, and CycloneDX/SPDX output
+  now includes the resolved dependency graph where the lockfile supports it.**
+  Two gaps remained even after transitive dependencies started being counted:
+  components had no [purl](https://github.com/package-url/purl-spec) a
+  vulnerability scanner could match on directly, and there was no way to tell
+  which package pulled in which. Every component (direct and transitive) now
+  carries a purl — `pkg:npm/<name>@<version>`, with a scoped name's `@scope`
+  as its own namespace segment rather than folded into one percent-encoded
+  string — as the CycloneDX `purl`/`bom-ref` and the SPDX `externalRefs`
+  PACKAGE-MANAGER reference (SPDX's purl had the same scoped-name bug; fixed
+  in the same pass). Where the lockfile format resolves real edges — npm
+  `package-lock.json` v2/v3 today, by replaying the same nearest-`node_modules`
+  lookup Node's `require` uses — the SBOM also includes the dependency graph:
+  CycloneDX's top-level `dependencies` array, or SPDX `DEPENDS_ON`
+  relationships. pnpm, yarn, and npm's older v1 lockfile shape still report
+  every component correctly but can't yet resolve edges; for those, the graph
+  section is left out entirely rather than shipping one that claims "no
+  dependencies" when the truth is "not tracked".
+
 - **Context compression reads its model facts from the scanning module.**
   Context windows, output caps, thinking/cache billing and per-1M-token list
   prices were a pair of hand-maintained tables inside the CLI, which meant a

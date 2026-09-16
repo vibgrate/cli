@@ -17,7 +17,7 @@ import { loadCatalog, resolveLib, readDoc, localPackageDocs, resolveVersion } fr
 import { searchSymbols } from '../engine/search.js';
 import { applyEdit, type SymbolSpan } from './apply.js';
 import { applyPatchIR, locatorsFromGraph } from './apply-patch-ir.js';
-import { PATCH_IR_SCHEMA_VERSION, validatePatchIR, type PatchIR } from './patch-ir.js';
+import { PATCH_IR_SCHEMA_VERSION, validatePatchIR, type PatchIR, type PatchOperation } from './patch-ir.js';
 import { unifiedDiff } from './diff.js';
 import { previewSides, type PreviewSides } from './preview-sides.js';
 import { isSecretPath, secretRefusal, redactText, secretEgressRefusal } from './secrets.js';
@@ -59,6 +59,16 @@ import {
 } from './browser-tool.js';
 import { runSubagent } from './subagent.js';
 import type { Provider } from './types.js';
+import {
+  fileExcerpt,
+  looksLikeRegexSearch,
+  looksLikeRegexSubstitution,
+  normalizeRelPath,
+  pathResolveError,
+  pathResolveNote,
+  resolveWorkspacePath,
+  type PathResolveResult,
+} from './workspace-path.js';
 
 export type { ShellResult } from './shell-runner.js';
 
@@ -510,12 +520,18 @@ export const AGENT_TOOL_ALIASES: Record<
 
 /** Rewrite a model-emitted call onto an advertised VG Code tool, if needed. */
 export function resolveAgentToolCall(call: ToolCall): ToolCall {
-  let name = call.name;
+  let name = (call.name ?? '').trim();
   if (name.startsWith(VG_MCP_PREFIX)) name = name.slice(VG_MCP_PREFIX.length);
-  if (AGENT_TOOL_NAME_SET.has(name)) {
-    return name === call.name ? call : { ...call, name };
+  const underscored = name.replace(/[\s-]+/g, '_').replace(/_+/g, '_');
+  const compact = underscored.replace(/_/g, '').toLowerCase();
+  const advertised =
+    (AGENT_TOOL_NAME_SET.has(underscored) ? underscored : undefined) ??
+    [...AGENT_TOOL_NAME_SET].find((n) => n.toLowerCase() === underscored.toLowerCase()) ??
+    [...AGENT_TOOL_NAME_SET].find((n) => n.replace(/_/g, '').toLowerCase() === compact);
+  if (advertised) {
+    return advertised === call.name ? call : { ...call, name: advertised };
   }
-  const alias = AGENT_TOOL_ALIASES[name];
+  const alias = AGENT_TOOL_ALIASES[name] ?? AGENT_TOOL_ALIASES[underscored];
   if (!alias) return call;
   const mapped = alias.mapArgs ? alias.mapArgs(call.arguments ?? {}) : call.arguments;
   return { ...call, name: alias.name, arguments: mapped ?? {} };
@@ -716,16 +732,20 @@ async function search(ctx: ToolContext, query: string): Promise<ToolResult> {
 function readFile(ctx: ToolContext, path: string, start?: number, end?: number): ToolResult {
   // Never send a secrets file to the model (GUARDRAILS §1.1).
   if (isSecretPath(path)) return { content: secretRefusal(path), mutated: false };
-  const content = ctx.fsImpl.read(path);
-  if (content === null) return { content: `${path} not found`, mutated: false, failed: true };
+  const loc = locateFile(ctx, path);
+  if (loc.error) return { content: loc.error, mutated: false, failed: true };
+  if (isSecretPath(loc.path)) return { content: secretRefusal(loc.path), mutated: false };
+  const content = ctx.fsImpl.read(loc.path);
+  if (content === null) return { content: `${loc.path} not found`, mutated: false, failed: true };
   const lines = content.split('\n');
   const from = start && start > 0 ? start - 1 : 0;
   const to = end && end > 0 ? end : lines.length;
   const slice = lines.slice(from, to).join('\n');
   // Redact any stray credential shapes before the content reaches the model.
   const shown = truncate(redactText(slice));
-  const header = start || end ? `${path} (lines ${from + 1}-${Math.min(to, lines.length)} of ${lines.length})` : `${path} (${lines.length} lines)`;
-  return { content: `${header}:\n${shown}`, mutated: false };
+  const header = start || end ? `${loc.path} (lines ${from + 1}-${Math.min(to, lines.length)} of ${lines.length})` : `${loc.path} (${lines.length} lines)`;
+  const note = loc.note ? `${loc.note}. ` : '';
+  return { content: `${note}${header}:\n${shown}`, mutated: false };
 }
 
 function listFiles(ctx: ToolContext, dir?: string, pattern?: string): ToolResult {
@@ -780,29 +800,57 @@ async function graphImpact(ctx: ToolContext, symbol: string): Promise<ToolResult
 /* ── mutating tools (gated) ──────────────────────────────────────────────── */
 
 async function editFile(ctx: ToolContext, path: string, search: string, replace: string): Promise<ToolResult> {
-  const before = ctx.fsImpl.read(path);
-  if (ctx.enforceIdentifiers !== false && ctx.identifierTrie) {
+  search = (search ?? '').trim();
+  replace = (replace ?? '').trim();
+  if (isSecretPath(path)) return { content: secretRefusal(path), mutated: false };
+  const loc = locateFile(ctx, path);
+  if (loc.error) {
+    return { content: loc.error, mutated: false };
+  }
+  if (isSecretPath(loc.path)) return { content: secretRefusal(loc.path), mutated: false };
+  const before = ctx.fsImpl.read(loc.path);
+  const note = loc.note ? `${loc.note}. ` : '';
+  if (before === null) return { content: `${note}${loc.path} not found`, mutated: false };
+  if (looksLikeRegexSearch(search) && !before.includes(search)) {
+    return {
+      content:
+        `${note}SEARCH looks like a regular expression, but edit_file matches a literal snippet (whitespace-flexible), not a regex. ` +
+        `SEARCH must be an exact current snippet. Quote the exact current lines from the file (call read_file if needed).\n\n${editExcerpt(ctx, loc.path, before)}`,
+      mutated: false,
+    };
+  }
+  // Regex SEARCH / `$1` replacements are not code — do not invent-check
+  // TitleCase tokens like `Hello` in `Hello, $1!` (live Spark false positive).
+  const skipInvent = looksLikeRegexSearch(search) || looksLikeRegexSubstitution(replace);
+  if (!skipInvent && ctx.enforceIdentifiers !== false && ctx.identifierTrie) {
     // Reusing locals / symbols already in the file (or the search span) is fine;
     // only inventing graph-unknown identifiers is blocked (B3).
     const allow = new Set([
-      ...extractIdentifiers(before ?? ''),
+      ...extractIdentifiers(before),
       ...extractIdentifiers(search),
     ]);
-    const idCheck = enforceIdentifiersInText(replace, ctx.identifierTrie, { allow });
+    const idCheck = enforceIdentifiersInText(replace, ctx.identifierTrie, { allow, callablesOnly: true });
     if (!idCheck.ok) {
       return { content: idCheck.reason ?? 'blocked: unknown identifiers in edit', mutated: false };
     }
   }
-  const { content: after, outcome } = applyEdit(before, { op: 'replace', file: path, search, replace }, ctx.spans.get(normalize(path)) ?? []);
+  const { content: after, outcome } = applyEdit(
+    before,
+    { op: 'replace', file: loc.path, search, replace },
+    ctx.spans.get(normalize(loc.path)) ?? [],
+  );
   if (outcome.status !== 'applied') {
-    return { content: `edit not applied (${outcome.status}): ${outcome.reason ?? ''}`, mutated: false };
+    return {
+      content: `${note}edit not applied (${outcome.status}): ${outcome.reason ?? ''}\n\n${editExcerpt(ctx, loc.path, before)}`,
+      mutated: false,
+    };
   }
-  const diff = unifiedDiff(before, after, path);
-  if (!(await ctx.approve({ kind: 'edit', file: path, diff, sides: previewSides(before, after) }))) {
-    return { content: `edit to ${path} was declined by the user`, mutated: false };
+  const diff = unifiedDiff(before, after, loc.path);
+  if (!(await ctx.approve({ kind: 'edit', file: loc.path, diff, sides: previewSides(before, after) }))) {
+    return { content: `${note}edit to ${loc.path} was declined by the user`, mutated: false };
   }
-  ctx.fsImpl.write(path, after ?? '');
-  return { content: `edited ${path}`, mutated: true, change: { file: path, before, after, outcomes: [outcome], diff } };
+  ctx.fsImpl.write(loc.path, after ?? '');
+  return { content: `${note}edited ${loc.path}`, mutated: true, change: { file: loc.path, before, after, outcomes: [outcome], diff } };
 }
 
 async function createFile(ctx: ToolContext, path: string, content: string): Promise<ToolResult> {
@@ -812,8 +860,14 @@ async function createFile(ctx: ToolContext, path: string, content: string): Prom
       return { content: idCheck.reason ?? 'blocked: unknown identifiers in create', mutated: false };
     }
   }
-  const existing = ctx.fsImpl.read(path);
-  if (existing !== null) return { content: `${path} already exists — use edit_file`, mutated: false };
+  const existingExact = ctx.fsImpl.read(path);
+  if (existingExact !== null) return { content: `${path} already exists — use edit_file`, mutated: false };
+  const loc = locateFile(ctx, path);
+  if (loc.result.status === 'resolved' || loc.result.status === 'exact') {
+    const note = loc.note ? `${loc.note}. ` : '';
+    return { content: `${note}${loc.path} already exists — use edit_file`, mutated: false };
+  }
+  if (loc.result.status === 'ambiguous') return { content: loc.error ?? pathResolveError(loc.result) ?? `${path} is ambiguous`, mutated: false };
   // Sides ("" → content) let the host open a real diff editor for a create,
   // same as the patch path already does.
   if (!(await ctx.approve({ kind: 'create', file: path, bytes: Buffer.byteLength(content), sides: previewSides('', content) }))) {
@@ -843,7 +897,10 @@ async function applyPatchTool(ctx: ToolContext, raw: unknown): Promise<ToolResul
   if (!patch) {
     return { content: 'apply_patch needs a patch object with operations[] (patch-ir/0)', mutated: false };
   }
-  const structural = validatePatchIR(patch);
+  const rewritten = rewritePatchFiles(ctx, patch);
+  if (rewritten.error) return { content: rewritten.error, mutated: false };
+  const notes = rewritten.notes;
+  const structural = validatePatchIR(rewritten.patch);
   if (!structural.ok) {
     return { content: `invalid PatchIR: ${structural.errors.join('; ')}`, mutated: false, failed: true };
   }
@@ -851,7 +908,7 @@ async function applyPatchTool(ctx: ToolContext, raw: unknown): Promise<ToolResul
   // B3: block patches that invent identifiers not present in the graph
   // (existing file locals + search spans are allowlisted).
   if (ctx.enforceIdentifiers !== false && ctx.identifierTrie) {
-    const idCheck = enforceIdentifiersInPatch(patch, ctx.identifierTrie, {
+    const idCheck = enforceIdentifiersInPatch(rewritten.patch, ctx.identifierTrie, {
       readFile: (f) => ctx.fsImpl.read(f),
     });
     if (!idCheck.ok) {
@@ -860,7 +917,7 @@ async function applyPatchTool(ctx: ToolContext, raw: unknown): Promise<ToolResul
   }
 
   const locate = locatorsFromGraph(ctx.graph.nodes);
-  const dry = applyPatchIR(patch, {
+  const dry = applyPatchIR(rewritten.patch, {
     readFile: (f) => ctx.fsImpl.read(f),
     spansForFile: (f) => ctx.spans.get(normalize(f)) ?? [],
     locateSymbol: locate,
@@ -868,7 +925,8 @@ async function applyPatchTool(ctx: ToolContext, raw: unknown): Promise<ToolResul
   });
   if (!dry.ok) {
     const detail = dry.errors.length ? dry.errors.join('; ') : dry.ops.map((o) => `${o.op}@${o.file}:${o.status}`).join('; ');
-    return { content: `patch not applied: ${detail}`, mutated: false };
+    const prefix = notes.length ? `${notes.join(' ')} ` : '';
+    return { content: `${prefix}patch not applied: ${detail}`, mutated: false };
   }
 
   // Build the full multi-file plan first, then one atomic approval. Hosts (VS Code
@@ -1288,5 +1346,71 @@ function num(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 function normalize(file: string): string {
-  return file.replace(/\\/g, '/').replace(/^\.\//, '');
+  return normalizeRelPath(file);
+}
+
+function knownExistingFiles(ctx: ToolContext): string[] {
+  const out = new Set<string>();
+  for (const n of ctx.graph.nodes) {
+    if (n.file) out.add(normalize(n.file));
+  }
+  for (const f of ctx.spans.keys()) out.add(normalize(f));
+  return [...out].filter((f) => !isSecretPath(f) && ctx.fsImpl.read(f) !== null);
+}
+
+function locateFile(
+  ctx: ToolContext,
+  requested: string,
+): { path: string; note: string; error: string | null; result: PathResolveResult } {
+  const result = resolveWorkspacePath(requested, knownExistingFiles(ctx), (p) => ctx.fsImpl.read(p) !== null);
+  return {
+    path: result.status === 'exact' || result.status === 'resolved' ? result.path : normalizeRelPath(requested),
+    note: pathResolveNote(result),
+    error: pathResolveError(result),
+    result,
+  };
+}
+
+function editExcerpt(ctx: ToolContext, file: string, content: string): string {
+  const here = ctx.graph.nodes.filter(
+    (n) => n.kind !== 'file' && n.file && normalize(n.file) === normalize(file) && n.span,
+  );
+  const span = here.length === 1 ? { name: here[0]!.name, start: here[0]!.span.start, end: here[0]!.span.end } : null;
+  return fileExcerpt(file, content, span);
+}
+
+function rewritePatchFiles(
+  ctx: ToolContext,
+  patch: PatchIR,
+): { patch: PatchIR; notes: string[]; error: string | null } {
+  const notes: string[] = [];
+  const operations: PatchOperation[] = [];
+  for (const op of patch.operations) {
+    if (!('file' in op) || !op.file) {
+      operations.push(op);
+      continue;
+    }
+    if (isSecretPath(op.file)) return { patch, notes, error: secretRefusal(op.file) };
+    const loc = locateFile(ctx, op.file);
+    if (loc.result.status === 'ambiguous') return { patch, notes, error: loc.error };
+    if (loc.result.status === 'resolved') {
+      notes.push(`${loc.note}.`);
+      operations.push({ ...op, file: loc.path });
+    } else {
+      operations.push(op);
+    }
+    if (op.op === 'replace-text' && looksLikeRegexSearch(op.search)) {
+      const body = ctx.fsImpl.read(loc.path);
+      if (body !== null && !body.includes(op.search)) {
+        return {
+          patch,
+          notes,
+          error:
+            `${notes.join(' ')}SEARCH looks like a regular expression, but apply_patch matches a literal snippet, not a regex. ` +
+            `SEARCH must be an exact current snippet. Quote the exact current lines from the file.\n\n${editExcerpt(ctx, loc.path, body)}`,
+        };
+      }
+    }
+  }
+  return { patch: { ...patch, operations }, notes, error: null };
 }

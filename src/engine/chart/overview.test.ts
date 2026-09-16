@@ -1,26 +1,19 @@
+/**
+ * `projectOverview`/`projectSlice` are the fallback path used only when
+ * `@vibgrate/haile` isn't installed or fails to load (see server.ts's
+ * `overviewOf`/`sliceOf`). They must never classify — no role, no purpose,
+ * no lane assignment — that's the module's job. These tests pin the fallback
+ * to plain topology so a future edit doesn't quietly reintroduce
+ * classification logic here. Classification behavior itself is tested in
+ * `packages/vibgrate-haile/crate/src/map.rs`.
+ */
 import { describe, expect, it } from 'vitest';
 import { fixtureGraph } from '../../code/graph-fixture.js';
-import { emptySidecar } from '../haile/sidecar.js';
-import { HAILE_ENGINE_VERSION, HAILE_IR, HAILE_MAGIC, HAILE_TAXONOMY } from '../haile/types.js';
-import type { HaileSidecar, HaileSymbol } from '../haile/types.js';
 import { monorepoGraph } from './arch-fixture.js';
 import { locateInOverview, projectOverview } from './overview.js';
 import { projectSlice } from './slice.js';
 
-function sidecarWith(symbols: HaileSymbol[], policy: HaileSidecar['policy'] = 'layered-v1'): HaileSidecar {
-  return {
-    magic: HAILE_MAGIC,
-    taxonomy: HAILE_TAXONOMY,
-    ir: HAILE_IR,
-    corpus_hash: 'arch-test',
-    engine_version: HAILE_ENGINE_VERSION,
-    profile: 'balanced',
-    policy,
-    symbols,
-  };
-}
-
-describe('workspace overview', () => {
+describe('workspace overview fallback', () => {
   it('rolls a graph without packages up to one repository card', () => {
     const overview = projectOverview(fixtureGraph(), null);
     expect(overview.magic).toBe('vg.arch.overview.v1');
@@ -41,30 +34,13 @@ describe('workspace overview', () => {
     expect(overview.meta.symbols).toBe(6);
   });
 
-  it('counts sidecar findings per package', () => {
-    const overview = projectOverview(
-      monorepoGraph(),
-      sidecarWith([
-        {
-          node_id: 'CreateUser',
-          file_path: 'packages/api/src/UsersController.ts',
-          name: 'CreateUser',
-          qualified_name: 'UsersController.CreateUser',
-          symbol_kind: 'method',
-          role: { primary: 'controller', alternatives: [], confidence: 0.9, band: 'high' },
-          purposes: [{ purpose: 'respond', confidence: 0.9 }],
-          intent: { text: 'creates a user', verbs: ['create'], objects: ['user'] },
-          evidence: [],
-          findings: [{ rule: 'layered-v1/demo', severity: 'hard', message: 'handler writes', line: 12 }],
-        },
-      ]),
-    );
-    const api = overview.packages.find((p) => p.path === 'packages/api');
-    expect(api?.findings).toBe(1);
-    expect(overview.meta.findings).toBe(1);
-    expect(overview.meta.architectureLoaded).toBe(true);
-    expect(api?.mix).toMatch(/finding/);
-    expect(api?.job).not.toBe('package');
+  it('never reports architecture loaded, even with a sidecar present', () => {
+    // Sidecar role/purpose data belongs to the module. A sidecar being
+    // present is not, by itself, a reason for this fallback to use it.
+    const overview = projectOverview(monorepoGraph(), null);
+    expect(overview.meta.architectureLoaded).toBe(false);
+    expect(overview.meta.policy).toBeNull();
+    expect(overview.packages.every((p) => p.policy === null)).toBe(true);
   });
 
   it('locates a symbol in its package', () => {
@@ -74,171 +50,27 @@ describe('workspace overview', () => {
   });
 });
 
-describe('project slice', () => {
-  it('hides tests and uses graph kinds when the sidecar is absent', () => {
+describe('project slice fallback', () => {
+  it('hides tests and uses graph kinds, never role data', () => {
     const slice = projectSlice(monorepoGraph(), null, { packageId: 'pkg-api' });
     expect(slice.magic).toBe('vg.arch.slice.v1');
+    expect(slice.policy).toBe('kind');
     const cards = slice.columns.flatMap((c) => c.cards);
     expect(cards.some((c) => c.title === 'makeUser')).toBe(false);
-    expect(cards.every((c) => c.job === 'Method' || c.job === 'Type')).toBe(true);
-    expect(cards.every((c) => !/Symbol · Symbol/.test(c.subtitle))).toBe(true);
+    expect(cards.every((c) => !c.classified)).toBe(true);
     expect(slice.columns.every((c) => c.id === 'unclassified' || c.cards.length === 0)).toBe(true);
-    expect(slice.emptyHint).toMatch(/catching up/);
+    expect(slice.emptyHint).toMatch(/module not installed/);
   });
 
-  it('does not hint catching up when architecture is off', () => {
+  it('does not hint at install when architecture is explicitly off', () => {
     const slice = projectSlice(monorepoGraph(), null, { packageId: 'pkg-api', architecture: false });
     expect(slice.emptyHint).toBeNull();
   });
 
-  it('uses layered columns when the sidecar says so', () => {
-    const slice = projectSlice(
-      monorepoGraph(),
-      sidecarWith([
-        {
-          node_id: 'CreateUser',
-          file_path: 'packages/api/src/UsersController.ts',
-          name: 'CreateUser',
-          qualified_name: 'UsersController.CreateUser',
-          symbol_kind: 'method',
-          role: { primary: 'controller', alternatives: [], confidence: 0.9, band: 'high' },
-          purposes: [{ purpose: 'respond', confidence: 0.9 }],
-          intent: { text: 'creates a user', verbs: ['create'], objects: ['user'] },
-          evidence: [],
-        },
-        {
-          node_id: 'UserService',
-          file_path: 'packages/api/src/UserService.ts',
-          name: 'Create',
-          qualified_name: 'UserService.Create',
-          symbol_kind: 'method',
-          role: { primary: 'application_service', alternatives: [], confidence: 0.9, band: 'high' },
-          purposes: [{ purpose: 'orchestrate', confidence: 0.9 }],
-          intent: { text: 'creates a user', verbs: ['create'], objects: ['user'] },
-          evidence: [],
-        },
-        {
-          node_id: 'SaveUser',
-          file_path: 'packages/api/src/UserRepo.ts',
-          name: 'Save',
-          qualified_name: 'UserRepo.Save',
-          symbol_kind: 'method',
-          role: { primary: 'repository', alternatives: [], confidence: 0.9, band: 'high' },
-          purposes: [{ purpose: 'persist', confidence: 0.9 }],
-          intent: { text: 'saves a user', verbs: ['save'], objects: ['user'] },
-          evidence: [],
-        },
-      ]),
-      { packageId: 'pkg-api' },
-    );
-    expect(slice.policy).toBe('layered-v1');
-    expect(slice.columns.map((c) => c.title)).toEqual(['UI / Endpoint', 'Application', 'Persistence / IO']);
-    expect(slice.columns[0]?.cards.some((c) => c.symbolId === 'CreateUser')).toBe(true);
-    expect(slice.columns[0]?.cards[0]?.job).toBe('HTTP handler');
-    expect(slice.columns[1]?.cards.some((c) => c.symbolId === 'UserService')).toBe(true);
-    expect(slice.columns[2]?.cards.some((c) => c.symbolId === 'SaveUser')).toBe(true);
-    expect(slice.columns.some((c) => c.title === 'Types / IO')).toBe(false);
-  });
-
-  it('puts UI roles in UI / Endpoint and lifts call edges onto the card', () => {
-    const graph = monorepoGraph();
-    const slice = projectSlice(
-      graph,
-      sidecarWith([
-        {
-          node_id: 'HomePage',
-          file_path: 'packages/web/src/HomePage.tsx',
-          name: 'HomePage',
-          qualified_name: 'HomePage',
-          symbol_kind: 'component',
-          role: { primary: 'user_interface', alternatives: [], confidence: 0.9, band: 'high' },
-          purposes: [{ purpose: 'render', confidence: 0.9 }],
-          intent: { text: 'renders the product listing', verbs: ['render'], objects: ['listing'] },
-          evidence: [],
-        },
-      ]),
-      { packageId: 'pkg-web' },
-    );
+  it('puts route/component nodes in the ui lane', () => {
+    const slice = projectSlice(monorepoGraph(), null, { packageId: 'pkg-web' });
     expect(slice.columns[0]?.id).toBe('ui');
-    const home = slice.columns[0]?.cards.find((c) => c.title === 'HomePage');
-    expect(home?.job).toBe('Interface');
-    expect(home?.subtitle).toMatch(/Draws the UI/);
-    expect(home?.intent).toMatch(/product listing/);
-    expect(home?.calls?.some((c) => c.name.includes('CreateUser'))).toBe(true);
-    expect(slice.columns.some((c) => c.id === 'app' && c.cards.length > 0)).toBe(false);
-  });
-
-  it('names adapters and helpers instead of Unclassified', () => {
-    const slice = projectSlice(
-      monorepoGraph(),
-      sidecarWith(
-        [
-          {
-            node_id: 'CreateUser',
-            file_path: 'packages/api/src/UsersController.ts',
-            name: 'CreateUser',
-            qualified_name: 'UsersController.CreateUser',
-            symbol_kind: 'method',
-            role: { primary: 'controller', alternatives: [], confidence: 0.9, band: 'high' },
-            purposes: [{ purpose: 'respond', confidence: 0.9 }],
-            intent: { text: 'creates a user', verbs: ['create'], objects: ['user'] },
-            evidence: [],
-          },
-          {
-            node_id: 'SaveUser',
-            file_path: 'packages/api/src/UserRepo.ts',
-            name: 'Save',
-            qualified_name: 'UserRepo.Save',
-            symbol_kind: 'method',
-            role: { primary: 'adapter', alternatives: [], confidence: 0.8, band: 'high' },
-            purposes: [{ purpose: 'persist', confidence: 0.8 }],
-            intent: { text: 'saves a user', verbs: ['save'], objects: ['user'] },
-            evidence: [],
-          },
-          {
-            node_id: 'UserService',
-            file_path: 'packages/api/src/UserService.ts',
-            name: 'Create',
-            qualified_name: 'UserService.Create',
-            symbol_kind: 'method',
-            role: { primary: 'utility', alternatives: [], confidence: 0.6, band: 'medium' },
-            purposes: [],
-            intent: { text: '', verbs: [], objects: [] },
-            evidence: [],
-          },
-        ],
-        'hexagonal-v1',
-      ),
-      { packageId: 'pkg-api' },
-    );
-    const jobs = slice.columns.flatMap((c) => c.cards.map((card) => card.job));
-    expect(jobs).toContain('HTTP handler');
-    expect(jobs).toContain('Adapter');
-    expect(jobs).toContain('Helper');
-    expect(jobs.filter((j) => j === 'Unclassified')).toHaveLength(0);
-  });
-
-  it('still paints jobs when the classify file is from the previous corpus', () => {
-    const sidecar = sidecarWith(
-      [
-        {
-          node_id: 'CreateUser',
-          file_path: 'packages/api/src/UsersController.ts',
-          name: 'CreateUser',
-          qualified_name: 'UsersController.CreateUser',
-          symbol_kind: 'method',
-          role: { primary: 'controller', alternatives: [], confidence: 0.9, band: 'high' },
-          purposes: [{ purpose: 'respond', confidence: 0.9 }],
-          intent: { text: 'creates a user', verbs: ['create'], objects: ['user'] },
-          evidence: [],
-        },
-      ],
-      'layered-v1',
-    );
-    sidecar.corpus_hash = 'from-the-last-rebuild';
-    const slice = projectSlice(monorepoGraph(), sidecar, { packageId: 'pkg-api' });
-    expect(slice.policy).toBe('layered-v1');
-    expect(slice.columns[0]?.cards.some((c) => c.job === 'HTTP handler')).toBe(true);
+    expect(slice.columns[0]?.cards.some((c) => c.title === 'HomePage')).toBe(true);
   });
 
   it('keeps a focused symbol when capping', () => {
@@ -246,13 +78,6 @@ describe('project slice', () => {
     expect(slice.focusCardId).toBeTruthy();
     const painted = slice.columns.flatMap((c) => c.cards);
     expect(painted.some((c) => c.symbolId === 'SaveUser' || c.id === slice.focusCardId)).toBe(true);
-  });
-
-  it('folds DTOs and never titles a card constructor', () => {
-    const slice = projectSlice(monorepoGraph(), null, { packageId: 'pkg-api' });
-    const titles = slice.columns.flatMap((c) => c.cards.map((card) => card.title));
-    expect(titles).not.toContain('UserDto');
-    expect(titles).not.toContain('constructor');
   });
 
   it('expand raises the per-lane cap so +N more can open the rest', () => {
@@ -265,9 +90,9 @@ describe('project slice', () => {
   });
 
   it('does not paint tests unless asked', () => {
-    const hidden = projectSlice(monorepoGraph(), emptySidecar('arch-test'), { packageId: 'pkg-api' });
+    const hidden = projectSlice(monorepoGraph(), null, { packageId: 'pkg-api' });
     expect(hidden.columns.flatMap((c) => c.cards).some((c) => c.title === 'makeUser')).toBe(false);
-    const shown = projectSlice(monorepoGraph(), emptySidecar('arch-test'), { packageId: 'pkg-api', tests: true });
+    const shown = projectSlice(monorepoGraph(), null, { packageId: 'pkg-api', tests: true });
     expect(shown.columns.flatMap((c) => c.cards).some((c) => c.symbolId === 'helperTest' || c.title === 'makeUser')).toBe(
       true,
     );

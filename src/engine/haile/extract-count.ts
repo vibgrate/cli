@@ -11,6 +11,8 @@ export const H3_CALLABLE_KINDS = new Set([
   'test',
   'component',
   'job',
+  'class',
+  'interface',
 ]);
 
 export interface GraphNodeLite {

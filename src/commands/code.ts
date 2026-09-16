@@ -502,6 +502,9 @@ export function registerCode(program: Command): void {
           mockReply,
           codeMode: codeModeActive,
           preferEmbedded: codeModeActive || undefined,
+          // Explicit Relay: fail closed on transport error. Auto-route with a
+          // token still attaches local fallbacks unless the caller set this.
+          noFallback: provider === 'vibgrate-relay',
         },
         {},
       );

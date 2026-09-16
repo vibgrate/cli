@@ -99,3 +99,20 @@ export function fixtureGraph(): VgGraph {
     facts,
   };
 }
+
+/** fixtureGraph plus extra file nodes (for path-resolution tests). */
+export function fixtureGraphWithFiles(files: string[]): VgGraph {
+  const g = fixtureGraph();
+  const proto = g.nodes.find((n) => n.kind === 'file');
+  if (!proto) return g;
+  const extra = files
+    .filter((f) => !g.nodes.some((n) => n.kind === 'file' && n.file === f))
+    .map((file, i) => ({
+      ...proto,
+      id: `fx-${i}-${file}`,
+      name: file.split('/').pop() ?? file,
+      qualifiedName: file,
+      file,
+    }));
+  return extra.length ? { ...g, nodes: [...g.nodes, ...extra] } : g;
+}

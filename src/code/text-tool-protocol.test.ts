@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { parseTextToolCalls, textToolProtocolInstruction, withToolCallFallback } from './text-tool-protocol.js';
+import {
+  looksLikeBrokenJsonDump,
+  looksLikeToolCallDump,
+  normalizeToolName,
+  parseTextToolCalls,
+  textToolProtocolInstruction,
+  withToolCallFallback,
+} from './text-tool-protocol.js';
 import type { ChatMessage, ChatOptions, Provider, ProviderResult, ToolSpec } from './types.js';
 
 const TOOLS: ToolSpec[] = [
@@ -54,6 +61,67 @@ describe('parseTextToolCalls', () => {
   it('accepts parameters/input as argument aliases', () => {
     const { calls } = parseTextToolCalls('<tool_call>{"name":"read_file","parameters":{"file":"a.ts"}}</tool_call>');
     expect(calls[0].arguments).toEqual({ file: 'a.ts' });
+  });
+
+  it('maps a spaced tool name onto the advertised tool', () => {
+    const { calls } = parseTextToolCalls('{"name":"read file","arguments":{"path":"src/greet.ts"}}');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].name).toBe('read_file');
+    expect(calls[0].arguments).toEqual({ path: 'src/greet.ts' });
+  });
+
+  it('maps apply patch (Review/Spark space form) onto apply_patch', () => {
+    expect(normalizeToolName('apply patch')).toBe('apply_patch');
+    expect(normalizeToolName('apply\tpatch')).toBe('apply_patch');
+    const { calls } = parseTextToolCalls('{"name":"apply patch","arguments":{"patch":{"operations":[]}}}');
+    expect(calls[0]?.name).toBe('apply_patch');
+  });
+
+  it('collapses underscore runs onto the canonical tool name', () => {
+    // Live Flow (2026-09-16): invented `read__file` / `read___file` / `edit__file`
+    // and then spun on unknown-tool. Collapse `_` runs after space/hyphen map.
+    expect(normalizeToolName('read__file')).toBe('read_file');
+    expect(normalizeToolName('read___file')).toBe('read_file');
+    expect(normalizeToolName('edit__file')).toBe('edit_file');
+    expect(normalizeToolName('read__file', TOOLS)).toBe('read_file');
+    const { calls } = parseTextToolCalls('{"name":"read__file","arguments":{"path":"src/gREET.ts"}}', TOOLS);
+    expect(calls[0]?.name).toBe('read_file');
+  });
+
+  it('maps a case-folded spaced name onto the offered tool list', () => {
+    const { calls } = parseTextToolCalls('{"name":"Read  File","arguments":{"path":"src/greet.ts"}}', TOOLS);
+    expect(calls[0]?.name).toBe('read_file');
+  });
+
+  it('recovers a Code Mode dump with spaced keys and a hyphenated tool name', () => {
+    const EDIT: ToolSpec[] = [
+      {
+        name: 'edit_file',
+        description: 'Edit.',
+        parameters: { type: 'object', properties: { path: { type: 'string' }, search: { type: 'string' }, replace: { type: 'string' } } },
+      },
+    ];
+    const dump = [
+      '```json',
+      '{',
+      '  " name": " edit-file",',
+      '  " arguments": {',
+      '    " path": "src/greep.ts",',
+      '    " search": "hi \\\\(\\\\w+\\\\)",',
+      '    " replace": " Hello, $1!"',
+      '  }',
+      '}',
+      '```',
+    ].join('\n');
+    const { calls, text } = parseTextToolCalls(dump, EDIT);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].name).toBe('edit_file');
+    expect(calls[0].arguments).toEqual({
+      path: 'src/greep.ts',
+      search: 'hi \\(\\w+\\)',
+      replace: ' Hello, $1!',
+    });
+    expect(text).toBe('');
   });
 
   it('leaves ordinary prose and non-call JSON alone', () => {
@@ -163,6 +231,21 @@ describe('withToolCallFallback', () => {
     expect(p.seen[0].messages).toBe(base);
   });
 
+  it('rewrites a native spaced tool name before the caller sees it', async () => {
+    const APPLY: ToolSpec[] = [
+      ...TOOLS,
+      { name: 'apply_patch', description: 'Apply a patch.', parameters: { type: 'object', properties: { patch: { type: 'object' } } } },
+    ];
+    const p = fake({
+      text: '',
+      model: 'fake-1',
+      provider: 'fake',
+      toolCalls: [{ id: '1', name: 'apply patch', arguments: { patch: { operations: [] } } }],
+    });
+    const r = await withToolCallFallback(p).chat(base, { tools: APPLY });
+    expect(r.toolCalls?.[0].name).toBe('apply_patch');
+  });
+
   it('rescues tool markup a native provider returned as plain text', async () => {
     const p = fake({
       text: '<tool_call>{"name":"read_file","arguments":{"file":"a.ts"}}</tool_call>',
@@ -213,6 +296,37 @@ describe('withToolCallFallback', () => {
     const r = await withToolCallFallback(p).chat(base, { tools: TOOLS });
     expect(r.text).toBe('The answer is 42.');
     expect(r.toolCalls).toBeUndefined();
+  });
+});
+
+describe('looksLikeToolCallDump', () => {
+  it('flags fenced JSON and Hermes dumps, not ordinary prose', () => {
+    expect(looksLikeToolCallDump('```json\n{ " name": " edit-file", " arguments": {} }\n```')).toBe(true);
+    expect(looksLikeToolCallDump('<tool_call>{"name":"finish","arguments":{}}</tool_call>')).toBe(true);
+    expect(looksLikeToolCallDump('{"name":"edit_file","arguments":{"path":"a.ts"}}')).toBe(true);
+    expect(looksLikeToolCallDump('Here is the answer: use `read_file` on a.ts.')).toBe(false);
+    expect(looksLikeToolCallDump('```json\n{"foo": 1}\n```')).toBe(false);
+  });
+
+  it('flags a bare {name} dump with spaces, even without arguments', () => {
+    expect(looksLikeToolCallDump('{"name":"inspect task"}')).toBe(true);
+    expect(looksLikeToolCallDump('{"name":"read file"}')).toBe(true);
+  });
+
+  it('flags prose mixed with a truncated / unquoted JSON dump', () => {
+    expect(looksLikeBrokenJsonDump('Sorry, I cannot use that tool. Let me try:\n{name: read_file, path: src/gREET.ts')).toBe(
+      true,
+    );
+    expect(looksLikeBrokenJsonDump('I apologize — here is the call\n{ "name": "read_file"')).toBe(true);
+    expect(looksLikeBrokenJsonDump('The timeout is in src/scan.ts.')).toBe(false);
+    expect(looksLikeBrokenJsonDump('{"name":"read_file","arguments":{"path":"a.ts"}}')).toBe(false);
+  });
+
+  it('flags a PatchIR / REPLACED op dump, not ordinary JSON', () => {
+    expect(looksLikeToolCallDump('{"id":"gREET.ts","op":"REPLACED","replacement":"Hi \\\\1!"}')).toBe(true);
+    expect(looksLikeToolCallDump('{"op":"create-file","file":"a.ts","content":"x"}')).toBe(true);
+    expect(looksLikeToolCallDump('{"op":"REPLACE","path":"src/greet.ts","search":"a","replace":"b"}')).toBe(true);
+    expect(looksLikeToolCallDump('```json\n{"foo": 1}\n```')).toBe(false);
   });
 });
 

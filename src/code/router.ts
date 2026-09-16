@@ -63,6 +63,14 @@ export interface RouteOptions {
   codeMode?: boolean;
   /** A scripted reply → force the deterministic MockProvider (tests/`--mock`). */
   mockReply?: string;
+  /**
+   * Fail-closed: return only the primary backend, never a local fallback chain.
+   * Use when the caller asked for Vibgrate Relay (hosted Review, `vg code
+   * --provider vibgrate-relay`). Auto-route on `VIBGRATE_RELAY_TOKEN` still
+   * attaches local fallbacks unless this is set — a silent `fellBack` there
+   * can look like the hosted model gave up.
+   */
+  noFallback?: boolean;
 }
 
 export interface RouteDeps {
@@ -130,12 +138,21 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
     if (opts.codeMode) {
       return finish([provider], `Code Mode → explicit --provider ${opts.provider} (no auto-fallback)`);
     }
-    // Custom path: only fall through to other *local* adapters when --local, never LM Studio unless chosen.
+    // Explicit hosted Relay is fail-closed: a transport error must surface,
+    // not a silent local answer. `--local` does not reopen the chain — pick
+    // an on-device `--provider` if that is what you want. `noFallback` is the
+    // same pin for auto-route / injected lists.
+    const failClosed = opts.noFallback === true || opts.provider === 'vibgrate-relay';
     const fallbacks =
-      opts.local || provider.local
+      !failClosed && (opts.local || provider.local)
         ? localFallbacks(opts, env, discover, provider.id, { allowLmStudio: opts.provider === 'lmstudio' })
         : [];
-    return finish([provider, ...fallbacks], `explicit --provider ${opts.provider}`);
+    return finish(
+      [provider, ...fallbacks],
+      failClosed
+        ? `explicit --provider ${opts.provider} (fail-closed, no local fallback)`
+        : `explicit --provider ${opts.provider}`,
+    );
   }
 
   // --local: on-device only, in preference order (embedded → ollama; no surprise LM Studio).
@@ -157,9 +174,14 @@ export function resolveProviders(opts: RouteOptions, deps: RouteDeps = {}): Rout
   if (env.VIBGRATE_RELAY_TOKEN) {
     const model = resolveHostedModel(opts, env, 'vibgrate-relay');
     const primary = buildHosted('vibgrate-relay', model, env);
+    const fallbacks = opts.noFallback
+      ? []
+      : localFallbacks(opts, env, discover, 'vibgrate-relay', { allowLmStudio: false });
     return finish(
-      [primary, ...localFallbacks(opts, env, discover, 'vibgrate-relay', { allowLmStudio: false })],
-      'VIBGRATE_RELAY_TOKEN is set → Vibgrate Relay (with local fallback)',
+      [primary, ...fallbacks],
+      opts.noFallback
+        ? 'VIBGRATE_RELAY_TOKEN is set → Vibgrate Relay (fail-closed, no local fallback)'
+        : 'VIBGRATE_RELAY_TOKEN is set → Vibgrate Relay (with local fallback)',
     );
   }
   // 2) Another configured hosted router key.
@@ -348,4 +370,21 @@ function safeDiscover(discover: () => LocalModel[]): LocalModel[] {
 
 function basename(p: string): string {
   return p.replace(/\\/g, '/').split('/').pop() ?? p;
+}
+
+/**
+ * Keep only the primary routed backend. Hosted Review and an explicit Relay
+ * session use this so a transport failure cannot fail-open to a local model.
+ */
+export function pinPrimaryProvider(providers: Provider[]): Provider[] {
+  return providers[0] ? [providers[0]] : [];
+}
+
+/**
+ * True when `runAgent` / `runCodeSession` answered via a fallback backend.
+ * Hosted and Review callers must treat this as failure — the user asked for
+ * Relay; a local answer looks like the hosted model gave up.
+ */
+export function hostedFallbackIsFailure(provider: { fellBack: boolean }): boolean {
+  return provider.fellBack === true;
 }

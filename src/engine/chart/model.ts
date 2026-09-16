@@ -104,7 +104,7 @@ export function viewNode(node: GraphNode, graph: VgGraph, sidecar: HaileSidecar 
   const findings = visibleFindings(symbol);
   const gap = extractGap(symbol);
   const classified = Boolean(symbol);
-  const job = classified ? roleLabel(symbol!.role.primary) : kindLabel(node.kind);
+  const job = classified ? roleLabel(symbol!.role.primary, purposes[0]?.slug) : kindLabel(node.kind);
   const lane = classified
     ? (LANE_FOR_ROLE[symbol!.role.primary] ?? laneForKind(node.kind))
     : laneForKind(node.kind);

@@ -118,8 +118,31 @@ export const KIND_COLOR: Record<string, string> = {
 export const PURPOSE_CONFIDENCE_FLOOR = 0.6;
 export const PURPOSE_CHIP_CAP = 3;
 
-export function roleLabel(role: string | undefined): string {
+/**
+ * `cross_cutting` spans authentication, validation, and logging alike —
+ * labeling all of it "Login check" reads as wrong whenever the actual
+ * behavior isn't login-related. Refine by the symbol's own strongest
+ * purpose when one is known.
+ */
+export function roleLabel(role: string | undefined, strongestPurpose?: string): string {
   if (!role) return 'Unclassified';
+  if (role === 'cross_cutting') {
+    switch (strongestPurpose) {
+      case 'authenticate':
+      case 'authorise':
+      case 'authorize':
+        return 'Login check';
+      case 'validate':
+        return 'Validation';
+      case 'log':
+        return 'Logging';
+      case 'encrypt':
+      case 'decrypt':
+        return 'Encryption';
+      default:
+        return 'Cross-cutting';
+    }
+  }
   return ROLE_LABEL[role] ?? titleize(role);
 }
 
