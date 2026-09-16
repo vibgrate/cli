@@ -37,7 +37,7 @@ describe('offline scan network boundary', () => {
       [
         'terraform {',
         '  required_providers {',
-        '    random = { source: "hashicorp/random", version: ">= 3.0" }',
+        '    random = { source = "hashicorp/random", version = ">= 3.0" }',
         '  }',
         '}',
       ].join('\n'),
