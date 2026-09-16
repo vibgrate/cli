@@ -151,17 +151,49 @@ jobs:
 
       - name: Log in to GHCR
         if: github.event_name != 'workflow_dispatch' || inputs.dry-run == false
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # oras uses its own (docker-style) credential store, separate from
+          # helm's — needed so the push step can verify via `oras resolve`
+          # against a package that may still be private.
+          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Push to OCI registry
         id: push
         if: github.event_name != 'workflow_dispatch' || inputs.dry-run == false
         run: |
-          set -euo pipefail
-          helm push "vibgrate-${{ steps.chart.outputs.version }}.tgz" "${OCI_REPO}" 2> push.log
-          cat push.log
-          digest=$(grep -oE 'sha256:[0-9a-f]{64}' push.log | head -1)
-          if [ -z "${digest}" ]; then echo "::error::could not determine pushed digest"; exit 1; fi
+          set -uo pipefail
+          ref="${CHART_REF}:${{ steps.chart.outputs.version }}"
+          attempts=5
+          digest=""
+          for i in $(seq 1 "${attempts}"); do
+            if helm push "vibgrate-${{ steps.chart.outputs.version }}.tgz" "${OCI_REPO}" 2> push.log; then
+              push_ok=true
+            else
+              push_ok=false
+            fi
+            cat push.log
+            # GHCR/helm push can report a transient error on the final manifest
+            # step even though the chart already landed — verify against the
+            # registry itself rather than trusting helm's exit code alone.
+            digest="$(oras resolve "${ref}" 2>/dev/null || true)"
+            if [ -n "${digest}" ]; then
+              if [ "${push_ok}" = "false" ]; then
+                echo "::warning::helm push reported an error but ${ref} is present in the registry (verified via oras resolve) — treating as success."
+              fi
+              break
+            fi
+            if [ "${i}" -lt "${attempts}" ]; then
+              delay=$((5 * i))
+              echo "::warning::helm push attempt ${i}/${attempts} did not land — retrying in ${delay}s."
+              sleep "${delay}"
+            fi
+          done
+          if [ -z "${digest}" ]; then
+            echo "::error::helm push did not succeed after ${attempts} attempts"
+            exit 1
+          fi
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Make GHCR chart package public

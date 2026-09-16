@@ -48,13 +48,14 @@ concurrency:
 
 permissions:
   contents: write # commit refreshed stamps back to main when they change
+  actions: read # poll this commit's Release run status on the push trigger
 
 jobs:
   publish:
     name: Stamp and publish tap + bucket
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -63,6 +64,39 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
+
+      # The `push` trigger above (for packaging/** or stamp-script edits) fires
+      # on the SAME push event as release.yml's own `push: branches: [main]`
+      # trigger — there is no `needs:`/ordering between the two workflows, so
+      # a sync commit that both bumps package.json's version AND touches
+      # packaging/** can start this job before (or while) the Release job is
+      # still building/publishing. Only the workflow_run trigger is naturally
+      # ordered after a publish; for the push path, explicitly wait for this
+      # commit's Release run to finish so we don't race it.
+      - name: Wait for this commit's Release run (npm publish)
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="${{ github.sha }}"
+          for i in $(seq 1 80); do
+            status="$(gh run list --repo "${{ github.repository }}" --workflow=release.yml --commit "${sha}" --json status --jq '.[0].status // "none"' 2>/dev/null || echo "none")"
+            case "${status}" in
+              completed)
+                echo "Release run for ${sha} completed — continuing."
+                exit 0
+                ;;
+              none)
+                echo "No Release run found yet for ${sha} (attempt ${i}/80)."
+                ;;
+              *)
+                echo "Release run for ${sha} is ${status} (attempt ${i}/80)."
+                ;;
+            esac
+            sleep 15
+          done
+          echo "::warning::Gave up waiting for the Release run on ${sha} after 20 minutes — proceeding anyway; the tarball download retry below is the fallback."
 
       - name: Stamp formula and manifest
         id: stamp

@@ -59,7 +59,15 @@ export function stampScoop(template, { version, sha256, tarballUrl }) {
   return out;
 }
 
-export async function sha256OfUrl(url, { retries = 4, fetchImpl = fetch } = {}) {
+// npm registry propagation after `npm publish` is eventually consistent — the
+// tarball can 404 for a couple of minutes even after the Release workflow's
+// publish step reports success. Retry generously (default ~4.5 minutes of
+// total backoff) before giving up, so a normal propagation lag doesn't fail
+// the packaging job.
+export async function sha256OfUrl(
+  url,
+  { retries = 8, fetchImpl = fetch, baseDelayMs = 5000, maxDelayMs = 60_000 } = {},
+) {
   let lastErr;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     try {
@@ -82,7 +90,9 @@ export async function sha256OfUrl(url, { retries = 4, fetchImpl = fetch } = {}) 
     } catch (err) {
       lastErr = err;
       if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+        const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
+        console.warn(`stamp-packaging: ${err instanceof Error ? err.message : err} (attempt ${attempt}/${retries}, retrying in ${delay}ms)`);
+        await new Promise((r) => setTimeout(r, delay));
       }
     }
   }
