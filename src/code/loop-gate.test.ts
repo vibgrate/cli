@@ -405,6 +405,41 @@ describe('loop-gate gold — Code Mode tool channel', () => {
     expect(fsImpl.files['src/greet.ts']).toContain('Hello, ${name}!');
   });
 
+  it('a PatchIR dump after a successful edit finishes and keeps the write', async () => {
+    // Live Spark (2026-09-16, #2692): edit_file landed, next turn dumped
+    // {op:REPLACED} / PatchIR, the loop kept generating dumps until timeout,
+    // and overlay never flushed so disk still had `hi`. Stop as finished.
+    const greet = 'export function greet(name: string) { return `hi ${name}`; }\n';
+    const provider = new ScriptedProvider('spark-pack', [
+      {
+        toolCalls: [
+          tc(
+            'edit_file',
+            { path: 'src/greet.ts', search: 'return `hi ${name}`;', replace: 'return `Hello, ${name}!`;' },
+            'e1',
+          ),
+        ],
+      },
+      { text: '{"schemaVersion":"patch-ir/0","operations":[{"op":"REPLACED","file":"src/greet.ts","replacement":"Hello"}]}' },
+    ]);
+    const fsImpl = memFs({ 'src/greet.ts': greet });
+    const result = await runAgent({
+      graph: fixtureGraphWithFiles(['src/greet.ts']),
+      root: '/repo',
+      instruction: 'edit src/greet.ts so greet returns Hello, <name>!',
+      providers: [withToolCallFallback(provider)],
+      fsImpl,
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      overlay: true,
+      noAudit: true,
+    });
+    expect(result.stopped).toBe('finished');
+    expect(result.changes.length).toBeGreaterThan(0);
+    expect(fsImpl.files['src/greet.ts']).toContain('Hello, ${name}!');
+    expect(result.finalText).not.toMatch(/schemaVersion|"op"\s*:\s*"REPLACED"/);
+  });
+
   it('a REPLACED op dump after a failed edit is not a successful finish', async () => {
     // Live Spark coding smoke (2026-09-16, this PR): edit_file missed
     // src/gREET.ts (SEARCH regex, wrong path) → not-found; next reply was

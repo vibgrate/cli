@@ -14,6 +14,7 @@ import type { CodeFs } from '../code/session.js';
 import type { Provider, ToolCall } from '../code/types.js';
 import {
   REVIEW_PROPOSE_LOOP_CAP,
+  buildReviewProposeInstruction,
   fileChangesToPatchIR,
   isDefaultBranchRef,
   parseReviewProposeModelId,
@@ -80,6 +81,28 @@ describe('parseReviewProposeModelId', () => {
     expect(parseReviewProposeModelId('relay:')).toBeNull();
     expect(parseReviewProposeModelId('gpt-4')).toBeNull();
     expect(parseReviewProposeModelId('ollama')).toBeNull();
+    expect(parseReviewProposeModelId('org/model')).toBeNull();
+  });
+});
+
+describe('buildReviewProposeInstruction', () => {
+  it('loop protocol asks for edit_file then finish and includes the cited file', () => {
+    const text = buildReviewProposeInstruction(baseInput({ loop: true }));
+    expect(text).toContain('src/scan.ts');
+    expect(text).toContain('const timeout = 0;');
+    expect(text).toContain('edit_file');
+    expect(text).toContain('finish');
+    expect(text).toContain(String(REVIEW_PROPOSE_LOOP_CAP));
+    expect(text).not.toMatch(/<<<<<<< SEARCH/);
+  });
+
+  it('one-shot protocol asks for SEARCH/REPLACE residual, not tools', () => {
+    const text = buildReviewProposeInstruction(baseInput({ loop: false }));
+    expect(text).toContain('<<<<<<< SEARCH');
+    expect(text).toContain('>>>>>>> REPLACE');
+    expect(text).toMatch(/do not call tools/i);
+    expect(text).toMatch(/do not call finish/i);
+    expect(text).toContain('const timeout = 0;');
   });
 });
 

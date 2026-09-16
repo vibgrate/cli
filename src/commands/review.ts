@@ -310,7 +310,7 @@ export function registerReview(program: Command): void {
     )
     .argument('<finding-id>', 'a finding id from the current change (e.g. arch-01)')
     .option('--base <ref>', 'review HEAD against the merge-base with <ref>')
-    .option('--model <id>', 'relay:<slug> (hosted Review) or spark|flow|forge (local Code Mode)')
+    .option('--model <id>', 'relay:<slug> (hosted Review) or spark|flow|forge (local Code Mode); a bare slug is invalid')
     .option('--loop', `use the VG Code agent loop (cap ${REVIEW_PROPOSE_LOOP_CAP}; stops on no progress)`, true)
     .option('--single', 'one-shot residual → patch → verify instead of the agent loop')
     .option('--apply', 'write the patch (still requires --yes; refused on the default branch)')

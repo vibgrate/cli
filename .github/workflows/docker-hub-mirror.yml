@@ -138,11 +138,7 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
-        uses: Wandalen/wretry.action@v3
-        with:
-          action: sigstore/cosign-installer@v3
-          attempt_limit: 3
-          attempt_delay: 15000
+        uses: sigstore/cosign-installer@v3
 
       - name: Re-sign on Docker Hub (keyless)
         env:

@@ -104,6 +104,11 @@ export interface ReviewProposeResult {
   error: string | null;
   correlationId: string;
   steps: number;
+  /**
+   * Token usage from `runAgent` when the loop ran. `null` on the one-shot path
+   * or a fail-fast stop that never called the model (absent ≠ 0).
+   */
+  usage: { promptTokens: number; completionTokens: number } | null;
 }
 
 const DEFAULT_BRANCH_NAMES = new Set(['main', 'master']);
@@ -178,6 +183,7 @@ function fail(
     finalText: '',
     error: null,
     steps: 0,
+    usage: null,
     ...partial,
   };
 }
@@ -197,9 +203,53 @@ function capturingFs(base: CodeFs, persist: boolean): CodeFs {
   };
 }
 
-function buildInstruction(input: ReviewProposeInput): string {
+const CITED_FILE_SNIPPET_CAP = 4_000;
+
+/** Current cited-file bodies so the model can edit without a discovery turn. */
+export function citedFileSnippets(input: Pick<ReviewProposeInput, 'finding' | 'fsImpl'>): string {
+  const fsImpl = input.fsImpl;
+  if (!fsImpl) return '';
+  const chunks: string[] = [];
+  for (const file of input.finding.paths) {
+    if (!file) continue;
+    const body = fsImpl.read(file);
+    if (body == null) continue;
+    const clipped = body.length > CITED_FILE_SNIPPET_CAP
+      ? `${body.slice(0, CITED_FILE_SNIPPET_CAP)}\n…`
+      : body;
+    chunks.push(`--- ${file} ---\n${clipped.trimEnd()}`);
+  }
+  return chunks.join('\n\n');
+}
+
+/**
+ * Review instruction for the shared VG Code loop / one-shot session.
+ * Path-aware: `--loop` asks for `edit_file` then `finish` inside the step cap;
+ * `--single` asks for residual SEARCH/REPLACE only (no tools).
+ */
+export function buildReviewProposeInstruction(input: ReviewProposeInput): string {
   const { finding, capsule, policySnippet } = input;
   const evidence = capsule.evidence.filter((e) => finding.evidence_ids.includes(e.id));
+  const snippets = citedFileSnippets(input);
+  const loop = input.loop !== false;
+  const protocol = loop
+    ? [
+        `You have at most ${REVIEW_PROPOSE_LOOP_CAP} steps.`,
+        'The finding already cites the file and evidence — do not search, list files, set_progress, or call graph_impact first.',
+        'Call edit_file on the cited path (SEARCH must match the current snippet). Then call finish with a short summary.',
+        'Smallest in-place edit only. Do not add files or invent an extra service.',
+      ].join(' ')
+    : [
+        'This is a one-shot residual turn: reply ONLY with edit blocks. Do not call tools and do not call finish.',
+        'Format:',
+        '<path/to/file>',
+        '<<<<<<< SEARCH',
+        '<exact current lines>',
+        '=======',
+        '<replacement lines>',
+        '>>>>>>> REPLACE',
+        'SEARCH must match the current snippet. Smallest in-place edit only. Do not add files.',
+      ].join('\n');
   return [
     'Propose a minimal patch for this Review finding. Do not decide whether the change merges.',
     'Do not claim the result is approved, certified, or vulnerability-free.',
@@ -212,8 +262,9 @@ function buildInstruction(input: ReviewProposeInput): string {
     evidence.length
       ? `Evidence:\n${evidence.map((e) => `- ${e.id} (${e.kind}${e.path ? ` ${e.path}` : ''})${e.note ? `: ${e.note}` : ''}`).join('\n')}`
       : 'Evidence: (none cited)',
-    'Use tools to inspect and edit. When the patch is ready, call finish with a short summary.',
-  ].join('\n');
+    snippets ? `Cited file contents:\n${snippets}` : '',
+    protocol,
+  ].filter((line) => line !== '').join('\n');
 }
 
 /**
@@ -319,7 +370,8 @@ export async function proposeFindingFix(input: ReviewProposeInput): Promise<Revi
     return cp;
   };
 
-  const instruction = buildInstruction(input);
+  const instruction = buildReviewProposeInstruction({ ...input, fsImpl: baseFs });
+  const citedFiles = input.finding.paths.filter(Boolean);
 
   // One-shot residual → patch → verify: the existing governance session.
   // `--loop` (default) reuses runAgent — never a second Review-specific loop.
@@ -332,6 +384,7 @@ export async function proposeFindingFix(input: ReviewProposeInput): Promise<Revi
       apply: persist,
       consent: persist,
       fsImpl,
+      files: citedFiles.length ? citedFiles : undefined,
       capsule: true,
       noAudit: !persist,
       correlationId,
@@ -367,6 +420,7 @@ export async function proposeFindingFix(input: ReviewProposeInput): Promise<Revi
       toolTrace,
       lastCheckpoint,
       steps: 1,
+      usage: null,
       verifyFailed: persist && !session.verification.ok,
     });
   }
@@ -377,6 +431,7 @@ export async function proposeFindingFix(input: ReviewProposeInput): Promise<Revi
     instruction,
     providers,
     fsImpl,
+    files: citedFiles.length ? citedFiles : undefined,
     run: input.run ?? (() => ({ stdout: '', exitCode: 0 })),
     approve: async () => true,
     maxSteps: REVIEW_PROPOSE_LOOP_CAP,
@@ -418,6 +473,7 @@ export async function proposeFindingFix(input: ReviewProposeInput): Promise<Revi
     toolTrace,
     lastCheckpoint,
     steps: agent.steps,
+    usage: agent.usage,
   });
 }
 
@@ -436,6 +492,7 @@ function finalizePropose(args: {
   toolTrace: ReviewProposeToolEvent[];
   lastCheckpoint: Checkpoint | null;
   steps: number;
+  usage?: { promptTokens: number; completionTokens: number } | null;
   verifyFailed?: boolean;
 }): ReviewProposeResult {
   const { correlationId, provider, toolTrace, lastCheckpoint } = args;
@@ -448,6 +505,7 @@ function finalizePropose(args: {
       finalText: args.finalText,
       toolTrace,
       steps: args.steps,
+      usage: args.usage ?? null,
       error: `Review refused a fallback backend (${provider.id}/${provider.model}) — hosted Review stays on Relay; local Review stays on the requested Code Mode`,
     });
   }
@@ -514,5 +572,6 @@ function finalizePropose(args: {
     error,
     correlationId,
     steps: args.steps,
+    usage: args.usage ?? null,
   };
 }
