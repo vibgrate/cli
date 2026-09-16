@@ -441,6 +441,64 @@ describe('mutating tools (gated)', () => {
     expect(clobber.content).toContain('already exists');
   });
 
+  it('edit_file allows defining requireVerified in the same replace', async () => {
+    const { buildIdentifierTrieFromGraph } = await import('../runtime/identifier-trie.js');
+    const c = ctx({ graph: fixtureGraphWithFiles(['src/auth.ts']) });
+    c.files['src/auth.ts'] = 'export function login(user: { verified: boolean }) {\n  return user;\n}\n';
+    c.identifierTrie = buildIdentifierTrieFromGraph({
+      nodes: [
+        ...c.graph.nodes.map((n) => ({ name: n.name, qualifiedName: n.qualifiedName, id: n.id })),
+        { name: 'login', qualifiedName: 'login' },
+      ],
+    });
+    c.enforceIdentifiers = true;
+    const r = await executeTool(
+      call('edit_file', {
+        path: 'src/auth.ts',
+        search: 'export function login(user: { verified: boolean }) {\n  return user;\n}',
+        replace: [
+          'export function requireVerified(user: { verified: boolean }) {',
+          '  if (!user.verified) throw new Error("unverified");',
+          '  return user;',
+          '}',
+          '',
+          'export function login(user: { verified: boolean }) {',
+          '  return requireVerified(user);',
+          '}',
+        ].join('\n'),
+      }),
+      c,
+    );
+    expect(r.content).not.toMatch(/blocked:.*requireVerified/);
+    expect(r.mutated).toBe(true);
+    expect(c.files['src/auth.ts']).toContain('export function requireVerified');
+    expect(c.files['src/auth.ts']).toContain('return requireVerified(user)');
+  });
+
+  it('edit_file still blocks a call to a missing external symbol', async () => {
+    const { buildIdentifierTrieFromGraph } = await import('../runtime/identifier-trie.js');
+    const c = ctx({ graph: fixtureGraphWithFiles(['src/auth.ts']) });
+    c.files['src/auth.ts'] = 'export function login(user: { verified: boolean }) {\n  return user;\n}\n';
+    c.identifierTrie = buildIdentifierTrieFromGraph({
+      nodes: [
+        ...c.graph.nodes.map((n) => ({ name: n.name, qualifiedName: n.qualifiedName, id: n.id })),
+        { name: 'login', qualifiedName: 'login' },
+      ],
+    });
+    c.enforceIdentifiers = true;
+    const r = await executeTool(
+      call('edit_file', {
+        path: 'src/auth.ts',
+        search: 'return user;',
+        replace: 'return inventGhostSymbol(user);',
+      }),
+      c,
+    );
+    expect(r.mutated).toBe(false);
+    expect(r.content).toMatch(/blocked:.*inventGhostSymbol/);
+    expect(c.files['src/auth.ts']).toContain('return user;');
+  });
+
   it('apply_patch blocks invented identifiers when trie is set', async () => {
     const { buildIdentifierTrieFromGraph } = await import('../runtime/identifier-trie.js');
     const c = ctx();

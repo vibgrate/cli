@@ -10,12 +10,19 @@ import {
   npmTarballUrl,
   stampFormula,
   stampScoop,
+  renderStamped,
+  versionFromStampedFormula,
+  sha256FromStampedFormula,
 } from '../scripts/stamp-packaging.mjs';
 import { visibilityUrl, packageSettingsUrl, setPackagePublic } from '../scripts/ghcr-set-visibility.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const VERSION = '2026.914.1';
-const SHA = '21c164080d1ba33dc53d604a8754ffa0079daa9c8b771a9053c224a2c43877bf';
+// Fixture pin for the pure stamp helpers — not the live tap/bucket copies.
+// Those are refreshed by the Packaging workflow after each npm publish and
+// must not be frozen here, or the next calendar bump breaks CI.
+const VERSION = '2026.1.1';
+const SHA = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const CALENDAR_VERSION = /^\d{4}\.\d{1,4}\.\d+$/;
 
 describe('npmTarballUrl', () => {
   it('points at the published @vibgrate/cli tarball', () => {
@@ -40,6 +47,13 @@ describe('stampFormula', () => {
       /VERSION or REPLACED_AT_RELEASE/,
     );
   });
+
+  it('round-trips version and sha256 through the stamped-formula parsers', () => {
+    const src = fs.readFileSync(path.join(ROOT, FORMULA_TEMPLATE), 'utf8');
+    const out = stampFormula(src, { version: VERSION, sha256: SHA });
+    expect(versionFromStampedFormula(out)).toBe(VERSION);
+    expect(sha256FromStampedFormula(out)).toBe(SHA);
+  });
 });
 
 describe('stampScoop', () => {
@@ -58,20 +72,44 @@ describe('stampScoop', () => {
   });
 });
 
+describe('stamped-formula parsers', () => {
+  it('returns empty strings when the formula is unpinned', () => {
+    expect(versionFromStampedFormula('class Vg < Formula\nend\n')).toBe('');
+    expect(sha256FromStampedFormula('  sha256 "REPLACED_AT_RELEASE"\n')).toBe('');
+  });
+});
+
 describe('live stamped packaging files', () => {
-  it('Homebrew formula is pinned to 2026.914.1 with the npm tarball sha256', () => {
-    const formula = fs.readFileSync(path.join(ROOT, FORMULA_STAMPED), 'utf8');
-    expect(formula).toContain(`cli-${VERSION}.tgz`);
-    expect(formula).toContain(`sha256 "${SHA}"`);
+  const formula = fs.readFileSync(path.join(ROOT, FORMULA_STAMPED), 'utf8');
+  const scoopText = fs.readFileSync(path.join(ROOT, SCOOP_STAMPED), 'utf8');
+  const version = versionFromStampedFormula(formula);
+  const sha256 = sha256FromStampedFormula(formula);
+
+  it('Homebrew formula pins a calendar version and a 64-hex npm tarball sha256', () => {
+    expect(version).toMatch(CALENDAR_VERSION);
+    expect(sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(formula).toContain(`cli-${version}.tgz`);
+    expect(formula).toContain(`sha256 "${sha256}"`);
     expect(formula).toContain('class Vg < Formula');
     expect(formula).not.toContain('REPLACED_AT_RELEASE');
   });
 
-  it('Scoop manifest is pinned to 2026.914.1', () => {
-    const scoop = JSON.parse(fs.readFileSync(path.join(ROOT, SCOOP_STAMPED), 'utf8'));
-    expect(scoop.version).toBe(VERSION);
+  it('Scoop manifest version matches the Homebrew formula pin', () => {
+    const scoop = JSON.parse(scoopText);
+    expect(scoop.version).toBe(version);
     expect(scoop.depends).toBe('nodejs');
     expect(scoop.installer.script[0]).toContain('@vibgrate/cli@$version');
+    expect(scoopText).not.toContain('REPLACED_AT_RELEASE');
+  });
+
+  it('stamped files match the templates rendered from their own pin', () => {
+    const rendered = renderStamped({
+      version,
+      sha256,
+      tarballUrl: npmTarballUrl(version),
+    });
+    expect(formula).toBe(rendered.formula);
+    expect(scoopText).toBe(rendered.scoop);
   });
 });
 

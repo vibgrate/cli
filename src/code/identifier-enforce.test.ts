@@ -58,6 +58,56 @@ describe('identifier-enforce', () => {
     expect(r.ok).toBe(true);
   });
 
+  it('allows a requireVerified-style helper declared in the same replace body', () => {
+    const body = [
+      'export function requireVerified(user: { verified: boolean }) {',
+      '  if (!user.verified) throw new Error("unverified");',
+      '  return user;',
+      '}',
+      'export function readConfig() { return requireVerified({ verified: true }); }',
+    ].join('\n');
+    const r = enforceIdentifiersInText(body, trie, { callablesOnly: true });
+    expect(r.ok).toBe(true);
+    expect(r.unknown).not.toContain('requireVerified');
+  });
+
+  it('allows const and class bindings declared in the same body', () => {
+    const r = enforceIdentifiersInText(
+      'export const requireVerified = (user: { verified: boolean }) => user;\nclass Gate {}\nnew Gate();\nrequireVerified({ verified: true });',
+      trie,
+      { callablesOnly: true },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it('still blocks a call to a missing external symbol', () => {
+    const r = enforceIdentifiersInText(
+      'export function requireVerified() { return inventGhostSymbol(); }',
+      trie,
+      { callablesOnly: true },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.unknown).toContain('inventGhostSymbol');
+    expect(r.unknown).not.toContain('requireVerified');
+  });
+
+  it('apply_patch allows a newly declared helper in the replacement', () => {
+    const p = patch([
+      {
+        op: 'replace-text',
+        file: 'a.ts',
+        search: 'readConfig',
+        replace:
+          'export function requireVerified() { return 1; }\nfunction readConfig() { return requireVerified(); }',
+      },
+    ]);
+    const r = enforceIdentifiersInPatch(p, trie, {
+      readFile: () => 'export function readConfig() { return 1; }\n',
+    });
+    expect(r.ok).toBe(true);
+    expect(r.unknown).not.toContain('requireVerified');
+  });
+
   it('blocks apply_patch when replacement invents symbols', () => {
     const p = patch([
       {

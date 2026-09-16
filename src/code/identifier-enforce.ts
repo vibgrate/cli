@@ -8,6 +8,12 @@
  * Allowances (so ordinary local edits are not blocked):
  * - Identifiers already present in the target file (or the search string)
  * - Tokens that only appear inside comments / string literals (code-only scan)
+ * - Bindings declared in the same replacement body (function / class / const /
+ *   export). Defining `requireVerified` and calling it in one edit is not an invent.
+ *
+ * Related skip (already shipped): regex SEARCH / `$1` substitutions and
+ * `callablesOnly` ignore TitleCase prose such as `Hello` in `Hello, $1!`.
+ * This change does not loosen that path — it only allowlists real declarations.
  */
 
 import { extractIdentifiers, scanIdentifiersAgainstTrie } from '../runtime/identifier-mask.js';
@@ -62,6 +68,24 @@ function scanCallablesAgainstTrie(text: string, trie: TrieNode) {
   return scanIdentifiersAgainstTrie(extractCallableIdentifiers(text).join(' '), trie);
 }
 
+/**
+ * Names bound in this text: `function` / `class` / `const` / `let` / `var`,
+ * including `export` / `export default` / `async` prefixes.
+ *
+ * Same-edit helpers must be allowlisted — `extractCallableIdentifiers` treats
+ * `function requireVerified` as a callable, which is how invent-check blocked
+ * the live `ts-auth-verified` add-helper edit.
+ */
+function extractDeclaredIdentifiers(text: string): string[] {
+  const out = new Set<string>();
+  const re =
+    /\b(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\s*\*?\s+|class\s+|const\s+|let\s+|var\s+)([A-Za-z_][A-Za-z0-9_]{2,})\b/g;
+  for (const m of text.matchAll(re)) {
+    if (m[1]) out.add(m[1]);
+  }
+  return [...out];
+}
+
 export function stripNonCodeSpans(text: string): string {
   return text
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
@@ -88,6 +112,7 @@ export function enforceIdentifiersInText(
     ? scanCallablesAgainstTrie(scanned, trie)
     : scanIdentifiersAgainstTrie(scanned, trie);
   const allow = new Set(options.allow ?? []);
+  for (const id of extractDeclaredIdentifiers(scanned)) allow.add(id);
   const unknown = scan.unknown.filter((id) => !allow.has(id));
   if (unknown.length === 0) return { ok: true, unknown: [] };
   return {

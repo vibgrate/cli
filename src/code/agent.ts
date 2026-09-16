@@ -1120,6 +1120,15 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       // unknown, then "Sorry…" + `{name: …`).
       const unknownThenBrokenDump =
         unknownToolFailures > 0 && successfulToolCalls === 0 && looksLikeBrokenJsonDump(fullText);
+      const isDump =
+        looksLikeToolCallDump(fullText) || looksLikeBareJsonObject(fullText) || unknownThenBrokenDump;
+      // Spark (2026-09-16): edit landed, next turn dumped PatchIR / {op:REPLACED}
+      // and the loop kept generating dumps until timeout — overlay never flushed.
+      // Work is already done; stop as finished instead of nudging.
+      if (changes.length > 0 && isDump) {
+        const files = [...new Set(changes.map((c) => c.file))];
+        return finish('finished', `Edited ${files.join(', ')}.`, step);
+      }
       // Edit ask is not a solve until a mutation actually writes
       // (Flow: edit_file not-found still counted mutationToolCalls=1 and
       // fake-finished with filesChanged=0).
@@ -1247,9 +1256,11 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         onEvent({ type: 'change', change: toolResult.change });
       }
       // After an approved mutation, refresh the session graph so subsequent
-      // search_code / graph_impact see uncommitted overlay content.
+      // search_code / graph_impact see uncommitted overlay content, then
+      // write-through so a later hang cannot lose the user's file.
       if (toolResult.mutated && !toolResult.finished) {
         await refreshSessionGraph();
+        flushOverlay();
       }
 
       // No-progress guard: a mutating call is progress (reset); a repeated

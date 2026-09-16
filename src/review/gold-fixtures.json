@@ -1,0 +1,280 @@
+[
+  {
+    "id": "happy-path-loop",
+    "family": "happy-path",
+    "title": "Agent loop produces PatchIR from edit_file + finish (dry-run)",
+    "modelId": "forge",
+    "loop": true,
+    "apply": false,
+    "consent": false,
+    "currentRef": "refs/heads/feat/fix",
+    "policySnippet": "outer layers flow one way",
+    "files": {
+      "src/scan.ts": "export function scanDir() {\n  const timeout = 0;\n  return timeout;\n}\n"
+    },
+    "finding": {
+      "id": "arch-01",
+      "kind": "boundary_bypass",
+      "severity": "high",
+      "confidence": 0.95,
+      "claim": "scanDir uses a zero timeout.",
+      "evidence_ids": ["src:scan"],
+      "target_alignment": "regression",
+      "remediation": "Change `const timeout = 0` to `const timeout = 5000` in the cited file. Do not add files or an extra service.",
+      "paths": ["src/scan.ts"],
+      "source": "scanner"
+    },
+    "capsulePolicies": [
+      { "evidence_id": "policy:1", "id": "layering", "rule": "outer layers flow one way", "source": "review.toml" }
+    ],
+    "capsuleEvidence": [
+      { "id": "src:scan", "kind": "source_span", "path": "src/scan.ts", "protected_finding": false, "note": "timeout is 0" }
+    ],
+    "script": {
+      "kind": "tool-turns",
+      "turns": [
+        {
+          "toolCalls": [
+            {
+              "id": "e1",
+              "name": "edit_file",
+              "args": { "path": "src/scan.ts", "search": "const timeout = 0;", "replace": "const timeout = 5000;" }
+            }
+          ]
+        },
+        {
+          "toolCalls": [
+            { "id": "f1", "name": "finish", "args": { "summary": "Raised the timeout." } }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "ok": true,
+      "stopReason": "finished",
+      "applied": false,
+      "hasPatch": true,
+      "proposedDiffIncludes": "const timeout = 5000",
+      "fileUnchanged": "src/scan.ts"
+    }
+  },
+  {
+    "id": "happy-path-oneshot",
+    "family": "happy-path",
+    "title": "One-shot residual → patch → verify is dry-run and returns PatchIR",
+    "modelId": "relay:hosted-coder",
+    "loop": false,
+    "apply": false,
+    "consent": false,
+    "currentRef": "refs/heads/feat/fix",
+    "policySnippet": "outer layers flow one way",
+    "files": {
+      "src/scan.ts": "const timeout = 0;\n"
+    },
+    "finding": {
+      "id": "arch-01",
+      "kind": "boundary_bypass",
+      "severity": "high",
+      "confidence": 0.95,
+      "claim": "scanDir uses a zero timeout.",
+      "evidence_ids": ["src:scan"],
+      "target_alignment": "regression",
+      "remediation": "Change `const timeout = 0` to `const timeout = 5000` in the cited file. Do not add files or an extra service.",
+      "paths": ["src/scan.ts"],
+      "source": "scanner"
+    },
+    "capsulePolicies": [
+      { "evidence_id": "policy:1", "id": "layering", "rule": "outer layers flow one way", "source": "review.toml" }
+    ],
+    "capsuleEvidence": [
+      { "id": "src:scan", "kind": "source_span", "path": "src/scan.ts", "protected_finding": false, "note": "timeout is 0" }
+    ],
+    "script": {
+      "kind": "one-shot-text",
+      "text": "src/scan.ts\n<<<<<<< SEARCH\nconst timeout = 0;\n=======\nconst timeout = 5000;\n>>>>>>> REPLACE"
+    },
+    "expected": {
+      "ok": true,
+      "stopReason": "finished",
+      "applied": false,
+      "hasPatch": true,
+      "proposedDiffIncludes": "+const timeout = 5000",
+      "fileUnchanged": "src/scan.ts"
+    }
+  },
+  {
+    "id": "plan-mode-no-patch",
+    "family": "plan-mode",
+    "title": "Plan-only finish (no mutations) remaps to no-patch, never success",
+    "modelId": "forge",
+    "loop": true,
+    "apply": false,
+    "consent": false,
+    "currentRef": "refs/heads/feat/fix",
+    "policySnippet": "outer layers flow one way",
+    "files": {
+      "src/scan.ts": "export function scanDir() {\n  const timeout = 0;\n  return timeout;\n}\n"
+    },
+    "finding": {
+      "id": "arch-01",
+      "kind": "boundary_bypass",
+      "severity": "high",
+      "confidence": 0.95,
+      "claim": "scanDir uses a zero timeout.",
+      "evidence_ids": ["src:scan"],
+      "target_alignment": "regression",
+      "remediation": "Change `const timeout = 0` to `const timeout = 5000` in the cited file. Do not add files or an extra service.",
+      "paths": ["src/scan.ts"],
+      "source": "scanner"
+    },
+    "capsulePolicies": [
+      { "evidence_id": "policy:1", "id": "layering", "rule": "outer layers flow one way", "source": "review.toml" }
+    ],
+    "capsuleEvidence": [
+      { "id": "src:scan", "kind": "source_span", "path": "src/scan.ts", "protected_finding": false, "note": "timeout is 0" }
+    ],
+    "script": {
+      "kind": "tool-turns",
+      "turns": [
+        {
+          "toolCalls": [
+            { "id": "f1", "name": "finish", "args": { "summary": "Plan: raise the timeout later." } }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "ok": false,
+      "stopReason": "no-patch",
+      "applied": false,
+      "hasPatch": false,
+      "errorMatches": "without a patch",
+      "fileUnchanged": "src/scan.ts"
+    }
+  },
+  {
+    "id": "refuse-fallback-backend",
+    "family": "refuse-backend",
+    "title": "Hosted Relay fallback to a local backend is fallback-backend, not success",
+    "modelId": "relay:hosted-coder",
+    "loop": true,
+    "apply": false,
+    "consent": false,
+    "currentRef": "refs/heads/feat/fix",
+    "policySnippet": "outer layers flow one way",
+    "files": {
+      "src/scan.ts": "export function scanDir() {\n  const timeout = 0;\n  return timeout;\n}\n"
+    },
+    "finding": {
+      "id": "arch-01",
+      "kind": "boundary_bypass",
+      "severity": "high",
+      "confidence": 0.95,
+      "claim": "scanDir uses a zero timeout.",
+      "evidence_ids": ["src:scan"],
+      "target_alignment": "regression",
+      "remediation": "Change `const timeout = 0` to `const timeout = 5000` in the cited file. Do not add files or an extra service.",
+      "paths": ["src/scan.ts"],
+      "source": "scanner"
+    },
+    "capsulePolicies": [
+      { "evidence_id": "policy:1", "id": "layering", "rule": "outer layers flow one way", "source": "review.toml" }
+    ],
+    "capsuleEvidence": [
+      { "id": "src:scan", "kind": "source_span", "path": "src/scan.ts", "protected_finding": false, "note": "timeout is 0" }
+    ],
+    "script": { "kind": "fallback-chain" },
+    "expected": {
+      "ok": false,
+      "stopReason": "fallback-backend",
+      "applied": false,
+      "hasPatch": false,
+      "errorMatches": "fallback backend",
+      "fileUnchanged": "src/scan.ts"
+    }
+  },
+  {
+    "id": "invalid-model",
+    "family": "invalid-model",
+    "title": "Unknown model id is invalid-model, never success",
+    "modelId": "mystery",
+    "loop": true,
+    "apply": false,
+    "consent": false,
+    "currentRef": "refs/heads/feat/fix",
+    "policySnippet": "outer layers flow one way",
+    "files": {
+      "src/scan.ts": "export function scanDir() {\n  const timeout = 0;\n  return timeout;\n}\n"
+    },
+    "finding": {
+      "id": "arch-01",
+      "kind": "boundary_bypass",
+      "severity": "high",
+      "confidence": 0.95,
+      "claim": "scanDir uses a zero timeout.",
+      "evidence_ids": ["src:scan"],
+      "target_alignment": "regression",
+      "remediation": "Change `const timeout = 0` to `const timeout = 5000` in the cited file. Do not add files or an extra service.",
+      "paths": ["src/scan.ts"],
+      "source": "scanner"
+    },
+    "capsulePolicies": [
+      { "evidence_id": "policy:1", "id": "layering", "rule": "outer layers flow one way", "source": "review.toml" }
+    ],
+    "capsuleEvidence": [
+      { "id": "src:scan", "kind": "source_span", "path": "src/scan.ts", "protected_finding": false, "note": "timeout is 0" }
+    ],
+    "script": { "kind": "none" },
+    "expected": {
+      "ok": false,
+      "stopReason": "invalid-model",
+      "applied": false,
+      "hasPatch": false,
+      "errorMatches": "relay:|spark|flow|forge"
+    }
+  },
+  {
+    "id": "default-branch-refuse",
+    "family": "default-branch",
+    "title": "Apply + consent on main refuses to write the default branch",
+    "modelId": "relay:hosted-coder",
+    "loop": false,
+    "apply": true,
+    "consent": true,
+    "currentRef": "refs/heads/main",
+    "policySnippet": "outer layers flow one way",
+    "files": {
+      "src/scan.ts": "const timeout = 0;\n"
+    },
+    "finding": {
+      "id": "arch-01",
+      "kind": "boundary_bypass",
+      "severity": "high",
+      "confidence": 0.95,
+      "claim": "scanDir uses a zero timeout.",
+      "evidence_ids": ["src:scan"],
+      "target_alignment": "regression",
+      "remediation": "Change `const timeout = 0` to `const timeout = 5000` in the cited file. Do not add files or an extra service.",
+      "paths": ["src/scan.ts"],
+      "source": "scanner"
+    },
+    "capsulePolicies": [
+      { "evidence_id": "policy:1", "id": "layering", "rule": "outer layers flow one way", "source": "review.toml" }
+    ],
+    "capsuleEvidence": [
+      { "id": "src:scan", "kind": "source_span", "path": "src/scan.ts", "protected_finding": false, "note": "timeout is 0" }
+    ],
+    "script": {
+      "kind": "one-shot-text",
+      "text": "src/scan.ts\n<<<<<<< SEARCH\nconst timeout = 0;\n=======\nconst timeout = 5000;\n>>>>>>> REPLACE"
+    },
+    "expected": {
+      "ok": false,
+      "stopReason": "default-branch",
+      "applied": false,
+      "hasPatch": true,
+      "errorMatches": "default branch",
+      "fileUnchanged": "src/scan.ts"
+    }
+  }
+]

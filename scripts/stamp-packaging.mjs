@@ -118,12 +118,12 @@ export function renderStamped({ version, sha256, tarballUrl }) {
   };
 }
 
-function sha256FromStampedFormula(text) {
+export function sha256FromStampedFormula(text) {
   const m = text.match(/^\s*sha256\s+"([0-9a-f]{64})"/m);
   return m?.[1] ?? '';
 }
 
-function versionFromStampedFormula(text) {
+export function versionFromStampedFormula(text) {
   const m = text.match(/@vibgrate\/cli\/-\/cli-([0-9][^"]+)\.tgz/);
   return m?.[1] ?? '';
 }
