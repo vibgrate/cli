@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { repositoryIdFromRoot, globalGraphPathForRef, globalGraphPath } from '../paths.js';
 import { detectGitRef } from '../git-ref.js';
 import { ActiveGraphCache } from '../active-graph-cache.js';
+import { resolveVgdCacheOptions } from './vgd-memory.js';
 import type { WorkspaceRecord } from './protocol.js';
 import type { VgGraph } from '../../schema.js';
 
@@ -32,6 +33,7 @@ export class WorkspaceRegistry {
   private publishListener?: (repositoryId: string, gitRef: string, graph: VgGraph) => void;
   /** Multi-branch in-memory graphs (shared across registered workspaces). */
   readonly graphs = new ActiveGraphCache({
+    ...resolveVgdCacheOptions(),
     onEvict: (slot) => this.slotListener?.onGraphEvict(slot.repositoryId, slot.gitRef),
   });
 

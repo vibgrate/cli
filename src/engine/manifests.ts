@@ -1,25 +1,44 @@
 /**
  * Deterministic package-manifest extraction.
  *
- * Pulls declared dependencies from package.json and go.mod into the code map as
- * `package` nodes + `import` edges to external packages. Complements source-level
- * imports so hubs/impact/ask can see the dependency surface without lockfile noise
- * (lockfiles stay skipped by discover).
+ * Pulls declared dependencies from package manifests (package.json, go.mod,
+ * pom.xml, .csproj/.vbproj/.sqlproj, pyproject.toml, Cargo.toml) into the
+ * code map as `package` nodes + `import` edges to external packages.
+ * Complements source-level imports so hubs/impact/ask can see the
+ * dependency surface without lockfile noise (lockfiles stay skipped by
+ * discover).
+ *
+ * This is also the sole source of real project boundaries for the
+ * architecture map (`index_packages` in the Haile kernel groups everything
+ * under one of these `package` nodes, or falls back to a much cruder
+ * per-community grouping when none exist). A repo whose manifest kind is
+ * missing here — a Maven multi-module repo before pom.xml support landed,
+ * for instance — silently loses real project structure everywhere
+ * downstream. Add new ecosystems here, not by teaching a *consumer* to
+ * paper over their absence.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
+import { XMLParser } from 'fast-xml-parser';
 import { nodeId, edgeId } from './ids.js';
 import { isSkippedDirName } from './discover.js';
+import { parseToml } from '../core-open/utils/toml.js';
 import type { GraphEdge, GraphNode } from '../schema.js';
 
 export interface ManifestExtract {
   nodes: GraphNode[];
   edges: GraphEdge[];
-  /** Number of package.json + go.mod files processed. */
+  /** Number of manifest files processed. */
   files: number;
   deps: number;
+}
+
+const xml = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+
+function asArray<T>(v: T | T[] | undefined): T[] {
+  return Array.isArray(v) ? v : v ? [v] : [];
 }
 
 const emptyNode = (
@@ -68,6 +87,14 @@ export function extractManifests(
         deps += ingestPackageJson(rel, abs, nodes, edges);
       } else if (base === 'go.mod') {
         deps += ingestGoMod(rel, abs, nodes, edges);
+      } else if (base === 'pom.xml') {
+        deps += ingestPomXml(rel, abs, nodes, edges);
+      } else if (isDotnetProjectFile(base)) {
+        deps += ingestCsproj(rel, abs, nodes, edges);
+      } else if (base === 'pyproject.toml') {
+        deps += ingestPyproject(rel, abs, nodes, edges);
+      } else if (base === 'Cargo.toml') {
+        deps += ingestCargoToml(rel, abs, nodes, edges);
       }
     } catch {
       /* unreadable / invalid — skip */
@@ -85,6 +112,44 @@ export function extractManifests(
   };
 }
 
+/**
+ * Register a `package` node plus the `file` node for its manifest and the
+ * `contains` edge between them — the boilerplate every ecosystem's ingest
+ * function needs regardless of how it parses dependencies.
+ */
+function makePackageNode(
+  nodes: Map<string, GraphNode>,
+  edges: Map<string, GraphEdge>,
+  opts: { rel: string; qualifiedName: string; displayName: string; lang: string },
+): string {
+  const localId = nodeId({ kind: 'package', qualifiedName: opts.qualifiedName, file: opts.rel });
+  nodes.set(
+    localId,
+    emptyNode({
+      id: localId,
+      kind: 'package',
+      name: opts.displayName,
+      qualifiedName: opts.qualifiedName,
+      file: opts.rel,
+      lang: opts.lang,
+    }),
+  );
+  const fileId = nodeId({ kind: 'file', qualifiedName: opts.rel, file: opts.rel });
+  nodes.set(
+    fileId,
+    emptyNode({
+      id: fileId,
+      kind: 'file',
+      name: path.posix.basename(opts.rel),
+      qualifiedName: opts.rel,
+      file: opts.rel,
+      lang: opts.lang,
+    }),
+  );
+  addEdge(edges, 'contains', fileId, localId, 1.0);
+  return localId;
+}
+
 function ingestPackageJson(
   rel: string,
   abs: string,
@@ -98,33 +163,12 @@ function ingestPackageJson(
     optionalDependencies?: Record<string, string>;
   };
   const pkgName = (raw.name && String(raw.name).trim()) || path.posix.dirname(rel) || '.';
-  const localId = nodeId({ kind: 'package', qualifiedName: pkgName, file: rel });
-  nodes.set(
-    localId,
-    emptyNode({
-      id: localId,
-      kind: 'package',
-      name: pkgName.includes('/') ? pkgName.split('/').pop()! : pkgName,
-      qualifiedName: pkgName,
-      file: rel,
-      lang: 'json',
-    }),
-  );
-
-  // Also a file node so the graph links the manifest file itself.
-  const fileId = nodeId({ kind: 'file', qualifiedName: rel, file: rel });
-  nodes.set(
-    fileId,
-    emptyNode({
-      id: fileId,
-      kind: 'file',
-      name: path.posix.basename(rel),
-      qualifiedName: rel,
-      file: rel,
-      lang: 'json',
-    }),
-  );
-  addEdge(edges, 'contains', fileId, localId, 1.0);
+  const localId = makePackageNode(nodes, edges, {
+    rel,
+    qualifiedName: pkgName,
+    displayName: pkgName.includes('/') ? pkgName.split('/').pop()! : pkgName,
+    lang: 'json',
+  });
 
   let n = 0;
   const depMaps = [raw.dependencies, raw.peerDependencies, raw.optionalDependencies];
@@ -154,31 +198,12 @@ function ingestGoMod(
   const moduleMatch = /^\s*module\s+(\S+)/m.exec(text);
   if (moduleMatch) moduleName = moduleMatch[1];
 
-  const localId = nodeId({ kind: 'package', qualifiedName: moduleName, file: rel });
-  nodes.set(
-    localId,
-    emptyNode({
-      id: localId,
-      kind: 'package',
-      name: moduleName.split('/').pop() ?? moduleName,
-      qualifiedName: moduleName,
-      file: rel,
-      lang: 'go',
-    }),
-  );
-  const fileId = nodeId({ kind: 'file', qualifiedName: rel, file: rel });
-  nodes.set(
-    fileId,
-    emptyNode({
-      id: fileId,
-      kind: 'file',
-      name: path.posix.basename(rel),
-      qualifiedName: rel,
-      file: rel,
-      lang: 'go',
-    }),
-  );
-  addEdge(edges, 'contains', fileId, localId, 1.0);
+  const localId = makePackageNode(nodes, edges, {
+    rel,
+    qualifiedName: moduleName,
+    displayName: moduleName.split('/').pop() ?? moduleName,
+    lang: 'go',
+  });
 
   // require blocks and single-line requires (ignore replace/exclude).
   const reqNames = new Set<string>();
@@ -201,6 +226,188 @@ function ingestGoMod(
     n++;
   }
   return n;
+}
+
+/** `${groupId}:${artifactId}`, Maven's own coordinate format — matches how a reader would look it up. */
+function ingestPomXml(
+  rel: string,
+  abs: string,
+  nodes: Map<string, GraphNode>,
+  edges: Map<string, GraphEdge>,
+): number {
+  const parsed = xml.parse(fs.readFileSync(abs, 'utf8')) as { project?: Record<string, unknown> };
+  const project = parsed.project;
+  if (!project) return 0;
+  const artifactId = String(project.artifactId ?? path.posix.dirname(rel).split('/').pop() ?? 'pom');
+  const groupId = typeof project.groupId === 'string' ? project.groupId : undefined;
+  const displayName = String((project.name as string | undefined) ?? artifactId);
+
+  const localId = makePackageNode(nodes, edges, {
+    rel,
+    qualifiedName: groupId ? `${groupId}:${artifactId}` : artifactId,
+    displayName,
+    lang: 'java',
+  });
+
+  const deps = asArray<{ dependency?: unknown }>(project.dependencies as never)
+    .flatMap((d) => asArray<Record<string, unknown>>(d?.dependency as never))
+    .filter((d): d is Record<string, unknown> => Boolean(d));
+  const names = new Set<string>();
+  for (const d of deps) {
+    const g = typeof d.groupId === 'string' ? d.groupId : '';
+    const a = typeof d.artifactId === 'string' ? d.artifactId : '';
+    if (g && a) names.add(`${g}:${a}`);
+  }
+  let n = 0;
+  for (const name of [...names].sort()) {
+    const extId = ensureExternal(nodes, name);
+    addEdge(edges, 'import', localId, extId, 1.0);
+    n++;
+  }
+  return n;
+}
+
+const DOTNET_PROJECT_EXTENSIONS = ['.csproj', '.vbproj', '.sqlproj'];
+
+function isDotnetProjectFile(base: string): boolean {
+  return DOTNET_PROJECT_EXTENSIONS.some((ext) => base.endsWith(ext));
+}
+
+function ingestCsproj(
+  rel: string,
+  abs: string,
+  nodes: Map<string, GraphNode>,
+  edges: Map<string, GraphEdge>,
+): number {
+  const parsed = xml.parse(fs.readFileSync(abs, 'utf8')) as { Project?: Record<string, unknown> };
+  const project = parsed.Project;
+  const projectName = path.posix.basename(rel).replace(/\.(cs|vb|sql)proj$/i, '');
+  const localId = makePackageNode(nodes, edges, {
+    rel,
+    qualifiedName: projectName,
+    displayName: projectName,
+    lang: csprojLang(rel),
+  });
+  if (!project) return 0;
+
+  const names = new Set<string>();
+  for (const ig of asArray<Record<string, unknown>>(project.ItemGroup as never)) {
+    for (const ref of asArray<Record<string, unknown>>(ig?.PackageReference as never)) {
+      const name = (ref?.['@_Include'] as string | undefined) ?? (ref?.['@_include'] as string | undefined);
+      if (name) names.add(String(name));
+    }
+  }
+  let n = 0;
+  for (const name of [...names].sort()) {
+    const extId = ensureExternal(nodes, name);
+    addEdge(edges, 'import', localId, extId, 1.0);
+    n++;
+  }
+  return n;
+}
+
+function csprojLang(rel: string): string {
+  if (rel.endsWith('.vbproj')) return 'vb';
+  if (rel.endsWith('.sqlproj')) return 'sql';
+  return 'csharp';
+}
+
+function ingestPyproject(
+  rel: string,
+  abs: string,
+  nodes: Map<string, GraphNode>,
+  edges: Map<string, GraphEdge>,
+): number {
+  const doc = parseToml(fs.readFileSync(abs, 'utf8'));
+  if (!doc) return 0;
+  const project = (doc.project as Record<string, unknown> | undefined) ?? {};
+  const poetry = ((doc.tool as Record<string, unknown> | undefined)?.poetry as Record<string, unknown> | undefined) ?? {};
+  const pkgName =
+    (typeof project.name === 'string' && project.name) ||
+    (typeof poetry.name === 'string' && poetry.name) ||
+    path.posix.dirname(rel).split('/').pop() ||
+    'pyproject';
+
+  const localId = makePackageNode(nodes, edges, {
+    rel,
+    qualifiedName: String(pkgName),
+    displayName: String(pkgName),
+    lang: 'python',
+  });
+
+  const names = new Set<string>();
+  // PEP 621: dependencies = ["name>=1.0", ...]
+  for (const dep of Array.isArray(project.dependencies) ? (project.dependencies as unknown[]) : []) {
+    const name = pep508Name(String(dep));
+    if (name) names.add(name);
+  }
+  // Poetry: [tool.poetry.dependencies] name = "^1.0" | { version = "^1.0" }
+  const poetryDeps = poetry.dependencies as Record<string, unknown> | undefined;
+  if (poetryDeps && typeof poetryDeps === 'object') {
+    for (const name of Object.keys(poetryDeps)) {
+      if (name && name.toLowerCase() !== 'python') names.add(name);
+    }
+  }
+  let n = 0;
+  for (const name of [...names].sort()) {
+    const extId = ensureExternal(nodes, name);
+    addEdge(edges, 'import', localId, extId, 1.0);
+    n++;
+  }
+  return n;
+}
+
+/** The bare distribution name from a PEP 508 requirement string (`"flask>=2.0"` -> `"flask"`). */
+function pep508Name(spec: string): string | null {
+  const m = /^\s*([A-Za-z0-9][A-Za-z0-9._-]*)/.exec(spec);
+  return m ? m[1] : null;
+}
+
+function ingestCargoToml(
+  rel: string,
+  abs: string,
+  nodes: Map<string, GraphNode>,
+  edges: Map<string, GraphEdge>,
+): number {
+  const doc = parseToml(fs.readFileSync(abs, 'utf8'));
+  if (!doc) return 0;
+  const pkg = (doc.package as Record<string, unknown> | undefined) ?? {};
+  const pkgName = (typeof pkg.name === 'string' && pkg.name) || path.posix.dirname(rel).split('/').pop() || 'crate';
+
+  const localId = makePackageNode(nodes, edges, {
+    rel,
+    qualifiedName: String(pkgName),
+    displayName: String(pkgName),
+    lang: 'rust',
+  });
+
+  const names = new Set<string>();
+  for (const section of ['dependencies', 'dev-dependencies', 'build-dependencies']) {
+    const deps = doc[section] as Record<string, unknown> | undefined;
+    if (deps && typeof deps === 'object') {
+      for (const name of Object.keys(deps)) {
+        if (name) names.add(name);
+      }
+    }
+  }
+  let n = 0;
+  for (const name of [...names].sort()) {
+    const extId = ensureExternal(nodes, name);
+    addEdge(edges, 'import', localId, extId, 1.0);
+    n++;
+  }
+  return n;
+}
+
+function isRecognizedManifest(base: string): boolean {
+  return (
+    base === 'package.json' ||
+    base === 'go.mod' ||
+    base === 'pom.xml' ||
+    base === 'pyproject.toml' ||
+    base === 'Cargo.toml' ||
+    isDotnetProjectFile(base)
+  );
 }
 
 function ensureExternal(nodes: Map<string, GraphNode>, name: string): string {
@@ -278,7 +485,7 @@ function walkManifests(
       walkManifests(root, abs, ig, found);
     } else if (entry.isFile()) {
       const base = entry.name;
-      if (base !== 'package.json' && base !== 'go.mod') continue;
+      if (!isRecognizedManifest(base)) continue;
       if (rel && ig.ignores(rel)) continue;
       found.set(rel, abs);
     }

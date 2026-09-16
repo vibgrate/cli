@@ -189,10 +189,11 @@ async function preflightAndPull(selection: WizardResult, prompter: Prompter): Pr
 async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOptions, selection: WizardResult, prompter: Prompter): Promise<void> {
   let sel = selection;
   let route = resolveProviders({
-    provider: sel.provider,
+    provider: sel.providerSlug === 'vibgrate-relay' ? 'vibgrate-relay' : sel.provider,
     model: sel.model,
     local: sel.kind === 'local' || global.local,
     consent: true, // interactive selection is consent for manager runtime deps
+    noFallback: sel.providerSlug === 'vibgrate-relay',
   });
   try {
     const { ensureManagerRuntime } = await import('../runtime/model-manager.js');
@@ -359,10 +360,11 @@ async function codingRepl(root: string, global: GlobalOpts, opts: InteractiveOpt
           if (swapped) {
             sel = swapped;
             route = resolveProviders({
-              provider: sel.provider,
+              provider: sel.providerSlug === 'vibgrate-relay' ? 'vibgrate-relay' : sel.provider,
               model: sel.model,
               local: sel.kind === 'local' || global.local,
               consent: true,
+              noFallback: sel.providerSlug === 'vibgrate-relay',
             });
             prompter.note(c.green(`now using ${sel.providerSlug}/${sel.model}`));
           }
@@ -630,7 +632,9 @@ export async function agentTask(params: {
     } else if (e.type === 'tool-call') {
       info(c.dim(`  → ${e.name}(${briefArgs(e.args)})`));
     } else if (e.type === 'tool-result') {
-      info(c.dim(`    ${e.mutated ? c.green('✔ ') : ''}${e.content.split('\n')[0].slice(0, 100)}`));
+      const lines = toolResultLogLines(e.name, e.content);
+      info(c.dim(`    ${e.mutated ? c.green('✔ ') : ''}${lines[0] ?? ''}`));
+      for (const line of lines.slice(1)) info(c.dim(`    ${line}`));
     } else if (e.type === 'compact') {
       info(c.dim(`  · compacted context (${e.droppedRounds} earlier round(s) summarized)`));
     } else if (e.type === 'verify') {
@@ -710,6 +714,23 @@ export async function agentTask(params: {
   const meterNote = perTask !== undefined ? ` · ${params.meter!.summary()}` : '';
   if (result.changes.length || perTask) info(c.dim(`  ${summary} · via ${result.provider.id}/${result.provider.model}${result.provider.fellBack ? ' (fell back)' : ''}${meterNote}`));
   return result;
+}
+
+/**
+ * stderr line(s) for a tool-result. Default is the first line (100 chars).
+ * `read_file` also logs the first ~3 content lines so Mac smoke can see the
+ * body, not only the header. Content is already redacted at ingest.
+ */
+export function toolResultLogLines(name: string, content: string): string[] {
+  const raw = (content ?? '').split('\n');
+  const header = (raw[0] ?? '').slice(0, 100);
+  if (name !== 'read_file') return [header];
+  const extra = raw
+    .slice(1)
+    .filter((l) => l.trim().length > 0)
+    .slice(0, 3)
+    .map((l) => l.slice(0, 100));
+  return [header, ...extra];
 }
 
 function briefArgs(args: Record<string, unknown>): string {

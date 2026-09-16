@@ -206,6 +206,27 @@ export interface LockfileComponent {
 }
 
 /**
+ * The full resolved dependency graph a lockfile encodes: every package
+ * (`components`), which `name@version` key each of them actually resolves
+ * its own dependencies to (`edges`), and which `name@version` keys the
+ * project itself depends on directly (`rootDependsOn`).
+ *
+ * `edges` is `undefined` when the format doesn't give us real resolved
+ * edges to work with (currently: pnpm and yarn, and npm's older v1 lockfile
+ * shape) — the component list is still complete, we just can't say which
+ * transitive package pulled in which. Never fabricate an edge: a consumer
+ * building a dependency graph or purl-based match needs `undefined` to mean
+ * "not tracked", not "no dependencies".
+ */
+export interface LockfileGraph {
+  components: LockfileComponent[];
+  edges: Map<string, string[]> | undefined;
+  rootDependsOn: string[];
+  /** Which registry these components resolve against; `undefined` means the npm family (the historical default, still keyed by `npmLockGraph`/`pnpmLockTree`/`yarnLockTree`). */
+  ecosystem?: DepRecord['ecosystem'];
+}
+
+/**
  * Enumerate every package a JS lockfile actually resolves — the full
  * transitive tree, not just the names declared in package.json.
  *
@@ -217,17 +238,58 @@ export interface LockfileComponent {
  * present or parseable — honest degradation, same as `lockfileVersion`.
  */
 export function fullDependencyTree(root: string): LockfileComponent[] | undefined {
-  return npmLockTree(root) ?? pnpmLockTree(root) ?? yarnLockTree(root);
+  return fullDependencyGraph(root)?.components;
+}
+
+/** Same lockfile search as `fullDependencyTree`, but keeps resolved dependency edges where available. */
+export function fullDependencyGraph(root: string): LockfileGraph | undefined {
+  return (
+    npmLockGraph(root) ??
+    componentsOnly(pnpmLockTree(root)) ??
+    componentsOnly(yarnLockTree(root)) ??
+    componentsOnly(cargoLockTree(root), 'rust') ??
+    componentsOnly(goSumTree(root), 'go') ??
+    componentsOnly(poetryLikeLockTree(root, 'poetry.lock'), 'pypi') ??
+    componentsOnly(poetryLikeLockTree(root, 'uv.lock'), 'pypi')
+  );
+}
+
+function componentsOnly(components: LockfileComponent[] | undefined, ecosystem?: DepRecord['ecosystem']): LockfileGraph | undefined {
+  return components ? { components, edges: undefined, rootDependsOn: [], ecosystem } : undefined;
 }
 
 function sortComponents(map: Map<string, LockfileComponent>): LockfileComponent[] {
   return [...map.values()].sort((a, b) => a.package.localeCompare(b.package) || a.version.localeCompare(b.version));
 }
 
-/** npm `package-lock.json` v2/v3 `packages` map, falling back to v1's nested `dependencies` tree. */
-function npmLockTree(root: string): LockfileComponent[] | undefined {
+function uniqSorted(keys: string[]): string[] {
+  return [...new Set(keys)].sort();
+}
+
+interface NpmV2Package {
+  name?: string;
+  version?: string;
+  dependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+}
+
+/**
+ * npm `package-lock.json` v2/v3 `packages` map, falling back to v1's nested
+ * `dependencies` tree (which carries no resolvable edges — see
+ * `LockfileGraph.edges`).
+ *
+ * v2/v3 stores every resolved package once, keyed by its install path
+ * (`node_modules/a/node_modules/b`), plus each package's own *declared*
+ * dependency ranges. To turn that into resolved edges we replay npm's own
+ * lookup: walk from a package's install path up through each ancestor's
+ * `node_modules/<name>`, same as Node's `require` resolution, and take the
+ * first match — that is what "hoisting" means, and it's exactly what
+ * `packages` encodes without needing a second (real) install.
+ */
+function npmLockGraph(root: string): LockfileGraph | undefined {
   let data: {
-    packages?: Record<string, { version?: string }>;
+    packages?: Record<string, NpmV2Package>;
     dependencies?: Record<string, { version?: string; dependencies?: Record<string, unknown> }>;
   };
   try {
@@ -235,18 +297,64 @@ function npmLockTree(root: string): LockfileComponent[] | undefined {
   } catch {
     return undefined;
   }
-  const out = new Map<string, LockfileComponent>();
-  if (data.packages && typeof data.packages === 'object') {
-    for (const [key, val] of Object.entries(data.packages)) {
-      if (!key) continue; // "" is the root project itself, not a dependency
-      const m = /node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(key);
-      const version = val?.version;
-      if (m && typeof version === 'string') out.set(`${m[1]}@${version}`, { package: m[1], version });
-    }
-  } else if (data.dependencies && typeof data.dependencies === 'object') {
+
+  if (!data.packages || typeof data.packages !== 'object') {
+    if (!data.dependencies || typeof data.dependencies !== 'object') return undefined;
+    const out = new Map<string, LockfileComponent>();
     walkNpmV1Tree(data.dependencies, out);
+    return componentsOnly(out.size ? sortComponents(out) : undefined);
   }
-  return out.size ? sortComponents(out) : undefined;
+
+  const packages = data.packages;
+  const keyOf = new Map<string, string>(); // install path → "name@version"
+  const components = new Map<string, LockfileComponent>();
+  for (const [p, val] of Object.entries(packages)) {
+    if (!p) continue; // "" is the root project itself
+    const m = /node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(p);
+    const version = val?.version;
+    if (m && typeof version === 'string') {
+      // npm's aliased installs (`"foo-cjs": "npm:foo@^1.0.0"`) key the
+      // package by its install-path segment ("foo-cjs") but record the real
+      // registry name in `name` ("foo") — use that when present, or the SBOM
+      // reports a component/purl for a package that doesn't exist on npm.
+      const name = typeof val?.name === 'string' ? val.name : m[1];
+      const key = `${name}@${version}`;
+      keyOf.set(p, key);
+      components.set(key, { package: name, version });
+    }
+  }
+  if (!components.size) return undefined;
+
+  const resolveInstallPath = (fromPath: string, name: string): string | undefined => {
+    let base = fromPath;
+    for (;;) {
+      const candidate = base ? `${base}/node_modules/${name}` : `node_modules/${name}`;
+      if (packages[candidate]) return candidate;
+      if (!base) return undefined;
+      const cut = base.lastIndexOf('/node_modules/');
+      base = cut === -1 ? '' : base.slice(0, cut);
+    }
+  };
+
+  const edges = new Map<string, string[]>();
+  let rootDependsOn: string[] = [];
+  for (const [p, val] of Object.entries(packages)) {
+    const names = Object.keys({ ...val?.dependencies, ...val?.optionalDependencies, ...val?.peerDependencies });
+    if (!names.length) continue;
+    const childKeys = names
+      .map((name) => resolveInstallPath(p, name))
+      .map((childPath) => (childPath ? keyOf.get(childPath) : undefined))
+      .filter((k): k is string => Boolean(k));
+    if (!childKeys.length) continue;
+    if (p === '') {
+      rootDependsOn = uniqSorted(childKeys);
+    } else {
+      const fromKey = keyOf.get(p);
+      if (fromKey) edges.set(fromKey, uniqSorted(childKeys));
+    }
+  }
+
+  return { components: sortComponents(components), edges, rootDependsOn };
 }
 
 function walkNpmV1Tree(
@@ -304,12 +412,8 @@ function yarnLockTree(root: string): LockfileComponent[] | undefined {
       pendingNames = line
         .replace(/:\s*$/, '')
         .split(',')
-        .map((spec) => {
-          const s = spec.trim().replace(/^"|"$/g, '');
-          const at = s.lastIndexOf('@');
-          return at > 0 ? s.slice(0, at) : '';
-        })
-        .filter(Boolean);
+        .map((spec) => yarnHeaderRealName(spec.trim().replace(/^"|"$/g, '')))
+        .filter((n): n is string => Boolean(n));
     } else if (pendingNames.length) {
       const m = /^\s+version:?\s+"?([^"\s]+)"?/.exec(line);
       if (m) {
@@ -317,6 +421,113 @@ function yarnLockTree(root: string): LockfileComponent[] | undefined {
         pendingNames = [];
       }
     }
+  }
+  return out.size ? sortComponents(out) : undefined;
+}
+
+/**
+ * Split a yarn descriptor (`name@range`) into its two halves. The separator
+ * is the first `@` *after* a leading scope segment, not the last `@` in the
+ * string — an aliased descriptor (`string-width-cjs@npm:string-width@^4.2.3`)
+ * has a second `@` further in (inside the `npm:` payload), and taking the
+ * last one would fold the `npm:` prefix into the "name" half instead of
+ * separating it out.
+ */
+function splitYarnDescriptor(spec: string): { name: string; range: string } | undefined {
+  const searchFrom = spec.startsWith('@') ? spec.indexOf('/') + 1 : 0;
+  const at = spec.indexOf('@', searchFrom);
+  if (at <= 0) return undefined;
+  return { name: spec.slice(0, at), range: spec.slice(at + 1) };
+}
+
+/**
+ * A yarn.lock header entry's real registry name. Normally the descriptor's
+ * own name, but an aliased install (`"foo-cjs@npm:foo@^1.0.0"`, classic and
+ * Berry syntax alike) is yarn's own way of writing npm's
+ * `"foo-cjs": "npm:foo@^1.0.0"` — the range names the real package, and
+ * reporting the alias `foo-cjs` as the component would fabricate a package
+ * that doesn't exist on the registry (same failure mode `npmLockGraph`'s
+ * alias handling above exists to avoid).
+ */
+function yarnHeaderRealName(spec: string): string | undefined {
+  const parsed = splitYarnDescriptor(spec);
+  if (!parsed) return undefined;
+  if (!parsed.range.startsWith('npm:')) return parsed.name;
+  // Yarn Berry writes every plain npm dependency as `name@npm:<range>` —
+  // that's not aliasing, just its normal descriptor syntax, and a semver
+  // range never contains '@'. Only `npm:<realName>@<range>` (the payload
+  // itself splits into a name and a range) is an actual rename.
+  const target = splitYarnDescriptor(parsed.range.slice(4));
+  return target ? target.name : parsed.name;
+}
+
+/**
+ * `Cargo.lock` — every `[[package]]` table's `name`/`version` pair. No
+ * dependency edges: a crate's `dependencies = [...]` entries can be
+ * version-disambiguated ("syn 2.0.119") or bare ("memchr") when only one
+ * version of that crate is present, and resolving the bare form correctly
+ * needs the same edge bookkeeping `npmLockGraph` does for npm — not worth
+ * duplicating for a components-only SBOM listing.
+ */
+function cargoLockTree(root: string): LockfileComponent[] | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(root, 'Cargo.lock'), 'utf8');
+  } catch {
+    return undefined;
+  }
+  const out = new Map<string, LockfileComponent>();
+  for (const block of text.split(/\[\[package\]\]/)) {
+    const nm = /(?:^|\n)\s*name\s*=\s*"([^"]+)"/.exec(block);
+    const ver = /(?:^|\n)\s*version\s*=\s*"([^"]+)"/.exec(block);
+    if (nm && ver) out.set(`${nm[1]}@${ver[1]}`, { package: nm[1], version: ver[1] });
+  }
+  return out.size ? sortComponents(out) : undefined;
+}
+
+/**
+ * `go.sum` — every `<module> <version> <hash>` line pins a resolved module;
+ * each module appears twice (the module zip hash and a `/go.mod` hash for
+ * its manifest), so only the bare (non-`/go.mod`) line is kept. No edges:
+ * go.sum records the flattened build list, not which module required which.
+ */
+function goSumTree(root: string): LockfileComponent[] | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(root, 'go.sum'), 'utf8');
+  } catch {
+    return undefined;
+  }
+  const out = new Map<string, LockfileComponent>();
+  for (const line of text.split('\n')) {
+    // Each module has two lines — `module version h1:...` (the module zip)
+    // and `module version/go.mod h1:...` (just its manifest). Skip the
+    // `/go.mod` one or its suffix ends up folded into the captured version.
+    const m = /^(\S+)\s+(v\S+)\s+h1:/.exec(line);
+    if (!m || m[2].endsWith('/go.mod')) continue;
+    const [, name, version] = m;
+    out.set(`${name}@${version}`, { package: name, version });
+  }
+  return out.size ? sortComponents(out) : undefined;
+}
+
+/**
+ * `poetry.lock` / `uv.lock` — same `[[package]]` TOML shape as `Cargo.lock`
+ * (see `tomlPackageLock`, which does the equivalent point lookup), collected
+ * in full for the SBOM's transitive component list.
+ */
+function poetryLikeLockTree(root: string, file: string): LockfileComponent[] | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(root, file), 'utf8');
+  } catch {
+    return undefined;
+  }
+  const out = new Map<string, LockfileComponent>();
+  for (const block of text.split(/\[\[package\]\]/)) {
+    const nm = /(?:^|\n)\s*name\s*=\s*"([^"]+)"/.exec(block);
+    const ver = /(?:^|\n)\s*version\s*=\s*"([^"]+)"/.exec(block);
+    if (nm && ver) out.set(`${nm[1]}@${ver[1]}`, { package: nm[1], version: ver[1] });
   }
   return out.size ? sortComponents(out) : undefined;
 }

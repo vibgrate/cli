@@ -6,41 +6,37 @@
  * become evictable; among idle slots, LILO (last-in, last-out ≡ FIFO by
  * load order) reclaims the oldest-loaded idle graph first. The currently
  * selected slot for a repository is never evicted.
+ *
+ * A process RSS budget is the extra brake: when `rssUsedBytes()` is over
+ * `rssBudgetBytes`, overflow eviction runs even if count caps are not hit.
  */
 
 import type { VgGraph } from '../schema.js';
 import { activeGraphSlotKey } from './git-ref.js';
 
-/** Default idle timeout: 20 minutes (within the 15–30 min plan band). */
 export const DEFAULT_ACTIVE_GRAPH_IDLE_MS = 20 * 60 * 1000;
 
 export interface ActiveGraphSlot {
   repositoryId: string;
   gitRef: string;
   graph: VgGraph;
-  /** When this slot was first loaded into the cache. */
   loadedAt: number;
-  /** Last access / select time. */
   lastAccessAt: number;
-  /** Approximate size hint for diagnostics (node count). */
   nodeCount: number;
 }
 
 export interface ActiveGraphCacheOptions {
-  /** Idle duration before a non-selected slot is evictable (default 20 min). */
   idleTimeoutMs?: number;
-  /** Max resident graphs per repositoryId (default 8). */
   maxPerRepo?: number;
-  /** Max resident graphs process-wide (default 32). */
   maxTotal?: number;
-  now?: () => number;
   /**
-   * Called for every slot leaving the cache, whatever removed it (idle
-   * timeout, overflow, clear). Anything keyed by the same slot — the semantic
-   * index in vgd — hangs off this so it can never outlive the graph it
-   * describes. Must not throw; a listener error is swallowed rather than
-   * corrupting eviction.
+   * Process RSS ceiling in bytes. When `rssUsedBytes()` is above this,
+   * overflow LILO runs. 0 / unset skips the RSS check (count caps still apply).
    */
+  rssBudgetBytes?: number;
+  /** Current process RSS. Defaults to `process.memoryUsage().rss`. */
+  rssUsedBytes?: () => number;
+  now?: () => number;
   onEvict?: (slot: { repositoryId: string; gitRef: string }) => void;
 }
 
@@ -55,16 +51,26 @@ export interface ActiveGraphSlotSummary {
   evictable: boolean;
 }
 
-/**
- * In-memory multi-branch graph cache. Pure structure — does not load/save disk.
- */
 export class ActiveGraphCache {
   private readonly slots = new Map<string, ActiveGraphSlot>();
-  /** repositoryId → currently selected gitRef */
   private readonly currentRef = new Map<string, string>();
+  /**
+   * Repos with a real `select()` call, as opposed to `put()`'s "first load
+   * defaults to current" convenience. Overflow eviction (RSS or count caps)
+   * only treats a slot as protected-current once it has been explicitly
+   * selected — otherwise a repo with a single warm branch that was loaded
+   * once and never revisited would be immune to the RSS budget forever,
+   * which is exactly the "five published maps on a 2 GiB box" case the
+   * budget exists for. The idle-timeout sweep still honors the implicit
+   * default: it protects a just-loaded sibling branch before its caller has
+   * had a chance to call `select()`.
+   */
+  private readonly explicitlySelected = new Set<string>();
   private readonly idleTimeoutMs: number;
   private readonly maxPerRepo: number;
   private readonly maxTotal: number;
+  private readonly rssBudgetBytes: number;
+  private readonly rssUsedBytes: () => number;
   private readonly now: () => number;
   private readonly onEvict?: (slot: { repositoryId: string; gitRef: string }) => void;
 
@@ -73,6 +79,8 @@ export class ActiveGraphCache {
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_ACTIVE_GRAPH_IDLE_MS;
     this.maxPerRepo = options.maxPerRepo ?? 8;
     this.maxTotal = options.maxTotal ?? 32;
+    this.rssBudgetBytes = options.rssBudgetBytes ?? 0;
+    this.rssUsedBytes = options.rssUsedBytes ?? (() => process.memoryUsage().rss);
     this.now = options.now ?? (() => Date.now());
   }
 
@@ -82,16 +90,10 @@ export class ActiveGraphCache {
 
   get(repositoryId: string, gitRef: string): ActiveGraphSlot | undefined {
     const slot = this.slots.get(activeGraphSlotKey(repositoryId, gitRef));
-    if (slot) {
-      slot.lastAccessAt = this.now();
-    }
+    if (slot) slot.lastAccessAt = this.now();
     return slot;
   }
 
-  /**
-   * Insert or replace a graph for (repositoryId, gitRef). Touches access time.
-   * Runs eviction if over cap.
-   */
   put(repositoryId: string, gitRef: string, graph: VgGraph): ActiveGraphSlot {
     const key = activeGraphSlotKey(repositoryId, gitRef);
     const t = this.now();
@@ -105,23 +107,17 @@ export class ActiveGraphCache {
       nodeCount: graph.nodes?.length ?? 0,
     };
     this.slots.set(key, slot);
-    if (!this.currentRef.has(repositoryId)) {
-      this.currentRef.set(repositoryId, gitRef);
-    }
+    if (!this.currentRef.has(repositoryId)) this.currentRef.set(repositoryId, gitRef);
     this.evictIfNeeded();
     return slot;
   }
 
-  /**
-   * Mark gitRef as the current branch for this repository and touch it.
-   * Returns the slot if present.
-   */
   select(repositoryId: string, gitRef: string): ActiveGraphSlot | undefined {
     this.currentRef.set(repositoryId, gitRef);
+    this.explicitlySelected.add(repositoryId);
     return this.get(repositoryId, gitRef);
   }
 
-  /** Currently selected gitRef for a repository, if any. */
   selectedRef(repositoryId: string): string | undefined {
     return this.currentRef.get(repositoryId);
   }
@@ -132,15 +128,10 @@ export class ActiveGraphCache {
     return this.get(repositoryId, ref);
   }
 
-  /**
-   * Drop idle slots past the timeout (LILO among idle).
-   * Returns keys of removed slots.
-   */
   evictIdle(now: number = this.now()): string[] {
     return this.evict(now, false);
   }
 
-  /** Force eviction of idle slots when over caps (timeout may be ignored for overflow). */
   evictIfNeeded(): string[] {
     return this.evict(this.now(), true);
   }
@@ -174,7 +165,6 @@ export class ActiveGraphCache {
     this.currentRef.clear();
   }
 
-  /** Drop every slot for a repository (unregister). Embed indexes follow via onEvict. */
   evictRepository(repositoryId: string): string[] {
     const removed: string[] = [];
     for (const slot of [...this.slots.values()]) {
@@ -185,6 +175,7 @@ export class ActiveGraphCache {
       this.notifyEvict(slot);
     }
     this.currentRef.delete(repositoryId);
+    this.explicitlySelected.delete(repositoryId);
     return removed;
   }
 
@@ -193,13 +184,20 @@ export class ActiveGraphCache {
     try {
       this.onEvict({ repositoryId: slot.repositoryId, gitRef: slot.gitRef });
     } catch {
-      // A listener problem must never break cache maintenance.
+      /* listener must never break cache maintenance */
     }
+  }
+
+  private overRssBudget(): boolean {
+    return this.rssBudgetBytes > 0 && this.rssUsedBytes() > this.rssBudgetBytes;
+  }
+
+  private isProtectedCurrent(repositoryId: string, gitRef: string): boolean {
+    return this.explicitlySelected.has(repositoryId) && this.currentRef.get(repositoryId) === gitRef;
   }
 
   private evict(now: number, forceOverflow: boolean): string[] {
     const removed: string[] = [];
-
     const removeKey = (key: string): void => {
       const slot = this.slots.get(key);
       if (!slot) return;
@@ -208,21 +206,19 @@ export class ActiveGraphCache {
       this.notifyEvict(slot);
     };
 
-    // 1) Idle timeout: LILO among idle (earliest loadedAt first).
     const idle = this.idleCandidates(now, this.idleTimeoutMs);
     idle.sort((a, b) => a.loadedAt - b.loadedAt);
-    for (const slot of idle) {
-      removeKey(activeGraphSlotKey(slot.repositoryId, slot.gitRef));
-    }
+    for (const slot of idle) removeKey(activeGraphSlotKey(slot.repositoryId, slot.gitRef));
 
-    // 2) Overflow: if still over maxPerRepo or maxTotal, LILO among any non-current idle-or-all-non-current.
+    // 2) Overflow: count caps or RSS budget. Timeout is ignored so a burst of
+    // publishes cannot sit on a 2 GiB box until the idle clock runs out.
     if (forceOverflow) {
-      while (this.slots.size > this.maxTotal) {
+      const overCap = () => this.slots.size > this.maxTotal || this.overRssBudget();
+      while (overCap()) {
         const victim = this.pickLiloVictim(now, /* requireIdleTimeout */ false);
         if (!victim) break;
         removeKey(activeGraphSlotKey(victim.repositoryId, victim.gitRef));
       }
-      // Per-repo caps
       const byRepo = new Map<string, ActiveGraphSlot[]>();
       for (const s of this.slots.values()) {
         const list = byRepo.get(s.repositoryId) ?? [];
@@ -232,7 +228,7 @@ export class ActiveGraphCache {
       for (const [repoId, list] of byRepo) {
         if (list.length <= this.maxPerRepo) continue;
         const nonCurrent = list
-          .filter((s) => this.currentRef.get(repoId) !== s.gitRef)
+          .filter((s) => !this.isProtectedCurrent(repoId, s.gitRef))
           .sort((a, b) => a.loadedAt - b.loadedAt);
         let excess = list.length - this.maxPerRepo;
         for (const s of nonCurrent) {
@@ -242,7 +238,6 @@ export class ActiveGraphCache {
         }
       }
     }
-
     return removed;
   }
 
@@ -258,7 +253,7 @@ export class ActiveGraphCache {
   private pickLiloVictim(now: number, requireIdleTimeout: boolean): ActiveGraphSlot | null {
     let best: ActiveGraphSlot | null = null;
     for (const slot of this.slots.values()) {
-      if (this.currentRef.get(slot.repositoryId) === slot.gitRef) continue;
+      if (this.isProtectedCurrent(slot.repositoryId, slot.gitRef)) continue;
       if (requireIdleTimeout && now - slot.lastAccessAt < this.idleTimeoutMs) continue;
       if (!best || slot.loadedAt < best.loadedAt) best = slot;
     }

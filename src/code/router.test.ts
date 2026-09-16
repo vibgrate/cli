@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveProviders } from './router.js';
+import { hostedFallbackIsFailure, pinPrimaryProvider, resolveProviders } from './router.js';
 import type { LocalModel } from '../engine/models.js';
 import { CliError } from '../util/exit.js';
 
@@ -230,5 +230,41 @@ describe('Vibgrate Relay', () => {
         { env: { VIBGRATE_RELAY_TOKEN: 'vtm_abc' }, discover: () => [] },
       ),
     ).toThrow(/model/i);
+  });
+
+  it('explicit Relay is fail-closed even when a local backend is discoverable', () => {
+    const route = resolveProviders(
+      { ...base, provider: 'vibgrate-relay', local: true },
+      { env: { VIBGRATE_RELAY_TOKEN: 'vtm_abc' }, discover: withOllama },
+    );
+    expect(route.providers.map((p) => p.id)).toEqual(['vibgrate-relay']);
+    expect(route.reason).toMatch(/fail-closed/);
+  });
+
+  it('auto-route on a Relay token still attaches local fallbacks unless noFallback', () => {
+    const open = resolveProviders(base, {
+      env: { VIBGRATE_RELAY_TOKEN: 'vtm_abc' },
+      discover: withOllama,
+    });
+    expect(open.providers[0].id).toBe('vibgrate-relay');
+    expect(open.providers.map((p) => p.id)).toContain('ollama');
+    expect(open.reason).toMatch(/local fallback/);
+
+    const pinned = resolveProviders({ ...base, noFallback: true }, {
+      env: { VIBGRATE_RELAY_TOKEN: 'vtm_abc' },
+      discover: withOllama,
+    });
+    expect(pinned.providers.map((p) => p.id)).toEqual(['vibgrate-relay']);
+    expect(pinned.reason).toMatch(/fail-closed/);
+  });
+
+  it('pinPrimaryProvider and hostedFallbackIsFailure are the Review pin contract', () => {
+    const route = resolveProviders(base, {
+      env: { VIBGRATE_RELAY_TOKEN: 'vtm_abc' },
+      discover: withOllama,
+    });
+    expect(pinPrimaryProvider(route.providers).map((p) => p.id)).toEqual(['vibgrate-relay']);
+    expect(hostedFallbackIsFailure({ fellBack: true })).toBe(true);
+    expect(hostedFallbackIsFailure({ fellBack: false })).toBe(false);
   });
 });

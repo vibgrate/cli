@@ -31,9 +31,23 @@ brew install vibgrate/tap/vg
 scoop bucket add vibgrate https://github.com/vibgrate/scoop-bucket
 scoop install vibgrate/vg
 
-# Docker / GHCR (the image entrypoint is `vg`; default command scans /work)
+# Docker / GHCR (canonical; the image entrypoint is `vg`)
 docker run --rm -v "$PWD":/work -w /work ghcr.io/vibgrate/cli scan
+
+# Docker Hub (mirror of the same signed image)
+docker run --rm -v "$PWD":/work -w /work docker.io/vibgrate/cli scan
 ```
+
+## Helm (Kubernetes)
+
+```bash
+helm install vibgrate oci://ghcr.io/vibgrate/charts/vibgrate \
+  --set dsn="$VIBGRATE_DSN" \
+  --set repository.url=https://github.com/your-org/your-repo
+```
+
+Chart details live in `charts/vibgrate/`. First-time org setup (GHCR package
+visibility, Hub secrets, tap/bucket repos) is in [`OWNER-CHECKLIST.md`](./OWNER-CHECKLIST.md).
 
 ## Templates in this directory
 
@@ -43,9 +57,13 @@ docker run --rm -v "$PWD":/work -w /work ghcr.io/vibgrate/cli scan
 | `Dockerfile` | container image (publish to GHCR/Docker Hub) |
 | `homebrew/vg.rb` | Homebrew formula template (sha256/version stamped at release) |
 | `scoop/vg.json` | Scoop manifest (auto-checkver against npm) |
+| `homebrew-tap/` | Stamped tap tree pushed to `github.com/vibgrate/homebrew-tap` |
+| `scoop-bucket/` | Stamped bucket tree pushed to `github.com/vibgrate/scoop-bucket` |
+| `OWNER-CHECKLIST.md` | One-time org-owner steps for Helm / Hub / brew / scoop |
 
 The release pipeline stamps versions/checksums and publishes signed artifacts +
-an SBOM. These files are templates, not pinned releases — honest by construction.
+an SBOM. `homebrew/vg.rb` and `scoop/vg.json` are templates; the tap and bucket
+copies are pinned to the current public CLI release.
 
 ## Wire it into your assistant
 

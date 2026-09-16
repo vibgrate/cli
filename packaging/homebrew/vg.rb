@@ -1,6 +1,5 @@
-# Homebrew formula template for vg (the @vibgrate/cli package).
-# Published to the vibgrate/tap tap by the release pipeline; sha256 + version
-# are stamped at release time. This is a template, not a pinned release.
+# Homebrew formula for vg (the @vibgrate/cli package).
+# The release pipeline stamps url version + sha256 from the npm tarball.
 class Vg < Formula
   desc "Deterministic, no-API-key code graph for AI assistants (vg)"
   homepage "https://vibgrate.com"

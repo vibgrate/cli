@@ -35,6 +35,7 @@ export function sanitizeOverview(raw: unknown): ArchOverview | null {
       missingSteps: num(p.missingSteps),
       job: typeof p.job === 'string' ? p.job : 'package',
       policy: typeof p.policy === 'string' ? p.policy : null,
+      lane: typeof p.lane === 'string' ? p.lane : 'unclassified',
       ...(typeof p.mix === 'string' ? { mix: p.mix } : {}),
       ...(typeof p.unclassified === 'number' ? { unclassified: num(p.unclassified) } : {}),
     });
@@ -84,7 +85,8 @@ export function sanitizeSlice(raw: unknown): ArchSlice | null {
       cards.push(card);
       painted += 1;
     }
-    columns.push({ id: col.id, title: col.title, cards });
+    const group = col.group === 'core' || col.group === 'outbound' ? col.group : undefined;
+    columns.push({ id: col.id, title: col.title, cards, ...(group ? { group } : {}) });
   }
   const guards = Array.isArray(o.guards)
     ? o.guards.map(sanitizeCard).filter((c): c is ArchCard => Boolean(c)).slice(0, 40)
@@ -167,7 +169,26 @@ function sanitizeCard(raw: unknown): ArchCard | null {
         }
       : {}),
     ...(c.guard ? { guard: true } : {}),
+    ...(Array.isArray(c.findings)
+      ? {
+          findings: c.findings
+            .filter(isFinding)
+            .slice(0, 8)
+            .map((f) => ({
+              rule: f.rule,
+              severity: f.severity,
+              message: f.message,
+              line: typeof f.line === 'number' && Number.isFinite(f.line) && f.line > 0 ? Math.floor(f.line) : null,
+            })),
+        }
+      : {}),
   };
+}
+
+function isFinding(v: unknown): v is { rule: string; severity: string; message: string; line?: unknown } {
+  if (!v || typeof v !== 'object') return false;
+  const f = v as { rule?: unknown; severity?: unknown; message?: unknown };
+  return typeof f.rule === 'string' && typeof f.severity === 'string' && typeof f.message === 'string';
 }
 
 function isLink(v: unknown): v is { id: string; name: string } {

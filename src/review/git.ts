@@ -200,14 +200,24 @@ export function readBaseFileTexts(change: ChangeSet, run: GitRunner = defaultRun
   return out;
 }
 
+export interface CollectChangeSetOptions {
+  /**
+   * Include the working tree when `--base` is also set. Default `vg review`
+   * (no `--base`) is already in-place.
+   */
+  inPlace?: boolean;
+}
+
 /**
  * Collect the change set. `base` selects merge-base mode; omitting it reviews
- * the working tree + index against HEAD.
+ * the working tree + index against HEAD. `--in-place --base` reviews the
+ * working tree against that merge-base.
  */
 export function collectChangeSet(
   root: string,
   base: string | undefined,
   run: GitRunner = defaultRun,
+  opts: CollectChangeSetOptions = {},
 ): ChangeSet {
   const topLevel = gitTopLevel(root, run);
   const headSha = run(['rev-parse', 'HEAD'], root).stdout.trim();
@@ -215,6 +225,35 @@ export function collectChangeSet(
   const ref = !refRaw || refRaw === 'HEAD' ? null : `refs/heads/${refRaw}`;
   const remoteRaw = run(['config', '--get', 'remote.origin.url'], root);
   const remote = remoteRaw.status === 0 ? normalizeRemote(remoteRaw.stdout) : null;
+
+  if (base && opts.inPlace) {
+    const mb = run(['merge-base', 'HEAD', base], root);
+    const mergeBase = mb.status === 0 ? mb.stdout.trim() : null;
+    const baseSha = mergeBase ?? run(['rev-parse', base], root).stdout.trim();
+    const numstat = parseNumstat(run(['diff', '--numstat', '-M', baseSha], root).stdout);
+    const status = parsePorcelainStatus(run(['status', '--porcelain', '-uall'], root).stdout);
+    const named = parseDiffNameStatus(run(['diff', '--name-status', '-M', baseSha], root).stdout);
+    for (const [p, op] of named) if (!status.has(p)) status.set(p, op);
+    const hunks = parseHunks(run(['diff', '-U0', '-M', baseSha], root).stdout);
+    const files = mergeFiles(numstat, status, hunks);
+    const vsHead = mergeFiles(
+      parseNumstat(run(['diff', '--numstat', '-M', 'HEAD'], root).stdout),
+      parsePorcelainStatus(run(['status', '--porcelain', '-uall'], root).stdout),
+      new Map(),
+    );
+    const dirty = vsHead.length > 0;
+    return {
+      topLevel,
+      baseSha,
+      headSha,
+      mergeBase,
+      ref,
+      dirty,
+      dirtyTreeHash: dirty ? dirtyTreeHash(files) : null,
+      files,
+      remote,
+    };
+  }
 
   if (base) {
     const mb = run(['merge-base', 'HEAD', base], root);

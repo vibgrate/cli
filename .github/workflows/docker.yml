@@ -16,8 +16,17 @@
 # which the OSS repo doesn't ship. The public image carries SLSA provenance +
 # CycloneDX/SPDX SBOM + OpenVEX.
 #
-# Canonical: ghcr.io/vibgrate/cli   Mirror: docker.io/<DOCKERHUB_USERNAME>/cli
+# Canonical: ghcr.io/vibgrate/cli   Mirror: docker.io/vibgrate/cli
 # (tag == @vibgrate/cli version)
+#
+# Docker Hub secrets (on github.com/vibgrate/cli → Settings → Secrets → Actions):
+#   DOCKERHUB_USERNAME  Hub account that can push to the vibgrate org
+#   DOCKERHUB_TOKEN     Hub access token with Read & Write
+# Without both, GHCR publish still succeeds; the Hub mirror is skipped and the
+# job writes the secrets checklist. To mirror an already-published GHCR tag
+# without a rebuild, run `.github/workflows/docker-hub-mirror.yml`.
+# Optional: PACKAGES_ADMIN_TOKEN (package-admin PAT) so the visibility step can
+# make ghcr.io/vibgrate/cli public without an org-owner UI click.
 #
 # Triggers:
 #   - push tag v*            → release that tag
@@ -50,6 +59,7 @@ permissions:
   packages: write # push to GHCR
   id-token: write # cosign keyless signing + SLSA provenance (OIDC)
   attestations: write # actions/attest-build-provenance
+  artifact-metadata: write # attest-build-provenance storage record on GHCR + Hub re-attest
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
@@ -188,8 +198,31 @@ jobs:
             VERSION=${{ steps.version.outputs.version }}
             VCS_REF=${{ github.sha }}
 
+      - name: Make GHCR image package public
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER="${{ github.repository_owner }}"
+          set +e
+          node scripts/ghcr-set-visibility.mjs --owner "${OWNER}" --package cli
+          status=$?
+          set -e
+          if [ "${status}" -eq 0 ]; then
+            echo "GHCR package \`ghcr.io/${OWNER}/cli\` is public." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Could not set ghcr.io/${OWNER}/cli public. Org owner: https://github.com/orgs/${OWNER}/packages/container/cli/settings → Change visibility → Public."
+            echo "> **Image package visibility** — anonymous \`docker pull\` 401s until the package is Public. Optional: set PACKAGES_ADMIN_TOKEN on this repo." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # GitHub Releases can hiccup on the bootstrap-binary download; retry
+      # rather than failing the whole publish on a transient network blip.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: sigstore/cosign-installer@v3
+          attempt_limit: 3
+          attempt_delay: 15000
 
       # Sign the immutable DIGEST (never a tag) so every tag that points at it is
       # covered. Keyless: identity comes from the GitHub OIDC token.
@@ -260,7 +293,11 @@ jobs:
       id-token: write
     steps:
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: sigstore/cosign-installer@v3
+          attempt_limit: 3
+          attempt_delay: 15000
 
       # cosign / gh attestation must PULL the signature + attestation manifests
       # from GHCR to verify them. The package is private, so an anonymous token
@@ -361,7 +398,8 @@ jobs:
 
   # Mirror the signed digest to Docker Hub ("shadows to docker"). Skipped
   # automatically when DOCKERHUB_USERNAME is not configured, so the pipeline works
-  # before the mirror is set up. Mirror by DIGEST (preserves multi-arch), then
+  # before the mirror is set up. Destination is always docker.io/vibgrate/cli.
+  # Mirror by DIGEST (preserves multi-arch), then
   # re-sign + re-attest on the Docker Hub ref so `cosign verify docker.io/...` and
   # `gh attestation verify` work for images pulled from the mirror too.
   mirror-dockerhub:
@@ -373,6 +411,7 @@ jobs:
       contents: read
       id-token: write # keyless cosign re-sign + native re-attest on Docker Hub
       attestations: write
+      artifact-metadata: write # attest-build-provenance storage record on Hub re-attest
       packages: read
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -384,7 +423,16 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "Docker Hub mirror not configured (no DOCKERHUB_USERNAME) — skipping." >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "### Docker Hub mirror skipped — secrets missing"
+              echo "Anonymous \`docker pull vibgrate/cli\` will 404 until an org owner adds these **repository secrets** on \`github.com/vibgrate/cli\` and re-runs this workflow (or \`Docker Hub mirror\`):"
+              echo ""
+              echo "1. Create public Hub repo \`vibgrate/cli\` (Docker Hub → Create repository)."
+              echo "2. Settings → Secrets and variables → Actions, add:"
+              echo "   - \`DOCKERHUB_USERNAME\` = Hub account that can push to the \`vibgrate\` namespace"
+              echo "   - \`DOCKERHUB_TOKEN\` = Hub access token with **Read & Write**"
+              echo "3. Re-run **Actions → Docker Hub mirror** with tag \`2026.914.1\` (mirrors the existing GHCR digest; no rebuild)."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Set up Docker Buildx
@@ -410,7 +458,7 @@ jobs:
         if: steps.cfg.outputs.enabled == 'true'
         id: mirror
         env:
-          DEST: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/cli
+          DEST: docker.io/vibgrate/cli
         run: |
           set -euo pipefail
           docker buildx imagetools create \
@@ -425,7 +473,11 @@ jobs:
 
       - name: Install cosign
         if: steps.cfg.outputs.enabled == 'true'
-        uses: sigstore/cosign-installer@v3
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: sigstore/cosign-installer@v3
+          attempt_limit: 3
+          attempt_delay: 15000
 
       # Re-sign on Docker Hub so `cosign verify docker.io/...` works — signatures
       # live at the registry digest, not GHCR.

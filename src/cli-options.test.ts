@@ -69,6 +69,12 @@ describe('the CLI surface', () => {
     const longs = review.options.map((o) => o.long);
     expect(longs).toContain('--offline');
     expect(longs).toContain('--local');
+    const propose = review.commands.find((c) => c.name() === 'propose');
+    expect(propose).toBeTruthy();
+    const proposeLongs = propose!.options.map((o) => o.long);
+    expect(proposeLongs).toContain('--loop');
+    expect(proposeLongs).toContain('--apply');
+    expect(proposeLongs).toContain('--model');
   });
 
   it('still accepts `vg bundle --offline`, whose own declaration was removed', () => {

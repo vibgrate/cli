@@ -34,6 +34,8 @@ export interface ArchPackageNode {
   /** Dominant-role mix, e.g. "32 symbols · 3 UI · 1 service · 0 findings". */
   mix?: string;
   unclassified?: number;
+  /** Workspace lane for the board layout: 'ui' | 'app' | 'io' | 'unclassified'. */
+  lane: string;
 }
 
 export interface ArchPackageEdge {
@@ -97,12 +99,54 @@ export interface ArchCard {
   members?: ArchCardMember[];
   types?: string[];
   guard?: boolean;
+  /** Two-letter monogram for an external-service card (no logo pixels ship in the artifact). */
+  logoText?: string;
+  /** The catalog's canonical provider id (e.g. `stripe`), for resolving a real brand mark. No pixels ship from here — the host UI owns the icon set. */
+  providerId?: string;
+  /**
+   * The hyperscaler/parent brand a specific product belongs to, when the
+   * product itself has no brand mark of its own to resolve by `providerId`
+   * (a managed database, a serverless product, ...). The host UI falls back
+   * to this parent's mark — e.g. `SQL Server` -> `microsoft`, `AWS S3` ->
+   * `aws` — same idea as `providerId` but one level up the brand hierarchy.
+   * `azure` is kept distinct from `microsoft` even though both currently
+   * resolve to the same mark (no redistributable Azure-specific glyph was
+   * available), so a real one can be dropped in later without touching this
+   * classification.
+   */
+  vendorFamily?: 'aws' | 'azure' | 'gcp' | 'microsoft' | 'oracle' | 'salesforce' | 'slack' | 'twilio';
+  /** Boundary-rule breaches from the module's policy pack (`hexagonal-v1/…`), rolled up from every member. */
+  findings?: ArchCardFinding[];
+  /** Reachable-vulnerability hits (from `vg scan`'s local reachability query) rolled up from every member. */
+  vulnerabilities?: ArchCardVuln[];
+}
+
+export interface ArchCardFinding {
+  rule: string;
+  /** `"hard"` (a real boundary violation) or `"warn"` (a smell). */
+  severity: 'hard' | 'warn' | string;
+  message: string;
+  line: number | null;
+}
+
+export interface ArchCardVuln {
+  advisoryId: string;
+  package: string;
+  /** `"reachable"` or `"potentially_reachable"` — `not_reached`/`unknown` findings never reach a card. */
+  tier: 'reachable' | 'potentially_reachable';
+  /** One-line human-readable evidence, e.g. "imported in src/api.ts, called at line 42". */
+  evidence?: string;
 }
 
 export interface ArchSliceColumn {
   id: string;
   title: string;
   cards: ArchCard[];
+  /** Tags this lane as part of the "core" reasoning chain (Application →
+   * Domain → Ports) or the "outbound" boundary it hands off to (Adapters /
+   * Infrastructure), for the client's CORE/OUTBOUND group banner. Absent on
+   * lanes that aren't part of that one directional claim. */
+  group?: 'core' | 'outbound';
 }
 
 export interface ArchSliceEdge {

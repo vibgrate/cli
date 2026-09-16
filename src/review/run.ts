@@ -55,6 +55,7 @@ import {
 } from './schemas.js';
 import { signReceipt } from './sign.js';
 import { verifyFindings, type VerifyResult } from './verify.js';
+import { isIgnoredPath, loadReviewPacks, type ReviewPackReport } from './packs.js';
 
 export interface RunReviewOptions {
   root: string;
@@ -74,6 +75,16 @@ export interface RunReviewOptions {
    * deterministic, so a stable key keeps `--generated-at` output byte-identical.
    */
   signingKey?: crypto.KeyObject | null;
+  /**
+   * `--in-place` — include the working tree when `--base` is also set.
+   * Default `vg review` (no `--base`) is already in-place.
+   */
+  inPlace?: boolean;
+  /**
+   * `--local` — deterministic scanners only; never a hosted model.
+   * `--explain` still requires an on-device model.
+   */
+  local?: boolean;
   workspaceId?: string | null;
   /** Injected in tests. */
   run?: GitRunner;
@@ -96,6 +107,8 @@ export interface RunReviewResult {
   intent: { target: string | null; sources: string[] };
   /** The resolved repository root — every path in the receipt is relative to it. */
   repoRoot: string;
+  /** `.vibgrate/review/` packs. Printed in text/md; not an attestation. */
+  packs?: ReviewPackReport;
 }
 
 function defaultRun(args: string[], cwd: string): { stdout: string; status: number } {
@@ -155,7 +168,7 @@ export async function runReview(opts: RunReviewOptions): Promise<RunReviewResult
     );
   }
 
-  const change: ChangeSet = collectChangeSet(root, opts.base, run);
+  const change: ChangeSet = collectChangeSet(root, opts.base, run, { inPlace: opts.inPlace });
   // git reports repo-relative paths, so every read below is anchored at the
   // repository root — not at whatever subdirectory `-C` pointed us to.
   const repoRoot = change.topLevel;
@@ -295,23 +308,35 @@ export async function runReview(opts: RunReviewOptions): Promise<RunReviewResult
     changedPaths: changedPathSet,
   });
 
+  const packs = loadReviewPacks(repoRoot, change.files.map((f) => f.path));
+  const keepFinding = (f: { paths: string[] }): boolean => {
+    if (packs.ignore.patterns.length === 0) return true;
+    return !f.paths.every((p) => isIgnoredPath(p, packs.ignore));
+  };
+
   let findings: ReviewFindings = {
     schema_version: FINDINGS_SCHEMA,
     change_class: changeClassOf(capsule, {
       architecture: scan.architecture.length,
       security: scan.security.length,
     }),
-    architecture_findings: scan.architecture,
-    security_findings: scan.security,
+    architecture_findings: scan.architecture.filter(keepFinding),
+    security_findings: scan.security.filter(keepFinding),
     unknowns: [...new Set([...compiled.unknowns, ...scan.unknowns])],
     required_checks: scan.requiredChecks,
   };
+  findings.change_class = changeClassOf(capsule, {
+    architecture: findings.architecture_findings.length,
+    security: findings.security_findings.length,
+  });
 
   let modelId = 'none';
   let quantization: string | null = null;
+  // `--local` keeps the deterministic pass. `--explain` is the only model path
+  // and it already fails closed without an on-device backend.
   if (opts.explain) {
     const explainImpl = opts.explainImpl ?? (await import('./explain.js')).explainFindings;
-    const explained = await explainImpl(capsule, findings, { offline: opts.offline });
+    const explained = await explainImpl(capsule, findings, { offline: Boolean(opts.offline || opts.local) });
     findings = explained.findings;
     modelId = explained.model;
     quantization = explained.quantization;
@@ -397,6 +422,7 @@ export async function runReview(opts: RunReviewOptions): Promise<RunReviewResult
       sources: intent.sources,
     },
     repoRoot,
+    packs,
     budget: {
       estimatedTokens: compiled.estimatedTokens,
       median: compiled.budget.median,

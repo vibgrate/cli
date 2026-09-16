@@ -43,6 +43,9 @@ jobs:
       - name: Check version pins in sync
         run: pnpm check:pins
 
+      - name: Check Homebrew / Scoop stamps in sync
+        run: pnpm check:packaging
+
       - name: Typecheck
         run: pnpm typecheck
 

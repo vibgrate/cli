@@ -554,6 +554,28 @@ describe('change set', () => {
     ]);
   });
 
+  it('`--in-place --base` includes the working tree against the merge-base', () => {
+    const run: GitRunner = (args) => {
+      const key = args.join(' ');
+      if (key === 'rev-parse HEAD') return { stdout: 'c'.repeat(40), status: 0 };
+      if (key === 'rev-parse --show-toplevel') return { stdout: '/repo', status: 0 };
+      if (key === 'rev-parse --abbrev-ref HEAD') return { stdout: 'feat/x', status: 0 };
+      if (key === 'merge-base HEAD origin/main') return { stdout: 'a'.repeat(40), status: 0 };
+      if (key.startsWith('diff --numstat -M ') && !key.includes('HEAD')) {
+        return { stdout: '2\t0\tsrc/wip.ts\n', status: 0 };
+      }
+      if (key === 'status --porcelain -uall') return { stdout: '?? src/wip.ts\n', status: 0 };
+      if (key.startsWith('diff --name-status -M ') && !key.includes('HEAD')) {
+        return { stdout: 'A\tsrc/wip.ts\n', status: 0 };
+      }
+      return { stdout: '', status: 0 };
+    };
+    const change = collectChangeSet('/repo', 'origin/main', run, { inPlace: true });
+    expect(change.mergeBase).toBe('a'.repeat(40));
+    expect(change.dirty).toBe(true);
+    expect(change.files.map((f) => f.path)).toContain('src/wip.ts');
+  });
+
   it('marks the working tree dirty and hashes its shape', () => {
     const run: GitRunner = (args) => {
       const key = args.join(' ');
@@ -734,7 +756,7 @@ describe('vg review command surface', () => {
     const review = buildProgram().commands.find((c) => c.name() === 'review');
     expect(review).toBeDefined();
     const flags = review!.options.map((o) => o.long);
-    for (const flag of ['--base', '--format', '--out', '--push', '--fail-on', '--explain']) {
+    for (const flag of ['--base', '--in-place', '--loop', '--format', '--out', '--push', '--fail-on', '--explain']) {
       expect(flags).toContain(flag);
     }
     // Commander derives each option key from its long flag. A handler that

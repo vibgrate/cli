@@ -81,6 +81,13 @@ import {
 } from './run-provenance.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import * as path from 'node:path';
+import {
+  looksLikeBareJsonObject,
+  looksLikeBrokenJsonDump,
+  looksLikeToolCallDump,
+  normalizeToolCalls,
+  parseTextToolCalls,
+} from './text-tool-protocol.js';
 import { createToolOutputCompressor, RETRIEVE_TOOL_NAME, type CompressionStats, type ToolOutputCompressor } from './compress-tool-output.js';
 import { env as knobEnv } from '../compress/config.js';
 import { repositoryIdFromRoot } from '../runtime/paths.js';
@@ -377,17 +384,19 @@ export interface AgentResult {
   provenance?: RunProvenance;
 }
 
-const DEFAULT_MAX_STEPS = 24;
+/** Default `--max-steps` / `maxSteps` when the caller does not set one. */
+export const AGENT_DEFAULT_MAX_STEPS = 24;
+const DEFAULT_MAX_STEPS = AGENT_DEFAULT_MAX_STEPS;
 /** Compact the transcript once it grows past this many estimated tokens. */
 const DEFAULT_CONTEXT_BUDGET = 16_000;
 /** Rounds (assistant + its tool results) to keep verbatim when compacting. */
 const KEEP_ROUNDS = 8;
 /** After this many identical, non-progressing repeats, nudge the model. */
-const NUDGE_AT = 3;
-/** After this many, stop the run as no-progress. */
-const STOP_AT = 5;
+export const AGENT_NO_PROGRESS_NUDGE_AT = 3;
+/** After this many identical non-progressing calls, stop the run as no-progress. */
+export const AGENT_NO_PROGRESS_STOP_AT = 5;
 /** Empty / non-prose no-tool replies tolerated (nudge + retry) before stopping. */
-const EMPTY_REPLY_RETRIES = 2;
+export const AGENT_EMPTY_REPLY_RETRIES = 2;
 /**
  * Continuations allowed when the model stops on the output cap rather than
  * because it finished (`finish_reason: 'length'`). Without this the tail of a
@@ -400,7 +409,7 @@ const TRUNCATED_REPLY_CONTINUES = 2;
 /**
  * Extra attempts granted when a reply carried *reasoning but no answer*. A
  * reasoning model that spends its output budget thinking is still working, so
- * charging those turns to EMPTY_REPLY_RETRIES ended the run after ~3 steps with
+ * charging those turns to AGENT_EMPTY_REPLY_RETRIES ended the run after ~3 steps with
  * nothing on screen but thinking traces. Bounded for the same reason as above:
  * a model that has thought this many times without writing a word is stuck, and
  * the run stops with an explanation rather than an empty reply.
@@ -534,6 +543,16 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   let emptyReplies = 0;
   /** Replies that carried reasoning but no answer and no tool call. */
   let reasoningOnlyReplies = 0;
+  /** Last mutation tool (edit/create/delete/patch/shell) did not write. */
+  let failedMutationPending = false;
+  /** Unknown-tool results this run (after name normalize). */
+  let unknownToolFailures = 0;
+  /** Tool dispatches that were not unknown-tool (read, edit, finish, …). */
+  let successfulToolCalls = 0;
+  /** Mutation-tool dispatches this run (edit/create/delete/patch/shell). */
+  let mutationToolCalls = 0;
+  /** Finish calls rejected because an edit ask still has 0 writes. */
+  let rejectedEmptyFinish = 0;
   /** Continuations spent recovering the tail of cap-truncated replies this run. */
   let truncatedContinues = 0;
   /** Text already emitted for a reply the cap cut short, awaiting its remainder. */
@@ -799,12 +818,13 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   /** Single terminal path: flush overlay, write audit once, then return. */
   const finish = (stopped: AgentStop, finalText: string, steps: number): AgentResult => {
     flushOverlay();
-    const solved = stopped === 'finished' && lastVerifyPassed;
+    const mutationMissing = instructionRequiresMutation(instruction) && changes.length === 0;
+    const solved = stopped === 'finished' && lastVerifyPassed && !mutationMissing;
     const traj = trajectory.finalize({
       taskId: options.attribution?.client ? `${options.attribution.client}:${instruction.slice(0, 40)}` : instruction.slice(0, 48),
       arm: capsule ? 'capsule' : 'metadata',
       solved,
-      verified: lastVerifyPassed,
+      verified: lastVerifyPassed && !mutationMissing,
       steps,
       stopped,
       inferenceTurns: currentStep || steps,
@@ -1015,7 +1035,14 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         options.reasoningEffort,
       );
       result = c.result;
-      providerInfo = { id: c.provider.id, model: c.provider.model, fellBack: c.fellBack };
+      // Sticky: a later primary success must not hide an earlier fallback.
+      // Hosted callers treat fellBack as failure — overwriting it looks like
+      // the requested backend finished the run.
+      providerInfo = {
+        id: c.provider.id,
+        model: c.provider.model,
+        fellBack: providerInfo.fellBack || c.fellBack,
+      };
     } catch (e) {
       const msg = redactSecrets((e as Error).message);
       onEvent({ type: 'assistant', text: `error: ${msg}` });
@@ -1040,7 +1067,21 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     const displayText = sanitizeAgentDisplayText(result.text ?? '');
     if (displayText) onEvent({ type: 'assistant', text: displayText });
 
-    const toolCalls = result.toolCalls ?? [];
+    let toolCalls = result.toolCalls ?? [];
+    // Last-ditch rescue: a Code Mode dump that the provider wrapper missed
+    // (spaced JSON keys, `edit-file` hyphens, `apply patch` spaces, fenced
+    // ```json) still becomes a real tool call. Prefer executing over treating
+    // the dump as prose.
+    if (toolCalls.length === 0 && (result.text ?? '').trim()) {
+      const rescued = parseTextToolCalls(result.text ?? '', allTools);
+      if (rescued.calls.length) {
+        toolCalls = rescued.calls;
+        result = { ...result, text: rescued.text, toolCalls };
+      }
+    }
+    // Every name — native, text-protocol, or rescued — is rewritten before
+    // dispatch so `apply patch` / `read file` never hit "unknown tool".
+    if (toolCalls.length) toolCalls = normalizeToolCalls(toolCalls, allTools);
     if (toolCalls.length === 0) {
       messages.push({ role: 'assistant', content: result.text });
 
@@ -1072,7 +1113,26 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 
       // Clean prose/Markdown answer (Q&A, explanations) is a successful finish —
       // same as Claude Code free-text, not a failed no-tools dump.
-      if (isUserFacingProse(fullText)) {
+      // After a failed mutation, a bare JSON / op dump is not a solve either
+      // (Spark printed `{id, op: REPLACED}` and the loop looked green).
+      // After unknown-tool failures and 0 successful calls, apologetic prose
+      // plus a broken `{` dump is the same fake-success (Flow: read__file
+      // unknown, then "Sorry…" + `{name: …`).
+      const unknownThenBrokenDump =
+        unknownToolFailures > 0 && successfulToolCalls === 0 && looksLikeBrokenJsonDump(fullText);
+      // Edit ask is not a solve until a mutation actually writes
+      // (Flow: edit_file not-found still counted mutationToolCalls=1 and
+      // fake-finished with filesChanged=0).
+      const editAskUnfulfilled =
+        instructionRequiresMutation(instruction) &&
+        changes.length === 0 &&
+        !looksLikeClarifyingQuestion(fullText);
+      if (
+        isUserFacingProse(fullText) &&
+        !(failedMutationPending && looksLikeBareJsonObject(fullText)) &&
+        !unknownThenBrokenDump &&
+        !editAskUnfulfilled
+      ) {
         return finish(
           'finished',
           stillTruncated
@@ -1093,29 +1153,42 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       else emptyReplies++;
       const retriesLeft = reasoningOnly
         ? reasoningOnlyReplies <= REASONING_ONLY_RETRIES
-        : emptyReplies <= EMPTY_REPLY_RETRIES;
+        : emptyReplies <= AGENT_EMPTY_REPLY_RETRIES;
       if (retriesLeft && step < maxSteps) {
         messages.push({
           role: 'user',
           content: reasoningOnly
             ? 'You produced reasoning but no visible reply. Reasoning is never shown as the answer. ' +
               'Stop thinking and act now: call a tool, or write the answer to the task in plain Markdown.'
-            : displayText.trim().length === 0
-              ? 'Your last reply was empty. Either call a tool to keep working, or answer the task in plain Markdown now.'
-              : 'Your last reply was neither a tool call nor a readable answer. Do not emit raw JSON or templates — call a tool, or answer the task in plain Markdown.',
+            : looksLikeToolCallDump(fullText) || looksLikeBareJsonObject(fullText) || unknownThenBrokenDump
+              ? 'That reply looks like a printed tool call or edit dump, not a call. Do not print JSON or fenced dumps. Emit a real tool call (<tool_call>{"name":"…","arguments":{…}}</tool_call>), or answer the task in plain Markdown.'
+              : editAskUnfulfilled
+                ? 'The task asks for a file change and nothing was written. Do not print a code fence as the answer. Call edit_file or apply_patch with the exact current snippet, then finish.'
+              : displayText.trim().length === 0
+                ? 'Your last reply was empty. Either call a tool to keep working, or answer the task in plain Markdown now.'
+                : 'Your last reply was neither a tool call nor a readable answer. Do not emit raw JSON or templates — call a tool, or answer the task in plain Markdown.',
         });
         continue;
       }
       // Terminal text is never empty: a silent finish is exactly the failure
       // this branch exists to report, and every host renders `finalText`.
+      // A leftover tool/edit dump is not an answer — say so instead of
+      // echoing the JSON (that used to look like a successful solve).
+      const dumpStop =
+        looksLikeToolCallDump(fullText) || looksLikeBareJsonObject(fullText) || unknownThenBrokenDump;
+      const stubAsk = editAskUnfulfilled && (!fullText || looksLikeFileStub(fullText));
       return finish(
         'no-tools',
-        fullText ||
-          (reasoningOnlyReplies > 0
-            ? `The model (${providerInfo.model}) kept reasoning without ever writing an answer (${reasoningOnlyReplies} reasoning-only reply/replies` +
-              `${emptyReplies > 0 ? `, ${emptyReplies} empty reply/replies` : ''}). ` +
-              'Lower the reasoning effort, raise the output limit, or re-ask with a more specific instruction.'
-            : `The model (${providerInfo.model}) returned no usable output after ${emptyReplies} attempt(s). Try a stronger model, or re-ask with a more specific instruction.`),
+        dumpStop
+          ? `The model (${providerInfo.model}) printed a tool or edit dump instead of applying a change or writing an answer. Try a stronger model, or re-ask with a more specific instruction.`
+          : stubAsk
+            ? `The model (${providerInfo.model}) stopped without applying a required file change. Try a stronger model, or re-ask with a more specific instruction.`
+          : fullText ||
+            (reasoningOnlyReplies > 0
+              ? `The model (${providerInfo.model}) kept reasoning without ever writing an answer (${reasoningOnlyReplies} reasoning-only reply/replies` +
+                `${emptyReplies > 0 ? `, ${emptyReplies} empty reply/replies` : ''}). ` +
+                'Lower the reasoning effort, raise the output limit, or re-ask with a more specific instruction.'
+              : `The model (${providerInfo.model}) returned no usable output after ${emptyReplies} attempt(s). Try a stronger model, or re-ask with a more specific instruction.`),
         step,
       );
     }
@@ -1189,10 +1262,19 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       } else {
         const n = (repeats.get(sig) ?? 0) + 1;
         repeats.set(sig, n);
-        if (n >= STOP_AT) stopNoProgress = true;
-        else if (n >= NUDGE_AT) content += `\n\n(note: you have called this exact tool call ${n} times with no change — try a different approach, read more context, or call finish.)`;
+        if (n >= AGENT_NO_PROGRESS_STOP_AT) stopNoProgress = true;
+        else if (n >= AGENT_NO_PROGRESS_NUDGE_AT) content += `\n\n(note: you have called this exact tool call ${n} times with no change — try a different approach, read more context, or call finish.)`;
       }
 
+      if (MUTATION_TOOLS.has(call.name)) mutationToolCalls++;
+      if (MUTATION_TOOLS.has(call.name) && !toolResult.finished) {
+        failedMutationPending = !toolResult.mutated;
+      }
+      if (toolResult.failed && /\bunknown tool\b/i.test(toolResult.content)) {
+        unknownToolFailures++;
+      } else {
+        successfulToolCalls++;
+      }
       trajectory.recordTool(call.name, step, toolResult.mutated);
       // The event carries the full result — the panel and the transcript log
       // show what the tool actually said. Only the copy the model re-reads on
@@ -1202,6 +1284,26 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       messages.push({ role: 'tool', content: forModel, toolCallId: call.id, name: call.name });
 
       if (toolResult.finished) {
+        if (
+          call.name === 'finish' &&
+          instructionRequiresMutation(instruction) &&
+          changes.length === 0
+        ) {
+          rejectedEmptyFinish++;
+          if (rejectedEmptyFinish > 1 || step >= maxSteps) {
+            return finish(
+              'no-tools',
+              `The model (${providerInfo.model}) stopped without applying a required file change. Try a stronger model, or re-ask with a more specific instruction.`,
+              step,
+            );
+          }
+          messages.push({
+            role: 'user',
+            content:
+              'The task asks for a file change and nothing was written. Do not treat a read as done. Call edit_file or apply_patch with the exact current snippet, then finish.',
+          });
+          break;
+        }
         // Auto-verify: on failure, keep going so the model fixes it.
         if ((await verifyOnFinish()) === 'retry') break;
         // Successful finish: close any open checklist items so the host panel
@@ -1578,12 +1680,46 @@ async function createLoopCompressor(instruction: string, model: string, env: Nod
   }
 }
 
+const FILE_HINT_RE =
+  /(?:^|[\s`'"])(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z][\w.-]*\b|\b[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|rb|php|cs|cpp|c|h|vue|svelte)\b/;
+
+/** Tight: `edit` (any), or change/fix/replace plus a file path, or "so … return(s)". */
+export function instructionRequiresMutation(instruction: string): boolean {
+  const t = (instruction ?? '').trim();
+  if (!t) return false;
+  if (/\bedit\b/i.test(t)) return true;
+  if (/\b(change|fix|replace)\b/i.test(t) && FILE_HINT_RE.test(t)) return true;
+  if (/\bso\b[\s\S]{0,120}\breturns?\b/i.test(t)) return true;
+  return false;
+}
+
+/** A real clarifying question — not a code-fence stub. */
+export function looksLikeClarifyingQuestion(text: string): boolean {
+  const t = (text ?? '').trim();
+  if (t.length < 8 || !/\?/.test(t)) return false;
+  return /\b(which|what|where|who|how|why|should i|can you|could you|please (clarify|confirm|specify))\b/i.test(t);
+}
+
+/** ```ts\n// src/gREET.ts\n``` — comment-only / path-only fence, not an answer. */
+function looksLikeFileStub(text: string): boolean {
+  const t = (text ?? '').trim();
+  const stripped = t.replace(/^```[\w-]*\s*/i, '').replace(/```\s*$/i, '').trim();
+  if (!stripped) return t.startsWith('```');
+  const lines = stripped.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return t.startsWith('```');
+  return lines.every((l) => /^(?:\/\/|#|\/\*|\*)/.test(l) || /^[\w./\\-]+$/.test(l));
+}
+
 /** True when model text is a real answer, not empty/PatchIR/tool JSON. */
 function isUserFacingProse(text: string): boolean {
   const t = (text ?? '').trim();
   if (t.length < 12) return false;
   if (/"schemaVersion"\s*:\s*"patch-ir\/0"/i.test(t)) return false;
   if (/^\s*\{[\s\S]*"operations"\s*:/.test(t)) return false;
+  // A fenced or bare tool-call dump is not a solve — rescue it or stop as no-tools.
+  if (looksLikeToolCallDump(t)) return false;
+  if (looksLikeFileStub(t)) return false;
+  if (/"\s*op\s*"\s*:/i.test(t) && /"\s*(replacement|replace|content|search)\s*"\s*:/i.test(t)) return false;
   if (!/[A-Za-z]{4,}/.test(t)) return false;
   return true;
 }

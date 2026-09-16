@@ -1,0 +1,183 @@
+# Mirror an already-published GHCR image to Docker Hub (`vibgrate/cli`)
+# without rebuilding. Use this for a one-shot catch-up (e.g. 2026.914.1)
+# after DOCKERHUB_USERNAME + DOCKERHUB_TOKEN are set on github.com/vibgrate/cli.
+#
+# Canonical source: ghcr.io/vibgrate/cli:<tag>
+# Destination:      docker.io/vibgrate/cli:<tag> and :latest (optional)
+#
+# REQUIRED secrets (Settings → Secrets → Actions on vibgrate/cli):
+#   DOCKERHUB_USERNAME  Hub account that can push to the vibgrate namespace
+#   DOCKERHUB_TOKEN     Hub access token with Read & Write
+name: Docker Hub mirror
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "GHCR tag to mirror (blank = committed image pin, e.g. 2026.914.1)"
+        required: false
+        default: ""
+      also-latest:
+        description: "Also tag the mirror as :latest"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: docker-hub-mirror-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+  id-token: write
+  attestations: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  DEST: docker.io/vibgrate/cli
+
+jobs:
+  mirror:
+    name: Mirror GHCR digest to Docker Hub
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG#v}"
+          else
+            tag="$(grep -E 'appVersion:.*" # vibgrate:cli-version' charts/vibgrate/Chart.yaml | head -1 | sed -E 's/.*appVersion: \"([^\"]+)\".*/\1/')"
+            if [ -z "${tag}" ]; then
+              echo "::error::Could not read the committed CLI version pin from charts/vibgrate/Chart.yaml. Pass tag= explicitly."
+              exit 1
+            fi
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "### Mirroring \`${IMAGE}:${tag}\` → \`${DEST}:${tag}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require Docker Hub secrets
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${DOCKERHUB_USERNAME}" ] && missing+=(DOCKERHUB_USERNAME)
+          [ -z "${DOCKERHUB_TOKEN}" ] && missing+=(DOCKERHUB_TOKEN)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            {
+              echo "### Docker Hub mirror blocked — secrets missing"
+              echo "Add these **repository secrets** on \`github.com/vibgrate/cli\` (Settings → Secrets and variables → Actions):"
+              echo ""
+              echo "1. Create public Hub repo \`vibgrate/cli\` if it does not exist."
+              echo "2. \`DOCKERHUB_USERNAME\` = Hub account that can push to the \`vibgrate\` namespace"
+              echo "3. \`DOCKERHUB_TOKEN\` = Hub access token with **Read & Write**"
+              echo "4. Re-run this workflow with tag \`${{ steps.tag.outputs.tag }}\`"
+              echo ""
+              echo "Missing: \`${missing[*]}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Docker Hub secrets missing: ${missing[*]}. See the job summary for the exact owner steps."
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve source digest
+        id: src
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect "${IMAGE}:${{ steps.tag.outputs.tag }}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          if [ -z "${digest}" ] || [ "${digest}" = "null" ]; then
+            echo "::error::Could not resolve ${IMAGE}:${{ steps.tag.outputs.tag }}. Confirm the GHCR tag exists and is readable."
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Mirror digest (preserves multi-arch)
+        id: mirror
+        env:
+          ALSO_LATEST: ${{ github.event.inputs.also-latest }}
+        run: |
+          set -euo pipefail
+          args=(--tag "${DEST}:${{ steps.tag.outputs.tag }}")
+          if [ "${ALSO_LATEST}" = "true" ]; then
+            args+=(--tag "${DEST}:latest")
+          fi
+          docker buildx imagetools create "${args[@]}" "${IMAGE}@${{ steps.src.outputs.digest }}"
+          digest=$(docker buildx imagetools inspect "${DEST}:${{ steps.tag.outputs.tag }}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: sigstore/cosign-installer@v3
+          attempt_limit: 3
+          attempt_delay: 15000
+
+      - name: Re-sign on Docker Hub (keyless)
+        env:
+          COSIGN_YES: "true"
+          DEST_REF: ${{ env.DEST }}@${{ steps.mirror.outputs.digest }}
+        run: cosign sign "${DEST_REF}"
+
+      - name: Re-attest SBOMs + VEX on Docker Hub
+        env:
+          COSIGN_YES: "true"
+          DEST_REF: ${{ env.DEST }}@${{ steps.mirror.outputs.digest }}
+          SRC_REF: ${{ env.IMAGE }}@${{ steps.src.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for TYPE in cyclonedx spdxjson openvex; do
+            cosign verify-attestation --type "${TYPE}" "${SRC_REF}" \
+              --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/.+" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              | jq -r '.payload | @base64d | fromjson | .predicate' > "predicate-${TYPE}.json"
+            cosign attest --type "${TYPE}" --predicate "predicate-${TYPE}.json" "${DEST_REF}"
+          done
+
+      - name: Re-attest build provenance (Docker Hub)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.DEST }}
+          subject-digest: ${{ steps.mirror.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        run: |
+          {
+            echo "### Docker Hub mirror"
+            echo "- Source: \`${IMAGE}:${{ steps.tag.outputs.tag }}@${{ steps.src.outputs.digest }}\`"
+            echo "- Dest: \`${DEST}:${{ steps.tag.outputs.tag }}\`${{ github.event.inputs.also-latest == 'true' && ' and `:latest`' || '' }}"
+            echo "- Re-signed (cosign keyless) + SLSA / SBOM / OpenVEX re-attested."
+            echo "- Confirm: \`docker pull vibgrate/cli:${{ steps.tag.outputs.tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

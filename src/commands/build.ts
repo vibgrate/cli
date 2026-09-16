@@ -9,6 +9,7 @@ import { epistemicBreakdown } from '../engine/epistemic.js';
 import { signGraphAttestation, verifyGraphAttestation, type SignSummary } from './attest-actions.js';
 import { isModelReady, countPending, resolveEmbedModel } from '../engine/embeddings.js';
 import { attachVgd } from '../runtime/vgd/attach.js';
+import { resolveBuildAttach } from '../runtime/vgd/build-attach.js';
 import { ActivityLog } from '../runtime/vgd/activity.js';
 import type { VgGraph } from '../schema.js';
 import { writeArtifacts } from '../engine/artifacts.js';
@@ -29,9 +30,7 @@ import { ProgressBar } from '../util/progress.js';
 import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.js';
 
 interface BuildCmdOpts {
-  /** Boundary policy pack for the architecture sidecar (`--policy`). */
   policy?: string;
-  /** Write a starter `.vibgrate/architecture.toml` from this build's classify file (never overwrites). */
   initPolicy?: boolean;
   only?: string;
   exclude?: string[];
@@ -52,6 +51,8 @@ interface BuildCmdOpts {
   attestKey?: string;
   attestation?: string;
   pub?: string;
+  /** Commander `--no-publish` arrives as `publish: false`. */
+  publish?: boolean;
 }
 
 export function registerBuild(program: Command): void {
@@ -73,7 +74,8 @@ export function registerBuild(program: Command): void {
     .option('--fast', 'skip precise tsc resolve (heuristic only — faster XL cold builds)')
     .option('--no-index', 'do not write the SQLite serve index under .vibgrate/cache/')
     .option('--analysis-tier <tier>', 'force analysis tier: full | large | xl (default: auto)')
-    .option('--no-warm', 'do not warm the semantic index in the background after building')
+    .option('--no-warm', 'do not warm the semantic index (no-daemon disk fallback only; vgd warms its own worker)')
+    .option('--no-publish', 'do not start vgd or load the new map into a slot (batch compares)')
     .option('--grammars <dir>', 'directory of grammar .wasm files (offline / air-gapped)')
     .option('-o, --export <file>', 'also write the map to a file (format inferred)')
     .option('--attest', 'sign the built graph → .vibgrate/attestation.intoto.jsonl')
@@ -88,7 +90,6 @@ export function registerBuild(program: Command): void {
 }
 
 export interface RunBuildHooks {
-  /** Invoked during the parse phase (even under --quiet / non-TTY hosts). */
   onParseProgress?: (done: number, total: number) => void;
 }
 
@@ -100,16 +101,11 @@ export async function runBuild(
 ): Promise<void> {
   const root = path.resolve(global.cwd ?? '.');
 
-  // `vg build --verify`: the single verification entry point — determinism
-  // self-check plus (if present) attestation verification.
   if (opts.verify) {
     await verifyGraph(root, opts, global);
     return;
   }
 
-  // Brand banner + live parse progress for an interactive human while the index
-  // builds (TTY only; both are no-ops under --json/--quiet/pipe so machine output
-  // stays clean). Hosts can still receive progress via hooks.onParseProgress.
   const interactive = !global.json && !global.quiet;
   if (interactive) printLogo(path.basename(root) || root);
   const bar = interactive ? new ProgressBar(c.dim('parsing')) : undefined;
@@ -152,18 +148,11 @@ export async function runBuild(
   } catch (err) {
     bar?.done();
     if (err instanceof UsageError) throw usageError(err.message);
-    // A resource safeguard fired (file-count cap, heap budget, worker OOM) —
-    // the message already carries the remedy; surface it without a stack.
     if (err instanceof ResourceLimitError) throw new CliError(err.message, ExitCode.ERROR);
     throw err;
   }
   bar?.done();
 
-  // Architecture classify is installed by default: run the bounded ensure now
-  // so this build can write the classify sidecar. A module that cannot be
-  // provisioned (or was declined / disabled) only costs the role/purpose
-  // lines — the build itself never waits on the network under --offline and
-  // never fails because of it.
   const haile = global.offline ? null : await ensureHaileModule().catch(() => null);
 
   const written = writeArtifacts(result.graph, {
@@ -174,17 +163,10 @@ export async function runBuild(
     ...(opts.policy ? { policy: opts.policy } : {}),
   });
 
-  // A `[[overlay]]` that does not validate fails the architecture step
-  // loudly: the map is on disk, the classify file is not, and the message
-  // names every problem. Nothing downstream should guess at a half policy.
   if (written.architecturePolicyError) {
     throw new CliError(`architecture policy: ${written.architecturePolicyError}`, ExitCode.ERROR);
   }
 
-  // `--init-policy`: seed `.vibgrate/architecture.toml` from the classify
-  // file this build just wrote. The map was judged under whatever pack was in
-  // force before the file existed, so a different inferred pack asks for one
-  // more build.
   let initPolicy: (SeedArchitecturePolicyResult & { stamped: string | null }) | undefined;
   if (opts.initPolicy) {
     const sidecar = readHaileSidecar(written.graphPath);
@@ -200,10 +182,6 @@ export async function runBuild(
     );
   }
 
-  // Record the freshness snapshot (stat+hash per corpus file, plus this build's
-  // scope) so `vg serve`/`vg ask` can auto-refresh the map when the tree drifts.
-  // Skipped for a custom --graph target: that is an explicit artifact the
-  // auto-refresh machinery must not manage.
   if (!global.graph) {
     writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats, {
       only,
@@ -218,20 +196,28 @@ export async function runBuild(
     });
   }
 
-  // The map is on disk now — start the local runtime if it is not up, and hand
-  // it the map. `vg build` used to leave the daemon at `0 graph slot(s)` no
-  // matter how many times it ran. Done here rather than with the summary below
-  // so a `--json` build (which returns early) warms the daemon too; the notice
-  // is printed in order later.
+  const attach = resolveBuildAttach({
+    daemon: global.daemon,
+    publish: opts.publish,
+    fast: opts.fast,
+    warm: opts.warm,
+    index: opts.index,
+  });
   const activity = new ActivityLog();
   await activity.time(
     'attach',
-    () => attachVgd(root, { graphPath: global.graph, disabled: global.daemon === false }),
+    () =>
+      attachVgd(root, {
+        graphPath: global.graph,
+        disabled: attach.disabled,
+        autoStart: attach.autoStart,
+        publish: attach.publish,
+      }),
     (a) => {
       if (a.status !== 'attached') return { outcome: 'skip' as const, detail: `${a.reason} — the map stays on disk only` };
       const started = a.started ? 'started vgd' : 'attached to vgd';
       if (a.published?.status === 'published') {
-        return { outcome: 'ok' as const, detail: `${started} · map published ${a.published.gitRef} · ${a.published.nodeCount} nodes · semantic index warming` };
+        return { outcome: 'ok' as const, detail: `${started} · map published ${a.published.gitRef} · ${a.published.nodeCount} nodes · semantic index warming in vgd` };
       }
       if (a.published?.status === 'failed') {
         return { outcome: 'warn' as const, detail: `${started} · map not published (${a.published.error})` };
@@ -242,11 +228,6 @@ export async function runBuild(
 
   if (opts.export) writeExport(result.graph, opts.export);
 
-  // Bring previously-installed assistant instructions (skill/nudge files from
-  // `vg install`) up to the current content version — so evolved instructions
-  // reach this repo the first time a new CLI builds here. Only files carrying
-  // vg's own version marker (or the exact legacy generated content) are
-  // touched; a custom --graph build is an explicit artifact and skips this.
   if (!global.graph) {
     const fileCount = result.graph.nodes.filter((n) => n.kind === 'file').length;
     const refreshed = refreshInstalledInstructions(root, fileCount > 0 && fileCount < SMALL_REPO_FILES);
@@ -255,8 +236,6 @@ export async function runBuild(
         info(c.dim(`vg · refreshed assistant instructions ${r.file} (v${r.from} → v${r.to})`));
       }
     }
-    // Per-area skills: off unless vibgrate.config.json sets areaSkills: true.
-    // When on, deterministic content → zero churn if the graph didn't change.
     const areaChanges = writeAreaSkills(root, result.graph);
     if (interactive && (areaChanges.written.length || areaChanges.removed.length)) {
       const parts = [
@@ -267,7 +246,6 @@ export async function runBuild(
     }
   }
 
-  // `--attest`: sign the freshly-built graph → .vibgrate/attestation.intoto.jsonl.
   let attestation: SignSummary | undefined;
   const attestNotices: string[] = [];
   if (opts.attest) {
@@ -319,8 +297,6 @@ export async function runBuild(
   }
 
   const { counts } = result.graph.meta;
-  // Parses served by content from the shared store (another branch, path, or
-  // worktree) are the reuse the path cache alone could not give — say so.
   const shared = result.cas && result.cas.parseHits > 0 ? `, ${result.cas.parseHits} shared` : '';
   const incremental =
     result.reused > 0
@@ -339,8 +315,6 @@ export async function runBuild(
             (result.resolveStats.callsResolved + result.resolveStats.callsUnresolved),
         )
       : 100;
-  // When a precise rung ran it is authoritative; callPct is only the heuristic
-  // floor (label it so, to avoid understating the precise result below).
   const precise = result.tsc || result.scip;
   const callLabel = precise ? `heuristic floor ${callPct}%` : `calls resolved ${callPct}%`;
   info(c.dim(`  ${callLabel} · resolver ${result.graph.provenance.resolver.join(',')}`));
@@ -376,15 +350,9 @@ export async function runBuild(
 
   for (const line of activity.render()) info(line);
 
-  maybeWarmEmbeddings(root, result.graph, global, opts.warm !== false);
+  maybeWarmEmbeddings(root, result.graph, global, attach.diskEmbedFallback);
 }
 
-/**
- * `vg build --verify` — the single verification entry point. Runs the determinism
- * self-check (byte-identical rebuilds + toolchain fingerprint) and, when an
- * attestation is present, verifies it against the on-disk graph. Exit 4 on a
- * determinism failure, exit 2 on an attestation failure.
- */
 async function verifyGraph(root: string, opts: BuildCmdOpts, global: GlobalOpts): Promise<void> {
   const only = opts.only ? opts.only.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
   const jobs = opts.jobs ? Number(opts.jobs) : undefined;
@@ -417,7 +385,7 @@ async function verifyGraph(root: string, opts: BuildCmdOpts, global: GlobalOpts)
     }
     info(det.ok ? c.green(`  deterministic · digest ${det.digest.slice(0, 16)}…`) : c.red('  NON-DETERMINISTIC'));
     if (attest.missing) {
-      info(c.dim(`  attestation: none (sign one with \`vg build --attest\`)`));
+      info(c.dim('  attestation: none (sign one with `vg build --attest`)'));
     } else {
       const r = attest.result;
       const badge =
@@ -435,16 +403,7 @@ async function verifyGraph(root: string, opts: BuildCmdOpts, global: GlobalOpts)
   if (attestFailed) throw new CliError('attestation verification failed', ExitCode.GATE_FAILED);
 }
 
-/**
- * After an interactive build we have just committed to a code graph, so the
- * user is likely to run `vg ask`/`vg serve` next — start warming the semantic
- * index in the background now so that first semantic call is instant instead of
- * paying a cold model load. If the model isn't downloaded yet, the background
- * warm fetches it (once, centrally) rather than deferring the whole cost to the
- * first `ask`. Disabled with `--no-warm`; skipped under --json/--quiet/--local
- * and when not at a TTY (so CI never auto-downloads). The detached child runs
- * `vg embed --bg [--download]`; a lock prevents it racing a foreground `ask`.
- */
+/** `--no-daemon` fallback only. Interactive builds let vgd's embed-worker own the index. */
 function maybeWarmEmbeddings(root: string, graph: VgGraph, global: GlobalOpts, warm: boolean): void {
   if (!warm || global.json || global.quiet || global.offline) return;
   if (!process.stdout.isTTY && !process.stderr.isTTY) return;
@@ -452,20 +411,11 @@ function maybeWarmEmbeddings(root: string, graph: VgGraph, global: GlobalOpts, w
   if (!cli) return;
   const modelId = resolveEmbedModel();
   const ready = isModelReady(modelId);
-  // Already fully warm: model present and every node embedded → nothing to do.
   if (ready && countPending(graph, root, modelId) === 0) return;
-  // When the model isn't on this machine yet, start the one-time download now
-  // (the graph is built; the next semantic call shouldn't wait for it).
   const args = ready
     ? [cli, 'embed', '-C', root, '--bg']
     : [cli, 'embed', '-C', root, '--bg', '--download'];
   try {
-    // On Windows, `detached` (DETACHED_PROCESS) would strip the child of any
-    // console, making every console-subsystem grandchild (git, node) pop a
-    // visible console window; windowsHide gives it a windowless console the
-    // grandchildren inherit. Children outlive their parent on Windows anyway,
-    // so nothing is lost. POSIX keeps detached so the warm survives the
-    // terminal closing.
     const child = spawn(process.execPath, args, {
       detached: process.platform !== 'win32',
       stdio: 'ignore',
@@ -475,8 +425,8 @@ function maybeWarmEmbeddings(root: string, graph: VgGraph, global: GlobalOpts, w
     info(
       c.dim(
         ready
-          ? '  warming the semantic index in the background — `vg ask` will be instant'
-          : '  downloading the semantic model in the background (once) — `vg ask`/`vg serve` will be instant; disable with --no-warm',
+          ? '  writing on-disk vectors (--no-daemon fallback) — vgd is not running'
+          : '  downloading the semantic model for the --no-daemon disk fallback; disable with --no-warm',
       ),
     );
   } catch {
@@ -504,7 +454,7 @@ function writeExport(graph: Parameters<typeof serializeGraph>[0], target: string
     default:
       throw new CliError(
         `cannot export to "${ext || target}" yet — supported in Phase 0: .json, .md, .html, "-" (stdout). ` +
-          `More formats (graphml, dot, cypher) arrive with \`vg export\` in Phase 1.`,
+          'More formats (graphml, dot, cypher) arrive with `vg export` in Phase 1.',
         ExitCode.USAGE_ERROR,
       );
   }

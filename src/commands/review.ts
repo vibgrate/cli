@@ -3,8 +3,12 @@
  * locally (spec §3).
  *
  *   vg review                    changed-only vs HEAD (dirty tree + index)
+ *   vg review --in-place         same as the default — working tree, explicit
+ *   vg review --local            deterministic scanners; no hosted model
+ *   vg review --loop             review → deterministic patch → re-review (CLI only)
  *   vg review --base origin/main merge-base of HEAD and base
  *   vg review explain <id>       the evidence behind one finding
+ *   vg review propose <id>       PatchIR dry-run via the VG Code loop (`--apply --yes` to write)
  *   vg review verify <receipt>   check a receipt's digest and Ed25519 signature offline
  *
  * Exit codes are the CI contract and never conflate "missing" with "pass".
@@ -32,6 +36,9 @@ import { rootOf } from './util.js';
 import { formatExplain, formatMarkdown, formatSarif, formatText, type ReviewFormat } from '../review/format.js';
 import { exitCodeForDecision, resolveFailOn, FAIL_ON_LEVELS, type FailOnLevel } from '../review/policy.js';
 import { buildEnvelope, collectSpans, pushReceipt, rejectPushWhenOffline, type ReviewPushBody } from '../review/push.js';
+import { applyPatches, collectLoopPatches, loopNote, REVIEW_LOOP_MAX } from '../review/loop.js';
+import { loadGraph } from '../engine/load.js';
+import { proposeFindingFix, REVIEW_PROPOSE_LOOP_CAP } from '../review/propose.js';
 import { runReview, type RunReviewResult } from '../review/run.js';
 import { resolveReviewSigningKey, verifyReceipt } from '../review/sign.js';
 import { injectContextBlock, renderContext, writeContextFile } from '../review/context-file.js';
@@ -63,6 +70,10 @@ interface ReviewOpts {
   sign?: boolean;
   /** `--sign-key <file>` — Ed25519 private key PEM. */
   signKey?: string;
+  /** `--in-place` — review the working tree (default without --base). */
+  inPlace?: boolean;
+  /** `--loop` — explicit review → patch → re-review. Never automatic. */
+  loop?: boolean;
 }
 
 const FORMATS: ReviewFormat[] = ['text', 'json', 'sarif', 'md'];
@@ -72,6 +83,14 @@ export function registerReview(program: Command): void {
     .command('review')
     .description('Vibgrate Review — architecture + security-control review of the current change, locally')
     .option('--base <ref>', 'review HEAD against the merge-base with <ref> (e.g. origin/main)')
+    .option(
+      '--in-place',
+      'review the working tree as-is (the default without --base; with --base, include uncommitted work against the merge-base)',
+    )
+    .option(
+      '--loop',
+      'repeat review → apply deterministic patches → re-review on this machine only. Never automatic. Does not write a hosted branch.',
+    )
     .option('--format <fmt>', `output format (${FORMATS.join(' | ')})`, 'text')
     .option('-o, --out <file>', 'write the formatted result to a file')
     .option('--push', 'send the receipt to Vibgrate Cloud (needs a DSN)')
@@ -114,15 +133,35 @@ export function registerReview(program: Command): void {
 
       const signingKey = resolveSigning(root, opts, Boolean(global.quiet));
 
-      const result = await runReview({
+      if (opts.loop && opts.base && !opts.inPlace) {
+        throw new CliError(
+          '`--loop` applies deterministic patches to the working tree — pass `--in-place` or omit `--base`',
+          ExitCode.USAGE_ERROR,
+        );
+      }
+
+      let result = await runReview({
         root,
         base: opts.base,
+        inPlace: opts.inPlace,
+        local: global.local,
         explain: opts.explain,
         offline: global.offline,
         graphPath: global.graph,
         generatedAt: global.generatedAt,
         signingKey,
       });
+
+      if (opts.loop) {
+        result = await runReviewLoop({
+          root,
+          opts,
+          global,
+          signingKey,
+          first: result,
+          quiet: Boolean(global.quiet) || Boolean(global.json),
+        });
+      }
 
       if (opts.failOn && !FAIL_ON_LEVELS.includes(opts.failOn)) {
         throw new CliError(
@@ -195,6 +234,7 @@ export function registerReview(program: Command): void {
       const result = await runReview({
         root: explainRoot,
         base: opts.base,
+        local: global.local,
         offline: global.offline,
         graphPath: global.graph,
         generatedAt: global.generatedAt,
@@ -262,6 +302,99 @@ export function registerReview(program: Command): void {
       process.exitCode = v.status === 'verified' ? ExitCode.OK : v.status === 'unverified' ? ExitCode.GATE_FAILED : ExitCode.ERROR;
     });
   applyGlobalOptions(verify);
+
+  const propose = cmd
+    .command('propose')
+    .description(
+      `propose a PatchIR fix for one finding via the VG Code agent loop (dry-run; never writes the default branch)`,
+    )
+    .argument('<finding-id>', 'a finding id from the current change (e.g. arch-01)')
+    .option('--base <ref>', 'review HEAD against the merge-base with <ref>')
+    .option('--model <id>', 'relay:<slug> (hosted Review) or spark|flow|forge (local Code Mode)')
+    .option('--loop', `use the VG Code agent loop (cap ${REVIEW_PROPOSE_LOOP_CAP}; stops on no progress)`, true)
+    .option('--single', 'one-shot residual → patch → verify instead of the agent loop')
+    .option('--apply', 'write the patch (still requires --yes; refused on the default branch)')
+    .option('--yes', 'consent to write when --apply is set')
+    .action(async function (
+      this: Command,
+      findingId: string,
+      opts: { base?: string; model?: string; loop?: boolean; single?: boolean; apply?: boolean; yes?: boolean },
+    ) {
+      const global = readGlobal(this);
+      const root = rootOf(global);
+      if (!opts.model) {
+        throw new CliError(
+          '`vg review propose` needs --model relay:<slug> (hosted) or spark|flow|forge (local Code Mode)',
+          ExitCode.USAGE_ERROR,
+        );
+      }
+      reportPrepare(
+        await ensureCodeMap({
+          root,
+          graphPath: global.graph,
+          quiet: Boolean(global.quiet) || Boolean(global.json),
+        }),
+        Boolean(global.quiet) || Boolean(global.json),
+      );
+      const reviewed = await runReview({
+        root,
+        base: opts.base,
+        offline: global.offline,
+        graphPath: global.graph,
+        generatedAt: global.generatedAt,
+        signingKey: null,
+      });
+      const all = [
+        ...reviewed.receipt.findings.architecture_findings,
+        ...reviewed.receipt.findings.security_findings,
+      ];
+      const hit = all.find((f) => f.id === findingId);
+      if (!hit) {
+        throw new CliError(
+          `no finding "${findingId}" in this change set — run \`vg review\` to list the current findings`,
+          ExitCode.NOT_FOUND,
+        );
+      }
+      const graph = loadGraph(root, global.graph);
+      if (!graph) {
+        throw new CliError(
+          'code map missing — run `vg` (or drop `--no-auto-build`) so Review can ground the proposal',
+          ExitCode.ENGINE_UNAVAILABLE,
+        );
+      }
+      const policySnippet = [
+        ...reviewed.capsule.policies.map((p) => `${p.id}: ${p.rule}`),
+        hit.remediation,
+      ]
+        .filter(Boolean)
+        .join('\n');
+      const result = await proposeFindingFix({
+        capsule: reviewed.capsule,
+        finding: hit,
+        policySnippet,
+        modelId: opts.model,
+        root,
+        graph,
+        apply: !!opts.apply,
+        consent: !!opts.yes,
+        loop: opts.single ? false : opts.loop !== false,
+        correlationId: `rp-${findingId}`,
+      });
+      if (global.json) {
+        out(JSON.stringify(result, null, 2));
+      } else if (!global.quiet) {
+        const tag = result.ok ? c.green('PROPOSED') : c.red('NOT APPLIED');
+        info(`  ${tag}  ${result.stopReason}  ${hit.id}  (ref ${result.correlationId})`);
+        if (result.error) info(c.dim(`  ${result.error}`));
+        if (result.proposedDiff) info(result.proposedDiff);
+        else if (result.finalText) info(c.dim(`  ${result.finalText}`));
+        if (!result.applied) {
+          info(c.dim('  dry-run — re-run with --apply --yes on a topic branch to write'));
+        }
+      }
+      if (!result.ok) process.exitCode = ExitCode.ERROR;
+    });
+  applyGlobalOptions(propose);
 }
 
 /**
@@ -323,6 +456,38 @@ function maybeSeedPolicy(result: RunReviewResult, opts: ReviewOpts, quiet: boole
             + '\n  Set one and commit the file to have future changes judged against it.',
       ),
   );
+}
+
+async function runReviewLoop(params: {
+  root: string;
+  opts: ReviewOpts;
+  global: ReturnType<typeof readGlobal>;
+  signingKey: KeyObject | null;
+  first: RunReviewResult;
+  quiet: boolean;
+}): Promise<RunReviewResult> {
+  let result = params.first;
+  for (let iteration = 1; iteration <= REVIEW_LOOP_MAX; iteration += 1) {
+    const patches = collectLoopPatches(result.repoRoot, result);
+    const applied = applyPatches(result.repoRoot, patches);
+    if (!params.quiet) info(c.dim(`  ${loopNote(applied, iteration)}`));
+    if (applied.length === 0) return result;
+    result = await runReview({
+      root: params.root,
+      base: params.opts.base,
+      inPlace: true,
+      local: params.global.local,
+      explain: params.opts.explain,
+      offline: params.global.offline,
+      graphPath: params.global.graph,
+      generatedAt: params.global.generatedAt,
+      signingKey: params.signingKey,
+    });
+  }
+  if (!params.quiet) {
+    info(c.dim(`  --loop stopped after ${REVIEW_LOOP_MAX} iterations. Remaining findings need a human.`));
+  }
+  return result;
 }
 
 function render(result: RunReviewResult, format: ReviewFormat): string {

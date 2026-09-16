@@ -8,11 +8,21 @@
 # the source of truth) and iterates independently of the CLI's calendar version.
 #
 # Triggers:
-#   - push to main           → publish ONLY when charts/vibgrate/Chart.yaml's
-#                              `version` changed in the push (a merged chart-bump /
-#                              "Sync from monorepo" PR). Other merges are skipped,
-#                              so no tag to manage and no re-publish on every commit.
+#   - push to main           → publish when charts/vibgrate/Chart.yaml's
+#                              `version` changed (a merged chart-bump / sync PR)
+#                              OR when package.json's version changed (a CLI
+#                              release). A CLI-only bump auto-increments the
+#                              chart patch so OCI accepts a new tag and the
+#                              published chart's appVersion tracks the image.
 #   - workflow_dispatch      → manual run (with a dry-run option)
+#
+# REQUIRED for anonymous `helm pull` (one-time if the API cannot flip it):
+#   Org owner → https://github.com/orgs/vibgrate/packages/container/charts/vibgrate/settings
+#   → Change visibility → Public.
+# OPTIONAL secret on github.com/vibgrate/cli:
+#   PACKAGES_ADMIN_TOKEN — PAT with admin on GHCR packages (write:packages +
+#   the org package-admin grant). When set, the visibility step uses it
+#   instead of GITHUB_TOKEN, which often cannot make an org package public.
 name: Helm
 
 on:
@@ -20,6 +30,7 @@ on:
     branches: [main]
     paths:
       - "charts/**"
+      - "package.json"
       - ".github/workflows/helm.yml"
   workflow_dispatch:
     inputs:
@@ -39,14 +50,13 @@ env:
   CHART_REF: ghcr.io/${{ github.repository_owner }}/charts/vibgrate
 
 jobs:
-  # Decide whether this event should publish, and skip a no-op republish on an
-  # ordinary push to main. A manual run always publishes (subject to dry-run).
   gate:
     name: Decide release
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       release: ${{ steps.decide.outputs.release }}
+      bump_chart: ${{ steps.decide.outputs.bump_chart }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -61,19 +71,32 @@ jobs:
         run: |
           set -euo pipefail
           release=false
+          bump_chart=false
           if [ "$EVENT" = "workflow_dispatch" ]; then
             release=true
           elif [ "$EVENT" = "push" ]; then
-            # Publish only when the chart version changed in this push.
             NEW="$(grep -E '^version:' "${CHART_DIR}/Chart.yaml" | awk '{print $2}' | tr -d '"')"
             OLD="$(git show "${BEFORE}:${CHART_DIR}/Chart.yaml" 2>/dev/null | grep -E '^version:' | awk '{print $2}' | tr -d '"' || echo "")"
-            if [ "$NEW" != "$OLD" ] && [ -n "$NEW" ]; then release=true; fi
+            if [ "$NEW" != "$OLD" ] && [ -n "$NEW" ]; then
+              release=true
+            else
+              NEW_PKG="$(jq -r .version package.json)"
+              OLD_PKG="$(git show "${BEFORE}:package.json" 2>/dev/null | jq -r .version || echo "")"
+              if [ "$NEW_PKG" != "$OLD_PKG" ] && [ -n "$NEW_PKG" ] && [ "$NEW_PKG" != "null" ]; then
+                release=true
+                bump_chart=true
+              fi
+            fi
           fi
           echo "release=${release}" >> "$GITHUB_OUTPUT"
+          echo "bump_chart=${bump_chart}" >> "$GITHUB_OUTPUT"
           if [ "$release" = "true" ]; then
             echo "### Helm chart — will publish" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$bump_chart" = "true" ]; then
+              echo "CLI version changed without a chart version bump — will increment the chart patch so OCI accepts a new tag." >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
-            echo "No chart version change on this push — Helm publish skipped." >> "$GITHUB_STEP_SUMMARY"
+            echo "No chart or CLI version change on this push — Helm publish skipped." >> "$GITHUB_STEP_SUMMARY"
           fi
 
   publish:
@@ -83,9 +106,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write # tag the release
-      packages: write # push to GHCR
-      id-token: write # keyless cosign
+      contents: write
+      packages: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -95,11 +118,25 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
       - name: Read chart version
         id: chart
         run: |
           set -euo pipefail
           ver=$(grep -E '^version:' "${CHART_DIR}/Chart.yaml" | awk '{print $2}' | tr -d '"')
+          if [ "${{ needs.gate.outputs.bump_chart }}" = "true" ]; then
+            # CLI release without a committed chart bump: increment the patch
+            # so helm push creates a new OCI tag (re-pushing 0.1.1 would 409).
+            IFS=. read -r major minor patch <<< "${ver}"
+            patch=$((patch + 1))
+            ver="${major}.${minor}.${patch}"
+            sed -i -E "s/^(version: ).*/\\1${ver}/" "${CHART_DIR}/Chart.yaml"
+            echo "Bumped Chart.yaml version to \`${ver}\` for this CLI release." >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "version=${ver}" >> "$GITHUB_OUTPUT"
           echo "### Chart version: \`${ver}\`" >> "$GITHUB_STEP_SUMMARY"
 
@@ -127,9 +164,31 @@ jobs:
           if [ -z "${digest}" ]; then echo "::error::could not determine pushed digest"; exit 1; fi
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
+      - name: Make GHCR chart package public
+        if: github.event_name != 'workflow_dispatch' || inputs.dry-run == false
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER="${{ github.repository_owner }}"
+          set +e
+          node scripts/ghcr-set-visibility.mjs --owner "${OWNER}" --package charts/vibgrate
+          status=$?
+          set -e
+          if [ "${status}" -eq 0 ]; then
+            echo "GHCR package \`ghcr.io/${OWNER}/charts/vibgrate\` is public." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Could not set ghcr.io/${OWNER}/charts/vibgrate public. Org owner: https://github.com/orgs/${OWNER}/packages/container/charts/vibgrate/settings → Change visibility → Public. Optional: set PACKAGES_ADMIN_TOKEN on this repo (package-admin PAT) so future runs flip it automatically."
+            echo "> **Chart package still private** — anonymous \`helm pull oci://ghcr.io/${OWNER}/charts/vibgrate\` will 401 until visibility is Public." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install cosign
         if: github.event_name != 'workflow_dispatch' || inputs.dry-run == false
-        uses: sigstore/cosign-installer@v3
+        uses: Wandalen/wretry.action@v3
+        with:
+          action: sigstore/cosign-installer@v3
+          attempt_limit: 3
+          attempt_delay: 15000
 
       - name: Sign chart (keyless)
         if: github.event_name != 'workflow_dispatch' || inputs.dry-run == false
@@ -144,9 +203,6 @@ jobs:
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/.+" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 
-      # Publish Artifact Hub repository metadata as an OCI artifact so the
-      # verified-publisher badge can be granted. No-op if the file still has an
-      # empty repositoryID (i.e. the repo hasn't been registered on Artifact Hub yet).
       - name: Push Artifact Hub metadata
         if: github.event_name != 'workflow_dispatch' || inputs.dry-run == false
         run: |
@@ -168,6 +224,23 @@ jobs:
           else
             git tag "$TAG"
             git push origin "$TAG"
+          fi
+
+      - name: Commit auto-bumped chart version
+        if: needs.gate.outputs.bump_chart == 'true' && (github.event_name != 'workflow_dispatch' || inputs.dry-run == false)
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- "${CHART_DIR}/Chart.yaml"; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${CHART_DIR}/Chart.yaml"
+          git commit -m "chore(release): bump Helm chart to v${{ steps.chart.outputs.version }} [skip ci]"
+          if git push origin HEAD:main; then
+            echo "Committed chart version \`${{ steps.chart.outputs.version }}\` to main." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Could not push the auto-bumped Chart.yaml (branch protection?). Open a PR pinning charts/vibgrate/Chart.yaml version to ${{ steps.chart.outputs.version }}."
           fi
 
       - name: Summary

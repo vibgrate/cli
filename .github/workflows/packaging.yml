@@ -1,0 +1,174 @@
+# Stamp and publish the Homebrew formula + Scoop manifest to the org tap/bucket
+# repos that strangers install from:
+#
+#   brew install vibgrate/tap/vg
+#     → github.com/vibgrate/homebrew-tap  (Formula/vg.rb)
+#   scoop bucket add vibgrate https://github.com/vibgrate/scoop-bucket
+#     → github.com/vibgrate/scoop-bucket  (vg.json)
+#
+# Both wrap the published npm package @vibgrate/cli (same tarball Homebrew
+# checksums). This workflow lives in github.com/vibgrate/cli so it runs after
+# a "Sync from monorepo" merge.
+#
+# REQUIRED secret on github.com/vibgrate/cli:
+#   PACKAGING_REPOS_TOKEN — PAT (or fine-grained token) with contents:write
+#   on vibgrate/homebrew-tap and vibgrate/scoop-bucket.
+#
+# REQUIRED one-time org-owner action (API cannot create org repos for us):
+#   Create two empty **public** repos: vibgrate/homebrew-tap, vibgrate/scoop-bucket.
+#   Then re-run this workflow. See packaging/OWNER-CHECKLIST.md.
+name: Packaging (Homebrew + Scoop)
+
+on:
+  # After npm publish so the tarball we checksum actually exists.
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  push:
+    branches: [main]
+    paths:
+      - "packaging/**"
+      - "scripts/stamp-packaging.mjs"
+      - ".github/workflows/packaging.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "CLI version to stamp (blank = committed image pin)"
+        required: false
+        default: ""
+      dry-run:
+        description: "Stamp and diff only — do not push to tap/bucket repos"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: packaging-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # commit refreshed stamps back to main when they change
+
+jobs:
+  publish:
+    name: Stamp and publish tap + bucket
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Stamp formula and manifest
+        id: stamp
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            args+=(--version "${INPUT_VERSION#v}")
+          fi
+          node scripts/stamp-packaging.mjs "${args[@]}"
+          version="$(node -e "const fs=require('fs'); const t=fs.readFileSync('packaging/scoop-bucket/vg.json','utf8'); process.stdout.write(JSON.parse(t).version);")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "### Stamped Homebrew + Scoop at \`${version}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ inputs.dry-run }}" != "true" ]; then
+            if ! git diff --quiet -- packaging/homebrew-tap/Formula/vg.rb packaging/scoop-bucket/vg.json; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git add packaging/homebrew-tap/Formula/vg.rb packaging/scoop-bucket/vg.json
+              git commit -m "chore(release): stamp Homebrew + Scoop to v${version} [skip ci]"
+              git push origin HEAD:main || echo "::warning::Could not push packaging stamps to main (branch protection?)."
+            fi
+          fi
+
+      - name: Require tap/bucket token
+        id: token
+        env:
+          PACKAGING_REPOS_TOKEN: ${{ secrets.PACKAGING_REPOS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PACKAGING_REPOS_TOKEN}" ]; then
+            {
+              echo "### Homebrew / Scoop publish blocked — token or repos missing"
+              echo "Org-owner steps (one-time):"
+              echo ""
+              echo "1. Create two **public** empty repos in the \`vibgrate\` org:"
+              echo "   - https://github.com/organizations/vibgrate/repositories/new → \`homebrew-tap\`"
+              echo "   - https://github.com/organizations/vibgrate/repositories/new → \`scoop-bucket\`"
+              echo "2. Add repo secret \`PACKAGING_REPOS_TOKEN\` on \`github.com/vibgrate/cli\`:"
+              echo "   a classic PAT (\`repo\` scope) or a fine-grained PAT with **contents: write**"
+              echo "   on \`vibgrate/homebrew-tap\` and \`vibgrate/scoop-bucket\`."
+              echo "3. Re-run **Actions → Packaging (Homebrew + Scoop)** with version \`${{ steps.stamp.outputs.version }}\`."
+              echo ""
+              echo "Stamped files for that version are already in this repo under \`packaging/homebrew-tap/\` and \`packaging/scoop-bucket/\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::PACKAGING_REPOS_TOKEN is not set. Create vibgrate/homebrew-tap + vibgrate/scoop-bucket (public) and add the token — see the job summary."
+            exit 1
+          fi
+
+      - name: Push Homebrew tap
+        if: github.event_name != 'workflow_dispatch' || inputs.dry-run == false
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGING_REPOS_TOKEN }}
+          VERSION: ${{ steps.stamp.outputs.version }}
+        run: |
+          set -euo pipefail
+          OWNER="${{ github.repository_owner }}"
+          REPO="https://x-access-token:${GH_TOKEN}@github.com/${OWNER}/homebrew-tap.git"
+          if ! git ls-remote "${REPO}" HEAD >/dev/null 2>&1; then
+            echo "::error::github.com/${OWNER}/homebrew-tap does not exist or the token cannot read it. Create the public repo, then re-run."
+            echo "> **Create** https://github.com/organizations/${OWNER}/repositories/new → \`homebrew-tap\` (public)." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          work=$(mktemp -d)
+          git clone --depth 1 "${REPO}" "${work}"
+          mkdir -p "${work}/Formula"
+          cp packaging/homebrew-tap/Formula/vg.rb "${work}/Formula/vg.rb"
+          cp packaging/homebrew-tap/README.md "${work}/README.md"
+          if [ -f packaging/homebrew-tap/LICENSE ]; then cp packaging/homebrew-tap/LICENSE "${work}/LICENSE"; fi
+          git -C "${work}" config user.name "github-actions[bot]"
+          git -C "${work}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${work}" add Formula/vg.rb README.md LICENSE 2>/dev/null || git -C "${work}" add Formula/vg.rb README.md
+          if git -C "${work}" diff --cached --quiet; then
+            echo "Homebrew tap already at \`${VERSION}\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            git -C "${work}" commit -m "chore: vg ${VERSION}"
+            git -C "${work}" push origin HEAD
+            echo "Pushed \`Formula/vg.rb\` \`${VERSION}\` to \`${OWNER}/homebrew-tap\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Push Scoop bucket
+        if: github.event_name != 'workflow_dispatch' || inputs.dry-run == false
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGING_REPOS_TOKEN }}
+          VERSION: ${{ steps.stamp.outputs.version }}
+        run: |
+          set -euo pipefail
+          OWNER="${{ github.repository_owner }}"
+          REPO="https://x-access-token:${GH_TOKEN}@github.com/${OWNER}/scoop-bucket.git"
+          if ! git ls-remote "${REPO}" HEAD >/dev/null 2>&1; then
+            echo "::error::github.com/${OWNER}/scoop-bucket does not exist or the token cannot read it. Create the public repo, then re-run."
+            echo "> **Create** https://github.com/organizations/${OWNER}/repositories/new → \`scoop-bucket\` (public)." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          work=$(mktemp -d)
+          git clone --depth 1 "${REPO}" "${work}"
+          cp packaging/scoop-bucket/vg.json "${work}/vg.json"
+          cp packaging/scoop-bucket/README.md "${work}/README.md"
+          git -C "${work}" config user.name "github-actions[bot]"
+          git -C "${work}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${work}" add vg.json README.md
+          if git -C "${work}" diff --cached --quiet; then
+            echo "Scoop bucket already at \`${VERSION}\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            git -C "${work}" commit -m "chore: vg ${VERSION}"
+            git -C "${work}" push origin HEAD
+            echo "Pushed \`vg.json\` \`${VERSION}\` to \`${OWNER}/scoop-bucket\`." >> "$GITHUB_STEP_SUMMARY"
+          fi

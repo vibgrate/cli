@@ -50,17 +50,14 @@ describe('ActiveGraphCache', () => {
   it('evicts idle slots in LILO order (earliest loaded first) after timeout', () => {
     let t = 0;
     const cache = new ActiveGraphCache({ now: () => t, idleTimeoutMs: 100, maxPerRepo: 8, maxTotal: 16 });
-    // Load A then B then C; select C as current.
-    cache.put('r', 'A', tinyGraph('A')); // loadedAt 0
+    cache.put('r', 'A', tinyGraph('A'));
     t = 10;
-    cache.put('r', 'B', tinyGraph('B')); // loadedAt 10
+    cache.put('r', 'B', tinyGraph('B'));
     t = 20;
-    cache.put('r', 'C', tinyGraph('C')); // loadedAt 20
+    cache.put('r', 'C', tinyGraph('C'));
     cache.select('r', 'C');
-    // Advance past idle timeout without touching A/B.
     t = 200;
     const removed = cache.evictIdle();
-    // A was loaded first among idle → LILO reclaims A then B; C stays (current).
     expect(removed.some((k) => k.includes('::A'))).toBe(true);
     expect(cache.get('r', 'C')).toBeDefined();
     expect(cache.get('r', 'A')).toBeUndefined();
@@ -73,7 +70,6 @@ describe('ActiveGraphCache', () => {
     cache.select('r', 'keep');
     t = 100;
     cache.put('r', 'other', tinyGraph('other'));
-    // maxPerRepo=1: other may stay if selected switches, but keep should survive if still selected
     cache.select('r', 'keep');
     cache.evictIfNeeded();
     expect(cache.current('r')?.gitRef).toBe('keep');
@@ -99,12 +95,30 @@ describe('ActiveGraphCache', () => {
     t = 100;
     cache.put('r', 'dev', tinyGraph('dev'));
     cache.select('r', 'dev');
-    // main last access at t=0 → idle 100 >= 50 and not current → evictable
     const list = cache.list('r');
     const main = list.find((s) => s.gitRef === 'main');
     const dev = list.find((s) => s.gitRef === 'dev');
     expect(main?.evictable).toBe(true);
     expect(dev?.current).toBe(true);
     expect(dev?.evictable).toBe(false);
+  });
+
+  it('evicts the oldest non-current slot when process RSS exceeds the budget', () => {
+    let rss = 100;
+    const cache = new ActiveGraphCache({
+      idleTimeoutMs: 60_000,
+      maxPerRepo: 8,
+      maxTotal: 32,
+      rssBudgetBytes: 150,
+      rssUsedBytes: () => rss,
+    });
+    cache.put('old', 'main', tinyGraph('old'));
+    cache.put('keep', 'main', tinyGraph('keep'));
+    cache.select('keep', 'main');
+    rss = 200;
+    cache.put('keep', 'main', tinyGraph('keep-2'));
+    expect(cache.get('old', 'main')).toBeUndefined();
+    expect(cache.get('keep', 'main')).toBeDefined();
+    expect(cache.size()).toBe(1);
   });
 });
