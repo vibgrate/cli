@@ -6,7 +6,7 @@ type: application
 # independently of the CLI. appVersion pins the tested scanner image tag and is
 # stamped to the released @vibgrate/cli calendar version by
 # scripts/stamp-release-pins.mjs (via the marker on the appVersion line below).
-version: 0.1.2
+version: 0.1.3
 appVersion: "2026.917.1" # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
 home: https://vibgrate.com
 icon: https://vibgrate.com/web-app-manifest-512x512.png
