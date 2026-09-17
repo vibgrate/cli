@@ -21,6 +21,53 @@ export function parseArchView(raw: string | null | undefined): ArchSliceView {
   return 'job';
 }
 
+export type ArchOverlayKind = 'vulns' | 'drift' | 'ownership' | 'churn';
+
+/**
+ * One map overlay. The engine decides whether source data exists and how many
+ * nodes paint; the client only toggles and renders. `painted === 0` is not a
+ * healthy score — it is an honest empty (see `empty`).
+ */
+export interface ArchOverlayState {
+  kind: ArchOverlayKind;
+  /** True when the backing artifact/file/git history was found. */
+  source: boolean;
+  /** Nodes that carry overlay marks. Absent data is omitted, never zeroed. */
+  painted: number;
+  /** Operator-facing reason when the overlay cannot paint. */
+  empty: string;
+}
+
+export interface ArchOverlays {
+  vulns: ArchOverlayState;
+  drift: ArchOverlayState;
+  ownership: ArchOverlayState;
+  churn: ArchOverlayState;
+}
+
+/** Worst drifted band among joined dependencies. `current` / `unknown` never paint. */
+export type ArchDriftBand = 'minor' | 'major';
+
+export interface ArchDriftMark {
+  band: ArchDriftBand;
+  /** Distinct drifted dependency names, worst band first, capped. */
+  packages: string[];
+}
+
+export interface ArchOwnershipMark {
+  /** CODEOWNERS teams/users for this path, last-match-wins, sorted. */
+  teams: string[];
+  /** Stable 0–7 colour bucket from the first team. Not a score. */
+  tone: number;
+}
+
+export interface ArchChurnMark {
+  /** Relative heat 1–5 among paths that have git history. Never 0. */
+  heat: 1 | 2 | 3 | 4 | 5;
+  /** Commit touches in the bounded window. Present only when greater than 0. */
+  commits: number;
+}
+
 export interface ArchPackageNode {
   id: string;
   name: string;
@@ -36,6 +83,14 @@ export interface ArchPackageNode {
   unclassified?: number;
   /** Workspace lane for the board layout: 'ui' | 'app' | 'io' | 'unclassified'. */
   lane: string;
+  /** Reachable-vulnerability hits rolled up from files under this package. */
+  vulnerabilities?: ArchCardVuln[];
+  /** Joined scan drift — omitted when the package has no drifted dependencies. */
+  drift?: ArchDriftMark;
+  /** CODEOWNERS teams — omitted when no rule matches. */
+  owners?: ArchOwnershipMark;
+  /** Bounded git churn — omitted when history is unavailable for this path. */
+  churn?: ArchChurnMark;
 }
 
 export interface ArchPackageEdge {
@@ -62,6 +117,8 @@ export interface ArchOverview {
   packages: ArchPackageNode[];
   edges: ArchPackageEdge[];
   meta: ArchOverviewMeta;
+  /** Overlay availability + honest empty copy. Absent when the host did not pass a repo root. */
+  overlays?: ArchOverlays;
 }
 
 export interface ArchCardLink {
@@ -119,6 +176,12 @@ export interface ArchCard {
   findings?: ArchCardFinding[];
   /** Reachable-vulnerability hits (from `vg scan`'s local reachability query) rolled up from every member. */
   vulnerabilities?: ArchCardVuln[];
+  /** Joined scan drift — omitted when this card has no drifted dependencies. */
+  drift?: ArchDriftMark;
+  /** CODEOWNERS teams — omitted when no rule matches. */
+  owners?: ArchOwnershipMark;
+  /** Bounded git churn — omitted when history is unavailable for this card's files. */
+  churn?: ArchChurnMark;
 }
 
 export interface ArchCardFinding {
@@ -168,6 +231,8 @@ export interface ArchSlice {
   overflowHint?: Record<string, string>;
   emptyHint?: string | null;
   focusCardId: string | null;
+  /** Overlay availability + honest empty copy. Absent when the host did not pass a repo root. */
+  overlays?: ArchOverlays;
 }
 
 export interface ArchSliceSpec {

@@ -236,7 +236,8 @@ export function buildReviewProposeInstruction(input: ReviewProposeInput): string
     ? [
         `You have at most ${REVIEW_PROPOSE_LOOP_CAP} steps.`,
         'The finding already cites the file and evidence — do not search, list files, set_progress, or call graph_impact first.',
-        'Call edit_file on the cited path (SEARCH must match the current snippet). Then call finish with a short summary.',
+        'You must write the cited file before finish: call edit_file (SEARCH must match the current snippet), then call finish with a short summary.',
+        'A residual search/replace block is applied as edit_file — do not treat it as the final answer. Do not call finish until a write has landed.',
         'Smallest in-place edit only. Do not add files or invent an extra service.',
       ].join(' ')
     : [
@@ -533,8 +534,9 @@ function finalizePropose(args: {
     error = args.finalText || `agent stopped (${args.stopped}) (ref ${correlationId})`;
   } else if (args.stopped === 'no-tools' || args.stopped === 'no-progress' || args.stopped === 'max-steps') {
     // Edit-ask gate turns plan-only `finish` (0 writes) into agent no-tools.
-    // Review's contract for that is no-patch, not a leaked no-tools. Empty
-    // replies and no-progress stay themselves.
+    // Review's contract for that is no-patch, not a leaked no-tools.
+    // A write that already landed (residual rescue / edit_file) is PatchIR
+    // success — do not leak no-tools when the patch validates.
     const planOnlyFinish =
       args.stopped === 'no-tools' &&
       (!patch || !validation.ok) &&
@@ -542,6 +544,9 @@ function finalizePropose(args: {
     if (planOnlyFinish) {
       stopReason = 'no-patch';
       error = `the model finished without a patch (ref ${correlationId})`;
+    } else if (patch && validation.ok) {
+      stopReason = 'finished';
+      ok = !args.applyRequested || args.persist;
     } else {
       error = args.finalText || `agent stopped (${args.stopped}) (ref ${correlationId})`;
     }

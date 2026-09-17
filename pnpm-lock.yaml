@@ -69,15 +69,15 @@ importers:
         specifier: ^2.8.3
         version: 2.9.0
     optionalDependencies:
-      '@anush008/tokenizers':
-        specifier: ^0.6.0
-        version: 0.6.0
       onnxruntime-node:
         specifier: ^1.29.0
         version: 1.29.0
       tar:
         specifier: ^7.5.21
         version: 7.5.22
+      tokenizers:
+        specifier: ^0.23.2
+        version: 0.23.2
     devDependencies:
       '@tree-sitter-grammars/tree-sitter-hcl':
         specifier: 1.2.0
@@ -111,46 +111,6 @@ importers:
         version: 5.0.0(@types/node@26.5.1)(vite@8.1.4(@types/node@26.5.1)(esbuild@0.27.7)(tsx@4.23.13)(yaml@2.9.0))
 
 packages:
-
-  '@anush008/tokenizers-darwin-universal@0.6.0':
-    resolution: {integrity: sha512-s27bL2x22NiDlhthi7UjGm+Is1tpAg4riLMBzna7Knzp26RdmnhbclWNEDd5UflRzFD49sdHzqv2XP0F2XFrqA==}
-    engines: {node: '>= 10'}
-    os: [darwin]
-
-  '@anush008/tokenizers-linux-arm64-gnu@0.6.0':
-    resolution: {integrity: sha512-Go1ssG7AylDFpsDzLkh+nqXt1RcIGhL9pSpPH1nLF504lutxkCZcihESUt6vobtjnCONOAIwCWe1AVEoHui+9A==}
-    engines: {node: '>= 10'}
-    cpu: [arm64]
-    os: [linux]
-
-  '@anush008/tokenizers-linux-arm64-musl@0.6.0':
-    resolution: {integrity: sha512-xfnDkjmOUXkVp5jNCnFzd8hTfAbei6UnoYetiadqbfX1o/K+drCV6sHzKadhHuPQlqa+erXdSyQDOtWkAAjN8Q==}
-    engines: {node: '>= 10'}
-    cpu: [arm64]
-    os: [linux]
-
-  '@anush008/tokenizers-linux-x64-gnu@0.6.0':
-    resolution: {integrity: sha512-4C9KiC0tdsOJCyOE2sD23zZHW16RbytRfMf81bdkDOLOrvOy0dYT9ZTnpwEl2k7jgzSdSpk9YKCkfEpkqbVvVg==}
-    engines: {node: '>= 10'}
-    cpu: [x64]
-    os: [linux]
-
-  '@anush008/tokenizers-linux-x64-musl@0.6.0':
-    resolution: {integrity: sha512-4CiqyQEFQpr7xTHv2IGZAoOKr/hIN7obTCaLvxUEjv3MHcpCGYBFpKa5RiRrcskY5k3w06dN9cRaxwsITeAHjw==}
-    engines: {node: '>= 10'}
-    cpu: [x64]
-    os: [linux]
-
-  '@anush008/tokenizers-win32-x64-msvc@0.6.0':
-    resolution: {integrity: sha512-ydjCu4wLdtcS8xOr0uMbRAOHviuFNEMCFM/T/Sw4zxLb+iHS9QboSJZtxMN1VF2dOkjRchtQmLiKK0ttE1iJEQ==}
-    engines: {node: '>= 10'}
-    cpu: [x64]
-    os: [win32]
-
-  '@anush008/tokenizers@0.6.0':
-    resolution: {integrity: sha512-vbKFjlFM15Ljm6HMh2FSiyPq4236xHoe31XMveTMdwqowHf1/UCwySPT331wl/wRWpdHWdQ3eU5ENl5XbXnPQQ==}
-    engines: {node: '>= 10'}
-    deprecated: This package has been archived. Please use the official and updated "huggingface/tokenizers" package.
 
   '@cacheable/memory@2.2.0':
     resolution: {integrity: sha512-CTLKqLItRCEixEAewD3/j9DB3/o96gpTPD4eJ1v+DGOlxZRZncRQkGYqqnAGCscYd6RNeXfGeiuCphsPtqyIfQ==}
@@ -513,7 +473,7 @@ packages:
     resolution: {integrity: sha512-GwtvgtXxnWsucXvbQXkRgqksiH2Qed37H9xHZocE5sA3N8O8O8/8FA3uclQXxXVzc9XBZuEOMK7+r02FmSpHtw==}
     engines: {node: '>=18.14.1'}
     peerDependencies:
-      hono: ^4.12.34
+      hono: ^4
 
   '@humanfs/core@0.19.2':
     resolution: {integrity: sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA==}
@@ -1906,6 +1866,10 @@ packages:
     resolution: {integrity: sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA==}
     engines: {node: '>=0.6'}
 
+  tokenizers@0.23.2:
+    resolution: {integrity: sha512-OS99VXTXuGuyUncICcS0hEawgKQlrFVKNU+UlzRsTN03RpOeJiCmcai5nKg3JrdIvUDo7/RC5puVEjlJd2e5oA==}
+    engines: {node: '>= 10'}
+
   tree-kill@1.2.2:
     resolution: {integrity: sha512-L0Orpi8qGpRG//Nd+H90vFB+3iHnue1zSSGmNOOCh1GLJ7rUKVwV2HvijphGQS2UmhUZewS9VgvxYIdgr+fG1A==}
     hasBin: true
@@ -2118,34 +2082,6 @@ packages:
     resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
 
 snapshots:
-
-  '@anush008/tokenizers-darwin-universal@0.6.0':
-    optional: true
-
-  '@anush008/tokenizers-linux-arm64-gnu@0.6.0':
-    optional: true
-
-  '@anush008/tokenizers-linux-arm64-musl@0.6.0':
-    optional: true
-
-  '@anush008/tokenizers-linux-x64-gnu@0.6.0':
-    optional: true
-
-  '@anush008/tokenizers-linux-x64-musl@0.6.0':
-    optional: true
-
-  '@anush008/tokenizers-win32-x64-msvc@0.6.0':
-    optional: true
-
-  '@anush008/tokenizers@0.6.0':
-    optionalDependencies:
-      '@anush008/tokenizers-darwin-universal': 0.6.0
-      '@anush008/tokenizers-linux-arm64-gnu': 0.6.0
-      '@anush008/tokenizers-linux-arm64-musl': 0.6.0
-      '@anush008/tokenizers-linux-x64-gnu': 0.6.0
-      '@anush008/tokenizers-linux-x64-musl': 0.6.0
-      '@anush008/tokenizers-win32-x64-msvc': 0.6.0
-    optional: true
 
   '@cacheable/memory@2.2.0':
     dependencies:
@@ -3766,6 +3702,9 @@ snapshots:
   tinypool@2.1.0: {}
 
   toidentifier@1.0.1: {}
+
+  tokenizers@0.23.2:
+    optional: true
 
   tree-kill@1.2.2: {}
 

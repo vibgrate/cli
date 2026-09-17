@@ -32,6 +32,15 @@ Architecture off is the raw graph’s kinds in the same columns. Architecture on
 
 A rose mark is a finding with `line > 0`. A yellow mark is a missing step. They are not the same thing.
 
+**Overlays** sit on the same Overview and Architecture canvas (the Health tab opens that chrome — it is not a blank page). Vulns, drift, ownership, and churn are toggles. The engine joins existing scan / CODEOWNERS / git data onto cards; missing source is omitted, never painted as a healthy zero. This is not an Architecture Health Score and not the Cloud ≈100−drift KPI.
+
+- **Vulns** — reachable findings from a connected `vg scan` (DSN online). No reachability → honest empty.
+- **Drift** — dependency drift already on the scan artifact, joined by path (and import when the graph has it). `current` / `unknown` do not paint.
+- **Ownership** — CODEOWNERS teams only. A team is not an architecture layer.
+- **Churn** — relative git heat in a bounded commit window. No git → overlay disabled.
+
+The VS Code architecture board hosts the same page and payload as `vg show arch`.
+
 `/api/overview` is the workspace map. `/api/slice?package=` is the column view. `/api/graph` is deprecated (it returns the overview). `/api/node/:id` is `vg show --json` plus a `view` block of the English labels. `/api/path` uses the same shortest-path engine as `vg path`. `/api/reach/:id` walks callers (`dir=up`) or callees (`dir=down`).
 
 Deep links use `#zoom=workspace` or `#zoom=slice&package=<id>&n=<symbol>`. `vg show arch --focus scanDir` opens the owning package’s slice with that symbol selected.

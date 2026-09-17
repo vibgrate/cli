@@ -63,6 +63,17 @@ button { font:inherit; color:inherit; cursor:pointer; height:34px; padding:0 10p
 .openfile { background:none; border:none; padding:0; height:auto; color:var(--link); text-decoration:underline; cursor:pointer; font:inherit; text-align:left; }
 .lbl { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--tl); margin:14px 0 6px; }
 a { color:var(--link); }
+.overlay-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:6px 12px;border-bottom:1px solid var(--line);background:var(--s1);font-size:12px}
+.overlay-toggles{display:flex;flex-wrap:wrap;gap:6px}
+.overlay-toggles button{height:28px;padding:0 10px}
+.overlay-toggles button[aria-pressed="true"]{border-color:var(--green)}
+.overlay-empty{margin:0;color:var(--tm);font-size:12px}
+[data-overlay="vulns"] .pkg:not(.ov-vuln),[data-overlay="vulns"] .card:not(.ov-vuln),
+[data-overlay="drift"] .pkg:not(.ov-drift),[data-overlay="drift"] .card:not(.ov-drift),
+[data-overlay="ownership"] .pkg:not(.ov-owner),[data-overlay="ownership"] .card:not(.ov-owner),
+[data-overlay="churn"] .pkg:not(.ov-churn),[data-overlay="churn"] .card:not(.ov-churn){opacity:.28}
+.ov-drift-major,.ov-churn-5,.ov-vuln{border-left-color:#ef4444}
+.ov-drift-minor,.ov-churn-3{border-left-color:#fb923c}
 @media (max-width:860px) { .work { grid-template-columns:1fr; } .drawer { border-left:0; border-top:1px solid var(--line); } }
 </style>
 </head>
@@ -74,6 +85,16 @@ a { color:var(--link); }
   <button type="button" id="theme">Theme</button>
 </header>
 <div class="note" id="note">Loading the map…</div>
+<div class="overlay-bar" id="overlayBar">
+  <span class="overlay-label">Overlays</span>
+  <div class="overlay-toggles" role="group" aria-label="Architecture overlays">
+    <button type="button" data-overlay="vulns" aria-pressed="false">Vulns</button>
+    <button type="button" data-overlay="drift" aria-pressed="false">Drift</button>
+    <button type="button" data-overlay="ownership" aria-pressed="false">Ownership</button>
+    <button type="button" data-overlay="churn" aria-pressed="false">Churn</button>
+  </div>
+  <p class="overlay-empty" id="overlayEmpty" hidden></p>
+</div>
 <div class="work">
   <div class="stage" id="stage"></div>
   <aside class="drawer" id="drawer"><p class="lbl">Details</p><p id="empty">Select a package, then a card.</p></aside>
@@ -86,7 +107,7 @@ if(HOST==="vscode"){
   const light=document.body.classList.contains("vscode-light")||document.body.classList.contains("vscode-high-contrast-light");
   document.documentElement.setAttribute("data-theme",light?"light":"dark");
 }
-const state = { zoom:"workspace", packageId:null, focus:null, overview:null, slice:null, pendingPackage:null };
+const state = { zoom:"workspace", packageId:null, focus:null, overview:null, slice:null, pendingPackage:null, overlay:null };
 function esc(s){
   return String(s==null?"":s).replace(/[&<>"']/g, function(c){
     if (c==="&") return "&amp;";
@@ -137,6 +158,43 @@ function boot(){
   if (vscode) { vscode.postMessage({ type:"ready" }); return; }
   api("/api/overview", function(body){ state.overview = body; afterOverview(); });
 }
+function overlayClass(node){
+  let cls = "";
+  if (node.vulnerabilities && node.vulnerabilities.length) cls += " ov-vuln";
+  if (node.drift) cls += " ov-drift ov-drift-"+node.drift.band;
+  if (node.owners) cls += " ov-owner";
+  if (node.churn) cls += " ov-churn ov-churn-"+node.churn.heat;
+  return cls;
+}
+function overlayMeta(){
+  return (state.zoom==="slice" && state.slice && state.slice.overlays) ? state.slice.overlays : (state.overview && state.overview.overlays) || null;
+}
+function syncOverlayBar(){
+  document.documentElement.setAttribute("data-overlay", state.overlay || "");
+  const overlays = overlayMeta();
+  document.querySelectorAll("#overlayBar [data-overlay]").forEach(function(b){
+    const kind = b.getAttribute("data-overlay");
+    const meta = overlays && overlays[kind];
+    b.setAttribute("aria-pressed", String(state.overlay===kind));
+    b.setAttribute("aria-disabled", String(meta ? !meta.source : false));
+  });
+  const empty = document.getElementById("overlayEmpty");
+  const selected = state.overlay && overlays ? overlays[state.overlay] : null;
+  if (empty) {
+    const show = !!(selected && selected.painted===0);
+    empty.hidden = !show;
+    empty.textContent = show ? selected.empty : "";
+  }
+}
+document.querySelectorAll("#overlayBar [data-overlay]").forEach(function(b){
+  b.onclick = function(){
+    const kind = b.getAttribute("data-overlay");
+    state.overlay = state.overlay===kind ? null : kind;
+    syncOverlayBar();
+    if (state.zoom==="slice" && state.slice) drawSlice();
+    else if (state.overview) drawWorkspace();
+  };
+});
 function drawWorkspace(){
   state.zoom = "workspace"; state.slice = null; state.packageId = null;
   document.getElementById("back").hidden = true;
@@ -149,13 +207,14 @@ function drawWorkspace(){
   const grid = stage.firstChild;
   for (const pkg of state.overview.packages) {
     const b = document.createElement("button");
-    b.className = "pkg";
+    b.className = "pkg"+overlayClass(pkg);
     b.type = "button";
     b.innerHTML = "<strong>"+esc(pkg.name)+"</strong><small>"+esc(pkg.mix || (pkg.job+" · "+pkg.symbols+" symbols"))+"</small>";
     b.onclick = function(){ openSlice(pkg.id); };
     grid.appendChild(b);
   }
   writeHash();
+  syncOverlayBar();
 }
 function openSlice(packageId, expand){
   if (vscode) { vscode.postMessage({ type:"openSlice", packageId:packageId, view:"job", focus:state.focus, arch:true, expand:!!expand }); return; }
@@ -179,7 +238,7 @@ function drawSlice(){
     stack.className = "stack";
     for (const card of col.cards) {
       const b = document.createElement("button");
-      b.className = "card";
+      b.className = "card"+overlayClass(card);
       b.type = "button";
       if (HOST !== "vscode" && card.color) b.style.borderLeftColor = card.color;
       b.innerHTML = "<strong>"+esc(card.title)+"</strong><small>"+esc(card.subtitle)+"</small>"
@@ -203,6 +262,7 @@ function drawSlice(){
   stage.innerHTML = "";
   stage.appendChild(cols);
   writeHash();
+  syncOverlayBar();
   if (state.slice.focusCardId) {
     const card = state.slice.columns.flatMap(function(c){ return c.cards; }).concat(state.slice.guards||[]).find(function(c){ return c.id === state.slice.focusCardId; });
     if (card) openCard(card);

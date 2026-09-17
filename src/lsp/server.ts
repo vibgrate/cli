@@ -1801,7 +1801,7 @@ export class VibgrateLanguageServer {
     try {
       const sidecar = this.architectureSidecar(graph);
       const provider = await loadHaileProvider();
-      const overview = overviewOf(graph, sidecar, provider);
+      const overview = overviewOf(graph, sidecar, provider, this.opts.root);
       if (!scopePath || scopePath === '__repo__') return { overview };
       const want = scopePath.replace(/\\/g, '/');
       const pkg = overview.packages.find(
@@ -1833,7 +1833,7 @@ export class VibgrateLanguageServer {
       const layout = readBoardLayout(this.opts.root) ?? defaultBoardLayout();
       if (!graph) return { html, overview: null, layout };
       const sidecar = this.architectureSidecar(graph);
-      return { html, overview: overviewOf(graph, sidecar, provider), layout };
+      return { html, overview: overviewOf(graph, sidecar, provider, this.opts.root), layout };
     } catch {
       return null;
     }

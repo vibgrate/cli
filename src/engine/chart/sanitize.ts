@@ -8,7 +8,13 @@ import {
   OVERVIEW_PACKAGE_CAP,
   SLICE_CARD_CAP,
   type ArchCard,
+  type ArchChurnMark,
+  type ArchDriftMark,
+  type ArchOverlayKind,
+  type ArchOverlays,
+  type ArchOverlayState,
   type ArchOverview,
+  type ArchOwnershipMark,
   type ArchPackageEdge,
   type ArchPackageNode,
   type ArchSlice,
@@ -38,6 +44,7 @@ export function sanitizeOverview(raw: unknown): ArchOverview | null {
       lane: typeof p.lane === 'string' ? p.lane : 'unclassified',
       ...(typeof p.mix === 'string' ? { mix: p.mix } : {}),
       ...(typeof p.unclassified === 'number' ? { unclassified: num(p.unclassified) } : {}),
+      ...overlayMarks(p),
     });
   }
   const edges: ArchPackageEdge[] = [];
@@ -63,6 +70,7 @@ export function sanitizeOverview(raw: unknown): ArchOverview | null {
       missingSteps: num(meta.missingSteps),
       title: typeof meta.title === 'string' && meta.title ? meta.title : 'Code map',
     },
+    ...sanitizeOverlays(o.overlays),
   };
 }
 
@@ -123,6 +131,7 @@ export function sanitizeSlice(raw: unknown): ArchSlice | null {
     overflowHint,
     emptyHint: typeof o.emptyHint === 'string' ? o.emptyHint : null,
     focusCardId: typeof o.focusCardId === 'string' ? o.focusCardId : null,
+    ...sanitizeOverlays(o.overlays),
   };
 }
 
@@ -169,6 +178,7 @@ function sanitizeCard(raw: unknown): ArchCard | null {
         }
       : {}),
     ...(c.guard ? { guard: true } : {}),
+    ...overlayMarks(c),
     ...(Array.isArray(c.findings)
       ? {
           findings: c.findings
@@ -182,6 +192,107 @@ function sanitizeCard(raw: unknown): ArchCard | null {
             })),
         }
       : {}),
+  };
+}
+
+function overlayMarks(raw: {
+  vulnerabilities?: unknown;
+  drift?: unknown;
+  owners?: unknown;
+  churn?: unknown;
+}): {
+  vulnerabilities?: ArchCard['vulnerabilities'];
+  drift?: ArchDriftMark;
+  owners?: ArchOwnershipMark;
+  churn?: ArchChurnMark;
+} {
+  const out: {
+    vulnerabilities?: ArchCard['vulnerabilities'];
+    drift?: ArchDriftMark;
+    owners?: ArchOwnershipMark;
+    churn?: ArchChurnMark;
+  } = {};
+  if (Array.isArray(raw.vulnerabilities)) {
+    const vulns = raw.vulnerabilities
+      .filter(
+        (v): v is { advisoryId: string; package: string; tier: string; evidence?: string } =>
+          Boolean(
+            v &&
+              typeof v === 'object' &&
+              typeof (v as { advisoryId?: unknown }).advisoryId === 'string' &&
+              typeof (v as { package?: unknown }).package === 'string' &&
+              ((v as { tier?: unknown }).tier === 'reachable' ||
+                (v as { tier?: unknown }).tier === 'potentially_reachable'),
+          ),
+      )
+      .slice(0, 6)
+      .map((v) => ({
+        advisoryId: v.advisoryId,
+        package: v.package,
+        tier: v.tier as 'reachable' | 'potentially_reachable',
+        ...(typeof v.evidence === 'string' ? { evidence: v.evidence } : {}),
+      }));
+    if (vulns.length) out.vulnerabilities = vulns;
+  }
+  const drift = sanitizeDrift(raw.drift);
+  if (drift) out.drift = drift;
+  const owners = sanitizeOwners(raw.owners);
+  if (owners) out.owners = owners;
+  const churn = sanitizeChurn(raw.churn);
+  if (churn) out.churn = churn;
+  return out;
+}
+
+function sanitizeDrift(raw: unknown): ArchDriftMark | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const d = raw as { band?: unknown; packages?: unknown };
+  if (d.band !== 'minor' && d.band !== 'major') return undefined;
+  const packages = Array.isArray(d.packages)
+    ? d.packages.filter((p): p is string => typeof p === 'string' && p.length > 0).slice(0, 6)
+    : [];
+  if (!packages.length) return undefined;
+  return { band: d.band, packages };
+}
+
+function sanitizeOwners(raw: unknown): ArchOwnershipMark | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const o = raw as { teams?: unknown; tone?: unknown };
+  const teams = Array.isArray(o.teams)
+    ? o.teams.filter((t): t is string => typeof t === 'string' && t.length > 0).slice(0, 8)
+    : [];
+  if (!teams.length) return undefined;
+  const tone = typeof o.tone === 'number' && Number.isFinite(o.tone) ? Math.abs(Math.floor(o.tone)) % 8 : 0;
+  return { teams, tone };
+}
+
+function sanitizeChurn(raw: unknown): ArchChurnMark | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const c = raw as { heat?: unknown; commits?: unknown };
+  if (c.heat !== 1 && c.heat !== 2 && c.heat !== 3 && c.heat !== 4 && c.heat !== 5) return undefined;
+  if (typeof c.commits !== 'number' || !Number.isFinite(c.commits) || c.commits <= 0) return undefined;
+  return { heat: c.heat, commits: Math.floor(c.commits) };
+}
+
+function sanitizeOverlays(raw: unknown): { overlays?: ArchOverlays } {
+  if (!raw || typeof raw !== 'object') return {};
+  const o = raw as Partial<ArchOverlays>;
+  const vulns = sanitizeOverlayState('vulns', o.vulns);
+  const drift = sanitizeOverlayState('drift', o.drift);
+  const ownership = sanitizeOverlayState('ownership', o.ownership);
+  const churn = sanitizeOverlayState('churn', o.churn);
+  if (!vulns || !drift || !ownership || !churn) return {};
+  return { overlays: { vulns, drift, ownership, churn } };
+}
+
+function sanitizeOverlayState(kind: ArchOverlayKind, raw: unknown): ArchOverlayState | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as Partial<ArchOverlayState>;
+  if (s.kind !== kind) return null;
+  return {
+    kind,
+    source: Boolean(s.source),
+    painted: num(s.painted),
+    empty: typeof s.empty === 'string' && s.empty ? s.empty : 'No overlay data.',
   };
 }
 

@@ -232,6 +232,23 @@ export interface ReviewFinding {
   protected_finding?: boolean;
   /** Which producer emitted it — deterministic scanners, or the local model. */
   source?: 'scanner' | 'model';
+  /**
+   * Same value as `id` on blast-radius/impact rows. App ledgers store
+   * `finding.id` as `finding_key`. Prefer `blast:{node_id}`, else
+   * `blast:{path}:{name}` (repo-relative path, no head SHA, no spaces).
+   */
+  finding_key?: string;
+  /**
+   * Optional pack/producer tag. Blast-radius rows set `blast_radius` here;
+   * architecture-policy rows set `architecture`. Not a second top-level `kind`
+   * — those rows use `kind: 'correctness'`.
+   */
+  producer?: string;
+  /**
+   * Existing capsule verification / scan / attest evidence ids cited by this
+   * finding. Only ids the capsule already emitted — never a new receipt system.
+   */
+  receipts?: string[];
 }
 
 export type ChangeClass = 'architecture' | 'security' | 'none';

@@ -82,6 +82,13 @@ when files change — including edits the assistant itself just made — the nex
 tool call rebuilds it incrementally before answering, with no watcher or
 daemon involved.
 
+<p align="center">
+  <a href="https://vibgrate.com/cli">
+    <img src="https://vibgrate.com/img/cli-scenarios/node-turborepo/serve.gif" alt="Recorded node-turborepo/serve replay of the real Vibgrate CLI" width="620" />
+  </a>
+</p>
+<p align="center"><sub><code>node-turborepo/serve</code> — <code>vg serve --http</code> starts Vibgrate AI Context. <a href="https://vibgrate.com/cli">Live simulator</a>.</sub></p>
+
 Wire it up in one command:
 
 ```bash
@@ -180,7 +187,14 @@ Prefer the hosted server over your team's scan data? **[Vibgrate Cloud MCP](http
 
 ## Understand any codebase
 
-Build the graph once, query it continuously:
+Build the graph once, query it continuously. These are recorded replays of the real CLI on sample repos — [run them live](https://vibgrate.com/cli).
+
+<p align="center">
+  <a href="https://vibgrate.com/cli">
+    <img src="https://vibgrate.com/img/cli-scenarios/node-turborepo/build.gif" alt="Recorded node-turborepo/build replay of the real Vibgrate CLI" width="620" />
+  </a>
+</p>
+<p align="center"><sub><code>node-turborepo/build</code> — <code>vg build</code> maps a pnpm monorepo.</sub></p>
 
 ```bash
 vg build                        # index the repo (incremental; re-run after changes)
@@ -191,6 +205,20 @@ vg path src/api/handler.ts src/db/query.ts   # shortest call path between two fi
 vg tree src/server.ts           # call tree rooted at a node
 vg insights                     # overview: hubs, hotspots, untested paths
 ```
+
+<p align="center">
+  <a href="https://vibgrate.com/cli">
+    <img src="https://vibgrate.com/img/cli-scenarios/node-turborepo/ask.gif" alt="Recorded node-turborepo/ask replay of the real Vibgrate CLI" width="620" />
+  </a>
+</p>
+<p align="center"><sub><code>node-turborepo/ask</code> — <code>vg ask</code> returns cited nodes, not a chat essay.</sub></p>
+
+<p align="center">
+  <a href="https://vibgrate.com/cli">
+    <img src="https://vibgrate.com/img/cli-scenarios/node-turborepo/impact.gif" alt="Recorded node-turborepo/impact replay of the real Vibgrate CLI" width="620" />
+  </a>
+</p>
+<p align="center"><sub><code>node-turborepo/impact</code> — blast radius of changing a hub before you edit.</sub></p>
 
 The graph is byte-deterministic and reproducible — the same repo always produces the same graph on every machine.
 
@@ -363,6 +391,13 @@ Full key reference — including `securityTier`, `capsule`, and `modelProfile` �
 
 ## Measure and manage upgrade drift
 
+<p align="center">
+  <a href="https://vibgrate.com/cli">
+    <img src="https://vibgrate.com/img/cli-scenarios/calcom/scan.gif" alt="Recorded calcom/scan replay of the real Vibgrate CLI" width="620" />
+  </a>
+</p>
+<p align="center"><sub><code>calcom/scan</code> — a bare <code>vg</code> drift scan on sample Cal.com data. <a href="https://vibgrate.com/cli">Live simulator</a>.</sub></p>
+
 ```bash
 vg scan                         # drift score + risk level + ranked priorities
 vg scan --push                  # same, and upload to Vibgrate Cloud for trend tracking
@@ -489,6 +524,13 @@ Upload is opt-in — nothing leaves your machine until you run `--push`. Store t
 
 ## CI integration
 
+<p align="center">
+  <a href="https://vibgrate.com/cli">
+    <img src="https://vibgrate.com/img/cli-scenarios/java-spring/budget.gif" alt="Recorded java-spring/budget replay of the real Vibgrate CLI" width="620" />
+  </a>
+</p>
+<p align="center"><sub><code>java-spring/budget</code> — <code>vg scan --drift-budget 60</code> as a CI gate (this recording exits 0). <a href="https://vibgrate.com/cli">Live simulator</a>.</sub></p>
+
 Drop `vg` into any pipeline to turn drift scoring into a quality gate:
 
 ```yaml
@@ -534,11 +576,33 @@ AI assistants connected via MCP use `vg lib` automatically when answering questi
 
 ## SBOM and OpenVEX
 
+<p align="center">
+  <a href="https://vibgrate.com/cli">
+    <img src="https://vibgrate.com/img/cli-scenarios/strapi/sbom.gif" alt="Recorded strapi/sbom replay of the real Vibgrate CLI" width="620" />
+  </a>
+</p>
+<p align="center"><sub><code>strapi/sbom</code> — <code>vg sbom export --format cyclonedx --out sbom.cdx.json</code>. An inventory, not a compliance determination. <a href="https://vibgrate.com/cli">Live simulator</a>.</sub></p>
+
 ```bash
 vg sbom export --format cyclonedx --out sbom.cdx.json
 vg sbom export --format spdx     --out sbom.spdx.json
 vg sbom delta  --from .vibgrate/baseline.json --to .vibgrate/scan_result.json --out delta.txt
 vg vex                          # generate an OpenVEX document for attestation
+```
+
+## Review a change
+
+**Vibgrate Review** reads the current change against the declared architecture and security-control policy. It reports change integrity, not a proof of security.
+
+<p align="center">
+  <a href="https://vibgrate.com/cli">
+    <img src="https://vibgrate.com/img/cli-scenarios/dotnet-clean-arch/review.gif" alt="Recorded dotnet-clean-arch/review replay of the real Vibgrate CLI" width="620" />
+  </a>
+</p>
+<p align="center"><sub><code>dotnet-clean-arch/review</code> — <code>vg review</code> on a Clean Architecture fixture. <a href="https://vibgrate.com/cli">Live simulator</a>.</sub></p>
+
+```bash
+vg review
 ```
 
 ---
@@ -683,7 +747,7 @@ All HCS computation runs in an optional, separately-licensed engine module that 
 | `vg fix` | Ranked, risk-tiered upgrade plans from the hosted planner — then apply the one you choose |
 | `vg init [path]` | Initialise config and `.vibgrate/` |
 | `vg report` | Generate a report from a scan artifact |
-| `vg review` | **Vibgrate Review** — architecture + security-control review of the current change, locally (`--in-place`, `--local`, `--loop`). One decision (`pass` / `needs_review` / `fail` / `undetermined`) in a signed receipt (Ed25519 over the receipt digest; `vg review verify <receipt.json>` checks it offline); protected findings cannot be blessed into a pass. Reports change integrity, not a proof of security. Builds or refreshes the code map itself when it is missing or stale (`--no-auto-build` opts out) |
+| `vg review` | **Vibgrate Review** — architecture + security-control review of the current change, locally (`--in-place`, `--local`, `--loop`). Deterministic blast-radius findings from the code graph via `vg review findings-from-diff`; `vg review propose <id>` attaches a PatchIR dry-run. One decision (`pass` / `needs_review` / `fail` / `undetermined`) in a signed receipt (Ed25519 over the receipt digest; `vg review verify <receipt.json>` checks it offline); protected findings cannot be blessed into a pass. Reports change integrity, not a proof of security. Builds or refreshes the code map itself when it is missing or stale (`--no-auto-build` opts out) |
 | `vg sbom export` / `delta` / `vex` | Export CycloneDX/SPDX SBOM, diff two artifacts, or emit an OpenVEX document |
 | `vg scan [path]` | Scan for upgrade drift |
 | `vg scan --full` | Comprehensive scan: drift + vulnerabilities + a banned-dependency report |

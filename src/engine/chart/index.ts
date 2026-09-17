@@ -6,6 +6,18 @@ export { projectChart, showJsonFor, pathJson, searchNodes, searchGraph, viewNode
 export type { ChartPayload, ChartNodeView, ChartMeta } from './model.js';
 export { projectOverview, locateInOverview } from './overview.js';
 export { projectSlice } from './slice.js';
-export type { ArchOverview, ArchSlice, ArchCard, ArchPackageNode } from './arch-types.js';
+export type {
+  ArchOverview,
+  ArchSlice,
+  ArchCard,
+  ArchPackageNode,
+  ArchOverlays,
+  ArchOverlayState,
+  ArchOverlayKind,
+  ArchDriftMark,
+  ArchOwnershipMark,
+  ArchChurnMark,
+} from './arch-types.js';
 export { parseArchView } from './arch-types.js';
+export { withArchOverviewOverlays, withArchSliceOverlays } from './overlays.js';
 export { roleLabel, purposeLabel, kindLabel, policyLabel } from './labels.js';

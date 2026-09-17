@@ -26,7 +26,7 @@ import { sanitizeOverview, sanitizeSlice } from './sanitize.js';
 import { parseArchView, type ArchOverview, type ArchSlice, type ArchSliceView } from './arch-types.js';
 import { defaultBoardLayout, readBoardLayout, writeBoardLayout, BOARD_LAYOUT_MAGIC, type ArchBoardLayout } from './board-layout.js';
 import { loadExternalSurfaces, withExternalLane } from './external-lane.js';
-import { loadReachabilityFindings, withVulnBadges } from './vuln-annotations.js';
+import { withArchOverviewOverlays, withArchSliceOverlays } from './overlays.js';
 
 export const DEFAULT_CHART_HOST = '127.0.0.1';
 export const DEFAULT_CHART_PORT = 7420;
@@ -121,11 +121,11 @@ async function handle(
     return;
   }
   if (req.method === 'GET' && pathName === '/api/meta') {
-    json(res, overviewOf(graph, sidecar, provider).meta);
+    json(res, overviewOf(graph, sidecar, provider, root).meta);
     return;
   }
   if (req.method === 'GET' && pathName === '/api/overview') {
-    json(res, overviewOf(graph, sidecar, provider));
+    json(res, overviewOf(graph, sidecar, provider, root));
     return;
   }
   if (req.method === 'GET' && pathName === '/api/slice') {
@@ -158,7 +158,7 @@ async function handle(
   }
   if (req.method === 'GET' && pathName === '/api/graph') {
     res.setHeader('Warning', '299 vg "/api/graph is deprecated; use /api/overview"');
-    json(res, overviewOf(graph, sidecar, provider));
+    json(res, overviewOf(graph, sidecar, provider, root));
     return;
   }
   if (req.method === 'GET' && pathName === '/api/sidecar') {
@@ -209,16 +209,19 @@ export function overviewOf(
   graph: VgGraph,
   sidecar: HaileSidecar | null,
   provider: HaileProvider | null,
+  root?: string,
 ): ArchOverview {
+  let overview: ArchOverview | undefined;
   if (provider?.projectOverview) {
     try {
       const clean = sanitizeOverview(provider.projectOverview(graph, sidecar));
-      if (clean && (clean.meta.architectureLoaded || !sidecar)) return clean;
+      if (clean && (clean.meta.architectureLoaded || !sidecar)) overview = clean;
     } catch {
       /* host fallback */
     }
   }
-  return projectOverview(graph, sidecar);
+  overview ??= projectOverview(graph, sidecar);
+  return root ? withArchOverviewOverlays(overview, root, graph) : overview;
 }
 
 export function sliceOf(
@@ -257,7 +260,7 @@ export function sliceOf(
   slice ??= projectSlice(graph, sidecar, input);
   if (!root) return slice;
   slice = withExternalLane(slice, loadExternalSurfaces(root));
-  slice = withVulnBadges(slice, loadReachabilityFindings(root));
+  slice = withArchSliceOverlays(slice, root, graph);
   return slice;
 }
 

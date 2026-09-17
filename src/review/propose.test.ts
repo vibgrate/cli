@@ -10,6 +10,7 @@ import { AGENT_NO_PROGRESS_STOP_AT } from '../code/agent.js';
 import { fixtureGraph } from '../code/graph-fixture.js';
 import { PATCH_IR_SCHEMA_VERSION, validatePatchIR } from '../code/patch-ir.js';
 import { MockProvider, ScriptedProvider } from '../code/providers.js';
+import { withToolCallFallback } from '../code/text-tool-protocol.js';
 import type { CodeFs } from '../code/session.js';
 import type { Provider, ToolCall } from '../code/types.js';
 import {
@@ -93,6 +94,8 @@ describe('buildReviewProposeInstruction', () => {
     expect(text).toContain('edit_file');
     expect(text).toContain('finish');
     expect(text).toContain(String(REVIEW_PROPOSE_LOOP_CAP));
+    expect(text).toMatch(/must write|before finish/i);
+    expect(text).toMatch(/residual search\/replace/i);
     expect(text).not.toMatch(/<<<<<<< SEARCH/);
   });
 
@@ -289,6 +292,52 @@ describe('proposeFindingFix — Review contract', () => {
     expect(r.provider.fellBack).toBe(true);
     expect(r.patch).toBeNull();
     expect(r.error).toMatch(/fallback backend/i);
+  });
+
+  it('Code Mode residual SEARCH/REPLACE drives the loop (not no-tools) and yields PatchIR', async () => {
+    // Deterministic llama-cpp-shaped mock: supportsTools false, residual
+    // oneshot block, no <tool_call> tags. happy-path-loop must not regress
+    // to stopReason no-tools after AGENT_EMPTY_REPLY_RETRIES (3 steps).
+    const residual = [
+      'src/scan.ts',
+      '<<<<<<< SEARCH',
+      'const timeout = 0;',
+      '=======',
+      'const timeout = 5000;',
+      '>>>>>>> REPLACE',
+    ].join('\n');
+    const backend: Provider & { seen: number } = {
+      id: 'llama-cpp',
+      label: 'Vibgrate (local)',
+      local: true,
+      model: 'forge-pack',
+      supportsTools: false,
+      seen: 0,
+      async chat() {
+        backend.seen += 1;
+        return { text: residual, model: 'forge-pack', provider: 'llama-cpp' };
+      },
+    };
+    const fsImpl = memFs({ 'src/scan.ts': baseFile });
+    const r = await proposeFindingFix(
+      baseInput({
+        loop: true,
+        providers: [withToolCallFallback(backend)],
+        fsImpl,
+        modelId: 'forge',
+      }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.stopReason).toBe('finished');
+    expect(r.stopReason).not.toBe('no-tools');
+    expect(r.patch).toBeTruthy();
+    expect(validatePatchIR(r.patch!).ok).toBe(true);
+    expect(r.proposedDiff).toContain('const timeout = 5000');
+    expect(r.toolTrace.map((t) => t.name)).toContain('edit_file');
+    expect(r.steps).toBeGreaterThanOrEqual(1);
+    expect(r.steps).toBeLessThanOrEqual(REVIEW_PROPOSE_LOOP_CAP);
+    expect(r.applied).toBe(false);
+    expect(fsImpl.files['src/scan.ts']).toBe(baseFile);
   });
 
   it('plan-mode leakage (no mutations) is no-patch, not success', async () => {

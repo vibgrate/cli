@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { parseReviewConfig, DEFAULT_REVIEW_CONFIG, loadReviewConfig, type ReviewConfig } from './config.js';
 import {
+  changeSetFromUnifiedDiff,
   collectChangeSet,
   dirtyTreeHash,
+  filesFromUnifiedDiff,
   isReviewable,
   normalizeRemote,
   readBaseFileTexts,
@@ -637,6 +639,59 @@ describe('change set', () => {
     ].join('\n');
     expect(removedLinesFromDiff(diff).get('src/api.ts')).toEqual(['  requireAuth(req)']);
   });
+
+  it('filesFromUnifiedDiff reads paths, hunks, and line counts from a patch', () => {
+    const diff = [
+      '--- a/src/api.ts',
+      '+++ b/src/api.ts',
+      '@@ -1,3 +1,4 @@',
+      ' keep',
+      '-old',
+      '+new',
+      '+extra',
+    ].join('\n');
+    expect(filesFromUnifiedDiff(diff)).toEqual([
+      { path: 'src/api.ts', op: 'modified', addedLines: 2, removedLines: 1, hunks: [{ start: 1, end: 4 }] },
+    ]);
+  });
+
+  it('filesFromUnifiedDiff records an added file and skips .vibgrate artifacts', () => {
+    const diff = [
+      '--- /dev/null',
+      '+++ b/src/new.ts',
+      '@@ -0,0 +1,2 @@',
+      '+export const x = 1',
+      '+export const y = 2',
+      '--- a/.vibgrate/graph.json',
+      '+++ b/.vibgrate/graph.json',
+      '@@ -1 +1 @@',
+      '-{}',
+      '+{"ok":true}',
+    ].join('\n');
+    expect(filesFromUnifiedDiff(diff)).toEqual([
+      { path: 'src/new.ts', op: 'added', addedLines: 2, removedLines: 0, hunks: [{ start: 1, end: 2 }] },
+    ]);
+  });
+
+  it('changeSetFromUnifiedDiff overlays the patch onto git identity', () => {
+    const base = collectChangeSet('/repo', undefined, (args) => {
+      const key = args.join(' ');
+      if (key === 'rev-parse HEAD') return { stdout: 'c'.repeat(40), status: 0 };
+      if (key === 'rev-parse --show-toplevel') return { stdout: '/repo', status: 0 };
+      if (key === 'rev-parse --abbrev-ref HEAD') return { stdout: 'feat/x', status: 0 };
+      return { stdout: '', status: 0 };
+    });
+    const overlaid = changeSetFromUnifiedDiff(
+      base,
+      ['--- a/src/api.ts', '+++ b/src/api.ts', '@@ -2,1 +2,2 @@', '-a', '+b', '+c'].join('\n'),
+    );
+    expect(overlaid.headSha).toBe('c'.repeat(40));
+    expect(overlaid.ref).toBe('refs/heads/feat/x');
+    expect(overlaid.files).toHaveLength(1);
+    expect(overlaid.files[0].path).toBe('src/api.ts');
+    expect(overlaid.dirty).toBe(true);
+    expect(overlaid.dirtyTreeHash).toMatch(/^sha256:/);
+  });
 });
 
 // ── layer-skip rule ─────────────────────────────────────────────────────────
@@ -768,9 +823,13 @@ describe('vg review command surface', () => {
     expect(review!.options.find((o) => o.long === '--include-snippets')!.attributeName()).toBe('includeSnippets');
   });
 
-  it('registers `vg review explain <finding-id>`', () => {
+  it('registers `vg review explain`, `findings-from-diff`, `propose`, and `verify`', () => {
     const review = buildProgram().commands.find((c) => c.name() === 'review');
-    expect(review!.commands.map((c) => c.name())).toContain('explain');
+    expect(review!.commands.map((c) => c.name())).toEqual(
+      expect.arrayContaining(['explain', 'findings-from-diff', 'propose', 'verify']),
+    );
+    const findings = review!.commands.find((c) => c.name() === 'findings-from-diff');
+    expect(findings!.options.map((o) => o.long)).toEqual(expect.arrayContaining(['--base', '--diff', '--format']));
   });
 
   it('refuses --push under --offline so an airgap cannot upload', () => {

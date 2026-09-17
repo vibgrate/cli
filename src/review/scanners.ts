@@ -23,9 +23,16 @@ import { routesForFile } from './routes.js';
 import { isComparable, SimilarityIndex, type FunctionBody } from './similarity.js';
 import { isDependencyManifest } from './surface.js';
 import type { ArchitectureLayer } from '../core-open/types.js';
+import type { VgGraph } from '../schema.js';
 import type { ReviewConfig } from './config.js';
 import type { ChangeSet } from './git.js';
-import type { AnalysisCapsule, ReviewFinding, TargetAlignment } from './schemas.js';
+import { collectBlastRadiusFindings, CORRECTNESS_KIND } from './impact-findings.js';
+import {
+  ARCH_PRODUCER,
+  archFindingKey,
+  attachVerificationReceipts,
+} from './finding-receipts.js';
+import type { AnalysisCapsule, FindingSeverity, ReviewFinding, TargetAlignment } from './schemas.js';
 
 const EXEMPT_LAYERS = new Set<ArchitectureLayer>(['config', 'shared', 'testing']);
 
@@ -73,6 +80,11 @@ export interface ScanInput {
   similarity?: SimilarityIndex;
   /** Function bodies introduced or modified by this change. */
   changedBodies?: FunctionBody[];
+  /**
+   * Built code map. When present, scanners emit blast-radius findings for
+   * changed symbols that have cross-file dependents (`vg impact`).
+   */
+  graph?: VgGraph | null;
 }
 
 export interface ScanOutput {
@@ -105,7 +117,6 @@ export function runScanners(input: ScanInput): ScanOutput {
   // ── 1. Boundary bypass ───────────────────────────────────────────────────
   const profile = capsule.patterns.declared_target_pattern ?? capsule.patterns.observed_dominant_pattern;
   if (profile) {
-    let n = 0;
     for (const edge of capsule.change.added_edges) {
       const from = edge.from_layer as ArchitectureLayer | undefined;
       const to = edge.to_layer as ArchitectureLayer | undefined;
@@ -119,24 +130,23 @@ export function runScanners(input: ScanInput): ScanOutput {
       if (!illegal.illegal && !skip.skipped) continue;
       const align = alignment(capsule, from, to);
       const declared = Boolean(capsule.patterns.declared_target_pattern);
-      n++;
-      architecture.push({
-        id: `arch-${String(n).padStart(2, '0')}`,
-        kind: 'boundary_bypass',
-        // A declared target makes this a regression against a stated intent;
-        // without one it is an observation about the repo's own majority.
-        severity: declared ? 'high' : 'medium',
-        confidence: declared ? 0.93 : 0.6,
-        claim: skip.skipped
-          ? `A changed ${from} file depends directly on ${to}, skipping ${skip.bypassed.join(', ')} (${edge.from_path} → ${edge.to_path}).`
-          : `A changed ${from} file depends on ${to}, against the ${illegal.rule} rule (${edge.from_path} → ${edge.to_path}).`,
-        evidence_ids: [edge.evidence_id, ...policyEvidenceIds(capsule)],
-        target_alignment: align,
-        remediation: `Route the operation through the ${intermediateLayer(from, to)} layer instead of calling ${to} directly.`,
-        paths: [edge.from_path, edge.to_path],
-        protected_finding: false,
-        source: 'scanner',
-      });
+      const ruleId = skip.skipped ? skip.rule || 'layer-skip' : illegal.rule || 'boundary_bypass';
+      architecture.push(
+        architectureFinding(capsule, {
+          ruleId,
+          path: edge.from_path,
+          extra: edge.to_path,
+          severity: declared ? 'high' : 'medium',
+          confidence: declared ? 0.93 : 0.6,
+          claim: skip.skipped
+            ? `A changed ${from} file depends directly on ${to}, skipping ${skip.bypassed.join(', ')} (${edge.from_path} → ${edge.to_path}).`
+            : `A changed ${from} file depends on ${to}, against the ${illegal.rule} rule (${edge.from_path} → ${edge.to_path}).`,
+          evidence_ids: [edge.evidence_id, ...policyEvidenceIds(capsule)],
+          target_alignment: align,
+          remediation: `Route the operation through the ${intermediateLayer(from, to)} layer instead of calling ${to} directly.`,
+          paths: [edge.from_path, edge.to_path],
+        }),
+      );
     }
   }
 
@@ -319,25 +329,25 @@ export function runScanners(input: ScanInput): ScanOutput {
       if (!isRegression(actual, vote.dominant as DataAccessPattern)) continue;
 
       const declared = Boolean(capsule.patterns.declared_target_pattern);
-      architecture.push({
-        id: `arch-${String(architecture.length + 1).padStart(2, '0')}`,
-        kind: 'peer_deviation',
-        severity: declared ? 'high' : 'medium',
-        // The vote's own share is the calibration: a 100%-consistent group of
-        // 20 peers is far stronger evidence than a bare 70% of 3.
-        confidence: Math.min(0.95, vote.share * Math.min(1, vote.size / 8)),
-        claim:
-          `${filePath} ${describePattern(actual)}, while ${(vote.share * 100).toFixed(0)}% of its `
-          + `${vote.size} ${vote.groupKind} peers ${describePattern(vote.dominant)}.`,
-        evidence_ids: [`vote:${vote.group}`, ...policyEvidenceIds(capsule)].filter((id) =>
-          capsule.evidence.some((e) => e.id === id),
-        ),
-        target_alignment: alignment(capsule, undefined, undefined),
-        remediation: `Follow the pattern its peers use — see ${vote.exemplars.slice(0, 2).join(', ') || 'the peer group'}.`,
-        paths: [filePath],
-        protected_finding: false,
-        source: 'scanner',
-      });
+      architecture.push(
+        architectureFinding(capsule, {
+          ruleId: 'peer_deviation',
+          path: filePath,
+          severity: declared ? 'high' : 'medium',
+          // The vote's own share is the calibration: a 100%-consistent group of
+          // 20 peers is far stronger evidence than a bare 70% of 3.
+          confidence: Math.min(0.95, vote.share * Math.min(1, vote.size / 8)),
+          claim:
+            `${filePath} ${describePattern(actual)}, while ${(vote.share * 100).toFixed(0)}% of its `
+            + `${vote.size} ${vote.groupKind} peers ${describePattern(vote.dominant)}.`,
+          evidence_ids: [`vote:${vote.group}`, ...policyEvidenceIds(capsule)].filter((id) =>
+            capsule.evidence.some((e) => e.id === id),
+          ),
+          target_alignment: alignment(capsule, undefined, undefined),
+          remediation: `Follow the pattern its peers use — see ${vote.exemplars.slice(0, 2).join(', ') || 'the peer group'}.`,
+          paths: [filePath],
+        }),
+      );
     }
   }
 
@@ -359,45 +369,56 @@ export function runScanners(input: ScanInput): ScanOutput {
       reported.add(key);
 
       const best = hits[0];
-      architecture.push({
-        id: `arch-${String(architecture.length + 1).padStart(2, '0')}`,
-        kind: 'duplicate_implementation',
-        severity: 'medium',
-        confidence: Math.min(0.9, best.score),
-        claim:
-          `${body.name} in ${body.file} is structurally ${(best.score * 100).toFixed(0)}% the same as `
-          + `${best.name} in ${best.file}:${best.startLine}`
-          + (hits.length > 1 ? ` (and ${hits.length - 1} other near-match(es))` : '')
-          + '.',
-        evidence_ids: [duplicateEvidence(capsule, body, best)],
-        // Reusing what exists is what the architecture wants; this is a
-        // deviation from that, but never a *security* regression.
-        target_alignment: capsule.patterns.declared_target_pattern ? 'regression' : 'unknown',
-        remediation: `Call ${best.name} instead, or extract the shared behaviour if the two genuinely differ.`,
-        paths: [body.file, best.file],
-        protected_finding: false,
-        source: 'scanner',
-      });
+      architecture.push(
+        architectureFinding(capsule, {
+          ruleId: 'duplicate_implementation',
+          path: body.file,
+          extra: body.name,
+          severity: 'medium',
+          confidence: Math.min(0.9, best.score),
+          claim:
+            `${body.name} in ${body.file} is structurally ${(best.score * 100).toFixed(0)}% the same as `
+            + `${best.name} in ${best.file}:${best.startLine}`
+            + (hits.length > 1 ? ` (and ${hits.length - 1} other near-match(es))` : '')
+            + '.',
+          evidence_ids: [duplicateEvidence(capsule, body, best)],
+          // Reusing what exists is what the architecture wants; this is a
+          // deviation from that, but never a *security* regression.
+          target_alignment: capsule.patterns.declared_target_pattern ? 'regression' : 'unknown',
+          remediation: `Call ${best.name} instead, or extract the shared behaviour if the two genuinely differ.`,
+          paths: [body.file, best.file],
+        }),
+      );
     }
   }
 
   // ── 8. Changed behaviour with no covering test ───────────────────────────
-  const untested = capsule.verification.filter((v) => v.kind === 'no_test_covering_change');
-  if (untested.length > 0) {
-    architecture.push({
-      id: `arch-${String(architecture.length + 1).padStart(2, '0')}`,
-      kind: 'unverified_change',
-      severity: 'medium',
-      confidence: 0.7,
-      claim: `${untested.length} changed file(s) have no test edge reaching them in the code map.`,
-      evidence_ids: untested.slice(0, 8).map((v) => v.evidence_id),
-      target_alignment: 'unknown',
-      remediation: 'Add a test that exercises the changed call path, or point `vg build` at the coverage report that already covers it.',
-      paths: untested.map((v) => v.path).slice(0, 25),
-      protected_finding: false,
-      source: 'scanner',
-    });
-    requiredChecks.push('changed-call-path-test');
+  const untested = capsule.verification
+    .filter((v) => v.kind === 'no_test_covering_change')
+    .sort((a, b) => a.path.localeCompare(b.path));
+  for (const fact of untested) {
+    architecture.push(
+      architectureFinding(capsule, {
+        ruleId: 'unverified_change',
+        path: fact.path,
+        severity: 'medium',
+        confidence: 0.7,
+        claim: `${fact.path} has no test edge reaching it in the code map.`,
+        evidence_ids: [fact.evidence_id],
+        target_alignment: 'unknown',
+        remediation:
+          'Add a test that exercises the changed call path, or point `vg build` at the coverage report that already covers it.',
+        paths: [fact.path],
+      }),
+    );
+  }
+  if (untested.length > 0) requiredChecks.push('changed-call-path-test');
+
+  // ── 9. Blast radius of changed symbols (graph facts, not policy) ────────
+  // Same reverse-reachability as `vg impact`. Findings are Review-shaped so
+  // `vg review propose` can attach PatchIR without a second loop.
+  if (input.graph) {
+    architecture.push(...collectBlastRadiusFindings({ graph: input.graph, capsule }));
   }
 
   return {
@@ -406,6 +427,47 @@ export function runScanners(input: ScanInput): ScanOutput {
     unknowns,
     requiredChecks: [...new Set(requiredChecks)].sort(),
   };
+}
+
+/**
+ * Architecture-policy row: top-level `kind` is `correctness` only.
+ * `producer` / pack rule live in metadata + the stable `arch:{rule}:{path}` id.
+ * Severity stays on the pack's low|medium|high scale — never `critical`.
+ */
+function architectureFinding(
+  capsule: AnalysisCapsule,
+  input: {
+    ruleId: string;
+    path: string;
+    extra?: string;
+    severity: Extract<FindingSeverity, 'low' | 'medium' | 'high'>;
+    confidence: number;
+    claim: string;
+    evidence_ids: string[];
+    target_alignment: TargetAlignment;
+    remediation: string;
+    paths: string[];
+  },
+): ReviewFinding {
+  const id = archFindingKey(input.ruleId, input.path, input.extra);
+  return attachVerificationReceipts(
+    {
+      id,
+      kind: CORRECTNESS_KIND,
+      finding_key: id,
+      producer: ARCH_PRODUCER,
+      severity: input.severity,
+      confidence: input.confidence,
+      claim: input.claim,
+      evidence_ids: input.evidence_ids,
+      target_alignment: input.target_alignment,
+      remediation: input.remediation,
+      paths: input.paths,
+      protected_finding: false,
+      source: 'scanner',
+    },
+    capsule,
+  );
 }
 
 function policyEvidenceIds(capsule: AnalysisCapsule): string[] {

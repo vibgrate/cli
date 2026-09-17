@@ -15,25 +15,21 @@
  * `ReachabilitySite.file` (+ its enclosing `function` when present) is
  * matched against a card's own file and its members' files/names.
  */
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import type { ScanArtifact, ScanReachabilityFinding } from '../../core-open/index.js';
-import type { ArchCardVuln, ArchSlice } from './arch-types.js';
+import type { ScanReachabilityFinding } from '../../core-open/index.js';
+import type { ArchCardVuln, ArchOverview, ArchPackageNode, ArchSlice } from './arch-types.js';
+import { loadScanArtifact, pathUnder, posixPath } from './overlay-context.js';
 
-const SCAN_ARTIFACT_REL = '.vibgrate/scan_result.json';
 const MAX_VULNS_PER_CARD = 6;
 
 /** Best-effort load of the last scan's reachability findings. Never throws. */
 export function loadReachabilityFindings(root: string): ScanReachabilityFinding[] {
-  try {
-    const abs = path.join(root, SCAN_ARTIFACT_REL);
-    if (!fs.existsSync(abs)) return [];
-    const artifact = JSON.parse(fs.readFileSync(abs, 'utf8')) as Partial<ScanArtifact>;
-    const findings = artifact.reachability?.findings;
-    return Array.isArray(findings) ? findings : [];
-  } catch {
-    return [];
-  }
+  const artifact = loadScanArtifact(root);
+  const findings = artifact?.reachability?.findings;
+  return Array.isArray(findings) ? findings : [];
+}
+
+export function relevantVulnFindings(findings: ScanReachabilityFinding[]): ScanReachabilityFinding[] {
+  return findings.filter((f) => f.tier === 'reachable' || f.tier === 'potentially_reachable');
 }
 
 /**
@@ -42,7 +38,7 @@ export function loadReachabilityFindings(root: string): ScanReachabilityFinding[
  * unchanged when nothing matches (including when `findings` is empty).
  */
 export function withVulnBadges(slice: ArchSlice, findings: ScanReachabilityFinding[]): ArchSlice {
-  const relevant = findings.filter((f) => f.tier === 'reachable' || f.tier === 'potentially_reachable');
+  const relevant = relevantVulnFindings(findings);
   if (!relevant.length) return slice;
 
   let changed = false;
@@ -50,26 +46,10 @@ export function withVulnBadges(slice: ArchSlice, findings: ScanReachabilityFindi
     let colChanged = false;
     const cards = col.cards.map((card) => {
       const files = new Set([card.file, ...(card.members ?? []).map((m) => m.file)].filter(Boolean));
-      const hits: ArchCardVuln[] = [];
-      const seen = new Set<string>();
-      for (const finding of relevant) {
-        const matches = (finding.sites ?? []).some((site) => files.has(site.file));
-        if (!matches) continue;
-        const key = `${finding.advisoryId}|${finding.package}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        hits.push({
-          advisoryId: finding.advisoryId,
-          package: finding.package,
-          tier: finding.tier as 'reachable' | 'potentially_reachable',
-          ...(finding.evidence ? { evidence: finding.evidence } : {}),
-        });
-      }
+      const hits = vulnsForFiles(files, relevant);
       if (!hits.length) return card;
       colChanged = true;
-      // Reachable outranks potentially-reachable so the worst case sorts first.
-      hits.sort((a, b) => (a.tier === b.tier ? 0 : a.tier === 'reachable' ? -1 : 1));
-      return { ...card, vulnerabilities: hits.slice(0, MAX_VULNS_PER_CARD) };
+      return { ...card, vulnerabilities: hits };
     });
     if (!colChanged) return col;
     changed = true;
@@ -77,4 +57,52 @@ export function withVulnBadges(slice: ArchSlice, findings: ScanReachabilityFindi
   });
 
   return changed ? { ...slice, columns } : slice;
+}
+
+/**
+ * Roll reachable findings onto overview packages by path prefix.
+ * Returns `overview` unchanged when nothing matches.
+ */
+export function withOverviewVulnBadges(overview: ArchOverview, findings: ScanReachabilityFinding[]): ArchOverview {
+  const relevant = relevantVulnFindings(findings);
+  if (!relevant.length) return overview;
+  let changed = false;
+  const packages = overview.packages.map((pkg) => {
+    const hits = vulnsForPackage(pkg, relevant);
+    if (!hits.length) return pkg;
+    changed = true;
+    return { ...pkg, vulnerabilities: hits };
+  });
+  return changed ? { ...overview, packages } : overview;
+}
+
+function vulnsForPackage(pkg: ArchPackageNode, findings: ScanReachabilityFinding[]): ArchCardVuln[] {
+  const files = new Set<string>();
+  for (const finding of findings) {
+    for (const site of finding.sites ?? []) {
+      if (site.file && pathUnder(site.file, pkg.path)) files.add(posixPath(site.file));
+    }
+  }
+  return vulnsForFiles(files, findings);
+}
+
+function vulnsForFiles(files: Set<string>, findings: ScanReachabilityFinding[]): ArchCardVuln[] {
+  const hits: ArchCardVuln[] = [];
+  const seen = new Set<string>();
+  const normalised = new Set([...files].map(posixPath));
+  for (const finding of findings) {
+    const matches = (finding.sites ?? []).some((site) => site.file && normalised.has(posixPath(site.file)));
+    if (!matches) continue;
+    const key = `${finding.advisoryId}|${finding.package}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hits.push({
+      advisoryId: finding.advisoryId,
+      package: finding.package,
+      tier: finding.tier as 'reachable' | 'potentially_reachable',
+      ...(finding.evidence ? { evidence: finding.evidence } : {}),
+    });
+  }
+  hits.sort((a, b) => (a.tier === b.tier ? 0 : a.tier === 'reachable' ? -1 : 1));
+  return hits.slice(0, MAX_VULNS_PER_CARD);
 }

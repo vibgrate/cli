@@ -70,6 +70,7 @@ function textBackend(
 describe('loop-gate gold — edit-ask heuristic', () => {
   it('flags edit/change/fix/replace and so-returns, not locate Q&A', () => {
     expect(instructionRequiresMutation('edit src/greet.ts so greet returns Hello, <name>!')).toBe(true);
+    expect(instructionRequiresMutation('Call edit_file on the cited path, then finish.')).toBe(true);
     expect(instructionRequiresMutation('edit the greeting')).toBe(true);
     expect(instructionRequiresMutation('fix the timeout in src/scan.ts')).toBe(true);
     expect(instructionRequiresMutation('replace the greeting in src/greet.ts')).toBe(true);
@@ -91,6 +92,43 @@ describe('loop-gate gold — Code Mode tool channel', () => {
     const p = new LocalLlamaProvider('forge-pack', '/tmp/forge.gguf');
     expect(p.supportsTools).toBe(false);
     expect(p.id).toBe('llama-cpp');
+  });
+
+  it('does not end as no-tools when a Code Mode emits residual SEARCH/REPLACE on an edit-ask', async () => {
+    // Live Code Mode Review (#2662): happy-path-loop died as no-tools after 3
+    // steps because the pack printed the oneshot residual instead of
+    // <tool_call> markup. Lift that residual to edit_file so the loop
+    // produces a write within REVIEW_PROPOSE_LOOP_CAP / AGENT_EMPTY_REPLY_RETRIES.
+    const residual = [
+      'src/scan.ts',
+      '<<<<<<< SEARCH',
+      'const timeout = 0;',
+      '=======',
+      'const timeout = 5000;',
+      '>>>>>>> REPLACE',
+    ].join('\n');
+    const backend = textBackend({ text: residual, model: 'forge-pack', provider: 'llama-cpp' }, false);
+    const events: Array<{ type: string; name?: string }> = [];
+    const fsImpl = memFs({ 'src/scan.ts': 'export function scanDir() {\n  const timeout = 0;\n  return timeout;\n}\n' });
+    const result = await runAgent({
+      graph: fixtureGraph(),
+      root: '/repo',
+      instruction: 'edit src/scan.ts so the timeout is 5000',
+      providers: [withToolCallFallback(backend)],
+      fsImpl,
+      run: () => ({ stdout: '', exitCode: 0 }),
+      approve: async () => true,
+      maxSteps: AGENT_NO_PROGRESS_STOP_AT,
+      noAudit: true,
+      onEvent: (e) => events.push(e),
+    });
+    expect(result.stopped).toBe('finished');
+    expect(result.stopped).not.toBe('no-tools');
+    expect(result.changes).toHaveLength(1);
+    expect(fsImpl.files['src/scan.ts']).toContain('5000');
+    expect(events.filter((e) => e.type === 'tool-call').map((e) => e.name)).toContain('edit_file');
+    expect(result.steps).toBeLessThanOrEqual(AGENT_NO_PROGRESS_STOP_AT);
+    expect(result.steps).toBeLessThanOrEqual(AGENT_EMPTY_REPLY_RETRIES + 1);
   });
 
   it('does not end as silent no-tools when a Code Mode emits text-protocol markup', async () => {

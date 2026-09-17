@@ -232,10 +232,65 @@ describe('runReview — pipeline wiring', () => {
       node('copy', 'src/orders.ts', { name: 'computeBillSum', span: { start: 1, end: 8 } }),
     ]);
     const { receipt } = await review(root, mapFile(root, g), { status: '?? src/orders.ts\n', numstat: '8\t0\tsrc/orders.ts\n' });
-    const dup = receipt.findings.architecture_findings.find((f) => f.kind === 'duplicate_implementation');
+    const dup = receipt.findings.architecture_findings.find(
+      (f) => f.producer === 'architecture' && f.id.includes('duplicate_implementation'),
+    );
     expect(dup).toBeDefined();
     expect(dup!.claim).toContain('computeBillSum in src/orders.ts');
     expect(dup!.claim).toContain('calculateInvoiceTotal in src/billing.ts:1');
+  });
+
+  it('emits a correctness finding when a changed symbol has a cross-file dependent', async () => {
+    const { root, graphPath } = routeRepo();
+    const { receipt, capsule } = await review(root, graphPath, modified('src/services/invoices.ts'));
+    const impact = receipt.findings.architecture_findings.find((f) => f.producer === 'blast_radius');
+    expect(impact).toBeDefined();
+    expect(impact!.id).toMatch(/^blast:/);
+    expect(impact!.id).not.toMatch(/\s/);
+    expect(impact!.finding_key).toBe(impact!.id);
+    expect(impact!.producer).toBe('blast_radius');
+    expect(impact!).not.toHaveProperty('review_check_kind');
+    expect(impact!.paths).toEqual(expect.arrayContaining(['src/services/invoices.ts', ROUTE]));
+    expect(impact!.claim).toMatch(/direct/);
+    expect(impact!.source).toBe('scanner');
+    expect(impact!.protected_finding).toBe(false);
+    expect(['low', 'medium']).toContain(impact!.severity);
+    expect(capsule.evidence.some((e) => impact!.evidence_ids.includes(e.id))).toBe(true);
+    expect(receipt.verification.evidence_ids_valid).toBe(true);
+  });
+
+  it('accepts an injected unified-diff change set (findings-from-diff --diff)', async () => {
+    const { root, graphPath } = routeRepo();
+    const diff = [
+      `--- a/src/services/invoices.ts`,
+      `+++ b/src/services/invoices.ts`,
+      '@@ -1,1 +1,2 @@',
+      ' export const listInvoices = () => [];',
+      '+export const extra = 1;',
+    ].join('\n');
+    const { receipt } = await review(root, graphPath, modified('src/services/invoices.ts'), {
+      change: {
+        topLevel: root,
+        baseSha: HEAD,
+        headSha: HEAD,
+        mergeBase: null,
+        ref: 'refs/heads/feat/x',
+        dirty: true,
+        dirtyTreeHash: 'sha256:test',
+        files: [
+          {
+            path: 'src/services/invoices.ts',
+            op: 'modified',
+            addedLines: 1,
+            removedLines: 0,
+            hunks: [{ start: 1, end: 2 }],
+          },
+        ],
+        remote: null,
+      },
+      diffText: diff,
+    });
+    expect(receipt.findings.architecture_findings.map((f) => f.kind)).toContain('correctness');
   });
 
   it('reads the declared intent and the working-tree policy from the repository root', async () => {
