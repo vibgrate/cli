@@ -465,6 +465,8 @@ vg review --local                    # deterministic scanners; no hosted model
 vg review --loop                     # review → deterministic patch → re-review
 vg review --base origin/main         # merge-base of HEAD and the base branch
 vg review explain arch-01            # the evidence behind one finding
+vg review findings-from-diff         # deterministic graph/policy findings only
+vg review propose blast:<node_id> --model forge --json
 ```
 
 | Flag                  | Default | Description                                                                |
@@ -531,13 +533,11 @@ to your repository; that is the only way to stop it gating.
 
 | Finding | What it means |
 |---|---|
-| `boundary_bypass` | A dependency breaks the declared layering, or skips a tier |
-| `peer_deviation` | This file does something its peers do differently |
 | `unguarded_entrypoint` | **Protected.** A mutating route has no authorization guard, where its peers do |
 | `guard_removed` | **Protected.** A guard was deleted and nothing equivalent remains |
 | `known_vulnerable_dependency` | **Protected.** A changed manifest declares a package with a known advisory |
-| `duplicate_implementation` | This re-implements something the repository already has |
-| `unverified_change` | Changed code with no test reaching it |
+| `correctness` (producer `blast_radius`) | Blast-radius fact: a changed symbol has cross-file callers or dependents — the same reverse-reachability `vg impact` reports. Severity stays at or below medium. Stable `id` (`blast:{node_id}` / `blast:{path}:{name}`) is the finding_key. |
+| `correctness` (producer `architecture`) | Architecture-policy on a changed file (layer skip / boundary, peer deviation, duplicate implementation, uncovered change). Stable `id` is `arch:{rule}:{path}` using the architecture pack's rule string when one exists. Severity is `low`, `medium`, or `high` — never `critical` from version lag. |
 
 Two of these deserve a note, because they are what a linter cannot do:
 
@@ -557,6 +557,34 @@ which by construction scores your best file worst.
 `unsure`, and `unsure` is never promoted. A guard Review does not recognise, or
 a file it could not parse, becomes an honest unknown — never "this route is
 open". Below four classified peer routes a finding is advisory and cannot gate.
+
+#### Findings from a change — `vg review findings-from-diff`
+
+The same deterministic scanners `vg review` runs, printed as the
+`vg.review.findings.v1` document — graph blast-radius facts for changed
+symbols, plus architecture and security-control findings on the change set.
+No hosted model. Use this when you want the findings (and their ids) without
+the signed receipt ceremony.
+
+```bash
+vg review findings-from-diff
+vg review findings-from-diff --base origin/main
+vg review findings-from-diff --diff pr.patch --format json
+vg review propose blast:<node_id> --model forge --json
+```
+
+`--diff` reads a unified diff (`-` is stdin). The patch names the files and
+hunks; the code map still has to be built (`vg` or `vg build`). `--format json`
+writes the findings document plus a `publishable` array of correctness rows
+(`kind: "correctness"`, stable `id` used as `finding_key`, producer metadata
+`blast_radius` or `architecture`) for App ingest. When capsule verification
+already emitted a fact for a finding's path, that evidence id is cited on the
+finding and on the publishable `receipts` array — no second receipt system.
+Suggested-fix on those rows is an honest skip — there is no computed PatchIR
+for blast-radius or architecture-policy rows. Propose is dry-run unless you pass
+`--apply --yes` on a topic branch — never the default branch. Local Code Mode
+ids are `spark`, `flow`, and `forge`; hosted Review uses `relay:<slug>`. This
+path does not post a comment or a check run.
 
 #### Before you write it — `assess_change`
 
@@ -1686,7 +1714,7 @@ vg show arch --no-open --json    # print the URL and counts; keep serving
 | `--focus <name>` | — | Open the map on this symbol |
 | `--no-open` | — | Print the URL without opening a browser |
 
-The map opens on the **workspace** (one card per package), then drills into a **column slice** (UI / endpoint → application → store). Same-file functions collapse; tests stay hidden; at most 120 cards. Filters (**by job**, **by cluster**, **who calls whom**, **missing steps**, **problems**) apply inside that zoom. With the Architecture module off it is the raw graph’s kinds in the same columns — never a guess. The page is served inline from loopback with no external assets, and `q` / Ctrl-C stops it. `vg show chart` is the pre-rename spelling and still works as a silent alias for one release. See [docs/show-arch.md](./docs/show-arch.md).
+The map opens on the **workspace** (one card per package), then drills into a **column slice** (UI / endpoint → application → store). Same-file functions collapse; tests stay hidden; at most 120 cards. Filters (**by job**, **by cluster**, **who calls whom**, **missing steps**, **problems**) apply inside that zoom. Overlay toggles (vulns, drift, ownership, churn) paint on that same canvas — the Health tab opens them; it is not a blank page. Missing scan, CODEOWNERS, or git history is omitted, never a healthy zero, and the map does not invent an Architecture Health Score. With the Architecture module off it is the raw graph’s kinds in the same columns — never a guess. The page is served inline from loopback with no external assets, and `q` / Ctrl-C stops it. `vg show chart` is the pre-rename spelling and still works as a silent alias for one release. The VS Code architecture board hosts the same page and payload. See [docs/show-arch.md](./docs/show-arch.md).
 
 #### vg show savings
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fixtureGraph } from '../code/graph-fixture.js';
 import { DEFAULT_REVIEW_CONFIG } from './config.js';
 import type { DominanceVote } from './dominance.js';
 import { runScanners, vulnerablePackagesFromScan, type ScanInput } from './scanners.js';
@@ -62,16 +63,19 @@ describe('boundary_bypass', () => {
     const out = runScanners(input({ capsule: c }));
     expect(out.architecture).toHaveLength(1);
     expect(out.architecture[0]).toMatchObject({
-      id: 'arch-01',
-      kind: 'boundary_bypass',
+      id: 'arch:layered:skip:routing→data-access:src/routes/x.ts:src/repositories/r.ts',
+      kind: 'correctness',
+      finding_key: 'arch:layered:skip:routing→data-access:src/routes/x.ts:src/repositories/r.ts',
+      producer: 'architecture',
       severity: 'high',
       confidence: 0.93,
       target_alignment: 'regression',
       protected_finding: false,
       source: 'scanner',
       paths: ['src/routes/x.ts', 'src/repositories/r.ts'],
-      evidence_ids: ['edge:1', 'policy:layering:1'],
     });
+    expect(out.architecture[0].evidence_ids).toEqual(expect.arrayContaining(['edge:1', 'policy:layering:1']));
+    expect(out.architecture[0].id).not.toMatch(/\s/);
     expect(out.architecture[0].claim).toContain('skipping middleware, services');
     expect(out.architecture[0].remediation).toContain('application service');
     expect(out.security).toEqual([]);
@@ -118,7 +122,9 @@ describe('boundary_bypass', () => {
       patterns: patterns('clean', 'clean'),
     });
     const [f] = runScanners(input({ capsule: c })).architecture;
-    expect(f.kind).toBe('boundary_bypass');
+    expect(f.kind).toBe('correctness');
+    expect(f.producer).toBe('architecture');
+    expect(f.id).toBe('arch:clean:domain→data-access:src/domain/d.ts:src/repositories/r.ts');
     expect(f.claim).toContain('clean:domain→data-access');
     expect(f.remediation).toContain('application service');
   });
@@ -398,8 +404,10 @@ describe('peer_deviation', () => {
     const out = runScanners(input(deviating));
     expect(out.architecture).toHaveLength(1);
     expect(out.architecture[0]).toMatchObject({
-      id: 'arch-01',
-      kind: 'peer_deviation',
+      id: 'arch:peer_deviation:src/routes/x.ts',
+      kind: 'correctness',
+      finding_key: 'arch:peer_deviation:src/routes/x.ts',
+      producer: 'architecture',
       severity: 'high',
       confidence: 0.9,
       target_alignment: 'regression',
@@ -491,8 +499,10 @@ function sendWelcomeEmail(user, template) {
     expect(out.architecture).toHaveLength(1);
     const [f] = out.architecture;
     expect(f).toMatchObject({
-      id: 'arch-01',
-      kind: 'duplicate_implementation',
+      id: 'arch:duplicate_implementation:src/orders.ts:computeBillSum',
+      kind: 'correctness',
+      finding_key: 'arch:duplicate_implementation:src/orders.ts:computeBillSum',
+      producer: 'architecture',
       severity: 'medium',
       target_alignment: 'regression',
       paths: ['src/orders.ts', 'src/billing.ts'],
@@ -542,7 +552,7 @@ function sendWelcomeEmail(user, template) {
 // ── 8. unverified change ────────────────────────────────────────────────────
 
 describe('unverified_change', () => {
-  it('rolls every uncovered file into one finding and requires a call-path test', () => {
+  it('emits one stable architecture finding per uncovered changed file', () => {
     const c = capsule({
       verification: [
         { evidence_id: 'verify:no_test_covering_change:1', kind: 'no_test_covering_change', path: 'src/a.ts', detail: 'no test edge' },
@@ -551,16 +561,22 @@ describe('unverified_change', () => {
       ],
     });
     const out = runScanners(input({ capsule: c }));
-    expect(out.architecture).toHaveLength(1);
+    expect(out.architecture).toHaveLength(2);
+    expect(out.architecture.map((f) => f.id)).toEqual([
+      'arch:unverified_change:src/a.ts',
+      'arch:unverified_change:src/c.ts',
+    ]);
     expect(out.architecture[0]).toMatchObject({
-      kind: 'unverified_change',
+      kind: 'correctness',
+      producer: 'architecture',
       severity: 'medium',
       confidence: 0.7,
       target_alignment: 'unknown',
-      paths: ['src/a.ts', 'src/c.ts'],
-      evidence_ids: ['verify:no_test_covering_change:1', 'verify:no_test_covering_change:3'],
+      paths: ['src/a.ts'],
+      evidence_ids: expect.arrayContaining(['verify:no_test_covering_change:1']),
+      receipts: ['verify:no_test_covering_change:1'],
     });
-    expect(out.architecture[0].claim).toContain('2 changed file(s)');
+    expect(out.architecture[0].claim).toContain('src/a.ts');
     expect(out.requiredChecks).toEqual(['changed-call-path-test']);
   });
 
@@ -571,6 +587,40 @@ describe('unverified_change', () => {
     const out = runScanners(input({ capsule: c }));
     expect(out.architecture).toEqual([]);
     expect(out.requiredChecks).toEqual([]);
+  });
+});
+
+describe('correctness blast-radius (graph wiring)', () => {
+  it('emits blast:{node_id} when the code map is supplied and a changed symbol has a cross-file caller', () => {
+    const c = capsule({
+      change: {
+        ...capsule().change,
+        symbols: [
+          { node_id: 'scanDir', name: 'scanDir', kind: 'function', path: 'src/scan.ts', start_line: 5, end_line: 20 },
+        ],
+        ops: [{ path: 'src/scan.ts', op: 'modified', added_lines: 1, removed_lines: 0 }],
+      },
+    });
+    const out = runScanners(input({ capsule: c, graph: fixtureGraph() }));
+    const hit = out.architecture.find((f) => f.producer === 'blast_radius');
+    expect(hit?.kind).toBe('correctness');
+    expect(hit?.id).toBe('blast:scanDir');
+    expect(hit?.producer).toBe('blast_radius');
+    expect(hit?.source).toBe('scanner');
+  });
+
+  it('emits no correctness blast-radius row when the map is omitted — absent is not zero-radius', () => {
+    const c = capsule({
+      change: {
+        ...capsule().change,
+        symbols: [
+          { node_id: 'scanDir', name: 'scanDir', kind: 'function', path: 'src/scan.ts', start_line: 5, end_line: 20 },
+        ],
+        ops: [{ path: 'src/scan.ts', op: 'modified', added_lines: 1, removed_lines: 0 }],
+      },
+    });
+    const out = runScanners(input({ capsule: c }));
+    expect(out.architecture.filter((f) => f.producer === 'blast_radius')).toEqual([]);
   });
 });
 
@@ -590,7 +640,11 @@ describe('runScanners bookkeeping', () => {
         vulnerablePackages: [{ package: 'lodash', detail: 'advisory' }],
       }),
     );
-    expect(out.architecture.map((f) => f.id)).toEqual(['arch-01', 'arch-02']);
+    expect(out.architecture.map((f) => f.id).sort()).toEqual([
+      'arch:layered:skip:routing→data-access:src/routes/x.ts:src/repositories/r.ts',
+      'arch:unverified_change:src/routes/x.ts',
+    ]);
+    expect(out.architecture.every((f) => f.kind === 'correctness' && f.producer === 'architecture')).toBe(true);
     expect(out.security.map((f) => [f.id, f.kind])).toEqual([
       ['sec-01', 'guard_removed'],
       ['sec-02', 'known_vulnerable_dependency'],

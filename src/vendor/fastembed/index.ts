@@ -22,7 +22,7 @@
  *    monorepo previously carried as a pnpm patch.
  *
  * Loaded lazily via dynamic import (see engine/embeddings.ts): the modules it
- * needs (`onnxruntime-node`, `@anush008/tokenizers`, `tar`) are OPTIONAL
+ * needs (`onnxruntime-node`, `tokenizers`, `tar`) are OPTIONAL
  * dependencies, so this module must never be imported statically from any
  * always-loaded path — and it must not import them statically either. They are
  * loaded on demand by `ensureNativeDeps()`, which prefers a host-supplied
@@ -35,13 +35,13 @@ import * as https from 'node:https';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { Tokenizer } from '@anush008/tokenizers';
+import type { Tokenizer } from 'tokenizers';
 import type { InferenceSession, Tensor } from 'onnxruntime-node';
 
 /** The lazily-loaded optional modules the dense backend runs on. */
 export interface NativeDeps {
   ort: typeof import('onnxruntime-node');
-  tokenizers: typeof import('@anush008/tokenizers');
+  tokenizers: typeof import('tokenizers');
   tar: typeof import('tar');
 }
 
@@ -90,7 +90,7 @@ export async function ensureNativeDeps(): Promise<NativeDeps> {
   if (nativeDeps) return nativeDeps;
   const [ortMod, tokMod, tarMod] = await Promise.all([
     importNative('onnxruntime-node'),
-    importNative('@anush008/tokenizers'),
+    importNative('tokenizers'),
     importNative('tar'),
   ]);
   const ort = unwrapCjs(ortMod, 'InferenceSession');

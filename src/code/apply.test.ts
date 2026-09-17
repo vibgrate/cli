@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseEdits, applyEdit, applyEdits, type SymbolSpan } from './apply.js';
+import { parseEdits, applyEdit, applyEdits, residualEditsToToolCalls, type SymbolSpan } from './apply.js';
 
 describe('parseEdits', () => {
   it('parses a search/replace block with the file on the preceding line', () => {
@@ -39,6 +39,33 @@ describe('parseEdits', () => {
     ].join('\n');
     const edits = parseEdits(text);
     expect(edits.map((e) => e.file)).toEqual(['src/a.ts', 'src/b.ts']);
+  });
+});
+
+describe('residualEditsToToolCalls', () => {
+  it('lifts SEARCH/REPLACE into edit_file and skips a path-less block', () => {
+    const calls = residualEditsToToolCalls(
+      ['src/scan.ts', '<<<<<<< SEARCH', 'const timeout = 0;', '=======', 'const timeout = 5000;', '>>>>>>> REPLACE'].join(
+        '\n',
+      ),
+    );
+    expect(calls).toEqual([
+      {
+        id: 'residual_0',
+        name: 'edit_file',
+        arguments: { path: 'src/scan.ts', search: 'const timeout = 0;', replace: 'const timeout = 5000;' },
+      },
+    ]);
+    expect(residualEditsToToolCalls(['<<<<<<< SEARCH', 'a', '=======', 'b', '>>>>>>> REPLACE'].join('\n'))).toEqual([]);
+  });
+
+  it('lifts CREATE and DELETE', () => {
+    const calls = residualEditsToToolCalls(
+      ['CREATE src/new.ts', 'export const y = 1;', 'END CREATE', 'DELETE src/old.ts'].join('\n'),
+    );
+    expect(calls.map((c) => c.name)).toEqual(['create_file', 'delete_file']);
+    expect(calls[0].arguments).toEqual({ path: 'src/new.ts', content: 'export const y = 1;' });
+    expect(calls[1].arguments).toEqual({ path: 'src/old.ts' });
   });
 });
 

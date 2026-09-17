@@ -8,6 +8,7 @@
  *   vg review --loop             review → deterministic patch → re-review (CLI only)
  *   vg review --base origin/main merge-base of HEAD and base
  *   vg review explain <id>       the evidence behind one finding
+ *   vg review findings-from-diff deterministic graph/policy findings for this change (or `--diff`)
  *   vg review propose <id>       PatchIR dry-run via the VG Code loop (`--apply --yes` to write)
  *   vg review verify <receipt>   check a receipt's digest and Ed25519 signature offline
  *
@@ -43,7 +44,8 @@ import { runReview, type RunReviewResult } from '../review/run.js';
 import { resolveReviewSigningKey, verifyReceipt } from '../review/sign.js';
 import { injectContextBlock, renderContext, writeContextFile } from '../review/context-file.js';
 import { ensureCodeMap, reviewPolicyState, seedReviewPolicy } from '../review/prepare.js';
-import { defaultRun } from '../review/git.js';
+import { exportCorrectnessPublishRows } from '../review/finding-publish.js';
+import { changeSetFromUnifiedDiff, collectChangeSet, defaultRun } from '../review/git.js';
 import { parseDsn } from '../reporting/commands/push.js';
 import { resolveDsn } from '../reporting/credentials.js';
 
@@ -265,6 +267,75 @@ export function registerReview(program: Command): void {
     });
   applyGlobalOptions(explain);
 
+  const findingsFromDiff = cmd
+    .command('findings-from-diff')
+    .description(
+      'emit deterministic Review findings from the change set and the code graph (blast radius + architecture/security scanners; no hosted model)',
+    )
+    .option('--base <ref>', 'review HEAD against the merge-base with <ref> (e.g. origin/main)')
+    .option(
+      '--in-place',
+      'include the working tree when --base is also set (the default without --base already is in-place)',
+    )
+    .option('--diff <file>', 'unified diff to treat as the change set (`-` reads stdin)')
+    .option('--format <fmt>', 'output format (text | json)', 'text')
+    .action(async function (
+      this: Command,
+      opts: { base?: string; inPlace?: boolean; diff?: string; format: string },
+    ) {
+      const global = readGlobal(this);
+      const root = rootOf(global);
+      if (opts.format !== 'text' && opts.format !== 'json') {
+        throw new CliError('unknown --format (expected text | json)', ExitCode.USAGE_ERROR);
+      }
+      reportPrepare(
+        await ensureCodeMap({
+          root,
+          graphPath: global.graph,
+          quiet: Boolean(global.quiet) || Boolean(global.json),
+        }),
+        Boolean(global.quiet) || Boolean(global.json),
+      );
+      let change = collectChangeSet(root, opts.base, defaultRun, { inPlace: opts.inPlace });
+      let diffText: string | undefined;
+      if (opts.diff) {
+        diffText = readDiffFile(opts.diff, root);
+        change = changeSetFromUnifiedDiff(change, diffText);
+      }
+      const reviewed = await runReview({
+        root,
+        base: opts.base,
+        inPlace: opts.inPlace,
+        local: true,
+        offline: true,
+        graphPath: global.graph,
+        generatedAt: global.generatedAt,
+        signingKey: null,
+        change,
+        diffText,
+      });
+      const findings = reviewed.receipt.findings;
+      if (global.json || opts.format === 'json') {
+        // Findings document plus App-ingestible correctness rows. The App
+        // parses this JSON; it must not import the public CLI.
+        out(
+          JSON.stringify(
+            {
+              ...findings,
+              publishable: exportCorrectnessPublishRows(findings),
+            },
+            null,
+            2,
+          ),
+        );
+        return;
+      }
+      if (!global.quiet) {
+        info(formatFindingsFromDiff(reviewed));
+      }
+    });
+  applyGlobalOptions(findingsFromDiff);
+
   const verify = cmd
     .command('verify')
     .description('verify a receipt offline — its content digest and its Ed25519 signature (no Vibgrate needed)')
@@ -308,7 +379,7 @@ export function registerReview(program: Command): void {
     .description(
       `propose a PatchIR fix for one finding via the VG Code agent loop (dry-run; never writes the default branch)`,
     )
-    .argument('<finding-id>', 'a finding id from the current change (e.g. arch-01)')
+    .argument('<finding-id>', 'a finding id from the current change (e.g. blast:<node_id>, arch:<rule>:<path>)')
     .option('--base <ref>', 'review HEAD against the merge-base with <ref>')
     .option('--model <id>', 'relay:<slug> (hosted Review) or spark|flow|forge (local Code Mode); a bare slug is invalid')
     .option('--loop', `use the VG Code agent loop (cap ${REVIEW_PROPOSE_LOOP_CAP}; stops on no progress)`, true)
@@ -566,4 +637,66 @@ function writeAgentContext(result: RunReviewResult, opts: ReviewOpts, quiet: boo
     fs.writeFileSync(abs, injectContextBlock(existing, renderContext(input)), 'utf8');
     if (!quiet) info(c.dim(`  managed review block updated in ${target}`));
   }
+}
+
+/** Read a unified diff from a path, or stdin when the path is `-`. */
+function readDiffFile(spec: string, root: string): string {
+  if (spec === '-') {
+    return fs.readFileSync(0, 'utf8');
+  }
+  const abs = path.resolve(root, spec);
+  if (!fs.existsSync(abs)) {
+    throw new CliError(
+      `no diff at ${spec} — pass a unified-diff file or \`-\` to read stdin`,
+      ExitCode.NOT_FOUND,
+    );
+  }
+  return fs.readFileSync(abs, 'utf8');
+}
+
+/**
+ * Human listing of the findings document. Points at `vg review propose`
+ * so a PatchIR dry-run does not need a second loop.
+ */
+function formatFindingsFromDiff(result: RunReviewResult): string {
+  const all = [
+    ...result.receipt.findings.architecture_findings,
+    ...result.receipt.findings.security_findings,
+  ];
+  const lines: string[] = [];
+  lines.push(`${c.cyan('vg review findings-from-diff')} · ${all.length} finding(s)`);
+  lines.push(
+    c.dim(
+      `  ${result.receipt.git.dirty ? 'working tree / patch' : result.receipt.git.head_sha.slice(0, 8)} vs ${result.receipt.git.base_sha.slice(0, 8)}` +
+        ` · ${result.receipt.change_class.join(', ')}`,
+    ),
+  );
+  lines.push('');
+  if (all.length === 0) {
+    lines.push(c.dim('  no deterministic graph or policy findings in this change set'));
+  }
+  for (const f of all) {
+    const producer = f.producer && f.producer !== f.kind ? ` ${c.dim(f.producer)}` : '';
+    lines.push(`  ${c.bold(f.id)} ${c.dim(f.kind)}${producer} ${f.severity}`);
+    lines.push(`    ${f.claim}`);
+    lines.push(c.dim(`    → ${f.remediation}`));
+    const range = result.capsule.evidence.find((e) => f.evidence_ids.includes(e.id) && e.start_line);
+    const loc = range?.start_line
+      ? `${f.paths[0] ?? ''}:${range.start_line}${range.end_line && range.end_line !== range.start_line ? `-${range.end_line}` : ''}`
+      : f.paths.slice(0, 3).join(', ');
+    lines.push(c.dim(`    ${loc}`));
+    lines.push('');
+  }
+  if (result.receipt.findings.unknowns.length > 0) {
+    lines.push(c.yellow('  unknowns'));
+    for (const u of result.receipt.findings.unknowns) lines.push(c.dim(`    · ${u}`));
+    lines.push('');
+  }
+  lines.push(
+    c.dim(
+      `  propose a PatchIR dry-run: vg review propose <id> --model forge --json` +
+        (result.receipt.receipt_id ? ` · receipt ${result.receipt.receipt_id}` : ''),
+    ),
+  );
+  return lines.join('\n');
 }

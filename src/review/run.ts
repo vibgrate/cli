@@ -90,6 +90,13 @@ export interface RunReviewOptions {
   run?: GitRunner;
   /** Injected in tests so the explain path does not need a real model. */
   explainImpl?: typeof import('./explain.js').explainFindings;
+  /**
+   * Injected change set. Used by tests and by `vg review findings-from-diff
+   * --diff` so a saved unified diff can stand in for `git diff`.
+   */
+  change?: ChangeSet;
+  /** Unified diff text used for guard-removal (overrides the git diff read). */
+  diffText?: string;
 }
 
 export interface RunReviewResult {
@@ -168,7 +175,7 @@ export async function runReview(opts: RunReviewOptions): Promise<RunReviewResult
     );
   }
 
-  const change: ChangeSet = collectChangeSet(root, opts.base, run, { inPlace: opts.inPlace });
+  const change: ChangeSet = opts.change ?? collectChangeSet(root, opts.base, run, { inPlace: opts.inPlace });
   // git reports repo-relative paths, so every read below is anchored at the
   // repository root — not at whatever subdirectory `-C` pointed us to.
   const repoRoot = change.topLevel;
@@ -227,7 +234,7 @@ export async function runReview(opts: RunReviewOptions): Promise<RunReviewResult
   // Diff text is read once, here, and never leaves this process: the receipt
   // carries claims and spans, never source lines (spec §3, privacy flags).
   const diffArgs = opts.base ? ['diff', '-U3', '-M', `${change.baseSha}..HEAD`] : ['diff', '-U3', '-M', 'HEAD'];
-  const removedLines = removedLinesFromDiff(run(diffArgs, repoRoot).stdout);
+  const removedLines = removedLinesFromDiff(opts.diffText ?? run(diffArgs, repoRoot).stdout);
 
   // Peer route files: the wider entrypoint surface the auth vote needs. Bounded
   // to files the map already knows about and to the route-bearing layers, so
@@ -306,6 +313,7 @@ export async function runReview(opts: RunReviewOptions): Promise<RunReviewResult
     changedBodies,
     dataAccess: compiled.dataAccess,
     changedPaths: changedPathSet,
+    graph,
   });
 
   const packs = loadReviewPacks(repoRoot, change.files.map((f) => f.path));

@@ -91,7 +91,7 @@ import {
 import { createToolOutputCompressor, RETRIEVE_TOOL_NAME, type CompressionStats, type ToolOutputCompressor } from './compress-tool-output.js';
 import { env as knobEnv } from '../compress/config.js';
 import { repositoryIdFromRoot } from '../runtime/paths.js';
-import type { SymbolSpan } from './apply.js';
+import { residualEditsToToolCalls, type SymbolSpan } from './apply.js';
 import type { CodeFs } from './session.js';
 import type { ChatMessage, CodeContext, FileChange, ImageAttachment, Provider, ProviderResult, ReasoningEffort, ToolCall, ToolSpec } from './types.js';
 import type { VgGraph } from '../schema.js';
@@ -1079,6 +1079,21 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         result = { ...result, text: rescued.text, toolCalls };
       }
     }
+    // Local Code Modes (text-protocol) often emit the oneshot SEARCH/REPLACE
+    // residual instead of `<tool_call>` markup. On an edit-ask that is a real
+    // write — lift it to edit_file so the loop cannot die as no-tools after
+    // the empty-reply retries (3 steps). Q&A is left alone.
+    if (
+      toolCalls.length === 0 &&
+      (result.text ?? '').trim() &&
+      instructionRequiresMutation(instruction)
+    ) {
+      const residual = residualEditsToToolCalls(result.text ?? '');
+      if (residual.length) {
+        toolCalls = residual;
+        result = { ...result, text: '', toolCalls };
+      }
+    }
     // Every name — native, text-protocol, or rescued — is rewritten before
     // dispatch so `apply patch` / `read file` never hit "unknown tool".
     if (toolCalls.length) toolCalls = normalizeToolCalls(toolCalls, allTools);
@@ -1186,6 +1201,12 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       const dumpStop =
         looksLikeToolCallDump(fullText) || looksLikeBareJsonObject(fullText) || unknownThenBrokenDump;
       const stubAsk = editAskUnfulfilled && (!fullText || looksLikeFileStub(fullText));
+      // A write already landed (residual rescue or a prior edit_file). Empty /
+      // dump replies after that are not a failed no-tools — the work is done.
+      if (changes.length > 0) {
+        const files = [...new Set(changes.map((c) => c.file))];
+        return finish('finished', `Edited ${files.join(', ')}.`, step);
+      }
       return finish(
         'no-tools',
         dumpStop
@@ -1280,6 +1301,18 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       if (MUTATION_TOOLS.has(call.name)) mutationToolCalls++;
       if (MUTATION_TOOLS.has(call.name) && !toolResult.finished) {
         failedMutationPending = !toolResult.mutated;
+      }
+      // Stale residual after a write already landed (Code Mode re-emits the
+      // oneshot SEARCH/REPLACE). Do not burn the step cap — the work is done.
+      if (
+        typeof call.id === 'string' &&
+        call.id.startsWith('residual_') &&
+        !toolResult.mutated &&
+        !toolResult.finished &&
+        changes.length > 0
+      ) {
+        const files = [...new Set(changes.map((c) => c.file))];
+        return finish('finished', `Edited ${files.join(', ')}.`, step);
       }
       if (toolResult.failed && /\bunknown tool\b/i.test(toolResult.content)) {
         unknownToolFailures++;
@@ -1694,11 +1727,11 @@ async function createLoopCompressor(instruction: string, model: string, env: Nod
 const FILE_HINT_RE =
   /(?:^|[\s`'"])(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z][\w.-]*\b|\b[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|rb|php|cs|cpp|c|h|vue|svelte)\b/;
 
-/** Tight: `edit` (any), or change/fix/replace plus a file path, or "so … return(s)". */
+/** Tight: `edit` / `edit_file`, or change/fix/replace plus a file path, or "so … return(s)". */
 export function instructionRequiresMutation(instruction: string): boolean {
   const t = (instruction ?? '').trim();
   if (!t) return false;
-  if (/\bedit\b/i.test(t)) return true;
+  if (/\bedit(?:_file)?\b/i.test(t)) return true;
   if (/\b(change|fix|replace)\b/i.test(t) && FILE_HINT_RE.test(t)) return true;
   if (/\bso\b[\s\S]{0,120}\breturns?\b/i.test(t)) return true;
   return false;

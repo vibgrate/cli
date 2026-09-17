@@ -154,8 +154,74 @@ function parseDiffNameStatus(out: string): Map<string, ChangedFile['op']> {
   return map;
 }
 
+/**
+ * Build a change-set file list from a unified diff. Used by
+ * `vg review findings-from-diff --diff` so a saved PR patch can stand in for
+ * `git diff` without inventing a second change collector.
+ */
+export function filesFromUnifiedDiff(diff: string): ChangedFile[] {
+  const hunks = parseHunks(diff);
+  const counts = new Map<string, { added: number; removed: number; op: ChangedFile['op'] }>();
+  let current: string | null = null;
+  let oldPath: string | null = null;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('--- ')) {
+      const p = line.slice(4).trim();
+      oldPath = p === '/dev/null' ? null : p.replace(/^a\//, '');
+      continue;
+    }
+    if (line.startsWith('+++ ')) {
+      const p = line.slice(4).trim();
+      current = p === '/dev/null' ? null : p.replace(/^b\//, '');
+      if (current && !counts.has(current)) {
+        const op: ChangedFile['op'] = oldPath === null ? 'added' : p === '/dev/null' ? 'removed' : 'modified';
+        counts.set(current, { added: 0, removed: 0, op });
+      }
+      if (!current && oldPath && !counts.has(oldPath)) {
+        counts.set(oldPath, { added: 0, removed: 0, op: 'removed' });
+      }
+      continue;
+    }
+    const target = current ?? (oldPath && counts.has(oldPath) ? oldPath : null);
+    if (!target) continue;
+    const entry = counts.get(target);
+    if (!entry) continue;
+    if (line.startsWith('+') && !line.startsWith('+++')) entry.added += 1;
+    else if (line.startsWith('-') && !line.startsWith('---')) entry.removed += 1;
+  }
+  const paths = new Set<string>([...hunks.keys(), ...counts.keys()]);
+  const files: ChangedFile[] = [];
+  for (const path of paths) {
+    if (!isReviewable(path)) continue;
+    const n = counts.get(path);
+    files.push({
+      path,
+      op: n?.op ?? 'modified',
+      addedLines: n?.added ?? 0,
+      removedLines: n?.removed ?? 0,
+      hunks: hunks.get(path) ?? [],
+    });
+  }
+  return files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
+ * Overlay a unified-diff file list onto git identity (SHAs, remote, ref).
+ * The patch owns *what* changed; git still owns *which commit pair*.
+ */
+export function changeSetFromUnifiedDiff(base: ChangeSet, diff: string): ChangeSet {
+  const files = filesFromUnifiedDiff(diff);
+  const dirty = files.length > 0;
+  return {
+    ...base,
+    files,
+    dirty,
+    dirtyTreeHash: dirty ? dirtyTreeHash(files) : null,
+  };
+}
+
 /** New-side hunk ranges from a unified diff, keyed by path. */
-function parseHunks(diff: string): Map<string, { start: number; end: number }[]> {
+export function parseHunks(diff: string): Map<string, { start: number; end: number }[]> {
   const map = new Map<string, { start: number; end: number }[]>();
   let current: string | null = null;
   for (const line of diff.split('\n')) {

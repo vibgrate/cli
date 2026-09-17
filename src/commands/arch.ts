@@ -58,7 +58,7 @@ function configure(chart: Command): void {
       }
       const sidecar = readHaileSidecar(graphPath);
       const provider = await loadHaileProvider();
-      const overview = overviewOf(graph, sidecar, provider);
+      const overview = overviewOf(graph, sidecar, provider, root);
       const located = opts.focus ? locateInOverview(graph, opts.focus) : null;
       const url = located
         ? `${server.url}/#zoom=slice&package=${encodeURIComponent(located.packageId)}&n=${encodeURIComponent(located.nodeId)}`

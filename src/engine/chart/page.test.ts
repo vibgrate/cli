@@ -8,6 +8,9 @@ describe('architecturePageHtml', () => {
     expect(html).toContain('data-host="browser"');
     expect(html).not.toMatch(/HAILE/i);
     expect(html).not.toContain('function sizeMap(');
+    expect(html).toContain('data-overlay="vulns"');
+    expect(html).toContain('Architecture overlays');
+    expect(html).not.toMatch(/Architecture Health Score/i);
   });
 
   it('binds a vscode host and nonce for the editor webview', () => {

@@ -31,6 +31,8 @@ describe('chart page chrome', () => {
     expect(html).not.toContain('HAILE');
     expect(html).not.toContain('confidence');
     expect(html).not.toContain('node_id');
+    expect(html).toContain('data-overlay="vulns"');
+    expect(html).not.toMatch(/Architecture Health Score/i);
   });
 
   it('opens on packages, not a 29k-symbol camera', () => {

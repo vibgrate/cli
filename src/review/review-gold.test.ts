@@ -10,6 +10,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { PATCH_IR_SCHEMA_VERSION, validatePatchIR } from '../code/patch-ir.js';
+import { withToolCallFallback } from '../code/text-tool-protocol.js';
+import type { Provider } from '../code/types.js';
 import {
   loadReviewGoldFixtureFile,
   reviewGoldResolvedModelId,
@@ -66,6 +68,41 @@ describe('review-gold — proposeFindingFix (offline, no live model)', () => {
     expect(result.steps).toBeGreaterThanOrEqual(2);
     // Scripted providers may report 0+0 — that is a measured zero, not absent.
     expect(result.usage).toEqual({ promptTokens: expect.any(Number), completionTokens: expect.any(Number) });
+  });
+
+  it('happy-path-loop cannot regress to no-tools when a Code Mode emits residual SEARCH/REPLACE', async () => {
+    // Deterministic llama-cpp-shaped mock (supportsTools: false, no <tool_call>
+    // tags). The live Code Mode miss was stopReason no-tools after 3 steps.
+    const fixture = fixtures.find((f) => f.id === 'happy-path-loop')!;
+    const residual = [
+      'src/scan.ts',
+      '<<<<<<< SEARCH',
+      'const timeout = 0;',
+      '=======',
+      'const timeout = 5000;',
+      '>>>>>>> REPLACE',
+    ].join('\n');
+    const backend: Provider = {
+      id: 'llama-cpp',
+      label: 'Vibgrate (local)',
+      local: true,
+      model: 'forge-pack',
+      supportsTools: false,
+      async chat() {
+        return { text: residual, model: 'forge-pack', provider: 'llama-cpp' };
+      },
+    };
+    const { result, filesAfter } = await runReviewGoldFixture(fixture, {
+      providers: [withToolCallFallback(backend)],
+    });
+    expect(result.ok, result.error ?? fixture.id).toBe(true);
+    expect(result.stopReason).toBe('finished');
+    expect(result.stopReason).not.toBe('no-tools');
+    expect(result.patch).toBeTruthy();
+    expect(validatePatchIR(result.patch!).ok).toBe(true);
+    expect(result.toolTrace.map((t) => t.name)).toContain('edit_file');
+    expect(result.applied).toBe(false);
+    expect(filesAfter['src/scan.ts']).toBe(fixture.files['src/scan.ts']);
   });
 
   it('invalid-model never calls a backend (usage absent, not zero)', async () => {

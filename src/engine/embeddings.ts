@@ -338,7 +338,7 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
 /**
  * Import the optional embedding backend — the VENDORED dense backend
  * (src/vendor/fastembed). It still needs the optional native deps
- * (`onnxruntime-node`, `@anush008/tokenizers`, `tar`), which a host can supply
+ * (`onnxruntime-node`, `tokenizers`, `tar`), which a host can supply
  * out-of-tree via `VIBGRATE_EMBEDDER_PATH` — a directory whose `node_modules`
  * contains them. Editor integrations use this when their bundled engine ships
  * without the native optional dependencies (the VS Code extension installs

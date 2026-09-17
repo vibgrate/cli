@@ -16,7 +16,7 @@
  * benchmark-testable offline.
  */
 
-import type { CodeEdit, EditOutcome } from './types.js';
+import type { CodeEdit, EditOutcome, ToolCall } from './types.js';
 
 /** A symbol span the graph knows about, used to disambiguate a SEARCH match. */
 export interface SymbolSpan {
@@ -118,6 +118,40 @@ export function parseEdits(text: string): CodeEdit[] {
   }
 
   return edits;
+}
+
+/**
+ * Lift residual SEARCH/REPLACE (the oneshot edit form) into tool calls.
+ * Local Code Modes often emit this instead of `<tool_call>` markup. The
+ * agent loop applies these as `edit_file` / `create_file` / `delete_file`
+ * so a text-protocol backend still drives the loop. Skips edits with no path.
+ */
+export function residualEditsToToolCalls(text: string): ToolCall[] {
+  const edits = parseEdits(text);
+  const calls: ToolCall[] = [];
+  for (const [i, edit] of edits.entries()) {
+    if (!edit.file.trim()) continue;
+    if (edit.op === 'replace') {
+      calls.push({
+        id: `residual_${i}`,
+        name: 'edit_file',
+        arguments: { path: edit.file, search: edit.search, replace: edit.replace },
+      });
+    } else if (edit.op === 'create') {
+      calls.push({
+        id: `residual_${i}`,
+        name: 'create_file',
+        arguments: { path: edit.file, content: edit.content },
+      });
+    } else {
+      calls.push({
+        id: `residual_${i}`,
+        name: 'delete_file',
+        arguments: { path: edit.file },
+      });
+    }
+  }
+  return calls;
 }
 
 function looksLikePath(s: string): boolean {

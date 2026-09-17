@@ -219,11 +219,11 @@ export function reviewGoldResolvedModelId(
 
 export async function runReviewGoldFixture(
   fixture: ReviewGoldFixtureFile,
-  opts: { live?: boolean; modelId?: string } = {},
+  opts: { live?: boolean; modelId?: string; providers?: Provider[] } = {},
 ): Promise<ReviewGoldRunRow> {
   const fsImpl = memFs({ ...fixture.files });
   const liveHappy = isLiveHappyPath(fixture, opts);
-  const providers = liveHappy ? undefined : providersFor(fixture);
+  const providers = opts.providers ?? (liveHappy ? undefined : providersFor(fixture));
   const result = await proposeFindingFix({
     capsule: goldCapsule(fixture.capsulePolicies ?? [], fixture.capsuleEvidence ?? []),
     finding: goldFinding(fixture.finding),

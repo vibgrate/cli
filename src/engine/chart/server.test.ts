@@ -45,6 +45,11 @@ describe('chart server', () => {
     expect(overview.magic).toBe('vg.arch.overview.v1');
     expect(overview.packages.length).toBeGreaterThan(0);
     expect(overview.packages.length).toBeLessThanOrEqual(200);
+    expect(overview.overlays.vulns.source).toBe(false);
+    expect(overview.overlays.drift.source).toBe(false);
+    expect(overview.overlays.ownership.source).toBe(false);
+    expect(overview.overlays.vulns.empty).toMatch(/reachability/i);
+    expect(JSON.stringify(overview.overlays)).not.toMatch(/Architecture Health Score/i);
 
     const graph = await fetchJson(server.url + '/api/graph');
     expect(graph.magic).toBe('vg.arch.overview.v1');
@@ -52,6 +57,8 @@ describe('chart server', () => {
 
     const slice = await fetchJson(server.url + '/api/slice?package=' + encodeURIComponent(overview.packages[0].id));
     expect(slice.magic).toBe('vg.arch.slice.v1');
+    expect(slice.overlays.vulns.source).toBe(false);
+    expect(slice.overlays.churn.kind).toBe('churn');
     const painted = slice.columns.reduce((n: number, col: { cards: unknown[] }) => n + col.cards.length, 0);
     expect(painted).toBeLessThanOrEqual(120);
 

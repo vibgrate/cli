@@ -30,12 +30,12 @@ describe('vendored backend native-dep resolution', () => {
       }),
       'node_modules/onnxruntime-node/index.cjs':
         "module.exports = { InferenceSession: { hostMarker: true }, Tensor: class {}, env: { logLevel: 'warning' } };",
-      'node_modules/@anush008/tokenizers/package.json': JSON.stringify({
-        name: '@anush008/tokenizers',
+      'node_modules/tokenizers/package.json': JSON.stringify({
+        name: 'tokenizers',
         version: '0.0.0-test',
         main: 'index.cjs',
       }),
-      'node_modules/@anush008/tokenizers/index.cjs':
+      'node_modules/tokenizers/index.cjs':
         'module.exports = { Tokenizer: class {}, AddedToken: class {} };',
       'node_modules/tar/package.json': JSON.stringify({ name: 'tar', version: '0.0.0-test', main: 'index.cjs' }),
       'node_modules/tar/index.cjs': 'module.exports = { x: async () => {} };',
