@@ -30,6 +30,31 @@ export interface DriftBudgetGateResult {
   verdict: DriftBudgetVerdict | null;
 }
 
+/**
+ * Compare a DriftScore to `--drift-budget`.
+ *
+ * A null score is unmeasured. It does not fail the budget, and it is not
+ * treated as 0. A measured 0 is a real score and is compared as usual.
+ */
+export function compareDriftBudget(
+  score: number | null,
+  budget: number,
+): { exitCode: 0 | 2; message: string | null } {
+  if (score === null) {
+    return {
+      exitCode: 0,
+      message: `DriftScore is absent; --drift-budget ${budget} was not compared.`,
+    };
+  }
+  if (score > budget) {
+    return {
+      exitCode: 2,
+      message: `Failing fitness function: DriftScore ${score}/100 exceeds budget ${budget}.`,
+    };
+  }
+  return { exitCode: 0, message: null };
+}
+
 export function evaluateConfigDriftBudget(input: DriftBudgetGateInput): DriftBudgetGateResult {
   const source = input.configFile ?? 'the project config';
   const parsed = parseDriftBudget(input.raw);

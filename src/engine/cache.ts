@@ -27,7 +27,9 @@ import type { FileParse } from './types.js';
 
 // Bumped to /4: optional mtime+size fingerprint for stat-skip fast path.
 // /6: RawCall carries `awaited`; /5 parses lack it.
-const CACHE_VERSION = 'vg-parse-cache/6';
+// /7: Prisma model-delegate writes (`prisma.post.update`) now yield `persist`
+// duties, so /6 parses of such files differ.
+const CACHE_VERSION = 'vg-parse-cache/7';
 
 interface CacheEntry {
   hash: string;

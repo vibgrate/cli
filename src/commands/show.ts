@@ -10,12 +10,15 @@ import { c, info, json, out } from '../util/output.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { loadHaileProvider } from '../engine/haile/haile-provider.js';
 import { buildExplainDoc } from '../review/explain-doc.js';
+import { keepInScratchpad } from '../review/scratchpad.js';
+import { registerShowScratchpad } from './show-scratchpad.js';
 import { renderReviewDocMarkdown } from '../review/doc.js';
 import { resolveGraphPath } from '../engine/artifacts.js';
 import { findHaileSymbol, formatHaileLines, haileJsonFields, readHaileSidecar } from '../engine/haile/index.js';
 import { registerShowArch } from './arch.js';
 import { registerShowSavings } from './show-savings.js';
 import { registerShowSurfaces } from './show-surfaces.js';
+import { registerShowFlow } from './show-flow.js';
 
 /**
  * `vg show <name>` (VG-CLI-SPEC §3.3) — the richest single-node view: what it
@@ -34,13 +37,16 @@ export function registerShow(program: Command): void {
   registerShowArch(cmd);
   registerShowSavings(cmd);
   registerShowSurfaces(cmd);
+  registerShowFlow(cmd);
+  registerShowScratchpad(cmd);
 
   cmd
     .argument('<name>', 'qualified name, short name, file:line, glob, or id')
     .option('--pick <n>', 'pick the nth candidate when ambiguous')
     .option('--diagram', 'explain it with pinned diagrams: how it is reached, its flow, the data it reads and writes, where it sits (needs the Architecture module)')
     .option('--format <fmt>', 'with --diagram: output format (md | json)', 'md')
-    .action(async function (this: Command, name: string, opts: { pick?: string; diagram?: boolean; format: string }) {
+    .option('--keep', 'with --diagram: also keep it on top of the explain scratchpad (`vg show scratchpad`)')
+    .action(async function (this: Command, name: string, opts: { pick?: string; diagram?: boolean; format: string; keep?: boolean }) {
       const global = readGlobal(this);
       const { root, graph } = requireGraph(global);
       const { node, candidates } = resolveOne(graph, name, opts.pick ? Number(opts.pick) : undefined);
@@ -57,6 +63,7 @@ export function registerShow(program: Command): void {
           throw new CliError('unknown --format (expected md | json)', ExitCode.USAGE_ERROR);
         }
         const { doc } = buildExplainDoc({ root, graph, node, graphPath: global.graph, provider: await loadHaileProvider() });
+        if (opts.keep) keepInScratchpad(root, doc);
         const asJson = Boolean(global.json) || opts.format === 'json';
         out(asJson ? JSON.stringify(doc, null, 2) : renderReviewDocMarkdown(doc).replace(/\n$/, ''));
         return;

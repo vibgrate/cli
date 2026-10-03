@@ -1,6 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { computeDriftScore, generateFindings, computeProjectId } from '../scoring/drift-score.js';
+import { computeDriftScore as computeLiveDriftScore } from '../../core-open/scoring/drift-score.js';
+import { formatMarkdown as formatLiveMarkdown } from '../../core-open/formatters/markdown.js';
+import { formatText as formatLiveText } from '../../core-open/formatters/text.js';
+import type { ProjectScan as LiveProjectScan, ScanArtifact as LiveScanArtifact } from '../../core-open/types.js';
 import type { ProjectScan, VibgrateConfig } from '../types.js';
+
+/** Narrow a score the fixture measured. Null here is a test bug, not absence. */
+function measured(score: number | null): number {
+  if (score === null) throw new Error('expected a measured DriftScore');
+  return score;
+}
 
 // ── Helpers ──
 
@@ -48,14 +58,54 @@ describe('computeDriftScore', () => {
     expect(result.riskLevel).toBe('low');
   });
 
-  it('returns 0 drift for empty projects array', () => {
+  it('returns null, not 0, when no project was scanned', () => {
     const result = computeDriftScore([]);
+    expect(result.score).toBeNull();
+    expect(result.riskLevel).toBeNull();
+    expect(result.measured).toEqual([]);
+    expect(result.components.runtimeScore).toBeNull();
+    expect(result.components.frameworkScore).toBeNull();
+    expect(result.components.dependencyScore).toBeNull();
+    expect(result.components.eolScore).toBeNull();
+    const serialized = JSON.parse(JSON.stringify(result)) as { score: unknown; components: { runtimeScore: unknown } };
+    expect(serialized.score).toBeNull();
+    expect(serialized.components.runtimeScore).toBeNull();
+  });
+
+  it('returns null, not 0, for a project with no runtime and empty dependency buckets', () => {
+    const project = makeNodeProject({
+      runtime: undefined,
+      runtimeMajorsBehind: undefined,
+      frameworks: [],
+      dependencies: [],
+      dependencyAgeBuckets: { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 },
+    });
+    const result = computeDriftScore([project]);
+    expect(result.score).toBeNull();
+    expect(result.riskLevel).toBeNull();
+    expect(result.components.runtimeScore).toBeNull();
+    expect(result.components.frameworkScore).toBeNull();
+    expect(result.components.dependencyScore).toBeNull();
+    expect(result.components.eolScore).toBeNull();
+    expect(JSON.stringify(result)).not.toContain('"score":0');
+  });
+
+  it('keeps a measured zero when runtime, framework, and dependencies are current', () => {
+    const project = makeNodeProject({
+      runtimeMajorsBehind: 0,
+      frameworks: [
+        { name: 'React', currentVersion: '19.0.0', latestVersion: '19.0.0', majorsBehind: 0 },
+      ],
+      dependencyAgeBuckets: { current: 4, oneBehind: 0, twoPlusBehind: 0, unknown: 0 },
+    });
+    const result = computeDriftScore([project]);
     expect(result.score).toBe(0);
     expect(result.riskLevel).toBe('low');
     expect(result.components.runtimeScore).toBe(0);
     expect(result.components.frameworkScore).toBe(0);
     expect(result.components.dependencyScore).toBe(0);
     expect(result.components.eolScore).toBe(0);
+    expect(JSON.parse(JSON.stringify(result)).components.runtimeScore).toBe(0);
   });
 
   it('penalises runtime 1 major behind', () => {
@@ -82,19 +132,21 @@ describe('computeDriftScore', () => {
     expect(result.components.runtimeScore).toBe(100);
   });
 
-  it('returns runtimeScore 0 (no drift) when no runtime info', () => {
+  it('leaves runtimeScore null when no runtime info was measured', () => {
     const project = makeNodeProject({
       runtimeMajorsBehind: undefined,
       runtime: undefined,
     });
     const result = computeDriftScore([project]);
-    expect(result.components.runtimeScore).toBe(0);
+    expect(result.components.runtimeScore).toBeNull();
+    expect(result.measured ?? []).not.toContain('runtime');
   });
 
-  it('computes frameworkScore 0 (no drift) when no frameworks', () => {
+  it('leaves frameworkScore null when no frameworks were measured', () => {
     const project = makeNodeProject({ frameworks: [] });
     const result = computeDriftScore([project]);
-    expect(result.components.frameworkScore).toBe(0);
+    expect(result.components.frameworkScore).toBeNull();
+    expect(result.measured ?? []).not.toContain('framework');
   });
 
   it('penalises frameworks with major lag', () => {
@@ -114,7 +166,7 @@ describe('computeDriftScore', () => {
       ],
     });
     const result = computeDriftScore([project]);
-    expect(result.components.frameworkScore).toBe(0);
+    expect(result.components.frameworkScore).toBeNull();
   });
 
   it('computes dependencyScore 0 (no drift) when all current', () => {
@@ -133,12 +185,14 @@ describe('computeDriftScore', () => {
     expect(result.components.dependencyScore).toBeGreaterThan(50);
   });
 
-  it('dependencyScore 0 (no drift) when no deps at all', () => {
+  it('leaves dependencyScore null when there are no dependencies', () => {
     const project = makeNodeProject({
+      dependencies: [],
       dependencyAgeBuckets: { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 },
     });
     const result = computeDriftScore([project]);
-    expect(result.components.dependencyScore).toBe(0);
+    expect(result.components.dependencyScore).toBeNull();
+    expect(result.measured ?? []).not.toContain('dependency');
   });
 
   it('eolScore penalises node 2 majors behind', () => {
@@ -454,8 +508,8 @@ describe('per-project drift scores', () => {
     expect(score2.score).toBeGreaterThan(70);
 
     // Aggregate should be between the two (pulled up by p2's drift)
-    expect(aggregate.score).toBeLessThan(score2.score);
-    expect(aggregate.score).toBeGreaterThan(score1.score);
+    expect(aggregate.score).toBeLessThan(measured(score2.score));
+    expect(aggregate.score).toBeGreaterThan(measured(score1.score));
   });
 
   it('individual project score matches single-project aggregate', () => {
@@ -472,5 +526,97 @@ describe('per-project drift scores', () => {
     expect(singleProjectScore.score).toBeGreaterThan(0);
     expect(singleProjectScore.riskLevel).toBeDefined();
     expect(singleProjectScore.components).toBeDefined();
+  });
+});
+
+// The scan command scores through the vendored engine, not the reporting copy above.
+describe('computeDriftScore (scan engine)', () => {
+  function unscoredProject(): LiveProjectScan {
+    return {
+      type: 'node',
+      path: '/test/empty',
+      name: 'empty',
+      frameworks: [],
+      dependencies: [],
+      dependencyAgeBuckets: { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 },
+    };
+  }
+
+  function liveArtifact(drift: LiveScanArtifact['drift'], projects: LiveProjectScan[] = []): LiveScanArtifact {
+    return {
+      schemaVersion: '1.0',
+      timestamp: '2026-02-16T00:00:00.000Z',
+      vibgrateVersion: '0.0.0',
+      rootPath: '/test',
+      projects,
+      drift,
+      findings: [],
+    };
+  }
+
+  it('serializes an empty scan as null, not 0', () => {
+    const result = computeLiveDriftScore([]);
+    expect(result.score).toBeNull();
+    expect(result.riskLevel).toBeNull();
+    expect(result.components).toEqual({
+      runtimeScore: null,
+      frameworkScore: null,
+      dependencyScore: null,
+      eolScore: null,
+    });
+    const json = JSON.stringify(result);
+    expect(json).toContain('"score":null');
+    expect(json).not.toContain('"score":0');
+  });
+
+  it('serializes a project with no runtime and empty dependency buckets as null', () => {
+    const result = computeLiveDriftScore([unscoredProject()]);
+    expect(result.score).toBeNull();
+    expect(result.components.runtimeScore).toBeNull();
+    expect(result.components.dependencyScore).toBeNull();
+    expect(result.components.eolScore).toBeNull();
+    expect(result.components.frameworkScore).toBeNull();
+  });
+
+  it('keeps a measured runtime zero distinct from an absent runtime', () => {
+    const measured = computeLiveDriftScore([{ ...unscoredProject(), runtimeMajorsBehind: 0 }]);
+    const absent = computeLiveDriftScore([unscoredProject()]);
+    expect(measured.components.runtimeScore).toBe(0);
+    expect(absent.components.runtimeScore).toBeNull();
+    // Lag of 4 or more is a measured health of 0, inverted to drift 100 — not null.
+    const lagged = computeLiveDriftScore([{ ...unscoredProject(), runtimeMajorsBehind: 5 }]);
+    expect(lagged.components.runtimeScore).toBe(100);
+  });
+
+  it('renders the scan summary as n/a when the score is absent and as 0/100 when it is zero', () => {
+    const absent = liveArtifact(computeLiveDriftScore([unscoredProject()]), [unscoredProject()]);
+    const absentText = formatLiveText(absent);
+    const absentMd = formatLiveMarkdown(absent);
+    expect(absentText).toContain('n/a');
+    expect(absentText).not.toContain('0/100');
+    expect(absentMd).toContain('| **DriftScore** | n/a |');
+    expect(absentMd).toContain('| Runtime | n/a |');
+    expect(absentMd).not.toContain('0/100');
+
+    const current = computeLiveDriftScore([{
+      ...unscoredProject(),
+      runtimeMajorsBehind: 0,
+      frameworks: [{ name: 'React', currentVersion: '19.0.0', latestVersion: '19.0.0', majorsBehind: 0 }],
+      dependencies: [{
+        package: 'left-pad',
+        section: 'dependencies',
+        currentSpec: '1.0.0',
+        resolvedVersion: '1.0.0',
+        latestStable: '1.0.0',
+        majorsBehind: 0,
+        drift: 'current',
+      }],
+      dependencyAgeBuckets: { current: 1, oneBehind: 0, twoPlusBehind: 0, unknown: 0 },
+    }]);
+    expect(current.score).toBe(0);
+    const zeroMd = formatLiveMarkdown(liveArtifact(current));
+    expect(zeroMd).toContain('| **DriftScore** | 0/100 |');
+    expect(zeroMd).toContain('| Runtime | 0 |');
+    expect(formatLiveText(liveArtifact(current))).toContain('0/100');
   });
 });

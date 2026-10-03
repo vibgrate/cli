@@ -340,6 +340,7 @@ export const fixCommand = new Command('fix')
       for (const plan of response.plans) {
         const upgraded = new Set(plan.upgrades.map((u) => u.package));
         const expected = estimateDriftScore(artifact, upgraded);
+        if (typeof expected !== 'number') continue;
         plan.expectedDriftScore = expected;
         plan.driftDelta = expected - currentDrift;
       }

@@ -18,7 +18,7 @@ import {
   loadConfig,
   findConfigFile,
 } from '../../core-open/index.js';
-import { evaluateConfigDriftBudget } from '../drift-budget-gate.js';
+import { compareDriftBudget, evaluateConfigDriftBudget } from '../drift-budget-gate.js';
 import type { ScanOptions, ScanArtifact } from '../../core-open/index.js';
 import { analyzeReachability, collectPreflightDependencies } from '../reachability.js';
 import type { VgGraph } from '../../schema.js';
@@ -889,19 +889,23 @@ export const scanCommand = new Command('scan')
       if (!opts.quiet) console.error(chalk.dim(`\niac gate: no findings at or above ${threshold} (${securityPacksLabel(section)}).`));
     }
 
-    if (scanOpts.driftBudget !== undefined && artifact.drift.score > scanOpts.driftBudget) {
-      console.error(chalk.red(`\nFailing fitness function: DriftScore ${artifact.drift.score}/100 exceeds budget ${scanOpts.driftBudget}.`));
-      process.exit(2);
+    const measuredDrift = artifact.drift.score;
+    if (scanOpts.driftBudget !== undefined) {
+      const budget = compareDriftBudget(measuredDrift, scanOpts.driftBudget);
+      if (budget.message) {
+        console.error(budget.exitCode === 2 ? chalk.red(`\n${budget.message}`) : chalk.yellow(`\n${budget.message}`));
+      }
+      if (budget.exitCode === 2) process.exit(2);
     }
 
     if (scanOpts.driftWorseningPercent !== undefined) {
-      if (artifact.delta === undefined) {
+      if (measuredDrift === null) {
+        console.error(chalk.yellow('\nDriftScore is absent; --drift-worsening was not compared.'));
+      } else if (artifact.delta === undefined) {
         console.error(chalk.red('\nFailing fitness function: --drift-worsening requires --baseline to compare against previous drift.'));
         process.exit(2);
-      }
-
-      if (artifact.delta > 0) {
-        const baselineScore = artifact.drift.score - artifact.delta;
+      } else if (artifact.delta > 0) {
+        const baselineScore = measuredDrift - artifact.delta;
         const denominator = Math.max(Math.abs(baselineScore), 0.0001);
         const worseningPercent = (artifact.delta / denominator) * 100;
 
@@ -916,18 +920,24 @@ export const scanCommand = new Command('scan')
     // so an explicit flag keeps its exact historic meaning.
     if (scanOpts.driftBudget === undefined && scanOpts.driftWorseningPercent === undefined) {
       const projectConfig = await loadConfig(rootDir);
-      const gate = evaluateConfigDriftBudget({
-        raw: projectConfig.driftBudget,
-        configFile: findConfigFile(rootDir),
-        headScore: artifact.drift.score,
-        baseScore: artifact.delta === undefined ? null : artifact.drift.score - artifact.delta,
-      });
-      for (const line of gate.lines) {
-        if (line.level === 'error') console.error(chalk.red(line.text));
-        else if (line.level === 'warn') console.error(chalk.yellow(line.text));
-        else if (!opts.quiet) console.error(chalk.dim(line.text));
+      if (measuredDrift === null) {
+        if (projectConfig.driftBudget !== undefined && projectConfig.driftBudget !== null) {
+          console.error(chalk.yellow('\nDriftScore is absent; the project drift budget was not compared.'));
+        }
+      } else {
+        const gate = evaluateConfigDriftBudget({
+          raw: projectConfig.driftBudget,
+          configFile: findConfigFile(rootDir),
+          headScore: measuredDrift,
+          baseScore: artifact.delta === undefined ? null : measuredDrift - artifact.delta,
+        });
+        for (const line of gate.lines) {
+          if (line.level === 'error') console.error(chalk.red(line.text));
+          else if (line.level === 'warn') console.error(chalk.yellow(line.text));
+          else if (!opts.quiet) console.error(chalk.dim(line.text));
+        }
+        if (gate.exitCode === 2) process.exit(2);
       }
-      if (gate.exitCode === 2) process.exit(2);
     }
 
     // Reachability hand-off (before push): post the dependency coordinates the

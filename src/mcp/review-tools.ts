@@ -17,6 +17,9 @@
  * `destructiveHint: false`, as for `compress_content` and `memory_save`.
  * `openWorldHint: true` because ops `comments` and `reply` read and answer
  * the comments people left on the pushed document in Vibgrate Cloud.
+ *
+ * Op "explain" with `keep` and doc_id "scratchpad" reach the explain
+ * scratchpad (`review/scratchpad.ts`), stored beside the review documents.
  */
 
 import type { DocScope } from '../review/doc-build.js';
@@ -32,6 +35,12 @@ import {
   restoreVersion,
 } from '../review/doc-store.js';
 import type { VgTool } from './tools.js';
+import type { GraphNode, VgGraph } from '../schema.js';
+import { resolveOne } from '../engine/lookup.js';
+import { callPath, shortestPath } from '../engine/paths.js';
+import { loadHaileProvider } from '../engine/haile/haile-provider.js';
+import { buildExplainDoc, buildPathDoc, ExplainEmpty } from '../review/explain-doc.js';
+import { clearScratchpad, getScratchpad, keepInScratchpad, patchScratchpad, SCRATCHPAD_ID, type Scratchpad } from '../review/scratchpad.js';
 import { cloudDsn, fetchComments, replyToComment, targetOf } from '../review/doc-comments.js';
 
 /** Inline the whole document only below this size; above it the outline plus `get` by block keeps every result inside the token budget. */
@@ -45,6 +54,7 @@ const DESCRIPTION = [
   'Patches are all or nothing and name the version they were written against; a pin that does not land, or a stale version, saves nothing and says why.',
   'Whatever you write is recorded as origin "agent"; only unchanged graph-derived elements stay "graph".',
   'After the document is pushed (`vg review doc --push`), op "comments" lists what people asked on its blocks in Vibgrate Cloud, and op "reply" answers a thread (comment_id, text); replies are shown as written by an agent.',
+  'To explain code as it is rather than a change, op "explain" with `symbol` returns the same kind of document (kind "explain": what it is, how it is reached, its flow, the data it reads and writes, where it sits); add `to` for the call path from symbol to `to`. It is not saved unless you pass `keep: true`, which puts it on top of the scratchpad (doc_id "scratchpad"): the always-present explain canvas the person sees in VS Code, newest on top. Patch the scratchpad by block id like a review document (ops get, patch, check, clear); start your own entry with a markdown block whose text begins "#### ". Reply to the person in one line and let the scratchpad carry the explanation.',
 ].join(' ');
 
 const PIN = {
@@ -61,14 +71,18 @@ const PIN = {
 const SCHEMA = {
   type: 'object',
   properties: {
-    op: { type: 'string', enum: ['open', 'get', 'patch', 'check', 'history', 'restore', 'comments', 'reply'] },
-    doc_id: { type: 'string', description: 'from open (rd_…); required for every op but open' },
+    op: { type: 'string', enum: ['open', 'get', 'patch', 'check', 'history', 'restore', 'comments', 'reply', 'explain', 'clear'] },
+    doc_id: { type: 'string', description: 'from open (rd_…), or "scratchpad"; required for every op but open and explain' },
     base: { type: 'string', description: 'open: review HEAD against the merge-base with this ref (default: working tree vs HEAD)' },
     in_place: { type: 'boolean', description: 'open: with base, include the working tree' },
     session: { type: 'string', description: 'open: a VG Code chat id, or "latest" — only the files it touched, its requests as requirements' },
     fresh: { type: 'boolean', description: 'open: rebuild from the change as a new version instead of reusing the saved one' },
     base_graph: { type: 'boolean', description: 'open: also map the base commit for before/after call paths (slower)' },
     block: { type: 'string', description: 'get: return one block by id' },
+    symbol: { type: 'string', description: 'explain: the code to explain — qualified name, short name, file:line or id' },
+    to: { type: 'string', description: 'explain: draw the path from symbol to this one instead' },
+    calls_only: { type: 'boolean', description: 'explain with to: follow call edges only (default true)' },
+    keep: { type: 'boolean', description: 'explain: also put it on top of the scratchpad (doc_id "scratchpad")' },
     comment_id: { type: 'string', description: 'reply: the comment (rdc_…) to answer, from op "comments"' },
     text: { type: 'string', description: 'reply: your answer, plain text, at most 4000 characters' },
     version: { type: 'integer', minimum: 1, description: 'patch: the version you read (required); get/restore: which version' },
@@ -90,7 +104,7 @@ function str(v: unknown): string | undefined {
 }
 
 /** The document, or only its outline when inlining it would crowd the agent's context. */
-function view(doc_id: string, version: number, doc: ReviewDoc): Record<string, unknown> {
+function view(doc_id: string | null, version: number | null, doc: ReviewDoc): Record<string, unknown> {
   const json = JSON.stringify(doc);
   return {
     doc_id,
@@ -106,14 +120,84 @@ function scopeFrom(args: Record<string, unknown>): DocScope {
   return session ? { kind: 'session', session, base } : { kind: 'change', base, in_place: args.in_place === true };
 }
 
-async function run(root: string, args: Record<string, unknown>): Promise<unknown> {
+/**
+ * op "explain": the explain document for a symbol, or for the path between
+ * two. Read-only, not saved: it describes code as it is, so there is nothing
+ * to version against.
+ */
+async function explain(root: string, graph: VgGraph, args: Record<string, unknown>): Promise<unknown> {
+  if (graph.nodes.length === 0) return { error: 'no_code_map', message: 'explain needs a code map — run `vg` in the repository first' };
+  const symbol = str(args.symbol);
+  if (!symbol) return { error: 'bad_request', message: 'explain needs symbol' };
+  const pick = (name: string): { node: GraphNode } | { error: string; message: string; candidates: string[] } => {
+    const r = resolveOne(graph, name);
+    return r.node ? { node: r.node } : { error: r.candidates.length ? 'ambiguous' : 'not_found', message: `"${name}" ${r.candidates.length ? 'is ambiguous' : 'matches no node'}`, candidates: r.candidates.slice(0, 10).map((n) => n.qualifiedName) };
+  };
+  const from = pick(symbol);
+  if (!('node' in from)) return from;
+  const toName = str(args.to);
+  try {
+    const answer = (doc: ReviewDoc) => {
+      if (args.keep !== true) return { ...view(null, null, doc), saved: false };
+      const pad = keepInScratchpad(root, doc);
+      return { ...view(pad.doc_id, pad.version, pad.doc ?? doc), saved: true, kept: doc.title };
+    };
+    if (!toName) {
+      const { doc } = buildExplainDoc({ root, graph, node: from.node, provider: await loadHaileProvider() });
+      return answer(doc);
+    }
+    const to = pick(toName);
+    if (!('node' in to)) return to;
+    const callsOnly = args.calls_only !== false;
+    const found = callsOnly ? callPath(graph, from.node.id, to.node.id) : shortestPath(graph, from.node.id, to.node.id);
+    if (!found) return { error: 'not_found', message: `no ${callsOnly ? 'call ' : ''}path between ${from.node.qualifiedName} and ${to.node.qualifiedName}` };
+    const { doc } = buildPathDoc({ root, graph, path: found, callsOnly });
+    return answer(doc);
+  } catch (err) {
+    if (err instanceof ExplainEmpty) return { error: 'not_found', message: err.message };
+    throw err;
+  }
+}
+
+/** Ops on the explain scratchpad (review/scratchpad.ts): one document per repository, no history. */
+function scratchpadOp(root: string, op: string | undefined, args: Record<string, unknown>): unknown {
+  const shown = (pad: Scratchpad) => ({ ...(pad.doc ? view(pad.doc_id, pad.version, pad.doc) : { doc_id: pad.doc_id, version: pad.version, doc: null }), stale: pad.stale });
+  switch (op) {
+    case 'get': {
+      const pad = getScratchpad(root);
+      const block = str(args.block);
+      if (!block || !pad.doc) return shown(pad);
+      const b = pad.doc.sections.flatMap((s) => s.blocks).find((x) => x.id === block);
+      return b ? { doc_id: pad.doc_id, version: pad.version, block: b } : { error: 'not_found', message: `no block ${block} in version ${pad.version}`, outline: outline(pad.doc) };
+    }
+    case 'check': {
+      const pad = getScratchpad(root);
+      return { doc_id: pad.doc_id, version: pad.version, valid: pad.stale.length === 0, stale: pad.stale };
+    }
+    case 'patch': {
+      const version = typeof args.version === 'number' ? args.version : undefined;
+      if (version === undefined) return { error: 'bad_request', message: 'patch needs version: the version you read' };
+      const res = patchScratchpad(root, version, args.ops);
+      if (!res.ok) return { saved: false, doc_id: SCRATCHPAD_ID, ...res };
+      return { saved: true, notes: res.notes, ...shown(res.scratchpad) };
+    }
+    case 'clear':
+      return { cleared: true, was_version: clearScratchpad(root) };
+    default:
+      return { error: 'bad_request', message: 'the scratchpad takes ops get, patch, check and clear; explain with keep: true adds to it' };
+  }
+}
+
+async function run(root: string, graph: VgGraph, args: Record<string, unknown>): Promise<unknown> {
   const op = str(args.op);
+  if (op === 'explain') return explain(root, graph, args);
   if (op === 'open') {
     const opened = await openDocument(root, scopeFrom(args), { fresh: args.fresh === true, baseGraph: args.base_graph === true });
     return { ...view(opened.doc_id, opened.version, opened.doc), built: opened.built, ...(opened.reason ? { rebuilt_because: opened.reason } : {}) };
   }
   const id = str(args.doc_id);
   if (!id) return { error: 'bad_request', message: `op "${op ?? ''}" needs doc_id — call op "open" first` };
+  if (id === SCRATCHPAD_ID) return scratchpadOp(root, op, args);
   const version = typeof args.version === 'number' ? args.version : undefined;
   switch (op) {
     case 'get': {
@@ -156,7 +240,7 @@ async function run(root: string, args: Record<string, unknown>): Promise<unknown
       return { replied: true, comment: await replyToComment(cloudDsn(), targetOf(doc), commentId, text, 'review_doc') };
     }
     default:
-      return { error: 'bad_request', message: 'op must be one of open, get, patch, check, history, restore, comments, reply' };
+      return { error: 'bad_request', message: 'op must be one of open, get, patch, check, history, restore, comments, reply, explain, clear (clear takes doc_id "scratchpad")' };
   }
 }
 
@@ -165,13 +249,14 @@ export const REVIEW_TOOLS: VgTool[] = [
     name: 'review_doc',
     description: DESCRIPTION,
     inputSchema: SCHEMA,
-    // It reads the code map itself when one exists, and works without one.
+    // It reads the code map itself when one exists, and works without one
+    // (op "explain" alone needs it, and says so when it is missing).
     graphless: true,
     // comments and reply reach Vibgrate Cloud with the workspace DSN.
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    handler: async (_graph, args, ctx) => {
+    handler: async (graph, args, ctx) => {
       try {
-        return await run(ctx.root, args);
+        return await run(ctx.root, graph, args);
       } catch (err) {
         return { error: 'review_doc_failed', message: (err as Error).message };
       }

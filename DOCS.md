@@ -1054,7 +1054,15 @@ Every component also carries a [purl](https://github.com/package-url/purl-spec)
 (`pkg:npm/<name>@<version>`, scoped names as their own namespace segment) — as the
 CycloneDX `purl` field and `bom-ref`, and as the SPDX `externalRefs` PACKAGE-MANAGER
 reference — so a vulnerability scanner can match components without re-deriving an
-identifier. When the lockfile format resolves real dependency edges (npm
+identifier. When a package name cannot be a Package URL (a space, a non-ASCII
+character, or an empty path segment), that component stays in the document and
+the purl is omitted. CycloneDX sets `vibgrate:purlStatus` to `unavailable` and
+records the reason on `vibgrate:purlWarning`. SPDX omits the purl externalRef,
+records `purlStatus=unavailable` on the package annotation, and repeats the
+reason in a second annotation. `vg sbom export` prints the same warning on
+stderr. The warning names the package and its ecosystem.
+
+When the lockfile format resolves real dependency edges (npm
 `package-lock.json` v2/v3 today; pnpm and yarn report components without edges), the
 SBOM also carries the resolved dependency graph: CycloneDX's top-level `dependencies`
 array, or SPDX `DEPENDS_ON` relationships. Where edges aren't resolvable, that section
@@ -1994,10 +2002,23 @@ vg path handler insert --calls
 | `--calls` | Follow call edges only; show the call-site line of each hop |
 | `--pick-a <n>` | Pick the nth candidate for A |
 | `--pick-b <n>` | Pick the nth candidate for B |
+| `--diagram` | Draw the path as a pinned call path instead of text |
+| `--format <fmt>` | With `--diagram`: `md` (default) or `json` (a `vg.review.doc.v1` document with `kind: "explain"`) |
 
 With `--json`, `steps` lists each hop's edge kind, resolver, call-site line and
 `awaited` flag. The `find_path` MCP tool returns the same as `hops`, and takes
 `calls_only: true` for the call-only path.
+
+With `--diagram`, the path becomes a document you can read or hand to an agent:
+
+```bash
+vg path placeOrder audit --calls --diagram
+```
+
+- **What it is:** each hop in order, with the line that makes it and whether the call is awaited.
+- **How it works:** one call path, caller first. Each step is linked to the lines that declare it, and each hop to its call site.
+
+Every element comes from the code map and is pinned to lines in the working tree. A step with no code in the repository (a library function) is left out of the call path and named in the notes.
 
 ---
 
@@ -2110,6 +2131,37 @@ vg show src/orders/service.ts:42 --diagram --pick 1 --format json
 - **Callers and callees:** each one linked to the lines that declare it.
 
 Every element is pinned to lines in the working tree and comes from the code map, so nothing is marked new or edited and the call path has no before side. When nothing in the code map calls the code, the flow leads instead. The document is the same `vg.review.doc.v1` that `vg review doc` writes, so the same renderers and checks apply. In VS Code, **Vibgrate: Explain This Code with Diagrams** opens it for the function under the cursor.
+
+#### vg show flow
+
+What a function does, step by step, as one pinned flow diagram: the explain view of `vg show <name> --diagram` with only its flows.
+
+```bash
+vg show flow UpdateProductCommandHandler.Handle
+vg show flow src/orders/service.ts:42 --format json
+```
+
+Each step is a statement the code map recorded (a query, a write, a call, a branch or an error path), linked to its line. When the code map records no steps for the function, `vg show flow` says so and exits 3. It needs the Architecture module (`vg module install arch`).
+
+Agents get the same documents over MCP: under `vg serve --review`, the `review_doc` tool's `explain` op takes `symbol` (and `to` for a call path). It saves nothing unless asked to keep it.
+
+#### vg show scratchpad
+
+One explain scratchpad per repository, for understanding code rather than reviewing a change. Every explanation you keep lands on top, newest first:
+
+```bash
+vg show OrderService.save --diagram --keep
+vg path placeOrder audit --calls --diagram --keep
+vg show scratchpad
+vg show scratchpad --clear
+```
+
+- **Newest on top.** Each entry starts with a heading. Keeping the same explanation again moves it to the top instead of adding a copy. The 30 newest entries are kept.
+- **Agents write here too.** The `review_doc` tool's `explain` op with `keep: true` adds an entry. Ops `get`, `patch`, `check` and `clear` with `doc_id: "scratchpad"` read it, redraw a block by id, and empty it. What an agent writes is marked as written by an agent.
+- **Pinned to the working tree.** Code moves under a scratchpad, so a block whose lines no longer exist is reported, not deleted. A patch is refused only when it breaks something that was fine.
+- **Local.** It is stored in `.vibgrate/review-docs/scratchpad.json`, never committed, and deleted after 365 days without an update.
+
+In VS Code, **Vibgrate: Explain This Code with Diagrams** keeps its result on the scratchpad, and **Vibgrate: Open Explain Scratchpad** opens it. The tab updates as an agent writes to it.
 
 #### vg show arch
 
@@ -2814,7 +2866,7 @@ This makes drift a formal quality gate (fitness function), not just reporting.
 
 The DriftScore is a deterministic, versioned metric (0–100) that represents how far behind your codebase is relative to the current stable ecosystem baseline.
 
-**Lower score = healthier upgrade posture.** 0 means no drift (fully current); 100 means maximum drift. Higher is worse.
+**Lower score = healthier upgrade posture.** 0 means no drift (fully current); 100 means maximum drift. Higher is worse. A component that was not measured is `null` in JSON and `n/a` in text, not 0. When nothing was measured, the overall score is null as well, and `--drift-budget` does not compare it.
 
 The methodology is published: see the [public scoring specification](./docs/public/SCORING-METHODOLOGY-PUBLIC.md) in this repository and the overview at [vibgrate.com/driftscore](https://vibgrate.com/driftscore).
 

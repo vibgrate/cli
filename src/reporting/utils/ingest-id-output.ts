@@ -13,7 +13,9 @@ export function emitIngestIdLine(ingestId: string, options?: { unchanged?: boole
  * (VIBGRATE_EMIT_MARKERS=1, set by the migration agent) so normal CLI output is
  * unchanged.
  */
-export function emitDriftScoreLine(score: number): void {
+export function emitDriftScoreLine(score: number | null): void {
   if (process.env.VIBGRATE_EMIT_MARKERS !== '1') return;
-  console.log(`VIBGRATE_DRIFT_SCORE=${score}`);
+  // `null` is the machine-readable form of an unmeasured score. A measured 0
+  // stays `0`; never collapse the two.
+  console.log(`VIBGRATE_DRIFT_SCORE=${score === null ? 'null' : score}`);
 }

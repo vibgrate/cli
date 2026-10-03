@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { toCycloneDx, toSpdx, formatDeltaText, npmPurl, purlFor, collectLockfileGraph } from './sbom.js';
+import { toCycloneDx, toSpdx, formatDeltaText, npmPurl, purlFor, collectLockfileGraph, collectPurlWarnings, describeUnavailablePurl } from './sbom.js';
 import type { ProjectScan, ScanArtifact } from '../types.js';
 import type { LockfileGraph } from '../../engine/lockfile.js';
 
@@ -230,6 +230,113 @@ describe('sbom helpers', () => {
     const sbom = toCycloneDx(makeArtifact('5.3.0', 90)) as { components: Array<{ version: string; purl: string }> };
     expect(sbom.components[0]!.version).toBe('5.3.0');
     expect(sbom.components[0]!.purl).toBe('pkg:npm/chalk@5.3.0');
+  });
+
+  /**
+   * A name that cannot be a purl name. `encodeURIComponent` used to turn the
+   * space into `pkg:npm/foo%20bar@1.0.0`, which is a purl-shaped string, and
+   * an empty path segment (`@scope/`) used to become `pkg:npm/%40scope/`.
+   * The component stays; the purl is omitted; the status is explicit.
+   */
+  it('keeps a component whose name cannot be a Package URL and marks the purl unavailable', () => {
+    const artifact = makeArtifact('5.3.0', 90);
+    artifact.rootPath = '/var/private/checkout';
+    const chalk = artifact.projects[0]!.dependencies[0]!;
+    artifact.projects[0]!.dependencies.push(
+      { ...chalk, package: 'foo bar', currentSpec: '1.0.0', resolvedVersion: '1.0.0' },
+      { ...chalk, package: '@scope/', currentSpec: '2.0.0', resolvedVersion: '2.0.0' },
+      { ...chalk, package: 'café', currentSpec: '3.0.0', resolvedVersion: '3.0.0' },
+    );
+
+    const cyclone = toCycloneDx(artifact) as {
+      components: Array<{
+        name: string;
+        version: string;
+        purl?: string;
+        'bom-ref': string;
+        properties: Array<{ name: string; value: string }>;
+      }>;
+    };
+    const again = JSON.stringify(toCycloneDx(artifact));
+    expect(JSON.stringify(cyclone)).toBe(again);
+    expect(again).not.toContain('foo%20bar');
+    expect(again).not.toContain('pkg:npm/foo');
+    expect(again).not.toContain('%40scope/');
+    expect(again).not.toContain('%C3%A9');
+
+    expect(cyclone.components.map((c) => c.name)).toEqual(['chalk', 'foo bar', '@scope/', 'café']);
+    expect(cyclone.components[0]!.purl).toBe('pkg:npm/chalk@5.3.0');
+
+    for (const name of ['foo bar', '@scope/', 'café']) {
+      const row = cyclone.components.find((c) => c.name === name)!;
+      expect(row.purl).toBeUndefined();
+      expect(row['bom-ref'].startsWith('pkg:')).toBe(false);
+      expect(row['bom-ref']).toBe(`vibgrate:npm:${name}@${row.version}`);
+      const status = row.properties.find((p) => p.name === 'vibgrate:purlStatus')?.value;
+      const warning = row.properties.find((p) => p.name === 'vibgrate:purlWarning')?.value;
+      expect(status).toBe('unavailable');
+      expect(warning).toBe(describeUnavailablePurl('npm', name, row.version));
+      expect(warning).toContain(`npm package "${name}"`);
+      expect(warning).not.toContain('/var/private');
+    }
+
+    const warnings = collectPurlWarnings(artifact);
+    expect(warnings).toEqual([
+      describeUnavailablePurl('npm', 'foo bar', '1.0.0'),
+      describeUnavailablePurl('npm', '@scope/', '2.0.0'),
+      describeUnavailablePurl('npm', 'café', '3.0.0'),
+    ]);
+    expect(warnings[0]).toContain('whitespace or a non-ASCII character');
+    expect(warnings[1]).toContain('empty path segment');
+
+    const spdx = toSpdx(artifact) as {
+      packages: Array<{
+        name: string;
+        externalRefs?: Array<{ referenceType: string; referenceLocator: string }>;
+        annotations: Array<{ comment: string }>;
+      }>;
+    };
+    expect(JSON.stringify(toSpdx(artifact))).toBe(JSON.stringify(spdx));
+    const bad = spdx.packages.find((p) => p.name === 'foo bar')!;
+    expect(bad.externalRefs).toBeUndefined();
+    expect(bad.annotations[0]!.comment).toContain('purlStatus=unavailable');
+    expect(bad.annotations[1]!.comment).toBe(warnings[0]);
+    expect(spdx.packages.find((p) => p.name === 'chalk')!.externalRefs?.[0]?.referenceLocator).toBe('pkg:npm/chalk@5.3.0');
+  });
+
+  it('does not put a rejected purl on a dependency-graph edge', () => {
+    const artifact = makeArtifact('5.3.0', 90);
+    const chalk = artifact.projects[0]!.dependencies[0]!;
+    artifact.projects[0]!.dependencies.push({ ...chalk, package: 'foo bar', currentSpec: '1.0.0', resolvedVersion: '1.0.0' });
+    const graph: LockfileGraph = {
+      components: [
+        { package: 'chalk', version: '5.3.0' },
+        { package: 'foo bar', version: '1.0.0' },
+      ],
+      edges: new Map([['chalk@5.3.0', ['foo bar@1.0.0']]]),
+      rootDependsOn: ['chalk@5.3.0', 'foo bar@1.0.0'],
+    };
+    const sbom = toCycloneDx(artifact, graph) as {
+      components: Array<{ name: string; 'bom-ref': string; purl?: string }>;
+      dependencies: Array<{ ref: string; dependsOn: string[] }>;
+    };
+    const badRef = sbom.components.find((c) => c.name === 'foo bar')!['bom-ref'];
+    expect(badRef).toBe('vibgrate:npm:foo bar@1.0.0');
+    expect(sbom.dependencies).toEqual([
+      { ref: 'vibgrate-root', dependsOn: ['pkg:npm/chalk@5.3.0', badRef] },
+      { ref: 'pkg:npm/chalk@5.3.0', dependsOn: [badRef] },
+      { ref: badRef, dependsOn: [] },
+    ]);
+    expect(JSON.stringify(sbom.dependencies)).not.toContain('pkg:npm/foo');
+  });
+
+  it('purlFor returns null for a bad name, an empty segment, and an unknown ecosystem', () => {
+    expect(purlFor('npm', 'foo bar', '1.0.0')).toBeNull();
+    expect(purlFor('npm', '@scope/', '2.0.0')).toBeNull();
+    expect(purlFor('go', 'github.com//sse', 'v1.0.0')).toBeNull();
+    expect(purlFor('npm', 'chalk', '^1.2.3')).toBeNull();
+    expect(purlFor('not-a-registry' as never, 'chalk', '1.0.0')).toBeNull();
+    expect(npmPurl('chalk', '5.3.0')).toBe('pkg:npm/chalk@5.3.0');
   });
 
   describe('collectLockfileGraph', () => {

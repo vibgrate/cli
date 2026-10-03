@@ -187,6 +187,7 @@ describe('vg fix — end to end on real repos', () => {
     expect(rendered.currentDriftScore).toBe(artifact.drift.score);
     const safe = rendered.plans.find((p) => p.tier === 'safe')!;
     expect(safe.expectedDriftScore).toBe(0); // upgrading lodash to current clears all drift
+    if (artifact.drift.score === null) throw new Error('expected a measured DriftScore');
     expect(safe.driftDelta).toBe(-artifact.drift.score); // strictly better
   });
 
@@ -316,6 +317,7 @@ describe('vg fix — end to end on real repos', () => {
 
     // …and a fresh scan proves the drift is gone, matching the pre-apply estimate.
     const after = await scan(root);
+    if (before.drift.score === null) throw new Error('expected a measured DriftScore');
     expect(after.drift.score).toBeLessThan(before.drift.score);
     expect(after.drift.score).toBe(0);
     expect(after.projects[0].dependencyAgeBuckets).toMatchObject({ current: 2, twoPlusBehind: 0 });

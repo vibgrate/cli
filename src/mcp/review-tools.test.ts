@@ -150,3 +150,57 @@ describe('review_doc, as an agent uses it', () => {
     expect(String(res.message)).toMatch(/needs a git repository/);
   });
 });
+
+describe('review_doc op "explain"', () => {
+  let root: string;
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fnNode = (id: string, file: string, start: number, end: number) => ({
+    id, kind: 'function', name: id, qualifiedName: id, file, span: { start, end }, lang: 'ts', importance: 0.1,
+    centrality: { degree: 0, pagerank: 0, betweenness: 0, eigenvector: 0 }, area: 0, isHub: false,
+  });
+  const graph = {
+    schemaVersion: 'vg-graph/1.1',
+    nodes: [fnNode('main', 'src/app.ts', 1, 3), fnNode('save', 'src/store.ts', 2, 4)],
+    edges: [{ id: 'call:main>save', kind: 'call', src: 'main', dst: 'save', resolution: 'tsc', confidence: 1, sites: [2] }],
+    areas: [{ id: 0, label: 'app' }],
+  } as unknown as VgGraph;
+  const explain = (args: Record<string, unknown>, g: VgGraph = graph) =>
+    Promise.resolve(tool.handler(g, { op: 'explain', ...args }, { root })) as Promise<Record<string, unknown>>;
+
+  function setup(): void {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vg-review-explain-')));
+    fs.mkdirSync(path.join(root, 'src'));
+    fs.writeFileSync(path.join(root, 'src/app.ts'), 'a\nb\nc\n');
+    fs.writeFileSync(path.join(root, 'src/store.ts'), 'a\nb\nc\nd\n');
+  }
+
+  it('returns the call path between two symbols, read-only and unsaved', async () => {
+    setup();
+    const res = await explain({ symbol: 'main', to: 'save' });
+    expect(res).toMatchObject({ doc_id: null, version: null, saved: false });
+    expect((res.doc as { kind: string; title: string }).title).toBe('Path: main → save');
+    expect(fs.existsSync(path.join(root, '.vibgrate', 'review-docs'))).toBe(false);
+  });
+
+  it('keeps an explanation on the scratchpad, which the agent then reads and patches by id', async () => {
+    setup();
+    const kept = await explain({ symbol: 'main', to: 'save', keep: true });
+    expect(kept).toMatchObject({ doc_id: 'scratchpad', version: 1, saved: true, kept: 'Path: main → save' });
+    const call2 = (args: Record<string, unknown>) => Promise.resolve(tool.handler(graph, args, { root })) as Promise<Record<string, unknown>>;
+    const got = await call2({ op: 'get', doc_id: 'scratchpad' });
+    const blocks = (got.doc as { sections: { blocks: { id: string; type: string; text?: string }[] }[] }).sections[0]!.blocks;
+    expect(blocks[0]!.text).toBe('#### Path: main → save');
+    const res = await call2({ op: 'patch', doc_id: 'scratchpad', version: 1, ops: [{ op: 'set_text', block: blocks[0]!.id, text: '#### How main saves' }] });
+    expect(res).toMatchObject({ saved: true, version: 2 });
+    expect(await call2({ op: 'history', doc_id: 'scratchpad' })).toMatchObject({ error: 'bad_request' });
+    expect(await call2({ op: 'clear', doc_id: 'scratchpad' })).toEqual({ cleared: true, was_version: 2 });
+  });
+
+  it('says what is missing: a code map, a symbol, or a path', async () => {
+    setup();
+    expect(await explain({ symbol: 'main' }, { ...graph, nodes: [] } as VgGraph)).toMatchObject({ error: 'no_code_map' });
+    expect(await explain({})).toMatchObject({ error: 'bad_request' });
+    expect(await explain({ symbol: 'nope' })).toMatchObject({ error: 'not_found' });
+    expect(await explain({ symbol: 'save', to: 'main' })).toMatchObject({ doc: expect.objectContaining({ title: 'Path: main → save' }) });
+  });
+});

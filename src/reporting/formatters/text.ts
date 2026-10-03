@@ -128,13 +128,11 @@ export function formatText(artifact: ScanArtifact): string {
   }
 
   // Score summary — drift score is lower-is-better (0 = no drift).
-  const scoreColor = artifact.drift.score <= 30 ? chalk.green :
-    artifact.drift.score <= 60 ? chalk.yellow : chalk.red;
-
+  // A null score is unmeasured, not a perfect 0.
   lines.push(...titleBox('DriftScore Summary'));
   lines.push('');
-  lines.push(chalk.bold('  DriftScore:   ') + scoreColor.bold(`${artifact.drift.score}/100`));
-  lines.push(chalk.bold('  Risk Level:   ') + riskBadge(artifact.drift.riskLevel));
+  lines.push(chalk.bold('  DriftScore:   ') + formatHeadlineScore(artifact.drift.score));
+  lines.push(chalk.bold('  Risk Level:   ') + formatHeadlineRisk(artifact.drift.riskLevel));
   lines.push(chalk.bold('  Projects:     ') + `${artifact.projects.length}`);
 
   if (artifact.vcs) {
@@ -146,13 +144,12 @@ export function formatText(artifact: ScanArtifact): string {
 
   lines.push('');
 
-  // Score breakdown
-  const m = new Set(artifact.drift.measured ?? ['runtime', 'framework', 'dependency', 'eol']);
+  // Score breakdown. Null components render as n/a; a measured 0 still renders as 0.
   lines.push('  ' + chalk.bold.underline('Score Breakdown'));
-  lines.push(`    Runtime:      ${m.has('runtime') ? scoreBar(artifact.drift.components.runtimeScore) : chalk.dim('n/a')}`);
-  lines.push(`    Frameworks:   ${m.has('framework') ? scoreBar(artifact.drift.components.frameworkScore) : chalk.dim('n/a')}`);
-  lines.push(`    Dependencies: ${m.has('dependency') ? scoreBar(artifact.drift.components.dependencyScore) : chalk.dim('n/a')}`);
-  lines.push(`    EOL Risk:     ${m.has('eol') ? scoreBar(artifact.drift.components.eolScore) : chalk.dim('n/a')}`);
+  lines.push(`    Runtime:      ${formatComponentScore(artifact.drift.components.runtimeScore)}`);
+  lines.push(`    Frameworks:   ${formatComponentScore(artifact.drift.components.frameworkScore)}`);
+  lines.push(`    Dependencies: ${formatComponentScore(artifact.drift.components.dependencyScore)}`);
+  lines.push(`    EOL Risk:     ${formatComponentScore(artifact.drift.components.eolScore)}`);
   lines.push('');
 
   const scannedParts: string[] = [`Scanned at ${artifact.timestamp}`];
@@ -180,6 +177,21 @@ function riskBadge(level: string): string {
     case 'high': return chalk.bgRed.white(' HIGH ');
     default: return level;
   }
+}
+
+function formatHeadlineScore(score: number | null): string {
+  if (score === null) return chalk.dim('n/a');
+  const scoreColor = score <= 30 ? chalk.green : score <= 60 ? chalk.yellow : chalk.red;
+  return scoreColor.bold(`${score}/100`);
+}
+
+function formatHeadlineRisk(level: string | null): string {
+  if (!level) return chalk.dim('n/a');
+  return riskBadge(level);
+}
+
+function formatComponentScore(score: number | null): string {
+  return score === null ? chalk.dim('n/a') : scoreBar(score);
 }
 
 function scoreBar(score: number): string {

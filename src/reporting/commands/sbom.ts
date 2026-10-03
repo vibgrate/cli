@@ -4,7 +4,7 @@ import chalk from 'chalk';
 import { pathExists, readJsonFile, writeTextFile } from '../utils/fs.js';
 import type { DependencyRow, ProjectScan, ScanArtifact } from '../types.js';
 import { fullDependencyGraph, type LockfileComponent, type LockfileGraph } from '../../engine/lockfile.js';
-import type { Ecosystem } from '../../engine/drift.js';
+import { ECOSYSTEMS, type Ecosystem } from '../../engine/drift.js';
 import { vexCommand } from './vex.js';
 
 type SbomFormat = 'cyclonedx' | 'spdx';
@@ -107,8 +107,31 @@ function isConcreteVersion(spec: string): boolean {
   return true;
 }
 
+/**
+ * purl types this exporter actually emits. `encodeURIComponent` will turn a
+ * space or a non-ASCII name into a string that still starts with `pkg:`, so
+ * "looks like a purl" is not the check — the type has to be one of these.
+ */
+const KNOWN_PURL_TYPES = new Set(['npm', 'pypi', 'cargo', 'golang', 'maven', 'gem', 'composer', 'nuget', 'swift', 'pub']);
+
+/**
+ * A path segment we are willing to call a purl name. `encodeURIComponent`
+ * leaves these characters alone, plus `%40`, which is the encoded `@` of an
+ * npm scope (`pkg:npm/%40scope/name`). Anything else — `%20` for a space,
+ * `%C3%A9` for non-ASCII, an empty segment — is a purl-shaped string, not a
+ * Package URL. `.` and `..` are forbidden segments in the purl spec.
+ */
+const PURL_SEGMENT = /^(?:[A-Za-z0-9._~!*'()-]|%40)+$/;
+
+const KNOWN_ECOSYSTEMS = new Set<string>(ECOSYSTEMS);
+
+/** CycloneDX property that says why `purl` was left off. Stable across runs. */
+const PURL_STATUS_PROPERTY = 'vibgrate:purlStatus';
+const PURL_WARNING_PROPERTY = 'vibgrate:purlWarning';
+const PURL_STATUS_UNAVAILABLE = 'unavailable';
+
 /** The purl type/namespace/name portion, without a version — shared by every ecosystem branch of `purlFor`. */
-function purlPath(ecosystem: Ecosystem, name: string): string {
+function purlPath(ecosystem: Ecosystem, name: string): string | null {
   switch (ecosystem) {
     case 'npm': {
       const scopeSlash = name.startsWith('@') ? name.indexOf('/') : -1;
@@ -138,7 +161,9 @@ function purlPath(ecosystem: Ecosystem, name: string): string {
     case 'dart':
       return `pkg:pub/${encodeURIComponent(name)}`;
     default:
-      return purlPath('npm', name);
+      // An ecosystem this function does not know is not npm. Falling through
+      // to `pkg:npm/...` would report a registry the scan did not detect.
+      return null;
   }
 }
 
@@ -148,8 +173,8 @@ function purlPath(ecosystem: Ecosystem, name: string): string {
  * not a single percent-encoded `%40scope%2Fname`). Used to key components and
  * dependency-graph refs so a vulnerability scanner can match on purl directly.
  */
-export function npmPurl(name: string, version: string): string {
-  return `${purlPath('npm', name)}@${encodeURIComponent(version)}`;
+export function npmPurl(name: string, version: string): string | null {
+  return purlFor('npm', name, version);
 }
 
 /** PyPI purl names are normalized per PEP 503: lowercased, runs of `-_.` collapsed to one `-`. */
@@ -163,10 +188,91 @@ function pypiPurlName(name: string): string {
  * mapping. A purl's `@version` is a claim about what's actually installed,
  * so `UNKNOWN_VERSION` omits it (a bare `pkg:npm/axios` is valid purl syntax)
  * rather than encode a range or protocol spec as if it were one.
+ *
+ * Returns null when the built string is not a Package URL: unknown type,
+ * empty name or path segment, a space or other character that only survives
+ * as percent-encoding, or a version that is not one concrete token. Callers
+ * keep the component and mark the purl unavailable — they do not drop the
+ * row, and they do not emit the rejected string.
  */
-export function purlFor(ecosystem: Ecosystem, name: string, version: string): string {
+export function purlFor(ecosystem: Ecosystem, name: string, version: string): string | null {
   const path = purlPath(ecosystem, name);
-  return version === UNKNOWN_VERSION ? path : `${path}@${encodeURIComponent(version)}`;
+  if (!path) return null;
+  const purl = version === UNKNOWN_VERSION ? path : `${path}@${encodeURIComponent(version)}`;
+  return isValidBuiltPurl(purl) ? purl : null;
+}
+
+function hasNonAscii(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 0x7f) return true;
+  }
+  return false;
+}
+
+function isPurlSegment(segment: string): boolean {
+  if (segment === '.' || segment === '..') return false;
+  return PURL_SEGMENT.test(segment);
+}
+
+/**
+ * True when `purl` is a Package URL we would hand to a scanner: known type,
+ * every path segment a non-empty name, version either absent or one concrete
+ * token (`isConcreteVersion` already rejects ranges, wildcards, and protocol
+ * specs). Percent-encoding other than an npm scope's `%40` fails — that is
+ * how `foo bar` was leaving as `pkg:npm/foo%20bar@1.0.0`.
+ */
+function isValidBuiltPurl(purl: string): boolean {
+  if (!purl.startsWith('pkg:')) return false;
+  const rest = purl.slice(4);
+  const at = rest.lastIndexOf('@');
+  const coords = at === -1 ? rest : rest.slice(0, at);
+  const version = at === -1 ? null : rest.slice(at + 1);
+  const slash = coords.indexOf('/');
+  if (slash <= 0) return false;
+  const type = coords.slice(0, slash);
+  if (!KNOWN_PURL_TYPES.has(type)) return false;
+  const pathPart = coords.slice(slash + 1);
+  if (!pathPart || pathPart.split('/').some((segment) => !isPurlSegment(segment))) return false;
+  if (version === null) return true;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(version);
+  } catch {
+    return false;
+  }
+  if (!decoded || /\s/u.test(decoded)) return false;
+  return isConcreteVersion(decoded);
+}
+
+/**
+ * Why `purlFor` returned null. Names the package and ecosystem and says what
+ * to do. No filesystem path — a scan root is not part of the package identity.
+ */
+export function describeUnavailablePurl(ecosystem: string, name: string, version: string): string {
+  let because: string;
+  if (!KNOWN_ECOSYSTEMS.has(ecosystem)) {
+    because = 'this ecosystem has no Package URL type, so none is guessed';
+  } else if (name.length === 0 || name.split('/').some((part) => part.length === 0)) {
+    because = 'the name has an empty path segment';
+  } else if (/\s/u.test(name) || hasNonAscii(name)) {
+    because = 'the name contains whitespace or a non-ASCII character';
+  } else if (version !== UNKNOWN_VERSION && !isConcreteVersion(version)) {
+    because = 'the version is not one concrete installed version';
+  } else {
+    because = 'the coordinates cannot be encoded as a Package URL';
+  }
+  return `Package URL unavailable for ${ecosystem} package "${name}": ${because}. The component is included without a purl. Use the package's registry name, with no spaces or empty path segments.`;
+}
+
+export function resolvePurl(ecosystem: Ecosystem, name: string, version: string): { purl: string | null; warning: string | null } {
+  const purl = purlFor(ecosystem, name, version);
+  if (purl) return { purl, warning: null };
+  return { purl: null, warning: describeUnavailablePurl(ecosystem, name, version) };
+}
+
+/** Stable CycloneDX bom-ref. A valid purl when we have one; never a rejected purl string. */
+function componentBomRef(ecosystem: Ecosystem, name: string, version: string): string {
+  return purlFor(ecosystem, name, version) ?? `vibgrate:${ecosystem}:${name}@${version}`;
 }
 
 function splitDependencyKey(key: string): { name: string; version: string } {
@@ -211,12 +317,15 @@ function cycloneDxDependencyGraph(
   if (!graph?.edges) return undefined;
   const purlOfKey = (key: string): string => {
     const { name, version } = splitDependencyKey(key);
-    return npmPurl(name, version);
+    // Lockfile edges are keyed `name@version` and carry no ecosystem. For npm
+    // this ref matches the component bom-ref, including the non-purl ref used
+    // when the name cannot be a Package URL.
+    return componentBomRef('npm', name, version);
   };
   const nodes = [{ ref: ROOT_BOM_REF, dependsOn: uniqSorted(graph.rootDependsOn).map(purlOfKey) }];
   for (const dep of dependencies) {
     const key = `${dep.package}@${dep.version}`;
-    nodes.push({ ref: npmPurl(dep.package, dep.version), dependsOn: uniqSorted(graph.edges.get(key) ?? []).map(purlOfKey) });
+    nodes.push({ ref: componentBomRef('npm', dep.package, dep.version), dependsOn: uniqSorted(graph.edges.get(key) ?? []).map(purlOfKey) });
   }
   return nodes;
 }
@@ -369,20 +478,30 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
         name: artifact.rootPath,
       },
     },
-    components: dependencies.map((dep) => ({
-      type: 'library',
-      'bom-ref': purlFor(dep.ecosystem, dep.package, dep.version),
-      name: dep.package,
-      version: dep.version,
-      purl: purlFor(dep.ecosystem, dep.package, dep.version),
-      properties: [
+    components: dependencies.map((dep) => {
+      const { purl, warning } = resolvePurl(dep.ecosystem, dep.package, dep.version);
+      const properties: Array<{ name: string; value: string }> = [
         { name: 'vibgrate:project', value: dep.project },
         { name: 'vibgrate:currentSpec', value: dep.currentSpec },
         { name: 'vibgrate:drift', value: dep.drift },
         { name: 'vibgrate:majorsBehind', value: String(dep.majorsBehind ?? 'unknown') },
         { name: 'vibgrate:scope', value: dep.scope },
-      ],
-    })),
+      ];
+      if (warning) {
+        properties.push(
+          { name: PURL_STATUS_PROPERTY, value: PURL_STATUS_UNAVAILABLE },
+          { name: PURL_WARNING_PROPERTY, value: warning },
+        );
+      }
+      return {
+        type: 'library',
+        'bom-ref': purl ?? componentBomRef(dep.ecosystem, dep.package, dep.version),
+        name: dep.package,
+        version: dep.version,
+        ...(purl ? { purl } : {}),
+        properties,
+      };
+    }),
     ...(dependencyGraph ? { dependencies: dependencyGraph } : {}),
   };
 }
@@ -400,30 +519,55 @@ export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<st
       created: artifact.timestamp,
       creators: [`Tool: @vibgrate/cli-${artifact.vibgrateVersion}`],
     },
-    packages: dependencies.map((dep, i) => ({
-      name: dep.package,
-      SPDXID: `SPDXRef-Package-${i + 1}`,
-      versionInfo: dep.version,
-      downloadLocation: 'NOASSERTION',
-      filesAnalyzed: false,
-      externalRefs: [
-        {
-          referenceCategory: 'PACKAGE-MANAGER',
-          referenceType: 'purl',
-          referenceLocator: purlFor(dep.ecosystem, dep.package, dep.version),
-        },
-      ],
-      annotations: [
+    packages: dependencies.map((dep, i) => {
+      const { purl, warning } = resolvePurl(dep.ecosystem, dep.package, dep.version);
+      const status = warning ? `; purlStatus=${PURL_STATUS_UNAVAILABLE}` : '';
+      const annotations = [
         {
           annotationType: 'OTHER',
           annotator: 'Tool: @vibgrate/cli',
           annotationDate: artifact.timestamp,
-          comment: `project=${dep.project}; drift=${dep.drift}; majorsBehind=${dep.majorsBehind ?? 'unknown'}; scope=${dep.scope}`,
+          comment: `project=${dep.project}; drift=${dep.drift}; majorsBehind=${dep.majorsBehind ?? 'unknown'}; scope=${dep.scope}${status}`,
         },
-      ],
-    })),
+      ];
+      if (warning) {
+        annotations.push({
+          annotationType: 'OTHER',
+          annotator: 'Tool: @vibgrate/cli',
+          annotationDate: artifact.timestamp,
+          comment: warning,
+        });
+      }
+      return {
+        name: dep.package,
+        SPDXID: `SPDXRef-Package-${i + 1}`,
+        versionInfo: dep.version,
+        downloadLocation: 'NOASSERTION',
+        filesAnalyzed: false,
+        ...(purl
+          ? {
+              externalRefs: [
+                {
+                  referenceCategory: 'PACKAGE-MANAGER',
+                  referenceType: 'purl',
+                  referenceLocator: purl,
+                },
+              ],
+            }
+          : {}),
+        annotations,
+      };
+    }),
     ...(relationships ? { relationships } : {}),
   };
+}
+
+/** Warnings for components whose purl was omitted. Same order as the SBOM rows; stable for a given artifact. */
+export function collectPurlWarnings(artifact: ScanArtifact, graph?: LockfileGraph): string[] {
+  return flattenDependencies(artifact, graph?.components ?? [], graph?.ecosystem).flatMap((dep) => {
+    const warning = resolvePurl(dep.ecosystem, dep.package, dep.version).warning;
+    return warning ? [warning] : [];
+  });
 }
 
 function projectDependencyMap(artifact: ScanArtifact): Map<string, DependencyRow> {
@@ -468,7 +612,11 @@ export function formatDeltaText(base: ScanArtifact, current: ScanArtifact): stri
     '===================',
     `Baseline: ${base.timestamp}`,
     `Current:  ${current.timestamp}`,
-    `DriftScore delta: ${(current.drift.score - base.drift.score).toFixed(2)} points`,
+    `DriftScore delta: ${
+      typeof current.drift.score === 'number' && typeof base.drift.score === 'number'
+        ? `${(current.drift.score - base.drift.score).toFixed(2)} points`
+        : 'n/a'
+    }`,
     '',
     `Added dependencies (${added.length})`,
     ...added.map((d) => `  + ${d}`),
@@ -517,6 +665,9 @@ const exportCommand = new Command('export')
     const lockfileGraph = opts.transitive ? collectLockfileGraph(artifact, path.resolve(opts.root)) : undefined;
 
     const sbom = format === 'cyclonedx' ? toCycloneDx(artifact, lockfileGraph) : toSpdx(artifact, lockfileGraph);
+    for (const warning of collectPurlWarnings(artifact, lockfileGraph)) {
+      console.error(chalk.yellow(`warning: ${warning}`));
+    }
     const body = JSON.stringify(sbom, null, 2);
 
     if (opts.out) {

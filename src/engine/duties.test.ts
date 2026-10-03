@@ -188,6 +188,45 @@ class UserService:
     expect(d[1]).toMatchObject({ k: 'persist', o: 'User', via: 'db.add' });
   });
 
+  it('Prisma model writes through an imported, untyped client persist the PascalCased model', async () => {
+    const ts = `
+import { prisma } from './db';
+export async function publish(id: string) {
+  const post = await prisma.post.findUnique({ where: { id } });
+  const updated = await prisma.post.update({ where: { id }, data: { published: true } });
+  await prisma.post.create({ data: { title: 'x' } });
+  await prisma.post.upsert({ where: { id }, create: {}, update: {} });
+  await prisma.post.delete({ where: { id } });
+  await prisma.post.createMany({ data: [] });
+  await prisma.post.updateMany({ where: {}, data: {} });
+  await prisma.post.deleteMany({ where: {} });
+  return updated ?? post;
+}`;
+    const d = await dutiesOf('ts', 'src/posts.ts', ts, 'publish');
+    expect(d.map((x) => [x.k, x.o, x.via])).toEqual([
+      ['query', 'Post', 'findUnique'],
+      ['persist', 'Post', 'post.update'],
+      ['persist', 'Post', 'post.create'],
+      ['persist', 'Post', 'post.upsert'],
+      ['persist', 'Post', 'post.delete'],
+      ['persist', 'Post', 'post.createMany'],
+      ['persist', 'Post', 'post.updateMany'],
+      ['persist', 'Post', 'post.deleteMany'],
+    ]);
+  });
+
+  it('Prisma model writes through a NestJS PrismaService and a multi-word model', async () => {
+    const ts = `
+export class PostsService {
+  constructor(private readonly prisma: PrismaService) {}
+  async archive(id: string) {
+    await this.prisma.blogPost.update({ where: { id }, data: { archived: true } });
+  }
+}`;
+    const d = await dutiesOf('ts', 'src/posts.service.ts', ts, 'archive');
+    expect(d).toEqual([expect.objectContaining({ k: 'persist', o: 'BlogPost', via: 'blogPost.update' })]);
+  });
+
   it('Prisma $transaction and a Java Spring repository save', async () => {
     const ts = `
 export async function moveStock(prisma: PrismaClient, from: string, to: string) {

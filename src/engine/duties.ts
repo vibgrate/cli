@@ -167,6 +167,9 @@ const WRITE = /^(?:save\w*|insert\w*|create\w*|update\w*|upsert\w*|delete\w*|rem
 /** ActiveRecord class-level finders and writers on a bare model constant. */
 const RAILS_READ = /^(?:find|find_by|where|all|first|last|exists|count|pluck|order|includes|select|take|find_each|find_in_batches|joins|distinct|limit|sum|average|maximum|minimum|ids|find_or_initialize_by|find_sole_by|sole)$/;
 const RAILS_WRITE = /^(?:create|update|destroy|destroy_all|delete|delete_all|update_all|insert|insert_all|upsert|upsert_all|find_or_create_by|create_or_find_by|touch_all|increment_counter|decrement_counter|update_counters)$/;
+/** Prisma model-delegate methods (`prisma.post.update`). */
+const PRISMA_WRITE = /^(?:create|createMany|createManyAndReturn|update|updateMany|updateManyAndReturn|upsert|delete|deleteMany)$/;
+const PRISMA_READ = /^(?:findUnique|findUniqueOrThrow|findFirst|findFirstOrThrow|findMany|count|aggregate|groupBy)$/;
 /** Unit-of-work verbs: a write with no object of its own. */
 const UOW = /^(?:savechanges(?:async)?|commit|flush|\$transaction|transaction|begin_transaction|begintransaction|save_changes)$/i;
 /** `execute` / `query` / `raw`: a read unless the statement text says otherwise. */
@@ -532,6 +535,16 @@ function classifySite(site: Site, def: Node, langId: string, bindings: Bindings,
   // Unit-of-work verbs: a write, no object of its own.
   if (UOW.test(lower) && (cls === 'store' || cls === 'unknown')) {
     return mk('persist', undefined, viaOf());
+  }
+  // Prisma model delegates: `prisma.post.update(…)`. The client is usually
+  // imported (`import { prisma } from './db'`, so untyped here) or injected as
+  // a `PrismaService` (a "service" by suffix); either way `client.model.verb`
+  // with a Prisma verb is the store, and the model segment is the object.
+  const prismaModel = /^(?:this\.|self\.)?(\w+)\.([a-z]\w*)$/.exec(receiver);
+  if (prismaModel && (/^(?:_?prisma|tx|trx)$/i.test(prismaModel[1]!) || /prisma/i.test(declaredShort ?? ''))) {
+    const model = prismaModel[2]![0]!.toUpperCase() + prismaModel[2]!.slice(1);
+    if (PRISMA_WRITE.test(verb)) return mk('persist', model, viaOf());
+    if (PRISMA_READ.test(verb)) return mk('query', model, callee);
   }
   // Strong, receiver-independent verbs.
   if (/^(?:saveandflush|saveall|insertmany|insertone|createmany|updatemany|deletemany|bulk_create|bulk_update|get_or_create|update_or_create|executeupdate|find_or_create_by)$/i.test(lower) || /^(?:save|update|create|destroy)!$/.test(callee)) {

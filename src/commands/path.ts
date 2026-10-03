@@ -6,7 +6,10 @@ import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
 import { ambiguityError } from './ambiguity.js';
 import { CliError, ExitCode } from '../util/exit.js';
-import { c, info, json } from '../util/output.js';
+import { c, info, json, out } from '../util/output.js';
+import { buildPathDoc, ExplainEmpty } from '../review/explain-doc.js';
+import { renderReviewDocMarkdown } from '../review/doc.js';
+import { keepInScratchpad } from '../review/scratchpad.js';
 
 /**
  * `vg path <A> <B>` (VG-CLI-SPEC §4.1) — how A connects to B (shortest path).
@@ -20,9 +23,15 @@ export function registerPath(program: Command): void {
     .option('--pick-a <n>', 'pick the nth candidate for A when ambiguous')
     .option('--pick-b <n>', 'pick the nth candidate for B when ambiguous')
     .option('--calls', 'follow call edges only, and show the call-site line of each hop')
-    .action(function (this: Command, a: string, b: string, opts: { pickA?: string; pickB?: string; calls?: boolean }) {
+    .option('--diagram', 'draw the path as a pinned call path: each step linked to its code and each hop to the line that makes it')
+    .option('--format <fmt>', 'with --diagram: output format (md | json)', 'md')
+    .option('--keep', 'with --diagram: also keep it on top of the explain scratchpad (`vg show scratchpad`)')
+    .action(function (this: Command, a: string, b: string, opts: { pickA?: string; pickB?: string; calls?: boolean; diagram?: boolean; format: string; keep?: boolean }) {
       const global = readGlobal(this);
-      const { graph } = requireGraph(global);
+      const { root, graph } = requireGraph(global);
+      if (opts.diagram && opts.format !== 'md' && opts.format !== 'json') {
+        throw new CliError('unknown --format (expected md | json)', ExitCode.USAGE_ERROR);
+      }
 
       const ra = resolveOne(graph, a, opts.pickA ? Number(opts.pickA) : undefined);
       if (!ra.node) throw ambiguityError(`"${a}" ${ra.candidates.length ? 'is ambiguous' : 'not found'}`, ra.candidates, '--pick-a');
@@ -59,6 +68,18 @@ export function registerPath(program: Command): void {
           `no path between ${ra.node.qualifiedName} and ${rb.node.qualifiedName}`,
           ExitCode.NOT_FOUND,
         );
+      }
+
+      if (opts.diagram) {
+        try {
+          const { doc } = buildPathDoc({ root, graph, path: result, callsOnly: Boolean(opts.calls) });
+          if (opts.keep) keepInScratchpad(root, doc);
+          out(Boolean(global.json) || opts.format === 'json' ? JSON.stringify(doc, null, 2) : renderReviewDocMarkdown(doc).replace(/\n$/, ''));
+        } catch (err) {
+          if (err instanceof ExplainEmpty) throw new CliError(err.message, ExitCode.NOT_FOUND);
+          throw err;
+        }
+        return;
       }
 
       const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));

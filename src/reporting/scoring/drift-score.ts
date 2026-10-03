@@ -138,21 +138,27 @@ export function computeDriftScore(projects: ProjectScan[]): DriftScore {
 
   // DriftScore v2 convention: 0 = no drift (best), 100 = maximum drift (worst).
   // Components are computed on a "health" scale and inverted to drift here.
+  // A null health value stays null: `?? 100` would invert to drift 0 and look
+  // like "no drift". A measured health of 0 (runtime lag of 4 or more) still
+  // inverts to drift 100.
   const toDrift = (health: number) => 100 - health;
+  const healthToDrift = (health: number | null): number | null =>
+    health === null ? null : toDrift(Math.round(health));
   const buildComponents = (): DriftScore['components'] => ({
-    runtimeScore: toDrift(Math.round(rs ?? 100)),
-    frameworkScore: toDrift(Math.round(fs ?? 100)),
-    dependencyScore: toDrift(Math.round(ds ?? 100)),
-    eolScore: toDrift(Math.round(es ?? 100)),
+    runtimeScore: healthToDrift(rs),
+    frameworkScore: healthToDrift(fs),
+    dependencyScore: healthToDrift(ds),
+    eolScore: healthToDrift(es),
   });
 
   const active = components.filter((c) => c.score !== null);
   if (active.length === 0) {
-    // No data at all — neutral score (no measurable drift)
+    // Nothing was measured. Absent is not a perfect score.
     return {
-      score: 0,
-      riskLevel: 'low',
+      score: null,
+      riskLevel: null,
       components: buildComponents(),
+      measured: [],
       methodologyVersion: DRIFT_SCORE_METHODOLOGY_VERSION,
     };
   }

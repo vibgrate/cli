@@ -114,3 +114,38 @@ describe('sql export', () => {
     expect(a).toBe(b);
   });
 });
+
+describe('cyclonedx export purl', () => {
+  it('keeps an npm component whose name cannot be a Package URL and omits the purl', () => {
+    const base = ctx(makeGraph(false));
+    const exported = exportGraph('cyclonedx', {
+      ...base,
+      deps: [
+        { name: 'chalk', ecosystem: 'npm', declared: '^5.0.0', installed: '5.3.0' },
+        { name: 'foo bar', ecosystem: 'npm', declared: '1.0.0', installed: '1.0.0' },
+        { name: 'requests', ecosystem: 'pypi', declared: '2.31.0', installed: '2.31.0' },
+      ],
+    });
+    expect(exported).toBe(
+      exportGraph('cyclonedx', {
+        ...base,
+        deps: [
+          { name: 'chalk', ecosystem: 'npm', declared: '^5.0.0', installed: '5.3.0' },
+          { name: 'foo bar', ecosystem: 'npm', declared: '1.0.0', installed: '1.0.0' },
+          { name: 'requests', ecosystem: 'pypi', declared: '2.31.0', installed: '2.31.0' },
+        ],
+      }),
+    );
+    const bom = JSON.parse(exported) as {
+      components: Array<{ name: string; purl?: string; properties?: Array<{ name: string; value: string }> }>;
+    };
+    expect(bom.components.find((c) => c.name === 'chalk')?.purl).toBe('pkg:npm/chalk@5.3.0');
+    const bad = bom.components.find((c) => c.name === 'foo bar')!;
+    expect(bad.purl).toBeUndefined();
+    expect(bad.properties?.find((p) => p.name === 'vibgrate:purlStatus')?.value).toBe('unavailable');
+    expect(exported).not.toContain('foo%20bar');
+    expect(exported).not.toContain('pkg:npm/foo');
+    // Non-npm rows still carry no guessed npm purl.
+    expect(bom.components.find((c) => c.name === 'requests')?.purl).toBeUndefined();
+  });
+});

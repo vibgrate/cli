@@ -169,6 +169,43 @@ describe('formatMarkdown', () => {
     expect(md).toContain('| Frameworks | 80 |');
   });
 
+  it('renders an absent DriftScore as n/a, not 0', () => {
+    const md = formatMarkdown(makeArtifact({
+      drift: {
+        score: null,
+        riskLevel: null,
+        components: {
+          runtimeScore: null,
+          frameworkScore: null,
+          dependencyScore: null,
+          eolScore: null,
+        },
+      },
+    }));
+    expect(md).toContain('n/a');
+    expect(md).not.toContain('0/100');
+    expect(md).not.toContain('| Runtime | 0 |');
+    expect(md).toContain('| Runtime | n/a |');
+  });
+
+  it('renders a measured zero DriftScore as 0', () => {
+    const md = formatMarkdown(makeArtifact({
+      drift: {
+        score: 0,
+        riskLevel: 'low',
+        components: {
+          runtimeScore: 0,
+          frameworkScore: 0,
+          dependencyScore: 0,
+          eolScore: 0,
+        },
+      },
+    }));
+    expect(md).toContain('0/100');
+    expect(md).toContain('| Runtime | 0 |');
+    expect(md).toContain('LOW');
+  });
+
   it('includes per-project details', () => {
     const md = formatMarkdown(makeArtifact());
     expect(md).toContain('### my-app (node)');
@@ -329,6 +366,43 @@ describe('formatText', () => {
   it('includes drift score', () => {
     const text = formatText(makeArtifact());
     expect(text).toContain('65/100');
+  });
+
+  it('renders an absent DriftScore as n/a, not 0/100', () => {
+    const text = formatText(makeArtifact({
+      projects: [],
+      findings: [],
+      drift: {
+        score: null,
+        riskLevel: null,
+        components: {
+          runtimeScore: null,
+          frameworkScore: null,
+          dependencyScore: null,
+          eolScore: null,
+        },
+      },
+    }));
+    expect(text).toContain('n/a');
+    expect(text).not.toContain('0/100');
+    expect(text).not.toContain('LOW');
+  });
+
+  it('renders a measured zero DriftScore as 0/100', () => {
+    const text = formatText(makeArtifact({
+      drift: {
+        score: 0,
+        riskLevel: 'low',
+        components: {
+          runtimeScore: 0,
+          frameworkScore: 0,
+          dependencyScore: 0,
+          eolScore: 0,
+        },
+      },
+    }));
+    expect(text).toContain('0/100');
+    expect(text).toContain('LOW');
   });
 
   it('includes project count', () => {

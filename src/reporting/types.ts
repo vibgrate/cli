@@ -172,15 +172,17 @@ export interface DriftScore {
   /**
    * Aggregate drift score, 0–100. Lower is better: 0 = no drift, 100 = maximum drift.
    * Risk bands: 0–30 = low, 31–60 = moderate, 61–100 = high.
+   * `null` means the score was not measured. A missing score is never stored as 0.
    */
-  score: number;
-  riskLevel: RiskLevel;
-  /** Per-component drift scores (0 = no drift, 100 = maximum drift). */
+  score: number | null;
+  /** `null` when `score` was not measured. */
+  riskLevel: RiskLevel | null;
+  /** Per-component drift scores (0 = no drift, 100 = maximum drift). `null` means that component had no input. */
   components: {
-    runtimeScore: number;
-    frameworkScore: number;
-    dependencyScore: number;
-    eolScore: number;
+    runtimeScore: number | null;
+    frameworkScore: number | null;
+    dependencyScore: number | null;
+    eolScore: number | null;
   };
   /** Which components had sufficient data to score. Missing = no data available. */
   measured?: ('runtime' | 'framework' | 'dependency' | 'eol')[];

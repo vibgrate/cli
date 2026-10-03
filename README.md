@@ -684,7 +684,9 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | `vg map` / `vg hubs` / `vg areas` / `vg oddities` | Map insights: overview, most-depended-on code, natural groupings, cross-area smells |
 | `vg models` | Code Modes (Spark / Flow / Forge) + local fleet (Ollama / LM Studio / gguf); `install` / `pull` by default (`--dry-run` to preview) |
 | `vg module` | Manage optional local modules (`relevance`, `hcs`): `status`, `install`, `remove` |
-| `vg path <from> <to>` | How A connects to B (shortest path) |
+| `vg path <from> <to>` | How A connects to B (shortest path); `--diagram` draws it as a pinned call path |
+| `vg show flow <entry>` | What a function does, step by step, as a pinned flow diagram |
+| `vg show scratchpad` | The explain scratchpad: explanations kept with `--keep` or by an agent, newest on top |
 | `vg savings` | Local report of tokens/$ saved — the grep baseline for map queries, and context compression by window, model and client (estimates) |
 | `vg watch` | Rebuild the map when files change |
 | `vg serve` | Start **Vibgrate AI Context** (local-first MCP: code map + drift + version-correct docs) |

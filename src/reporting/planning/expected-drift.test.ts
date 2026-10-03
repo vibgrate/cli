@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { estimateDriftScore } from './expected-drift.js';
+
+function measured(score: number | null): number {
+  if (score === null) throw new Error('expected a measured DriftScore');
+  return score;
+}
 import type { ScanArtifact } from '../../core-open/index.js';
 
 /** Build a minimal artifact with one node project's dependency age buckets. */
@@ -44,8 +49,8 @@ describe('estimateDriftScore', () => {
     const before = estimateDriftScore(a, new Set());
     const afterOne = estimateDriftScore(a, new Set(['b'])); // moves 1 out of oneBehind
     const afterAll = estimateDriftScore(a, new Set(['a', 'b']));
-    expect(afterOne).toBeLessThanOrEqual(before);
-    expect(afterAll).toBeLessThanOrEqual(afterOne);
+    expect(afterOne).toBeLessThanOrEqual(measured(before));
+    expect(afterAll).toBeLessThanOrEqual(measured(afterOne));
   });
 
   it('does not mutate the input artifact', () => {

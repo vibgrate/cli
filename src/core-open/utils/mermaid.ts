@@ -11,8 +11,8 @@ function escapeLabel(input: string): string {
   return input.replace(/"/g, '\\"');
 }
 
-function scoreClass(score: number | undefined): 'scoreHigh' | 'scoreModerate' | 'scoreLow' | 'scoreUnknown' {
-  if (score === undefined || Number.isNaN(score)) return 'scoreUnknown';
+function scoreClass(score: number | null | undefined): 'scoreHigh' | 'scoreModerate' | 'scoreLow' | 'scoreUnknown' {
+  if (typeof score !== 'number' || Number.isNaN(score)) return 'scoreUnknown';
   // Match dashboard thresholds: >= 80 green, >= 50 amber, < 50 red
   if (score >= 80) return 'scoreHigh';
   if (score >= 50) return 'scoreModerate';

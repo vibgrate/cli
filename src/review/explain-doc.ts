@@ -17,6 +17,7 @@ import { overviewOf } from '../engine/chart/server.js';
 import { readHaileSidecar } from '../engine/haile/sidecar.js';
 import type { HaileProvider } from '../engine/haile/haile-provider.js';
 import { indexFor } from '../engine/relations.js';
+import { describeHops, type PathResult } from '../engine/paths.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 import { readDataModels } from './data-models.js';
 import { deriveDiagrams, mapPrefix, rolesOf } from './derive.js';
@@ -31,10 +32,15 @@ import {
   withIds,
   type DocBlock,
   type DocSection,
+  type Pin,
   type PinResolver,
   type ReviewDoc,
+  type StackFrame,
 } from './doc.js';
 import { defaultRun, gitTopLevel, isGitRepo, normalizeRemote, repoKey, type ChangeSet, type GitRunner } from './git.js';
+
+/** Thrown when a narrowed explain view has nothing to show; the message says why. */
+export class ExplainEmpty extends Error {}
 
 /** Callers and callees listed under implementation, each. */
 export const MAX_LISTED = 12;
@@ -47,6 +53,8 @@ export interface ExplainOptions {
   graphPath?: string;
   provider: HaileProvider | null;
   run?: GitRunner;
+  /** Keep only these diagram types in "How it works" (`vg show flow` keeps flows). */
+  only?: DocBlock['type'][];
 }
 
 export interface BuiltExplainDoc {
@@ -142,7 +150,13 @@ export function buildExplainDoc(o: ExplainOptions): BuiltExplainDoc {
   const impl = [list('Called by', callers), list('Calls', callees)].filter((b): b is DocBlock => b !== null);
 
   const sections: DocSection[] = [{ kind: 'what_why', title: 'What it is', blocks: withIds([{ type: 'markdown', text: what.join('\n') }]) }];
-  if (design.blocks.length > 0) sections.push({ kind: 'design', title: 'How it works', blocks: withIds(design.blocks) });
+  // Narrowed to some types, the first kept diagram leads when the primary was dropped.
+  const kept = o.only ? design.blocks.filter((b) => o.only!.includes(b.type)) : design.blocks;
+  const diagrams = kept.some((b) => (b as { primary?: boolean }).primary === true) ? kept : kept.map((b, i) => (i === 0 ? ({ ...b, primary: true } as DocBlock) : b));
+  if (o.only && diagrams.length === 0) {
+    throw new ExplainEmpty(`no ${o.only.join(' or ')} diagram for ${node.qualifiedName}: the code map records no steps for it — \`vg show ${node.qualifiedName} --diagram\` shows what there is`);
+  }
+  if (diagrams.length > 0) sections.push({ kind: 'design', title: 'How it works', blocks: withIds(diagrams) });
   if (impl.length > 0) sections.push({ kind: 'implementation', title: 'Callers and callees', blocks: withIds(impl) });
 
   const notes = ['explains the code as it is in the working tree; nothing here is a change', ...design.notes];
@@ -165,5 +179,106 @@ export function buildExplainDoc(o: ExplainOptions): BuiltExplainDoc {
   if (issues.length > 0) {
     throw new Error(`internal: generated explain document failed validation — ${issues[0].path}: ${issues[0].message}`);
   }
+  return { doc, resolve };
+}
+
+export interface PathDocOptions {
+  root: string;
+  graph: VgGraph;
+  path: PathResult;
+  /** Whether the path follows call edges only (`vg path --calls`). */
+  callsOnly: boolean;
+  run?: GitRunner;
+}
+
+/**
+ * The explain view of a path: how one piece of code reaches another, drawn as
+ * one call path, caller first, each frame pinned to its declaration and each
+ * hop to the line that makes it. Graph facts only: the path is the one
+ * `vg path` finds, and nothing is judged.
+ */
+export function buildPathDoc(o: PathDocOptions): BuiltExplainDoc {
+  const { root, graph } = o;
+  const run = o.run ?? defaultRun;
+  const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  // A reverse path was found from B back to A; draw it in the order it runs.
+  const ids = o.path.direction === 'forward' ? o.path.ids : [...o.path.ids].reverse();
+  const nodes = ids.map((id) => byId.get(id)).filter((n): n is GraphNode => n !== undefined);
+  if (nodes.length !== ids.length || nodes.length < 2) throw new Error('internal: the path names a node that is not in the code map');
+  const first = nodes[0]!;
+  const last = nodes[nodes.length - 1]!;
+  const change = explainChange(root, first, run);
+  const resolve = makePinResolver(change, { inPlace: true }, run);
+  const prefix = mapPrefix(change, root);
+  const repoPath = (file: string) => (prefix ? `${prefix}/${file.replace(/\\/g, '/')}` : file.replace(/\\/g, '/'));
+  /** A pin for lines of a file, or null when it does not land in the working tree. */
+  const pinOf = (file: string | undefined, start: number, end: number): Pin | null => {
+    if (!file) return null;
+    const p = repoPath(file);
+    const lines = resolve('head', p);
+    const e = Math.max(start, end);
+    return lines !== null && start >= 1 && e <= lines ? { side: 'head', path: p, start, end: e } : null;
+  };
+  const hops = describeHops(graph, ids, 'forward');
+
+  const frames: StackFrame[] = [];
+  const unpinned: string[] = [];
+  nodes.forEach((n, i) => {
+    const pin = pinOf(n.file, n.span.start, n.span.end);
+    if (!pin) {
+      unpinned.push(n.qualifiedName);
+      return;
+    }
+    const hop = i > 0 ? hops[i - 1] : undefined;
+    const frame: StackFrame = { key: n.id, label: n.qualifiedName, pin };
+    if (frames.length > 0) frame.parent_key = frames[frames.length - 1]!.key;
+    if (hop?.kind === 'call') frame.via = { kind: hop.awaited ? 'async' : 'call' };
+    const site = hop?.line ? pinOf(hop.file, hop.line, hop.line) : null;
+    if (site) frame.call_site = site;
+    frames.push(frame);
+  });
+  if (frames.length === 0) throw new ExplainEmpty('no step of this path has code in the working tree to pin, so there is nothing to draw');
+
+  const name = (n: GraphNode) => {
+    const pin = pinOf(n.file, n.span.start, n.span.end);
+    const label = n.qualifiedName.replace(/[[\]`]/g, '');
+    return pin ? `[${label}](${pinLink(pin)})` : `\`${n.qualifiedName.replace(/`/g, "'")}\``;
+  };
+  const steps = hops.map((h, i) => {
+    const site = h.line ? pinOf(h.file, h.line, h.line) : null;
+    const how = [h.kind === 'call' ? (h.awaited ? 'awaited call' : 'call') : h.kind, site ? `at [line ${h.line}](${pinLink(site)})` : null]
+      .filter(Boolean)
+      .join(' ');
+    return `${i + 1}. ${name(nodes[i]!)} → ${name(nodes[i + 1]!)} · ${how}`;
+  });
+  const what = [
+    `How ${name(first)} reaches ${name(last)}: ${plural(hops.length, 'hop')}, ${o.callsOnly ? 'following calls only' : 'over any relation in the code map (add --calls to follow calls only)'}.`,
+    '',
+    ...steps,
+  ];
+
+  const sections: DocSection[] = [
+    { kind: 'what_why', title: 'What it is', blocks: withIds([{ type: 'markdown', text: what.join('\n') }]) },
+    {
+      kind: 'design',
+      title: 'How it works',
+      blocks: withIds([
+        { type: 'call_stack_diff', title: `How ${first.qualifiedName} reaches ${last.qualifiedName}`.slice(0, 300), primary: true, base_status: 'not_computed', base: [], head: frames },
+      ]),
+    },
+  ];
+  const notes = ['explains the code as it is in the working tree; nothing here is a change', `the path ${o.callsOnly ? 'follows call edges only' : 'is the shortest over any edge'}, as \`vg path\` finds it`];
+  if (unpinned.length > 0) notes.push(`left out of the call path, with no code in the working tree to pin: ${unpinned.join(', ')}`);
+  const doc = sealReviewDoc({
+    schema_version: DOC_SCHEMA,
+    kind: 'explain',
+    title: `Path: ${first.qualifiedName} → ${last.qualifiedName}`.slice(0, 300),
+    target: { repo_key: repoKey(change.remote, change.topLevel), base_sha: change.baseSha, head_sha: change.headSha, merge_base: null, dirty_tree_hash: null },
+    sections,
+    groups_digest: null,
+    generator: { by: 'vg', notes },
+  });
+  const issues = validateReviewDoc(doc, resolve);
+  if (issues.length > 0) throw new Error(`internal: generated path document failed validation — ${issues[0].path}: ${issues[0].message}`);
   return { doc, resolve };
 }

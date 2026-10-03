@@ -16,6 +16,11 @@ function formatBillable(value: number): string {
   return String(Number(value.toFixed(2)));
 }
 
+/** A measured zero stays `0`. An unmeasured component is `n/a`, never `0`. */
+function markdownDriftCell(score: number | null): string {
+  return score === null ? 'n/a' : String(score);
+}
+
 /** Generate a Markdown report from scan artifact */
 export function formatMarkdown(artifact: ScanArtifact): string {
   const lines: string[] = [];
@@ -28,8 +33,8 @@ export function formatMarkdown(artifact: ScanArtifact): string {
   lines.push('');
   lines.push(`| Metric | Value |`);
   lines.push(`|--------|-------|`);
-  lines.push(`| **DriftScore** | ${artifact.drift.score}/100 |`);
-  lines.push(`| **Risk Level** | ${artifact.drift.riskLevel.toUpperCase()} |`);
+  lines.push(`| **DriftScore** | ${artifact.drift.score === null ? 'n/a' : `${artifact.drift.score}/100`} |`);
+  lines.push(`| **Risk Level** | ${artifact.drift.riskLevel ? artifact.drift.riskLevel.toUpperCase() : 'n/a'} |`);
   lines.push(`| **Projects** | ${artifact.projects.length} |`);
   if (billing) {
     // Per-size billable contribution (count ÷ ratio) to 1–2 dp, so tiny projects
@@ -64,10 +69,10 @@ export function formatMarkdown(artifact: ScanArtifact): string {
   lines.push('');
   lines.push(`| Component | Score |`);
   lines.push(`|-----------|-------|`);
-  lines.push(`| Runtime | ${artifact.drift.components.runtimeScore} |`);
-  lines.push(`| Frameworks | ${artifact.drift.components.frameworkScore} |`);
-  lines.push(`| Dependencies | ${artifact.drift.components.dependencyScore} |`);
-  lines.push(`| EOL Risk | ${artifact.drift.components.eolScore} |`);
+  lines.push(`| Runtime | ${markdownDriftCell(artifact.drift.components.runtimeScore)} |`);
+  lines.push(`| Frameworks | ${markdownDriftCell(artifact.drift.components.frameworkScore)} |`);
+  lines.push(`| Dependencies | ${markdownDriftCell(artifact.drift.components.dependencyScore)} |`);
+  lines.push(`| EOL Risk | ${markdownDriftCell(artifact.drift.components.eolScore)} |`);
   lines.push('');
 
   // Per project

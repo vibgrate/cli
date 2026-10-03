@@ -37,4 +37,13 @@ describe('emitDriftScoreLine', () => {
     emitDriftScoreLine(42);
     expect(log).toHaveBeenCalledWith('VIBGRATE_DRIFT_SCORE=42');
   });
+
+  it('emits null for an absent score and 0 for a measured zero', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    process.env.VIBGRATE_EMIT_MARKERS = '1';
+    emitDriftScoreLine(null);
+    emitDriftScoreLine(0);
+    expect(log).toHaveBeenNthCalledWith(1, 'VIBGRATE_DRIFT_SCORE=null');
+    expect(log).toHaveBeenNthCalledWith(2, 'VIBGRATE_DRIFT_SCORE=0');
+  });
 });

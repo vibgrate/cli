@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateConfigDriftBudget } from './drift-budget-gate.js';
+import { compareDriftBudget, evaluateConfigDriftBudget } from './drift-budget-gate.js';
 
 const file = '.vibgrate/config.yml';
 
@@ -51,5 +51,26 @@ describe('evaluateConfigDriftBudget', () => {
       'driftBudget in .vibgrate/config.yml was not applied:',
       '  driftBudget.maxscore is not a known setting.',
     ]);
+  });
+});
+
+describe('compareDriftBudget', () => {
+  it('does not fail when the score is absent', () => {
+    expect(compareDriftBudget(null, 0)).toEqual({
+      exitCode: 0,
+      message: 'DriftScore is absent; --drift-budget 0 was not compared.',
+    });
+  });
+
+  it('passes a measured zero without treating it as absent', () => {
+    expect(compareDriftBudget(0, 0)).toEqual({ exitCode: 0, message: null });
+    expect(compareDriftBudget(0, 30)).toEqual({ exitCode: 0, message: null });
+  });
+
+  it('fails when a measured score is above the budget', () => {
+    expect(compareDriftBudget(44, 40)).toEqual({
+      exitCode: 2,
+      message: 'Failing fitness function: DriftScore 44/100 exceeds budget 40.',
+    });
   });
 });

@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { GraphEdge, GraphNode, VgGraph } from '../schema.js';
 import type { HaileProvider } from '../engine/haile/haile-provider.js';
 import { renderReviewDocMarkdown, validateReviewDoc } from './doc.js';
-import { buildExplainDoc, explainChange } from './explain-doc.js';
+import { buildExplainDoc, buildPathDoc, ExplainEmpty, explainChange } from './explain-doc.js';
+import { callPath } from '../engine/paths.js';
 import type { GitRunner } from './git.js';
 
 /**
@@ -140,5 +141,70 @@ describe('document kind', () => {
   it('is change or explain', () => {
     const { doc } = buildExplainDoc({ root, graph, node: save, provider: null, run: noGit });
     expect(validateReviewDoc({ ...doc, kind: 'scratch' }).map((i) => i.code)).toEqual(['enum']);
+  });
+});
+
+describe('the flow-only view (vg show flow)', () => {
+  const flow = {
+    type: 'flow',
+    title: 'What save does',
+    nodes: [{ key: 's', label: 'persist Order', pins: [{ side: 'head', path: 'src/store.ts', start: 45, end: 45 }], origin: 'graph' }],
+    edges: [],
+  };
+  const withFlow = { ...provider({}), reviewDiagrams: () => ({ blocks: [stackBlock, flow], contract: [], notes: [] }) } as unknown as HaileProvider;
+
+  it('keeps only the flows', () => {
+    const { doc } = buildExplainDoc({ root, graph, node: save, provider: withFlow, run: noGit, only: ['flow'] });
+    const design = doc.sections.find((x) => x.kind === 'design');
+    expect(design?.blocks.map((b) => b.type)).toEqual(['flow']);
+  });
+
+  it('says so when the code map has no flow for the symbol', () => {
+    expect(() => buildExplainDoc({ root, graph, node: save, provider: provider({}), run: noGit, only: ['flow'] })).toThrow(ExplainEmpty);
+  });
+});
+
+describe('the path view (vg path --diagram)', () => {
+  const sited = {
+    ...graph,
+    edges: [
+      { ...edge('main', 'save'), sites: [7], awaited: true },
+      { ...edge('save', 'audit'), sites: [52] },
+    ],
+  } as unknown as VgGraph;
+
+  it('draws the call path caller first, each frame and hop pinned', () => {
+    const found = callPath(sited, 'main', 'audit');
+    expect(found).not.toBeNull();
+    const { doc, resolve } = buildPathDoc({ root, graph: sited, path: found!, callsOnly: true, run: noGit });
+    expect(doc.kind).toBe('explain');
+    expect(doc.title).toBe('Path: main → audit');
+    expect(validateReviewDoc(doc, resolve)).toEqual([]);
+    const stack = doc.sections.find((x) => x.kind === 'design')?.blocks[0] as { head: { key: string; parent_key?: string; via?: { kind: string }; call_site?: unknown }[] };
+    expect(stack.head.map((f) => [f.key, f.parent_key ?? null, f.via?.kind ?? null])).toEqual([
+      ['main', null, null],
+      ['save', 'main', 'async'],
+      ['audit', 'save', 'call'],
+    ]);
+    expect(stack.head[1]!.call_site).toEqual({ side: 'head', path: 'src/app.ts', start: 7, end: 7 });
+    const md = renderReviewDocMarkdown(doc);
+    expect(md).toContain('2 hops, following calls only');
+    expect(md).toContain('awaited call at line 7 (`src/app.ts:7`)');
+    expect(md).not.toContain('| Before | After |');
+  });
+
+  it('draws a reverse path in the order it runs', () => {
+    const { doc } = buildPathDoc({ root, graph: sited, path: { ids: ['audit', 'save', 'main'], direction: 'reverse' }, callsOnly: true, run: noGit });
+    expect(doc.title).toBe('Path: main → audit');
+  });
+
+  it('leaves out a step with no code to pin, and notes it', () => {
+    const ext = {
+      ...sited,
+      nodes: [...sited.nodes, node('lib', { file: 'node_modules/lib/index.js', span: { start: 1, end: 3 } })],
+      edges: [...sited.edges, edge('audit', 'lib')],
+    } as unknown as VgGraph;
+    const { doc } = buildPathDoc({ root, graph: ext, path: callPath(ext, 'main', 'lib')!, callsOnly: true, run: noGit });
+    expect(doc.generator.notes.join(' ')).toContain('with no code in the working tree to pin: lib');
   });
 });

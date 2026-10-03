@@ -2,6 +2,7 @@ import { serializeGraph, slimGraphForExport } from './serialize.js';
 import { renderReport } from './report.js';
 import { renderHtml } from './html.js';
 import type { DepRecord } from './drift.js';
+import { resolvePurl } from '../reporting/commands/sbom.js';
 import type { LocalModel } from './models.js';
 import type { VgGraph } from '../schema.js';
 
@@ -247,12 +248,27 @@ function cyclonedx(ctx: ExportContext): string {
   // timestamps beyond the pinned generatedAt.
   const components: unknown[] = [];
   for (const d of ctx.deps ?? []) {
-    components.push({
-      type: 'library',
-      name: d.name,
-      version: d.installed ?? d.declared,
-      purl: d.ecosystem === 'npm' ? `pkg:npm/${d.name}@${d.installed ?? ''}` : undefined,
-    });
+    const version = d.installed ?? d.declared;
+    if (d.ecosystem !== 'npm') {
+      components.push({ type: 'library', name: d.name, version, purl: undefined });
+      continue;
+    }
+    // Same rule as `vg sbom`: a name that cannot be a Package URL is kept,
+    // and the purl field is omitted rather than filled with a purl-shaped string.
+    const resolved = resolvePurl('npm', d.name, d.installed ?? '');
+    if (resolved.purl) {
+      components.push({ type: 'library', name: d.name, version, purl: resolved.purl });
+    } else {
+      components.push({
+        type: 'library',
+        name: d.name,
+        version,
+        properties: [
+          { name: 'vibgrate:purlStatus', value: 'unavailable' },
+          { name: 'vibgrate:purlWarning', value: resolved.warning },
+        ],
+      });
+    }
   }
   for (const m of ctx.models ?? []) {
     components.push({ type: 'machine-learning-model', name: m.name, properties: [{ name: 'vg:runtime', value: m.runtime }] });

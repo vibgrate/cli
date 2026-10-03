@@ -101,6 +101,12 @@ import type { VgGraph } from '../schema.js';
 /** DriftScore band. Mirrors the engine — clients must never re-derive it. */
 export type Band = 'low' | 'moderate' | 'high';
 
+/** Map an engine risk level onto the wire band. Null stays null — never `low`. */
+function driftBand(level: string | null | undefined): Band | null {
+  if (level === 'low' || level === 'moderate' || level === 'high') return level;
+  return null;
+}
+
 /**
  * `vibgrate/scanArtifact` — full Drift scan artifact as prettified JSON for
  * Output ▸ Vibgrate Scan. Kept off the main log channel so operational noise
@@ -991,22 +997,15 @@ export class VibgrateLanguageServer {
     // `riskLevel` is what `driftscore-2.0` ships; v3 renames it `band` (§5
     // envelope). We normalise to `band` on the wire so clients are already
     // speaking v3 and need no change when the engine catches up.
-    const band = (a.drift.riskLevel ?? 'low') as Band;
-
-    // History + drift diff (plan §5.6/§5.8): diff against the last recorded
-    // entry, then record this one. Both engine-side — clients only render.
-    const historyEntry: ScoreHistoryEntry = {
-      ts: a.timestamp,
-      score: a.drift.score,
-      band,
-      mode: a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated'),
-      methodology: a.drift.methodologyVersion ?? 'unknown',
-    };
-    const delta = deltaFrom(lastEntry(this.opts.root), historyEntry);
-    recordScore(this.opts.root, historyEntry);
+    // A null risk level is unmeasured — do not coerce it to `low`.
+    const score = a.drift.score;
+    const band = driftBand(a.drift.riskLevel);
+    const mode = a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated');
+    const methodology = a.drift.methodologyVersion ?? 'unknown';
 
     // Per-dependency state for the inline/hover surfaces — all O(deps), once
     // per scan, never in a hover or decoration hot path (coverage plan §5).
+    // This runs even when the aggregate score is absent: inventory is not a score.
     this.ignores = readIgnores(this.opts.root);
     const driftedKeys: string[] = [];
     for (const proj of a.projects ?? []) {
@@ -1016,12 +1015,27 @@ export class VibgrateLanguageServer {
         }
       }
     }
-    const snapshot = { ts: a.timestamp, methodology: historyEntry.methodology, drifted: driftedKeys };
+    const snapshot = { ts: a.timestamp, methodology, drifted: driftedKeys };
     this.newDrift = newlyDrifted(readInventory(this.opts.root), snapshot);
     recordInventory(this.opts.root, snapshot);
 
+    // History + drift diff (plan §5.6/§5.8): diff against the last recorded
+    // entry, then record this one. Both engine-side — clients only render.
+    // An unmeasured score is not recorded and not pushed: clients render a
+    // missing notification as "no score", and a pushed 0 would read as perfect.
+    if (typeof score !== 'number' || band === null) return;
+    const historyEntry: ScoreHistoryEntry = {
+      ts: a.timestamp,
+      score,
+      band,
+      mode,
+      methodology,
+    };
+    const delta = deltaFrom(lastEntry(this.opts.root), historyEntry);
+    recordScore(this.opts.root, historyEntry);
+
     const payload: ScoreNotification = {
-      score: a.drift.score,
+      score,
       band,
       // v3 §2.4: `estimated` means "no timestamps at all" — it is NOT an
       // offline marker. An air-gapped scan against a dated snapshot is Verified.
@@ -1246,9 +1260,13 @@ export class VibgrateLanguageServer {
       (project.drift?.mode ?? a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated')) ===
       'estimated';
     const mode = estimated ? '~' : '';
-    const score = project.drift?.score ?? a.drift.score;
-    const band = project.drift?.riskLevel ?? a.drift.riskLevel;
-    const title = `Vibgrate · drift ${mode}${score} (${band}) · ${behind} behind · ${eol} EOL`;
+    // `??` would treat an explicit null (unmeasured) as missing and fall through
+    // to the workspace score. Use the project's own score when it has one.
+    const score = project.drift ? project.drift.score : a.drift.score;
+    const band = project.drift ? project.drift.riskLevel : a.drift.riskLevel;
+    const scoreLabel = typeof score === 'number' ? `${mode}${score}` : 'n/a';
+    const bandLabel = driftBand(band) ?? 'n/a';
+    const title = `Vibgrate · drift ${scoreLabel} (${bandLabel}) · ${behind} behind · ${eol} EOL`;
 
     return [
       {
@@ -2151,8 +2169,8 @@ function buildProjectRefs(rootDir: string, projects: ProjectScan[]): ProjectRef[
       name: rel,
       manifestPath: manifestRelativePath(p),
       ...(lockfilePath ? { lockfilePath } : {}),
-      score: p.drift.score,
-      band: (p.drift.riskLevel ?? 'low') as Band,
+      ...(typeof p.drift.score === 'number' ? { score: p.drift.score } : {}),
+      ...(driftBand(p.drift.riskLevel) ? { band: driftBand(p.drift.riskLevel) as Band } : {}),
       mode: (p.drift.mode ?? 'verified') as 'verified' | 'estimated',
     });
   }
@@ -2201,9 +2219,12 @@ function scoreForProject(rootDir: string, a: ScanArtifact, proj: ProjectScan): S
   ).length;
   const hasDates = (proj.dependencies ?? []).some((d) => d.ageDays !== null && d.ageDays !== undefined);
 
+  if (typeof proj.drift.score !== 'number') return null;
+  const band = driftBand(proj.drift.riskLevel);
+  if (!band) return null;
   return {
     score: proj.drift.score,
-    band: (proj.drift.riskLevel ?? 'low') as Band,
+    band,
     mode: proj.drift.mode ?? (hasDates ? 'verified' : 'estimated'),
     methodology: proj.drift.methodologyVersion ?? a.drift.methodologyVersion ?? 'unknown',
     scale: '0 best, 100 worst',

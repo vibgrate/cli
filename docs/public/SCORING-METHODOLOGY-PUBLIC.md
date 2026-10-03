@@ -42,7 +42,9 @@ RiskScore's job).
 
 Four weighted pillars, computed on a health scale and emitted as drift (0 = no
 drift). Weight is redistributed across whichever pillars have data, so a scan
-with no runtime metadata is not unfairly penalised.
+with no runtime metadata is not unfairly penalised. A pillar with no input is
+`null` (shown as `n/a`), not drift 0. When no pillar has data, the overall
+DriftScore is null rather than 0.
 
 | Pillar | Weight | Input |
 |---|---:|---|
