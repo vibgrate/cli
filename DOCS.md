@@ -1054,7 +1054,12 @@ Every component also carries a [purl](https://github.com/package-url/purl-spec)
 (`pkg:npm/<name>@<version>`, scoped names as their own namespace segment) — as the
 CycloneDX `purl` field and `bom-ref`, and as the SPDX `externalRefs` PACKAGE-MANAGER
 reference — so a vulnerability scanner can match components without re-deriving an
-identifier. When the lockfile format resolves real dependency edges (npm
+identifier. When a package name cannot be encoded as a purl (a space, an empty
+path segment, or another character outside the purl name alphabet), the component
+is kept. The purl and the SPDX purl `externalRef` are omitted, the component gains
+`vibgrate:purlStatus=unavailable` plus a `vibgrate:purlWarning` that names the
+package and ecosystem, and `vg sbom export` prints that warning. A name that
+encodes cleanly is unchanged. When the lockfile format resolves real dependency edges (npm
 `package-lock.json` v2/v3 today; pnpm and yarn report components without edges), the
 SBOM also carries the resolved dependency graph: CycloneDX's top-level `dependencies`
 array, or SPDX `DEPENDS_ON` relationships. Where edges aren't resolvable, that section

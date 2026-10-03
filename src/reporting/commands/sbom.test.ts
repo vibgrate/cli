@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { toCycloneDx, toSpdx, formatDeltaText, npmPurl, purlFor, collectLockfileGraph } from './sbom.js';
+import { toCycloneDx, toSpdx, formatDeltaText, npmPurl, purlFor, collectLockfileGraph, collectPurlWarnings, sbomCommand } from './sbom.js';
 import type { ProjectScan, ScanArtifact } from '../types.js';
 import type { LockfileGraph } from '../../engine/lockfile.js';
 
@@ -230,6 +230,182 @@ describe('sbom helpers', () => {
     const sbom = toCycloneDx(makeArtifact('5.3.0', 90)) as { components: Array<{ version: string; purl: string }> };
     expect(sbom.components[0]!.version).toBe('5.3.0');
     expect(sbom.components[0]!.purl).toBe('pkg:npm/chalk@5.3.0');
+  });
+
+  /**
+   * Names that cannot be a purl name. A space percent-encodes to a purl-shaped
+   * string; an empty path segment encodes to `pkg:golang/github.com//sse@…`.
+   * Neither is a Package URL.
+   */
+  const unencodableNames = ['foo bar', 'github.com//sse'] as const;
+
+  it('keeps a component when its name cannot be encoded as a purl, without inventing one', () => {
+    const secretPath = '/var/lib/secret-workspace';
+    const artifact = makeArtifact('5.3.0', 90);
+    artifact.rootPath = secretPath;
+    artifact.projects[0]!.dependencies[0]!.currentSpec = `file:${secretPath}/id_rsa`;
+    artifact.projects[0]!.dependencies.push({
+      package: 'foo bar',
+      section: 'dependencies',
+      currentSpec: `file:${secretPath}/id_rsa`,
+      resolvedVersion: '1.0.0',
+      latestStable: null,
+      majorsBehind: null,
+      drift: 'unknown',
+    });
+
+    const sbom = toCycloneDx(artifact) as {
+      components: Array<{
+        name: string;
+        purl?: string;
+        'bom-ref': string;
+        properties: Array<{ name: string; value: string }>;
+      }>;
+    };
+    expect(JSON.stringify(sbom)).toBe(JSON.stringify(toCycloneDx(artifact)));
+
+    const chalk = sbom.components.find((c) => c.name === 'chalk');
+    expect(chalk?.purl).toBe('pkg:npm/chalk@5.3.0');
+    expect(chalk?.['bom-ref']).toBe('pkg:npm/chalk@5.3.0');
+    expect(chalk?.properties.some((p) => p.name === 'vibgrate:purlStatus')).toBe(false);
+
+    const broken = sbom.components.find((c) => c.name === 'foo bar');
+    expect(broken).toBeDefined();
+    expect(broken?.purl).toBeUndefined();
+    expect(broken?.['bom-ref']).toBe('vibgrate:npm:foo bar@1.0.0');
+    expect(broken?.['bom-ref'].startsWith('pkg:')).toBe(false);
+    const status = broken?.properties.find((p) => p.name === 'vibgrate:purlStatus')?.value;
+    const warning = broken?.properties.find((p) => p.name === 'vibgrate:purlWarning')?.value ?? '';
+    expect(status).toBe('unavailable');
+    expect(warning).toContain('npm');
+    expect(warning).toContain('foo bar');
+    expect(warning).toContain('regenerate the SBOM');
+    expect(warning).not.toContain(secretPath);
+    expect(warning).not.toContain('id_rsa');
+    expect(JSON.stringify(sbom)).not.toContain('foo%20bar');
+    expect(JSON.stringify(sbom)).not.toContain('pkg:npm/foo');
+
+    const warnings = collectPurlWarnings(
+      // Same order the export command prints: direct dependencies, document order.
+      [
+        {
+          project: 'app',
+          package: 'chalk',
+          version: '5.3.0',
+          currentSpec: '5.3.0',
+          drift: 'current',
+          majorsBehind: 0,
+          scope: 'direct',
+          ecosystem: 'npm',
+          ecosystemLabel: 'npm',
+        },
+        {
+          project: 'app',
+          package: 'foo bar',
+          version: '1.0.0',
+          currentSpec: '1.0.0',
+          drift: 'unknown',
+          majorsBehind: null,
+          scope: 'direct',
+          ecosystem: 'npm',
+          ecosystemLabel: 'npm',
+        },
+      ],
+    );
+    expect(warnings).toEqual([warning]);
+  });
+
+  it('rejects an empty purl path segment and a non-ASCII name instead of percent-encoding them', () => {
+    expect(purlFor('npm', 'chalk', '5.3.0')).toBe('pkg:npm/chalk@5.3.0');
+    expect(purlFor('go', 'github.com//sse', '1.2.3')).toBeUndefined();
+    expect(purlFor('npm', 'café', '1.0.0')).toBeUndefined();
+    expect(purlFor('not-a-registry' as never, 'left-pad', '1.0.0')).toBeUndefined();
+
+    for (const packageName of unencodableNames) {
+      const artifact = makeArtifact('1.2.3', 90);
+      artifact.projects[0]!.type = packageName.includes('//') ? 'go' : 'node';
+      artifact.projects[0]!.dependencies[0]!.package = packageName;
+      artifact.projects[0]!.dependencies[0]!.resolvedVersion = '1.2.3';
+      artifact.projects[0]!.dependencies[0]!.currentSpec = '1.2.3';
+      const cyclonedx = JSON.stringify(toCycloneDx(artifact));
+      const spdx = toSpdx(artifact) as {
+        packages: Array<{ name: string; externalRefs?: unknown; annotations: Array<{ comment: string }> }>;
+      };
+      expect(cyclonedx).toBe(JSON.stringify(toCycloneDx(artifact)));
+      expect(cyclonedx).not.toContain('%20');
+      expect(cyclonedx).not.toContain('%2F%2F');
+      expect(cyclonedx).toContain('"vibgrate:purlStatus"');
+      expect(cyclonedx).toContain(packageName);
+      const pkg = spdx.packages.find((p) => p.name === packageName);
+      expect(pkg).toBeDefined();
+      expect(pkg?.externalRefs).toBeUndefined();
+      expect(pkg?.annotations.some((a) => a.comment.includes('purlStatus=unavailable'))).toBe(true);
+      expect(pkg?.annotations.some((a) => a.comment.includes(packageName) && a.comment.includes('regenerate the SBOM'))).toBe(true);
+      expect(JSON.stringify(spdx)).not.toContain('pkg:');
+    }
+  });
+
+  it('does not key the dependency graph with an invented purl when a name cannot be encoded', () => {
+    const artifact = makeArtifact('5.3.0', 90);
+    artifact.projects[0]!.dependencies.push({
+      package: 'foo bar',
+      section: 'dependencies',
+      currentSpec: '1.0.0',
+      resolvedVersion: '1.0.0',
+      latestStable: null,
+      majorsBehind: null,
+      drift: 'unknown',
+    });
+    const graph: LockfileGraph = {
+      components: [
+        { package: 'chalk', version: '5.3.0' },
+        { package: 'foo bar', version: '1.0.0' },
+      ],
+      edges: new Map([['chalk@5.3.0', ['foo bar@1.0.0']]]),
+      rootDependsOn: ['chalk@5.3.0'],
+    };
+    const sbom = toCycloneDx(artifact, graph) as { dependencies: Array<{ ref: string; dependsOn: string[] }> };
+    expect(sbom.dependencies).toEqual([
+      { ref: 'vibgrate-root', dependsOn: ['pkg:npm/chalk@5.3.0'] },
+      { ref: 'pkg:npm/chalk@5.3.0', dependsOn: ['vibgrate:npm:foo bar@1.0.0'] },
+      { ref: 'vibgrate:npm:foo bar@1.0.0', dependsOn: [] },
+    ]);
+    expect(JSON.stringify(sbom)).not.toContain('foo%20bar');
+  });
+
+  it('prints the same warning on export and leaves it out of the document path', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-sbom-purl-'));
+    const artifact = makeArtifact('1.0.0', 90);
+    artifact.projects[0]!.dependencies[0]!.package = 'foo bar';
+    artifact.projects[0]!.dependencies[0]!.resolvedVersion = '1.0.0';
+    artifact.projects[0]!.dependencies[0]!.currentSpec = '1.0.0';
+    const inFile = path.join(dir, 'scan.json');
+    fs.writeFileSync(inFile, JSON.stringify(artifact));
+    const errors: string[] = [];
+    const logs: string[] = [];
+    const origLog = console.log;
+    const origError = console.error;
+    console.log = (msg?: unknown) => {
+      logs.push(String(msg));
+    };
+    console.error = (msg?: unknown) => {
+      errors.push(String(msg));
+    };
+    try {
+      await sbomCommand.parseAsync(['node', 'sbom', 'export', '--in', inFile, '--no-transitive']);
+    } finally {
+      console.log = origLog;
+      console.error = origError;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    const stderr = errors.join('\n');
+    expect(stderr).toContain('foo bar');
+    expect(stderr).toContain('npm');
+    expect(stderr).toContain('regenerate the SBOM');
+    expect(stderr).not.toContain(dir);
+    const body = JSON.parse(logs.join('\n')) as { components: Array<{ purl?: string; properties: Array<{ name: string; value: string }> }> };
+    expect(body.components[0]?.purl).toBeUndefined();
+    expect(body.components[0]?.properties.find((p) => p.name === 'vibgrate:purlStatus')?.value).toBe('unavailable');
   });
 
   describe('collectLockfileGraph', () => {

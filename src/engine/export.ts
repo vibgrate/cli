@@ -4,6 +4,7 @@ import { renderHtml } from './html.js';
 import type { DepRecord } from './drift.js';
 import type { LocalModel } from './models.js';
 import type { VgGraph } from '../schema.js';
+import { isConcreteVersion, PURL_STATUS_UNAVAILABLE, purlFor, purlUnavailableMessage, UNKNOWN_VERSION } from './purl.js';
 
 /** Above this node count, JSON export defaults to compact (no pretty-print). */
 export const COMPACT_JSON_NODES = 5_000;
@@ -241,19 +242,33 @@ function sqlBool(v: boolean | null | undefined): string {
   return v == null ? 'NULL' : v ? '1' : '0';
 }
 
+function libraryComponent(d: DepRecord): Record<string, unknown> {
+  const version = d.installed ?? d.declared;
+  const purl = purlFor(d.ecosystem, d.name, isConcreteVersion(version) ? version : UNKNOWN_VERSION);
+  const component: Record<string, unknown> = {
+    type: 'library',
+    name: d.name,
+    version,
+  };
+  if (purl) {
+    component.purl = purl;
+  } else {
+    // Keep the component. A missing purl is a property, not a deleted row,
+    // and not an invented Package URL.
+    component.properties = [
+      { name: 'vibgrate:purlStatus', value: PURL_STATUS_UNAVAILABLE },
+      { name: 'vibgrate:purlWarning', value: purlUnavailableMessage(d.ecosystem, d.name) },
+    ];
+  }
+  return component;
+}
+
 function cyclonedx(ctx: ExportContext): string {
   // CycloneDX 1.6 JSON — dependencies as library components + local models as
   // machine-learning-model components (AI-BOM). Deterministic ordering; no
   // timestamps beyond the pinned generatedAt.
   const components: unknown[] = [];
-  for (const d of ctx.deps ?? []) {
-    components.push({
-      type: 'library',
-      name: d.name,
-      version: d.installed ?? d.declared,
-      purl: d.ecosystem === 'npm' ? `pkg:npm/${d.name}@${d.installed ?? ''}` : undefined,
-    });
-  }
+  for (const d of ctx.deps ?? []) components.push(libraryComponent(d));
   for (const m of ctx.models ?? []) {
     components.push({ type: 'machine-learning-model', name: m.name, properties: [{ name: 'vg:runtime', value: m.runtime }] });
   }

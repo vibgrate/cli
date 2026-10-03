@@ -131,6 +131,17 @@ backward compatible.
 
 ### Fixed
 
+- **A component whose name cannot be a Package URL is no longer dropped or given a made-up purl.**
+  A space, an empty path segment, or another character outside the purl name
+  alphabet used to be percent-encoded into a purl-shaped string, or the purl
+  was left off with no signal. `vg sbom export` (CycloneDX and SPDX) and
+  CycloneDX graph export keep the component, omit the purl (and the SPDX purl
+  `externalRef`), record `vibgrate:purlStatus=unavailable`, and include a
+  warning that names the package and ecosystem and says what to change.
+  `vg sbom export` also prints that warning. A component that already has a
+  valid purl is unchanged. A project type with no purl type is not reported as
+  npm.
+
 - **`vg show arch` clipped the map to a fixed viewport.** Columns that ran off the
   bottom of the window could not be scrolled or zoomed; the canvas is now a
   pannable, zoomable map (scroll or drag, pinch / Ctrl-scroll, + / −).

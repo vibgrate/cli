@@ -9,6 +9,8 @@
 
 import { readJsonFile, pathExists } from '../../utils/fs.js';
 import { CliError, ExitCode } from '../../../util/exit.js';
+import type { Ecosystem } from '../../../engine/drift.js';
+import { isConcreteVersion, purlFor, purlUnavailableMessage, UNKNOWN_VERSION } from '../../../engine/purl.js';
 import type { ProjectType, ScanArtifact } from '../../types.js';
 import type { FrozenComponent, Release, ReleaseBuild } from './types.js';
 import {
@@ -60,6 +62,39 @@ export function ecosystemForProjectType(type: ProjectType): string | undefined {
   }
 }
 
+/** Project type → purl ecosystem. Types with no purl type return undefined (no invented npm purl). */
+function purlEcosystemForProjectType(type: ProjectType): Ecosystem | undefined {
+  switch (type) {
+    case 'node':
+    case 'typescript':
+      return 'npm';
+    case 'python':
+      return 'pypi';
+    case 'java':
+    case 'kotlin':
+    case 'scala':
+    case 'groovy':
+      return 'java';
+    case 'dotnet':
+    case 'visual-basic':
+      return 'dotnet';
+    case 'go':
+      return 'go';
+    case 'rust':
+      return 'rust';
+    case 'ruby':
+      return 'ruby';
+    case 'php':
+      return 'php';
+    case 'swift':
+      return 'swift';
+    case 'dart':
+      return 'dart';
+    default:
+      return undefined;
+  }
+}
+
 function ecosystemForPurl(purl: string): string | undefined {
   const m = /^pkg:([^/]+)\//.exec(purl);
   if (!m) return undefined;
@@ -77,7 +112,19 @@ export function componentsFromArtifact(artifact: ScanArtifact): FrozenComponent[
       const key = `${ecosystem ?? ''}|${dep.package}|${version}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({ name: dep.package, version, ecosystem, purl: ecosystem === 'npm' ? `pkg:npm/${dep.package}@${version}` : undefined });
+      const purlEco = purlEcosystemForProjectType(project.type);
+      const purl = purlEco ? purlFor(purlEco, dep.package, isConcreteVersion(version) ? version : UNKNOWN_VERSION) : undefined;
+      if (purl) {
+        out.push({ name: dep.package, version, ecosystem, purl });
+      } else {
+        out.push({
+          name: dep.package,
+          version,
+          ecosystem,
+          purlStatus: 'unavailable',
+          purlWarning: purlUnavailableMessage(ecosystem ?? project.type, dep.package),
+        });
+      }
     }
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));

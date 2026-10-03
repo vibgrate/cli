@@ -114,3 +114,46 @@ describe('sql export', () => {
     expect(a).toBe(b);
   });
 });
+
+describe('cyclonedx purl encoding', () => {
+  const base = ctx(makeGraph(false));
+
+  it('keeps a valid npm purl unchanged', () => {
+    const out = exportGraph('cyclonedx', {
+      ...base,
+      deps: [{ name: 'left', ecosystem: 'npm', declared: '^1', installed: '1.2.3' }],
+    });
+    const bom = JSON.parse(out) as { components: Array<{ name: string; purl?: string; properties?: unknown }> };
+    expect(bom.components[0]).toEqual({ type: 'library', name: 'left', version: '1.2.3', purl: 'pkg:npm/left@1.2.3' });
+  });
+
+  it('keeps a component whose name cannot be a purl and does not invent one', () => {
+    const secretPath = '/var/lib/secret-workspace';
+    const deps = [{ name: 'foo bar', ecosystem: 'npm' as const, declared: `file:${secretPath}/id_rsa`, installed: '1.0.0' }];
+    const out = exportGraph('cyclonedx', { ...base, deps });
+    expect(out).toBe(exportGraph('cyclonedx', { ...base, deps }));
+    const bom = JSON.parse(out) as {
+      components: Array<{ name: string; purl?: string; properties?: Array<{ name: string; value: string }> }>;
+    };
+    expect(bom.components).toHaveLength(1);
+    expect(bom.components[0]?.name).toBe('foo bar');
+    expect(bom.components[0]?.purl).toBeUndefined();
+    expect(out).not.toContain('foo%20bar');
+    expect(out).not.toContain('pkg:npm/foo');
+    expect(out).not.toContain(secretPath);
+    const warning = bom.components[0]?.properties?.find((p) => p.name === 'vibgrate:purlWarning')?.value ?? '';
+    expect(bom.components[0]?.properties?.find((p) => p.name === 'vibgrate:purlStatus')?.value).toBe('unavailable');
+    expect(warning).toContain('npm');
+    expect(warning).toContain('foo bar');
+    expect(warning).toContain('regenerate the SBOM');
+  });
+
+  it('encodes a non-npm package as its own purl instead of dropping the field', () => {
+    const out = exportGraph('cyclonedx', {
+      ...base,
+      deps: [{ name: 'Flask-SQLAlchemy', ecosystem: 'pypi', declared: '3.0.0', installed: '3.0.0' }],
+    });
+    const bom = JSON.parse(out) as { components: Array<{ purl?: string }> };
+    expect(bom.components[0]?.purl).toBe('pkg:pypi/flask-sqlalchemy@3.0.0');
+  });
+});

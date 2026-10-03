@@ -109,8 +109,12 @@ export interface FrozenComponent {
   name: string;
   /** The exact shipped/resolved version (never a range). */
   version: string;
-  /** package-url, when derivable. */
+  /** package-url, when derivable. Absent when the coordinate cannot be encoded as a purl. */
   purl?: string;
+  /** Set when `purl` cannot be encoded. The component is kept. */
+  purlStatus?: 'unavailable';
+  /** Actionable reason `purl` is absent. Names the package and ecosystem only. */
+  purlWarning?: string;
   /** Ecosystem, e.g. npm / PyPI / Maven — drives OSV matching. */
   ecosystem?: string;
 }

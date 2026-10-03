@@ -34,6 +34,9 @@ export interface PushComponent {
   version: string;
   ecosystem?: string;
   purl?: string;
+  /** Present when the component was kept but its purl could not be encoded. */
+  purlStatus?: 'unavailable';
+  purlWarning?: string;
 }
 
 export interface PushRelease {
@@ -109,7 +112,14 @@ export function pushRelease(r: Release): PushRelease {
     distribution: r.distribution,
     frozenAt: r.frozenAt,
     componentCount: r.components.length,
-    components: r.components.map((c) => ({ name: c.name, version: c.version, ecosystem: c.ecosystem, purl: c.purl })),
+    components: r.components.map((c) => ({
+      name: c.name,
+      version: c.version,
+      ecosystem: c.ecosystem,
+      ...(c.purl ? { purl: c.purl } : {}),
+      ...(c.purlStatus ? { purlStatus: c.purlStatus } : {}),
+      ...(c.purlWarning ? { purlWarning: c.purlWarning } : {}),
+    })),
     ...(r.build ? { build: r.build } : {}),
   };
 }

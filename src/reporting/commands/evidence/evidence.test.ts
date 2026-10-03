@@ -143,6 +143,27 @@ describe('release freezing', () => {
     const comps = componentsFromArtifact(artifact as never);
     expect(comps).toEqual([{ name: 'netty', version: '4.1.104', ecosystem: 'npm', purl: 'pkg:npm/netty@4.1.104' }]);
   });
+  it('does not invent a purl when the package name cannot be encoded', () => {
+    const artifact = {
+      projects: [{ type: 'node', path: '/var/lib/secret-workspace', dependencies: [{ package: 'foo bar', resolvedVersion: '1.0.0', currentSpec: 'file:/var/lib/secret-workspace/id_rsa' }] }],
+    };
+    const comps = componentsFromArtifact(artifact as never);
+    expect(comps).toHaveLength(1);
+    expect(comps[0]?.name).toBe('foo bar');
+    expect(comps[0]?.purl).toBeUndefined();
+    expect(comps[0]?.purlStatus).toBe('unavailable');
+    expect(comps[0]?.purlWarning).toContain('npm');
+    expect(comps[0]?.purlWarning).toContain('foo bar');
+    expect(comps[0]?.purlWarning).not.toContain('/var/lib/secret-workspace');
+    expect(comps[0]?.purlWarning).not.toContain('id_rsa');
+    expect(JSON.stringify(comps)).not.toContain('foo%20bar');
+    expect(JSON.stringify(comps)).not.toContain('pkg:');
+  });
+  it('encodes a non-npm scan dependency as its own purl', () => {
+    const artifact = { projects: [{ type: 'python', dependencies: [{ package: 'Flask-SQLAlchemy', resolvedVersion: '3.0.0', currentSpec: '3.0.0' }] }] };
+    const comps = componentsFromArtifact(artifact as never);
+    expect(comps).toEqual([{ name: 'Flask-SQLAlchemy', version: '3.0.0', ecosystem: 'PyPI', purl: 'pkg:pypi/flask-sqlalchemy@3.0.0' }]);
+  });
   it('extracts components from a CycloneDX SBOM', () => {
     const comps = componentsFromCycloneDx({ components: [{ name: 'netty', version: '4.1.104', purl: 'pkg:maven/io.netty/netty@4.1.104' }] });
     expect(comps[0]).toMatchObject({ name: 'netty', version: '4.1.104', ecosystem: 'Maven' });

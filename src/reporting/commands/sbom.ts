@@ -5,7 +5,17 @@ import { pathExists, readJsonFile, writeTextFile } from '../utils/fs.js';
 import type { DependencyRow, ProjectScan, ScanArtifact } from '../types.js';
 import { fullDependencyGraph, type LockfileComponent, type LockfileGraph } from '../../engine/lockfile.js';
 import type { Ecosystem } from '../../engine/drift.js';
+import {
+  isConcreteVersion,
+  PURL_STATUS_UNAVAILABLE,
+  purlFor,
+  purlUnavailableMessage,
+  unavailableBomRef,
+  UNKNOWN_VERSION,
+} from '../../engine/purl.js';
 import { vexCommand } from './vex.js';
+
+export { npmPurl, purlFor } from '../../engine/purl.js';
 
 type SbomFormat = 'cyclonedx' | 'spdx';
 
@@ -18,13 +28,22 @@ interface FlattenedDependency {
   majorsBehind: number | null;
   /** 'direct' comes from a scanned manifest; 'transitive' is lockfile-only. */
   scope: 'direct' | 'transitive';
-  /** Which package registry this dependency resolves against — picks the purl scheme. */
-  ecosystem: Ecosystem;
+  /** Which package registry this dependency resolves against — picks the purl scheme. Absent when this project type has no purl type. */
+  ecosystem?: Ecosystem;
+  /** Ecosystem name used in diagnostics. A project type with no purl type keeps its own name here. */
+  ecosystemLabel: string;
 }
 
-/** `ProjectScan.type` → the purl-scheme ecosystem for its dependencies. */
-function projectEcosystem(type: ProjectScan['type']): Ecosystem {
+/**
+ * `ProjectScan.type` → the purl-scheme ecosystem for its dependencies.
+ * Node and TypeScript are npm. A project type with no purl type returns
+ * undefined so the SBOM does not invent an npm purl for it.
+ */
+function projectEcosystem(type: ProjectScan['type']): Ecosystem | undefined {
   switch (type) {
+    case 'node':
+    case 'typescript':
+      return 'npm';
     case 'python':
       return 'pypi';
     case 'rust':
@@ -34,19 +53,21 @@ function projectEcosystem(type: ProjectScan['type']): Ecosystem {
     case 'java':
     case 'kotlin':
     case 'scala':
+    case 'groovy':
       return 'java';
     case 'ruby':
       return 'ruby';
     case 'php':
       return 'php';
     case 'dotnet':
+    case 'visual-basic':
       return 'dotnet';
     case 'swift':
       return 'swift';
     case 'dart':
       return 'dart';
     default:
-      return 'npm';
+      return undefined;
   }
 }
 
@@ -82,91 +103,32 @@ export function deterministicUuid(seed: string): string {
 }
 
 /**
- * Sentinel for "we know the package but not a concrete installed version" —
- * same convention as `majorsBehind`'s `'unknown'` elsewhere in this file.
- * Never emitted as a real version: `isConcreteVersion` below is what routes a
- * dependency here instead of its raw declared spec.
+ * A resolved purl, or a stable non-purl identity plus a warning when the
+ * package cannot be encoded. The component is always kept.
  */
-const UNKNOWN_VERSION = 'unknown';
-
-/**
- * True for something that names one real, installed version — false for a
- * semver range (`^1.2.3`, `>=1.0.0`), a wildcard/dist-tag (`*`, `latest`), or
- * a package-manager protocol spec (`workspace:*`, `npm:real-name@1.2.3`,
- * `patch:pkg@…`, `file:../local`, a git/http(s) URL). Only `resolvedVersion`
- * or a lockfile hit should ever produce the latter; when neither exists the
- * SBOM must say so honestly (`UNKNOWN_VERSION`) rather than put someone's
- * *intent* ("whatever satisfies ^1.2.3") in the field a vulnerability scanner
- * reads as "this exact version is installed" — that's not a smaller version
- * of the truth, it's a different claim.
- */
-function isConcreteVersion(spec: string): boolean {
-  if (!spec || spec === '*' || spec === 'latest') return false;
-  if (/[\^~*<>|]/.test(spec)) return false;
-  if (/^(npm|workspace|patch|file|link|git|github|https?):/i.test(spec)) return false;
-  return true;
+interface ResolvedPurl {
+  bomRef: string;
+  purl?: string;
+  warning?: string;
 }
 
-/** The purl type/namespace/name portion, without a version — shared by every ecosystem branch of `purlFor`. */
-function purlPath(ecosystem: Ecosystem, name: string): string {
-  switch (ecosystem) {
-    case 'npm': {
-      const scopeSlash = name.startsWith('@') ? name.indexOf('/') : -1;
-      if (scopeSlash > 0) {
-        return `pkg:npm/${encodeURIComponent(name.slice(0, scopeSlash))}/${encodeURIComponent(name.slice(scopeSlash + 1))}`;
-      }
-      return `pkg:npm/${encodeURIComponent(name)}`;
-    }
-    case 'pypi':
-      return `pkg:pypi/${encodeURIComponent(pypiPurlName(name))}`;
-    case 'rust':
-      return `pkg:cargo/${encodeURIComponent(name)}`;
-    case 'go':
-      return `pkg:golang/${name.split('/').map(encodeURIComponent).join('/')}`;
-    case 'java': {
-      const [group, artifact] = name.includes(':') ? name.split(':') : [undefined, name];
-      return group ? `pkg:maven/${encodeURIComponent(group)}/${encodeURIComponent(artifact)}` : `pkg:maven/${encodeURIComponent(artifact)}`;
-    }
-    case 'ruby':
-      return `pkg:gem/${encodeURIComponent(name)}`;
-    case 'php':
-      return `pkg:composer/${name.split('/').map(encodeURIComponent).join('/')}`;
-    case 'dotnet':
-      return `pkg:nuget/${encodeURIComponent(name)}`;
-    case 'swift':
-      return `pkg:swift/${name.split('/').map(encodeURIComponent).join('/')}`;
-    case 'dart':
-      return `pkg:pub/${encodeURIComponent(name)}`;
-    default:
-      return purlPath('npm', name);
+function resolvedPurl(dep: FlattenedDependency): ResolvedPurl {
+  const purl = dep.ecosystem ? purlFor(dep.ecosystem, dep.package, dep.version) : undefined;
+  if (purl) return { bomRef: purl, purl };
+  return {
+    bomRef: unavailableBomRef(dep.ecosystemLabel, dep.package, dep.version),
+    warning: purlUnavailableMessage(dep.ecosystemLabel, dep.package),
+  };
+}
+
+/** Warnings for components whose purl could not be encoded, in document order. */
+export function collectPurlWarnings(deps: FlattenedDependency[]): string[] {
+  const warnings: string[] = [];
+  for (const dep of deps) {
+    const warning = resolvedPurl(dep).warning;
+    if (warning) warnings.push(warning);
   }
-}
-
-/**
- * [purl](https://github.com/package-url/purl-spec) for an npm package,
- * scope handled as its own namespace segment per spec (`pkg:npm/%40scope/name@1.0.0`,
- * not a single percent-encoded `%40scope%2Fname`). Used to key components and
- * dependency-graph refs so a vulnerability scanner can match on purl directly.
- */
-export function npmPurl(name: string, version: string): string {
-  return `${purlPath('npm', name)}@${encodeURIComponent(version)}`;
-}
-
-/** PyPI purl names are normalized per PEP 503: lowercased, runs of `-_.` collapsed to one `-`. */
-function pypiPurlName(name: string): string {
-  return name.trim().toLowerCase().replace(/[-_.]+/g, '-');
-}
-
-/**
- * [purl](https://github.com/package-url/purl-spec) for a dependency, keyed
- * by ecosystem — see `purlPath` for the per-ecosystem type/namespace/name
- * mapping. A purl's `@version` is a claim about what's actually installed,
- * so `UNKNOWN_VERSION` omits it (a bare `pkg:npm/axios` is valid purl syntax)
- * rather than encode a range or protocol spec as if it were one.
- */
-export function purlFor(ecosystem: Ecosystem, name: string, version: string): string {
-  const path = purlPath(ecosystem, name);
-  return version === UNKNOWN_VERSION ? path : `${path}@${encodeURIComponent(version)}`;
+  return warnings;
 }
 
 function splitDependencyKey(key: string): { name: string; version: string } {
@@ -209,14 +171,29 @@ function cycloneDxDependencyGraph(
   graph: LockfileGraph | undefined,
 ): Array<{ ref: string; dependsOn: string[] }> | undefined {
   if (!graph?.edges) return undefined;
-  const purlOfKey = (key: string): string => {
+  const ecosystem = graph.ecosystem ?? 'npm';
+  const refByKey = new Map<string, string>();
+  for (const dep of dependencies) refByKey.set(`${dep.package}@${dep.version}`, resolvedPurl(dep).bomRef);
+  const refOfKey = (key: string): string => {
+    const known = refByKey.get(key);
+    if (known) return known;
     const { name, version } = splitDependencyKey(key);
-    return npmPurl(name, version);
+    return resolvedPurl({
+      project: '',
+      package: name,
+      version,
+      currentSpec: version,
+      drift: 'unknown',
+      majorsBehind: null,
+      scope: 'transitive',
+      ecosystem,
+      ecosystemLabel: ecosystem,
+    }).bomRef;
   };
-  const nodes = [{ ref: ROOT_BOM_REF, dependsOn: uniqSorted(graph.rootDependsOn).map(purlOfKey) }];
+  const nodes = [{ ref: ROOT_BOM_REF, dependsOn: uniqSorted(graph.rootDependsOn).map(refOfKey) }];
   for (const dep of dependencies) {
     const key = `${dep.package}@${dep.version}`;
-    nodes.push({ ref: npmPurl(dep.package, dep.version), dependsOn: uniqSorted(graph.edges.get(key) ?? []).map(purlOfKey) });
+    nodes.push({ ref: resolvedPurl(dep).bomRef, dependsOn: uniqSorted(graph.edges.get(key) ?? []).map(refOfKey) });
   }
   return nodes;
 }
@@ -265,6 +242,7 @@ export function flattenDependencies(
   const seen = new Set<string>();
   for (const project of artifact.projects) {
     const ecosystem = projectEcosystem(project.type);
+    const ecosystemLabel = ecosystem ?? project.type;
     for (const dep of project.dependencies) {
       // Go always pins an exact version in go.mod, but the scanner's
       // `resolvedVersion` runs it through `semver.clean` (for semver math
@@ -298,6 +276,7 @@ export function flattenDependencies(
         majorsBehind: dep.majorsBehind,
         scope: 'direct',
         ecosystem,
+        ecosystemLabel,
       });
     }
   }
@@ -305,6 +284,7 @@ export function flattenDependencies(
     const key = `${dep.package}@${dep.version}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const ecosystem = lockfileEcosystem ?? 'npm';
     rows.push({
       project: artifact.rootPath,
       package: dep.package,
@@ -313,7 +293,8 @@ export function flattenDependencies(
       drift: 'unknown',
       majorsBehind: null,
       scope: 'transitive',
-      ecosystem: lockfileEcosystem ?? 'npm',
+      ecosystem,
+      ecosystemLabel: ecosystem,
     });
   }
   return rows;
@@ -369,20 +350,29 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
         name: artifact.rootPath,
       },
     },
-    components: dependencies.map((dep) => ({
-      type: 'library',
-      'bom-ref': purlFor(dep.ecosystem, dep.package, dep.version),
-      name: dep.package,
-      version: dep.version,
-      purl: purlFor(dep.ecosystem, dep.package, dep.version),
-      properties: [
-        { name: 'vibgrate:project', value: dep.project },
-        { name: 'vibgrate:currentSpec', value: dep.currentSpec },
-        { name: 'vibgrate:drift', value: dep.drift },
-        { name: 'vibgrate:majorsBehind', value: String(dep.majorsBehind ?? 'unknown') },
-        { name: 'vibgrate:scope', value: dep.scope },
-      ],
-    })),
+    components: dependencies.map((dep) => {
+      const identity = resolvedPurl(dep);
+      return {
+        type: 'library',
+        'bom-ref': identity.bomRef,
+        name: dep.package,
+        version: dep.version,
+        ...(identity.purl ? { purl: identity.purl } : {}),
+        properties: [
+          { name: 'vibgrate:project', value: dep.project },
+          { name: 'vibgrate:currentSpec', value: dep.currentSpec },
+          { name: 'vibgrate:drift', value: dep.drift },
+          { name: 'vibgrate:majorsBehind', value: String(dep.majorsBehind ?? 'unknown') },
+          { name: 'vibgrate:scope', value: dep.scope },
+          ...(identity.warning
+            ? [
+                { name: 'vibgrate:purlStatus', value: PURL_STATUS_UNAVAILABLE },
+                { name: 'vibgrate:purlWarning', value: identity.warning },
+              ]
+            : []),
+        ],
+      };
+    }),
     ...(dependencyGraph ? { dependencies: dependencyGraph } : {}),
   };
 }
@@ -400,28 +390,46 @@ export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<st
       created: artifact.timestamp,
       creators: [`Tool: @vibgrate/cli-${artifact.vibgrateVersion}`],
     },
-    packages: dependencies.map((dep, i) => ({
-      name: dep.package,
-      SPDXID: `SPDXRef-Package-${i + 1}`,
-      versionInfo: dep.version,
-      downloadLocation: 'NOASSERTION',
-      filesAnalyzed: false,
-      externalRefs: [
-        {
-          referenceCategory: 'PACKAGE-MANAGER',
-          referenceType: 'purl',
-          referenceLocator: purlFor(dep.ecosystem, dep.package, dep.version),
-        },
-      ],
-      annotations: [
-        {
-          annotationType: 'OTHER',
-          annotator: 'Tool: @vibgrate/cli',
-          annotationDate: artifact.timestamp,
-          comment: `project=${dep.project}; drift=${dep.drift}; majorsBehind=${dep.majorsBehind ?? 'unknown'}; scope=${dep.scope}`,
-        },
-      ],
-    })),
+    packages: dependencies.map((dep, i) => {
+      const identity = resolvedPurl(dep);
+      const comment = `project=${dep.project}; drift=${dep.drift}; majorsBehind=${dep.majorsBehind ?? 'unknown'}; scope=${dep.scope}`;
+      return {
+        name: dep.package,
+        SPDXID: `SPDXRef-Package-${i + 1}`,
+        versionInfo: dep.version,
+        downloadLocation: 'NOASSERTION',
+        filesAnalyzed: false,
+        ...(identity.purl
+          ? {
+              externalRefs: [
+                {
+                  referenceCategory: 'PACKAGE-MANAGER',
+                  referenceType: 'purl',
+                  referenceLocator: identity.purl,
+                },
+              ],
+            }
+          : {}),
+        annotations: [
+          {
+            annotationType: 'OTHER',
+            annotator: 'Tool: @vibgrate/cli',
+            annotationDate: artifact.timestamp,
+            comment: identity.warning ? `${comment}; purlStatus=${PURL_STATUS_UNAVAILABLE}` : comment,
+          },
+          ...(identity.warning
+            ? [
+                {
+                  annotationType: 'OTHER',
+                  annotator: 'Tool: @vibgrate/cli',
+                  annotationDate: artifact.timestamp,
+                  comment: identity.warning,
+                },
+              ]
+            : []),
+        ],
+      };
+    }),
     ...(relationships ? { relationships } : {}),
   };
 }
@@ -515,6 +523,8 @@ const exportCommand = new Command('export')
     // format supports it, the resolved dependency edges — so the SBOM
     // reflects real supply-chain exposure, not just direct dependencies.
     const lockfileGraph = opts.transitive ? collectLockfileGraph(artifact, path.resolve(opts.root)) : undefined;
+    const warnings = collectPurlWarnings(flattenDependencies(artifact, lockfileGraph?.components ?? [], lockfileGraph?.ecosystem));
+    for (const warning of warnings) console.error(chalk.yellow('warning:') + ` ${warning}`);
 
     const sbom = format === 'cyclonedx' ? toCycloneDx(artifact, lockfileGraph) : toSpdx(artifact, lockfileGraph);
     const body = JSON.stringify(sbom, null, 2);
