@@ -81,6 +81,9 @@ export interface PackageJson {
   devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
+  /** Declared license: SPDX id/expression, legacy `{ type }`, or a `licenses` array. */
+  license?: unknown;
+  licenses?: unknown;
 }
 
 // ── npm registry metadata ──
@@ -211,6 +214,11 @@ export interface ProjectScan {
   packageManager?: string;
   frameworks: DetectedFramework[];
   dependencies: DependencyRow[];
+  /**
+   * License declared by this project's own manifest (`license` / `licenses`).
+   * Absent when the manifest does not declare one.
+   */
+  declaredLicense?: DependencyLicense;
   dependencyAgeBuckets: {
     current: number;
     oneBehind: number;

@@ -56,6 +56,8 @@ export interface PackageJson {
   devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
+  license?: unknown;
+  licenses?: unknown;
 }
 
 // ── npm registry metadata ──
@@ -76,6 +78,13 @@ export interface DependencyRow {
   latestStable: string | null;
   majorsBehind: number | null;
   drift: 'current' | 'minor-behind' | 'major-behind' | 'unknown';
+  /** Declared license evidence, when the scanner captured it. */
+  license?: {
+    raw: string | null;
+    spdxId: string | null;
+    source?: 'manifest' | 'registry' | 'license-file' | 'none';
+    confidence?: number;
+  };
 }
 
 // ── Detected framework ──
@@ -118,6 +127,11 @@ export interface ProjectScan {
   packageManager?: string;
   frameworks: DetectedFramework[];
   dependencies: DependencyRow[];
+  /** License declared by this project's own manifest, when present. */
+  declaredLicense?: {
+    raw: string | null;
+    spdxId: string | null;
+  };
   dependencyAgeBuckets: {
     current: number;
     oneBehind: number;

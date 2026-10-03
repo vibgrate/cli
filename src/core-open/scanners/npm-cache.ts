@@ -47,7 +47,7 @@ function parseReleaseDates(time: unknown): Record<string, string> | undefined {
  * ({ type }) or an array of such objects under `licenses`. Reduce any of these
  * to a single declared string (an SPDX expression for the array form).
  */
-function parseLicenseField(value: unknown): string | null {
+export function parseLicenseField(value: unknown): string | null {
   if (!value) return null;
   if (typeof value === 'string') return value.trim() || null;
   if (Array.isArray(value)) {

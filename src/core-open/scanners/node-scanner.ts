@@ -8,7 +8,7 @@ import { findPackageJsonFiles, readJsonFile, readTextFile, pathExists, FileCache
 import { loadNpmLockIndex, type NpmLockIndex, type LockfileIo } from './npm-lockfile.js';
 import { Semaphore } from '../utils/semaphore.js';
 import { withTimeout } from '../utils/timeout.js';
-import { NpmCache, isSemverSpec } from './npm-cache.js';
+import { NpmCache, isSemverSpec, parseLicenseField } from './npm-cache.js';
 import { buildDependencyLicense } from '../licenses/dependency-license.js';
 import { ageDaysBetween, daysToLibyears, aggregateLibyears } from '../scoring/libyear.js';
 import { latestLts, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
@@ -478,6 +478,9 @@ async function scanOnePackageJson(
     // Ignore file count errors
   }
 
+  const declaredRaw = parseLicenseField(pj.license ?? pj.licenses);
+  const declaredLicense = declaredRaw ? buildDependencyLicense(declaredRaw, 'manifest') : undefined;
+
   return {
     type: 'node',
     path: projectPath,
@@ -489,6 +492,7 @@ async function scanOnePackageJson(
     runtimeEolDate,
     frameworks,
     dependencies,
+    ...(declaredLicense ? { declaredLicense } : {}),
     dependencyAgeBuckets: buckets,
     libyears: aggregateLibyears(dependencies.map((d) => d.libyears)) ?? undefined,
     fileCount,

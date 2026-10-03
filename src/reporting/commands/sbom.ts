@@ -5,6 +5,7 @@ import { pathExists, readJsonFile, writeTextFile } from '../utils/fs.js';
 import type { DependencyRow, ProjectScan, ScanArtifact } from '../types.js';
 import { fullDependencyGraph, type LockfileComponent, type LockfileGraph } from '../../engine/lockfile.js';
 import type { Ecosystem } from '../../engine/drift.js';
+import { diagnoseLicenseParse, manifestRelativePath } from '../../core-open/licenses/diagnose.js';
 import { vexCommand } from './vex.js';
 
 type SbomFormat = 'cyclonedx' | 'spdx';
@@ -20,6 +21,62 @@ interface FlattenedDependency {
   scope: 'direct' | 'transitive';
   /** Which package registry this dependency resolves against — picks the purl scheme. */
   ecosystem: Ecosystem;
+  /** Repo-relative manifest that declared this dependency. */
+  manifestPath: string;
+  /** Declared license string, when the scan captured one. */
+  licenseRaw: string | null;
+  /** Resolved SPDX id, when parsing succeeded. Null when the string did not resolve. */
+  licenseSpdx: string | null;
+}
+
+const LICENSE_DIAGNOSTIC_PROPERTY = 'vibgrate:license-diagnostic';
+
+interface SbomLicense {
+  cycloneDx?: Array<{ license: { id: string } | { name: string } }>;
+  spdx?: { licenseConcluded: string; licenseDeclared?: string };
+  /** Stable diagnostic, set only when the declared string did not parse. */
+  diagnostic?: string;
+}
+
+/**
+ * License fields for one component. A resolved SPDX id is emitted as an id.
+ * An unparseable string is kept (truncated) and paired with one diagnostic —
+ * it is not omitted.
+ */
+function sbomLicense(
+  raw: string | null | undefined,
+  spdxId: string | null | undefined,
+  manifestPath: string,
+  subject?: string,
+): SbomLicense {
+  const declared = (raw ?? '').trim();
+  if (!declared && !spdxId) return {};
+  const diag = declared ? diagnoseLicenseParse(declared, manifestPath, subject) : null;
+  if (diag) {
+    return {
+      cycloneDx: [{ license: { name: diag.raw } }],
+      spdx: { licenseConcluded: 'NOASSERTION', licenseDeclared: diag.raw },
+      diagnostic: `${diag.code}: ${diag.message}`,
+    };
+  }
+  if (spdxId) {
+    return {
+      cycloneDx: [{ license: { id: spdxId } }],
+      spdx: { licenseConcluded: spdxId },
+    };
+  }
+  return {};
+}
+
+function rootProject(artifact: ScanArtifact): ProjectScan | undefined {
+  return artifact.projects.find((p) => p.path === '.' || p.path === '');
+}
+
+function rootSbomLicense(artifact: ScanArtifact): SbomLicense {
+  const project = rootProject(artifact);
+  const declared = project?.declaredLicense;
+  if (!project || !declared?.raw) return {};
+  return sbomLicense(declared.raw, declared.spdxId, manifestRelativePath(project.path, project.type), project.name);
 }
 
 /** `ProjectScan.type` → the purl-scheme ecosystem for its dependencies. */
@@ -193,7 +250,11 @@ function sbomSerialSeed(format: string, artifact: ScanArtifact, deps: FlattenedD
     artifact.rootPath ?? '',
     artifact.timestamp ?? '',
     artifact.vibgrateVersion ?? '',
-    ...deps.map((d) => `${d.package}|${d.version}|${d.currentSpec}|${d.project}|${d.drift}|${d.majorsBehind ?? ''}|${d.scope}`),
+    ...deps.map((d) => `${d.package}|${d.version}|${d.currentSpec}|${d.project}|${d.drift}|${d.majorsBehind ?? ''}|${d.scope}|${d.licenseSpdx ?? ''}|${d.licenseRaw ?? ''}`),
+    ...(() => {
+      const root = rootSbomLicense(artifact);
+      return root.diagnostic || root.spdx ? [`root-license|${root.spdx?.licenseConcluded ?? ''}|${root.spdx?.licenseDeclared ?? ''}|${root.diagnostic ?? ''}`] : [];
+    })(),
     ...(graph?.rootDependsOn.length ? [`root>${uniqSorted(graph.rootDependsOn).join(',')}`] : []),
     ...edgeLines,
   ].join('\n');
@@ -298,6 +359,9 @@ export function flattenDependencies(
         majorsBehind: dep.majorsBehind,
         scope: 'direct',
         ecosystem,
+        manifestPath: manifestRelativePath(project.path, project.type),
+        licenseRaw: dep.license?.raw ?? null,
+        licenseSpdx: dep.license?.spdxId ?? null,
       });
     }
   }
@@ -314,6 +378,9 @@ export function flattenDependencies(
       majorsBehind: null,
       scope: 'transitive',
       ecosystem: lockfileEcosystem ?? 'npm',
+      manifestPath: artifact.rootPath || '.',
+      licenseRaw: null,
+      licenseSpdx: null,
     });
   }
   return rows;
@@ -349,6 +416,7 @@ export function collectLockfileGraph(artifact: ScanArtifact, root: string): Lock
 export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Record<string, unknown> {
   const dependencies = flattenDependencies(artifact, graph?.components ?? [], graph?.ecosystem);
   const dependencyGraph = cycloneDxDependencyGraph(dependencies, graph);
+  const rootLicense = rootSbomLicense(artifact);
   return {
     bomFormat: 'CycloneDX',
     specVersion: '1.5',
@@ -367,22 +435,31 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
         type: 'application',
         'bom-ref': ROOT_BOM_REF,
         name: artifact.rootPath,
+        ...(rootLicense.cycloneDx ? { licenses: rootLicense.cycloneDx } : {}),
+        ...(rootLicense.diagnostic
+          ? { properties: [{ name: LICENSE_DIAGNOSTIC_PROPERTY, value: rootLicense.diagnostic }] }
+          : {}),
       },
     },
-    components: dependencies.map((dep) => ({
-      type: 'library',
-      'bom-ref': purlFor(dep.ecosystem, dep.package, dep.version),
-      name: dep.package,
-      version: dep.version,
-      purl: purlFor(dep.ecosystem, dep.package, dep.version),
-      properties: [
-        { name: 'vibgrate:project', value: dep.project },
-        { name: 'vibgrate:currentSpec', value: dep.currentSpec },
-        { name: 'vibgrate:drift', value: dep.drift },
-        { name: 'vibgrate:majorsBehind', value: String(dep.majorsBehind ?? 'unknown') },
-        { name: 'vibgrate:scope', value: dep.scope },
-      ],
-    })),
+    components: dependencies.map((dep) => {
+      const license = sbomLicense(dep.licenseRaw, dep.licenseSpdx, dep.manifestPath, dep.package);
+      return {
+        type: 'library',
+        'bom-ref': purlFor(dep.ecosystem, dep.package, dep.version),
+        name: dep.package,
+        version: dep.version,
+        purl: purlFor(dep.ecosystem, dep.package, dep.version),
+        ...(license.cycloneDx ? { licenses: license.cycloneDx } : {}),
+        properties: [
+          { name: 'vibgrate:project', value: dep.project },
+          { name: 'vibgrate:currentSpec', value: dep.currentSpec },
+          { name: 'vibgrate:drift', value: dep.drift },
+          { name: 'vibgrate:majorsBehind', value: String(dep.majorsBehind ?? 'unknown') },
+          { name: 'vibgrate:scope', value: dep.scope },
+          ...(license.diagnostic ? [{ name: LICENSE_DIAGNOSTIC_PROPERTY, value: license.diagnostic }] : []),
+        ],
+      };
+    }),
     ...(dependencyGraph ? { dependencies: dependencyGraph } : {}),
   };
 }
@@ -390,6 +467,7 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
 export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<string, unknown> {
   const dependencies = flattenDependencies(artifact, graph?.components ?? [], graph?.ecosystem);
   const relationships = spdxRelationships(dependencies, graph);
+  const rootLicense = rootSbomLicense(artifact);
   return {
     spdxVersion: 'SPDX-2.3',
     dataLicense: 'CC0-1.0',
@@ -400,28 +478,55 @@ export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<st
       created: artifact.timestamp,
       creators: [`Tool: @vibgrate/cli-${artifact.vibgrateVersion}`],
     },
-    packages: dependencies.map((dep, i) => ({
-      name: dep.package,
-      SPDXID: `SPDXRef-Package-${i + 1}`,
-      versionInfo: dep.version,
-      downloadLocation: 'NOASSERTION',
-      filesAnalyzed: false,
-      externalRefs: [
-        {
-          referenceCategory: 'PACKAGE-MANAGER',
-          referenceType: 'purl',
-          referenceLocator: purlFor(dep.ecosystem, dep.package, dep.version),
-        },
-      ],
-      annotations: [
-        {
-          annotationType: 'OTHER',
-          annotator: 'Tool: @vibgrate/cli',
-          annotationDate: artifact.timestamp,
-          comment: `project=${dep.project}; drift=${dep.drift}; majorsBehind=${dep.majorsBehind ?? 'unknown'}; scope=${dep.scope}`,
-        },
-      ],
-    })),
+    ...(rootLicense.diagnostic
+      ? {
+          annotations: [
+            {
+              annotationType: 'OTHER',
+              annotator: 'Tool: @vibgrate/cli',
+              annotationDate: artifact.timestamp,
+              comment: rootLicense.diagnostic,
+            },
+          ],
+        }
+      : {}),
+    packages: dependencies.map((dep, i) => {
+      const license = sbomLicense(dep.licenseRaw, dep.licenseSpdx, dep.manifestPath, dep.package);
+      return {
+        name: dep.package,
+        SPDXID: `SPDXRef-Package-${i + 1}`,
+        versionInfo: dep.version,
+        downloadLocation: 'NOASSERTION',
+        filesAnalyzed: false,
+        ...(license.spdx ? { licenseConcluded: license.spdx.licenseConcluded } : {}),
+        ...(license.spdx?.licenseDeclared ? { licenseDeclared: license.spdx.licenseDeclared } : {}),
+        externalRefs: [
+          {
+            referenceCategory: 'PACKAGE-MANAGER',
+            referenceType: 'purl',
+            referenceLocator: purlFor(dep.ecosystem, dep.package, dep.version),
+          },
+        ],
+        annotations: [
+          {
+            annotationType: 'OTHER',
+            annotator: 'Tool: @vibgrate/cli',
+            annotationDate: artifact.timestamp,
+            comment: `project=${dep.project}; drift=${dep.drift}; majorsBehind=${dep.majorsBehind ?? 'unknown'}; scope=${dep.scope}`,
+          },
+          ...(license.diagnostic
+            ? [
+                {
+                  annotationType: 'OTHER',
+                  annotator: 'Tool: @vibgrate/cli',
+                  annotationDate: artifact.timestamp,
+                  comment: license.diagnostic,
+                },
+              ]
+            : []),
+        ],
+      };
+    }),
     ...(relationships ? { relationships } : {}),
   };
 }

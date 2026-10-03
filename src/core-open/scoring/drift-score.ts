@@ -3,6 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import * as crypto from 'node:crypto';
 import type { ProjectScan, DriftScore, Finding, RiskLevel, VibgrateConfig } from '../types.js';
+import { diagnoseLicenseParse, manifestRelativePath } from '../licenses/diagnose.js';
 import { aggregateDependencyDrift } from './dependency-drift-v3.js';
 
 /**
@@ -283,6 +284,16 @@ export function computeDriftScore(projects: ProjectScan[]): DriftScore {
 
 // ── Findings generation ──
 
+function licenseFinding(diag: { code: string; message: string; path: string; raw: string }): Finding {
+  return {
+    ruleId: diag.code,
+    level: 'warning',
+    message: diag.message,
+    location: diag.path,
+    details: { raw: diag.raw },
+  };
+}
+
 export function generateFindings(
   projects: ProjectScan[],
   config?: VibgrateConfig,
@@ -380,6 +391,15 @@ export function generateFindings(
           location: project.path,
         });
       }
+    }
+
+    // Unparseable SPDX license ids. Fuzzy matches are not parse failures.
+    const manifestPath = manifestRelativePath(project.path, project.type);
+    const declared = diagnoseLicenseParse(project.declaredLicense?.raw, manifestPath, project.name);
+    if (declared) findings.push(licenseFinding(declared));
+    for (const dep of project.dependencies) {
+      const diag = diagnoseLicenseParse(dep.license?.raw, manifestPath, dep.package);
+      if (diag) findings.push(licenseFinding(diag));
     }
   }
 

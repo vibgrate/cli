@@ -262,6 +262,68 @@ describe('sbom helpers', () => {
     });
   });
 
+  it('keeps a valid SPDX id on the component', () => {
+    const artifact = makeArtifact('5.3.0', 90);
+    artifact.projects[0]!.dependencies[0]!.license = { raw: 'MIT', spdxId: 'MIT', source: 'registry', confidence: 1 };
+    artifact.projects[0]!.declaredLicense = { raw: 'Apache-2.0', spdxId: 'Apache-2.0' };
+    const cyclone = toCycloneDx(artifact) as {
+      metadata: { component: { licenses?: Array<{ license: { id?: string } }>; properties?: unknown } };
+      components: Array<{ licenses?: Array<{ license: { id?: string; name?: string } }>; properties: Array<{ name: string }> }>;
+    };
+    expect(cyclone.metadata.component.licenses).toEqual([{ license: { id: 'Apache-2.0' } }]);
+    expect(cyclone.metadata.component.properties).toBeUndefined();
+    expect(cyclone.components[0]!.licenses).toEqual([{ license: { id: 'MIT' } }]);
+    expect(cyclone.components[0]!.properties.some((p) => p.name === 'vibgrate:license-diagnostic')).toBe(false);
+
+    const spdx = toSpdx(artifact) as {
+      packages: Array<{ licenseConcluded?: string; licenseDeclared?: string }>;
+      annotations?: unknown;
+    };
+    expect(spdx.packages[0]!.licenseConcluded).toBe('MIT');
+    expect(spdx.packages[0]!.licenseDeclared).toBeUndefined();
+    expect(spdx.annotations).toBeUndefined();
+  });
+
+  it('reports an unparseable license id instead of dropping it', () => {
+    const artifact = makeArtifact('1.0.0', 90);
+    const tail = 'UNIQUE_FILE_TAIL';
+    artifact.projects[0]!.dependencies[0]!.package = 'left-pad';
+    artifact.projects[0]!.dependencies[0]!.license = {
+      raw: `NotARealLicense\n${'unrelated license file text. '.repeat(20)}${tail}`,
+      spdxId: null,
+      source: 'registry',
+      confidence: 0,
+    };
+    const cyclone = toCycloneDx(artifact) as {
+      components: Array<{
+        name: string;
+        licenses?: Array<{ license: { name?: string; id?: string } }>;
+        properties: Array<{ name: string; value: string }>;
+      }>;
+    };
+    const component = cyclone.components[0]!;
+    expect(component.licenses).toEqual([{ license: { name: 'NotARealLicense' } }]);
+    const diagnostic = component.properties.find((p) => p.name === 'vibgrate:license-diagnostic');
+    expect(diagnostic?.value).toContain('vibgrate/license-unparseable');
+    expect(diagnostic?.value).toContain('NotARealLicense');
+    expect(diagnostic?.value).toContain('package.json');
+    expect(diagnostic?.value).not.toContain(tail);
+    expect(diagnostic?.value).not.toContain('unrelated license file');
+
+    const spdx = toSpdx(artifact) as {
+      packages: Array<{
+        licenseConcluded?: string;
+        licenseDeclared?: string;
+        annotations: Array<{ comment: string }>;
+      }>;
+    };
+    expect(spdx.packages[0]!.licenseConcluded).toBe('NOASSERTION');
+    expect(spdx.packages[0]!.licenseDeclared).toBe('NotARealLicense');
+    const note = spdx.packages[0]!.annotations.map((a) => a.comment).join('\n');
+    expect(note).toContain('vibgrate/license-unparseable');
+    expect(note).not.toContain(tail);
+  });
+
   it('formats dependency deltas', () => {
     const base = makeArtifact('5.2.0', 80);
     const current = makeArtifact('5.3.0', 76);

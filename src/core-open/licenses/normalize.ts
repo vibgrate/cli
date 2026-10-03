@@ -142,26 +142,44 @@ export function normalizeLicense(raw: string | null | undefined): LicenseVerdict
   return verdictFromRecord(unknownLicenseRecord(input.slice(0, 120)), 'unknown', 0);
 }
 
+/** Resolve one license id (exact, alias, then fuzzy). Unknown when none match. */
+function resolveSingle(id: string): LicenseVerdict {
+  const exact = getLicenseRecord(id);
+  if (exact) return verdictFromRecord(exact, 'exact', 1);
+  const aliasId = resolveAlias(id);
+  if (aliasId) {
+    const rec = getLicenseRecord(aliasId);
+    if (rec) return verdictFromRecord(rec, 'alias', 0.95);
+  }
+  const fuzzy = fuzzyMatch(id);
+  if (fuzzy) return verdictFromRecord(fuzzy, 'fuzzy', 0.6);
+  return verdictFromRecord(unknownLicenseRecord(id), 'unknown', 0);
+}
+
+/**
+ * Constituent ids inside a compound expression that did not resolve.
+ * Empty for a single id, and empty when every constituent is exact, an alias,
+ * or a fuzzy family match. Order follows the expression.
+ */
+export function unresolvedConstituentIds(raw: string | null | undefined): string[] {
+  const input = (raw ?? '').trim();
+  if (!input || !isCompoundExpression(input)) return [];
+  const parsed = parseLicenseExpression(input);
+  const ids: string[] = [];
+  for (const id of parsed.licenseIds) {
+    if (resolveSingle(id).matchStatus === 'unknown' && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
 function resolveExpression(input: string): LicenseVerdict {
   const parsed = parseLicenseExpression(input);
   if (parsed.licenseIds.length === 0) {
     return verdictFromRecord(unknownLicenseRecord(input.slice(0, 120)), 'unknown', 0);
   }
 
-  // Resolve each constituent id to a verdict (via recursion through the
-  // single-id path: exact → alias → fuzzy).
-  const componentVerdicts = parsed.licenseIds.map((id) => {
-    const exact = getLicenseRecord(id);
-    if (exact) return verdictFromRecord(exact, 'exact', 1);
-    const aliasId = resolveAlias(id);
-    if (aliasId) {
-      const rec = getLicenseRecord(aliasId);
-      if (rec) return verdictFromRecord(rec, 'alias', 0.95);
-    }
-    const fuzzy = fuzzyMatch(id);
-    if (fuzzy) return verdictFromRecord(fuzzy, 'fuzzy', 0.6);
-    return verdictFromRecord(unknownLicenseRecord(id), 'unknown', 0);
-  });
+  // Resolve each constituent id: exact → alias → fuzzy → unknown.
+  const componentVerdicts = parsed.licenseIds.map((id) => resolveSingle(id));
 
   // For OR the consumer may pick the least-restrictive; for AND all apply, so
   // the most-restrictive governs.

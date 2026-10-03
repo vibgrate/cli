@@ -131,6 +131,13 @@ backward compatible.
 
 ### Fixed
 
+- **An unparseable license id is reported instead of being dropped.** `vg scan`
+  (text, JSON, SARIF, and Markdown) and `vg sbom export` (CycloneDX and SPDX)
+  now emit a `vibgrate/license-unparseable` warning when a declared license
+  string is not an SPDX id or expression. The message names the failed string
+  and the manifest path, and stays on one short line. A valid SPDX id, alias,
+  or fuzzy family match is unchanged.
+
 - **`vg show arch` clipped the map to a fixed viewport.** Columns that ran off the
   bottom of the window could not be scrolled or zoomed; the canvas is now a
   pannable, zoomable map (scroll or drag, pinch / Ctrl-scroll, + / −).

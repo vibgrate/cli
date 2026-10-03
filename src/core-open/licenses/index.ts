@@ -12,3 +12,4 @@ export * from './spdx-catalog.js';
 export * from './spdx-aliases.js';
 export * from './spdx-expression.js';
 export * from './normalize.js';
+export * from './diagnose.js';
