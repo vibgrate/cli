@@ -49,6 +49,7 @@ import type { ScipIndex } from './scip.js';
 import type { FileParse } from './types.js';
 import type { ResolveResult } from './resolve.js';
 import { fileRolesFromParses } from './ast-roles.js';
+import { assertLockfilesValid } from './lockfile-guard.js';
 import type { AstRoleHit } from '../core-open/scanners/architecture/ast-roles.js';
 
 export interface BuildOptions {
@@ -152,6 +153,9 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const timer = new StageTimer();
   timer.start('total');
   const root = path.resolve(options.root);
+  // Before discovery and source parse workers. A bad lockfile must not start
+  // a worker pool or leave a partial graph behind.
+  assertLockfilesValid(root);
   const exclude = mergeExcludes(root, options.exclude);
   timer.start('discover');
   const files = discover({

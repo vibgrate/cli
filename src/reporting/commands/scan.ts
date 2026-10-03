@@ -34,13 +34,14 @@ import { buildClaimUrl } from './push.js';
 import { emitIngestIdLine, emitDriftScoreLine } from '../utils/ingest-id-output.js';
 import { uploadScanArtifact } from '../utils/upload.js';
 import { buildGraph } from '../../engine/build.js';
+import { assertLockfilesValid, LockfileSyntaxError } from '../../engine/lockfile-guard.js';
 import { writeArtifacts, resolveGraphPath } from '../../engine/artifacts.js';
 import { readHaileSidecar } from '../../engine/haile/sidecar.js';
 import { isUsableHaileSymbol } from '../../engine/haile/format.js';
 import { writeSnapshot } from '../../engine/freshness.js';
 import { detectAiAssistant, printAiContextPrompt } from '../ai-context-prompt.js';
 import { resolveCliInvocation } from '../../util/cli-invocation.js';
-import { usageError } from '../../util/exit.js';
+import { CliError, ExitCode, usageError } from '../../util/exit.js';
 import { runSecurityPacks, type SecurityRunResult } from '../../security/run-packs.js';
 import { evaluateSecurityGate, lowestThreshold, parseFailOn } from '../../security/gate.js';
 import { securityFindingRow, securityPacksLabel } from '../../core-open/formatters/text.js';
@@ -442,6 +443,15 @@ export const scanCommand = new Command('scan')
     if (!(await pathExists(rootDir))) {
       console.error(chalk.red(`Path does not exist: ${rootDir}`));
       process.exit(1);
+    }
+
+    // Before project scanners and the code-map parse workers. A truncated
+    // lockfile must not become a partial dependency graph or a successful exit.
+    try {
+      assertLockfilesValid(rootDir);
+    } catch (err) {
+      if (err instanceof LockfileSyntaxError) throw new CliError(err.message, ExitCode.ERROR);
+      throw err;
     }
 
     // `--fail-on` is parsed up front so a typo is a usage error before a long

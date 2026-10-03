@@ -131,6 +131,14 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` and `vg build` stop when a lockfile is truncated or not valid
+  syntax.** A cut-off or syntactically invalid `package-lock.json`, `pnpm-lock.yaml`,
+  `yarn.lock`, or other lockfile used to be skipped, so the command could exit
+  successfully with a partial dependency graph. The command now exits non-zero
+  before source parsing starts. The error names the file and tells you to
+  regenerate it with your package manager. Lockfile contents are not printed.
+  A valid lockfile still scans and builds as before.
+
 - **`vg show arch` clipped the map to a fixed viewport.** Columns that ran off the
   bottom of the window could not be scrolled or zoomed; the canvas is now a
   pannable, zoomable map (scroll or drag, pinch / Ctrl-scroll, + / −).

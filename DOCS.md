@@ -1103,6 +1103,8 @@ vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [
 
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
+A truncated or syntactically invalid lockfile stops the scan before a dependency graph is built. The error names the file (for example `package-lock.json`, `pnpm-lock.yaml`, or `yarn.lock`) and tells you to regenerate it with your package manager. The message does not include the lockfile, and the process exits non-zero. A valid lockfile is scanned as before.
+
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`.
 
 Examples:
@@ -1334,6 +1336,8 @@ vg build [paths...]
 ```
 
 Maps source code into a graph artifact, enabling all downstream queries (`vg show`, `vg ask`, `vg impact`, etc.).
+
+A truncated or syntactically invalid lockfile stops the build before source files are parsed, so parse workers are not left running and a partial map is not written. The error names the file and tells you to regenerate it with your package manager. A valid lockfile builds as before.
 
 | Flag | Default | Description |
 |------|---------|-------------|
