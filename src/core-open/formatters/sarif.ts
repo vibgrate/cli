@@ -170,6 +170,11 @@ function buildRules(findings: Finding[]) {
         shortDescription: { text: 'Known vulnerability in an installed dependency' },
         helpUri: 'https://vibgrate.com/rules/vulnerability',
       },
+      'vibgrate/cvss-vector': {
+        id: 'vibgrate/cvss-vector',
+        shortDescription: { text: 'CVSS or severity vector could not be parsed' },
+        helpUri: 'https://vibgrate.com/rules/cvss-vector',
+      },
     };
     return descriptions[id] ?? {
       id,

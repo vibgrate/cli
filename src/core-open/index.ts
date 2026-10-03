@@ -142,9 +142,11 @@ export {
   parseOsvAdvisory,
   projectTypeToVulnEcosystem,
   VULN_RULE_ID,
+  CVSS_VECTOR_RULE_ID,
   type VulnTarget,
 } from './scanners/vulnerability-scanner.js';
-export { cvssV3BaseScore, severityFromCvss, severityRank, normalizeSeverityLabel } from './scoring/cvss.js';
+export { cvssV3BaseScore, parseCvssV3, severityFromCvss, severityRank, normalizeSeverityLabel } from './scoring/cvss.js';
+export type { CvssParseResult } from './scoring/cvss.js';
 export { computeUpgradeImpact, analyzeUsage, computeVersionJump } from './scanners/upgrade-impact.js';
 export {
   getChangelogSignals,

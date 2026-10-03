@@ -78,6 +78,7 @@ export function registerWhy(program: Command): void {
           const cvss = adv.cvss != null ? ` cvss ${adv.cvss}` : '';
           const fixed = adv.fixedVersions.length ? ` — fixed in ${adv.fixedVersions.join(', ')}` : ' — no fix available';
           info(`    ${severityTag(adv.severity)} ${idLabel}${c.dim(cvss)}${c.dim(fixed)}`);
+          if (adv.cvssDiagnostic) info(c.yellow(`        ${adv.cvssDiagnostic}`));
           if (adv.introduced) {
             const exposure = adv.exposureDays != null ? `, ${adv.exposureDays}d exposed` : '';
             info(

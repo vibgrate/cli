@@ -488,9 +488,20 @@ export interface VulnerabilityAdvisory {
   summary: string | null;
   /** Qualitative severity. */
   severity: VulnSeverity;
-  /** CVSS v3 base score (0–10), or null when not derivable from the advisory. */
+  /**
+   * CVSS v3 base score (0–10), or null when the advisory did not yield one.
+   * Null with {@link cvssDiagnostic} set means the vector failed to parse —
+   * not an absent score and not zero. Null without that field means no vector
+   * was supplied.
+   */
   cvss: number | null;
-  /** Raw CVSS vector string, when the advisory carried one. */
+  /**
+   * Set when a CVSS or severity vector was present but could not be parsed.
+   * Omitted when the vector parsed (including a real zero) or when no vector
+   * was supplied.
+   */
+  cvssDiagnostic?: string;
+  /** Raw CVSS vector string, when the advisory carried one short enough to keep. */
   cvssVector: string | null;
   /** First fixed version per affected range (empty when no fix is published). */
   fixedVersions: string[];

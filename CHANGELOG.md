@@ -131,6 +131,8 @@ backward compatible.
 
 ### Fixed
 
+- **An unparseable CVSS or severity vector is no longer silent.** `vg scan --vulns` (and the offline package manifest) used to drop a vector it could not parse and leave the advisory with no numeric score, the same shape as an advisory that never had one. A failed vector now keeps the score unset and adds a warning (`vibgrate/cvss-vector`) naming the parse failure and what to supply instead. A missing vector stays missing. A valid CVSS v3.0/v3.1 base vector still scores as before, including a real zero when every impact metric is None. The warning does not echo the raw vector.
+
 - **`vg show arch` clipped the map to a fixed viewport.** Columns that ran off the
   bottom of the window could not be scrolled or zoomed; the canvas is now a
   pannable, zoomable map (scroll or drag, pinch / Ctrl-scroll, + / −).
