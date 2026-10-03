@@ -44,8 +44,11 @@ describe('estimateDriftScore', () => {
     const before = estimateDriftScore(a, new Set());
     const afterOne = estimateDriftScore(a, new Set(['b'])); // moves 1 out of oneBehind
     const afterAll = estimateDriftScore(a, new Set(['a', 'b']));
-    expect(afterOne).toBeLessThanOrEqual(before);
-    expect(afterAll).toBeLessThanOrEqual(afterOne);
+    expect(afterOne).not.toBeNull();
+    expect(afterAll).not.toBeNull();
+    expect(before).not.toBeNull();
+    expect(afterOne ?? 0).toBeLessThanOrEqual(before ?? 0);
+    expect(afterAll ?? 0).toBeLessThanOrEqual(afterOne ?? 0);
   });
 
   it('does not mutate the input artifact', () => {

@@ -718,7 +718,10 @@ export async function runCoreScan(
   // ── Step: Drift score ──
   progress.startStep('drift');
   const drift = computeDriftScore(allProjects);
-  progress.completeStep('drift', `${drift.score}/100 — ${drift.riskLevel} risk`);
+  progress.completeStep(
+    'drift',
+    drift.score === null ? 'absent' : `${drift.score}/100 — ${drift.riskLevel} risk`,
+  );
 
   // ── Step: Findings ──
   progress.startStep('findings');
@@ -823,7 +826,9 @@ export async function runCoreScan(
         // baseline outside the repo degrades to its basename for the same reason.
         const relBaseline = path.relative(rootDir, baselinePath);
         artifact.baseline = !relBaseline || relBaseline.startsWith('..') ? path.basename(baselinePath) : relBaseline;
-        artifact.delta = artifact.drift.score - baseline.drift.score;
+        if (typeof artifact.drift.score === 'number' && typeof baseline.drift.score === 'number') {
+          artifact.delta = artifact.drift.score - baseline.drift.score;
+        }
       } catch {
         console.error(chalk.yellow(`Warning: Could not read baseline file: ${baselinePath}`));
       }

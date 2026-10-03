@@ -17,7 +17,8 @@ export async function runBaseline(rootDir: string): Promise<void> {
   const baselinePath = path.join(rootDir, '.vibgrate', 'baseline.json');
   await writeJsonFile(baselinePath, artifact);
   console.log(chalk.green('✔') + ` Baseline saved to ${chalk.bold('.vibgrate/baseline.json')}`);
-  console.log(chalk.dim(`  Baseline score: ${artifact.drift.score}/100`));
+  const score = artifact.drift.score;
+  console.log(chalk.dim(`  Baseline score: ${typeof score === 'number' ? `${score}/100` : 'n/a'}`));
 }
 
 export const baselineCommand = new Command('baseline')

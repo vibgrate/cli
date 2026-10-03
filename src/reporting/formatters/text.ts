@@ -128,13 +128,16 @@ export function formatText(artifact: ScanArtifact): string {
   }
 
   // Score summary — drift score is lower-is-better (0 = no drift).
-  const scoreColor = artifact.drift.score <= 30 ? chalk.green :
-    artifact.drift.score <= 60 ? chalk.yellow : chalk.red;
+  // A null score was not computed; it must not render as 0.
+  const score = artifact.drift.score;
+  const scoreColor = typeof score === 'number'
+    ? (score <= 30 ? chalk.green : score <= 60 ? chalk.yellow : chalk.red)
+    : chalk.dim;
 
   lines.push(...titleBox('DriftScore Summary'));
   lines.push('');
-  lines.push(chalk.bold('  DriftScore:   ') + scoreColor.bold(`${artifact.drift.score}/100`));
-  lines.push(chalk.bold('  Risk Level:   ') + riskBadge(artifact.drift.riskLevel));
+  lines.push(chalk.bold('  DriftScore:   ') + (typeof score === 'number' ? scoreColor.bold(`${score}/100`) : chalk.dim('n/a')));
+  lines.push(chalk.bold('  Risk Level:   ') + (typeof score === 'number' ? riskBadge(artifact.drift.riskLevel) : chalk.dim('n/a')));
   lines.push(chalk.bold('  Projects:     ') + `${artifact.projects.length}`);
 
   if (artifact.vcs) {
@@ -146,13 +149,17 @@ export function formatText(artifact: ScanArtifact): string {
 
   lines.push('');
 
-  // Score breakdown
+  // Score breakdown. A missing `measured` list is a legacy artifact that
+  // stored a number for every component; a null component is unmeasured
+  // even when that list names it.
   const m = new Set(artifact.drift.measured ?? ['runtime', 'framework', 'dependency', 'eol']);
+  const componentCell = (key: 'runtime' | 'framework' | 'dependency' | 'eol', value: number | null): string =>
+    m.has(key) && typeof value === 'number' ? scoreBar(value) : chalk.dim('n/a');
   lines.push('  ' + chalk.bold.underline('Score Breakdown'));
-  lines.push(`    Runtime:      ${m.has('runtime') ? scoreBar(artifact.drift.components.runtimeScore) : chalk.dim('n/a')}`);
-  lines.push(`    Frameworks:   ${m.has('framework') ? scoreBar(artifact.drift.components.frameworkScore) : chalk.dim('n/a')}`);
-  lines.push(`    Dependencies: ${m.has('dependency') ? scoreBar(artifact.drift.components.dependencyScore) : chalk.dim('n/a')}`);
-  lines.push(`    EOL Risk:     ${m.has('eol') ? scoreBar(artifact.drift.components.eolScore) : chalk.dim('n/a')}`);
+  lines.push(`    Runtime:      ${componentCell('runtime', artifact.drift.components.runtimeScore)}`);
+  lines.push(`    Frameworks:   ${componentCell('framework', artifact.drift.components.frameworkScore)}`);
+  lines.push(`    Dependencies: ${componentCell('dependency', artifact.drift.components.dependencyScore)}`);
+  lines.push(`    EOL Risk:     ${componentCell('eol', artifact.drift.components.eolScore)}`);
   lines.push('');
 
   const scannedParts: string[] = [`Scanned at ${artifact.timestamp}`];

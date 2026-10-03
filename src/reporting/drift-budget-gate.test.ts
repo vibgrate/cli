@@ -1,9 +1,36 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateConfigDriftBudget } from './drift-budget-gate.js';
+import { driftBudgetFlagDecision, evaluateConfigDriftBudget } from './drift-budget-gate.js';
 
 const file = '.vibgrate/config.yml';
 
+describe('driftBudgetFlagDecision', () => {
+  it('does not compare an absent score, even against a budget of 0', () => {
+    expect(driftBudgetFlagDecision(null, 0)).toEqual({
+      exitCode: 0,
+      message: 'DriftScore is absent; --drift-budget was not applied.',
+    });
+  });
+
+  it('keeps a measured zero inside the budget and fails a real overrun', () => {
+    expect(driftBudgetFlagDecision(0, 0)).toEqual({ exitCode: 0, message: null });
+    expect(driftBudgetFlagDecision(41, 40).exitCode).toBe(2);
+    expect(driftBudgetFlagDecision(41, 40).message).toContain('41/100');
+  });
+});
+
 describe('evaluateConfigDriftBudget', () => {
+  it('does not apply the budget when DriftScore is absent', () => {
+    const gate = evaluateConfigDriftBudget({
+      raw: { mode: 'enforce', maxScore: 0 },
+      configFile: file,
+      headScore: null,
+      baseScore: null,
+    });
+    expect(gate.exitCode).toBe(0);
+    expect(gate.verdict).toBeNull();
+    expect(gate.lines[0]?.text).toContain('DriftScore is absent');
+  });
+
   it('does nothing when the config has no driftBudget', () => {
     expect(evaluateConfigDriftBudget({ raw: undefined, configFile: file, headScore: 90, baseScore: null })).toEqual({
       exitCode: 0,

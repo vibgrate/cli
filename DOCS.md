@@ -2816,6 +2816,8 @@ The DriftScore is a deterministic, versioned metric (0–100) that represents ho
 
 **Lower score = healthier upgrade posture.** 0 means no drift (fully current); 100 means maximum drift. Higher is worse.
 
+A number is reported only when something was measured. If a scan has no runtime, framework, dependency, or end-of-life signal, the DriftScore is absent: `null` in JSON and `n/a` in the text and Markdown report. That is not a score of 0. `--drift-budget` skips the comparison when the score is absent and does not fail the scan for it.
+
 The methodology is published: see the [public scoring specification](./docs/public/SCORING-METHODOLOGY-PUBLIC.md) in this repository and the overview at [vibgrate.com/driftscore](https://vibgrate.com/driftscore).
 
 ### Risk Levels

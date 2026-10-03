@@ -18,7 +18,7 @@ import {
   loadConfig,
   findConfigFile,
 } from '../../core-open/index.js';
-import { evaluateConfigDriftBudget } from '../drift-budget-gate.js';
+import { driftBudgetFlagDecision, evaluateConfigDriftBudget } from '../drift-budget-gate.js';
 import type { ScanOptions, ScanArtifact } from '../../core-open/index.js';
 import { analyzeReachability, collectPreflightDependencies } from '../reachability.js';
 import type { VgGraph } from '../../schema.js';
@@ -889,18 +889,24 @@ export const scanCommand = new Command('scan')
       if (!opts.quiet) console.error(chalk.dim(`\niac gate: no findings at or above ${threshold} (${securityPacksLabel(section)}).`));
     }
 
-    if (scanOpts.driftBudget !== undefined && artifact.drift.score > scanOpts.driftBudget) {
-      console.error(chalk.red(`\nFailing fitness function: DriftScore ${artifact.drift.score}/100 exceeds budget ${scanOpts.driftBudget}.`));
-      process.exit(2);
+    if (scanOpts.driftBudget !== undefined) {
+      const decision = driftBudgetFlagDecision(artifact.drift.score, scanOpts.driftBudget);
+      if (decision.exitCode === 2 && decision.message) {
+        console.error(chalk.red(`\n${decision.message}`));
+        process.exit(2);
+      }
+      if (decision.message) {
+        console.error(chalk.yellow(`\n${decision.message}`));
+      }
     }
 
     if (scanOpts.driftWorseningPercent !== undefined) {
-      if (artifact.delta === undefined) {
+      if (artifact.drift.score === null) {
+        console.error(chalk.yellow('\nDriftScore is absent; --drift-worsening was not applied.'));
+      } else if (artifact.delta === undefined) {
         console.error(chalk.red('\nFailing fitness function: --drift-worsening requires --baseline to compare against previous drift.'));
         process.exit(2);
-      }
-
-      if (artifact.delta > 0) {
+      } else if (artifact.delta > 0) {
         const baselineScore = artifact.drift.score - artifact.delta;
         const denominator = Math.max(Math.abs(baselineScore), 0.0001);
         const worseningPercent = (artifact.delta / denominator) * 100;
@@ -920,7 +926,9 @@ export const scanCommand = new Command('scan')
         raw: projectConfig.driftBudget,
         configFile: findConfigFile(rootDir),
         headScore: artifact.drift.score,
-        baseScore: artifact.delta === undefined ? null : artifact.drift.score - artifact.delta,
+        baseScore: artifact.delta === undefined || artifact.drift.score === null
+          ? null
+          : artifact.drift.score - artifact.delta,
       });
       for (const line of gate.lines) {
         if (line.level === 'error') console.error(chalk.red(line.text));

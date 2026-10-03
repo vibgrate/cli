@@ -131,6 +131,15 @@ backward compatible.
 
 ### Fixed
 
+- **An unscored DriftScore no longer prints as 0.** A scan that measured no
+  runtime, framework, dependency, or end-of-life signal used to report
+  DriftScore 0 and low risk — the same result as a fully current tree.
+  Unmeasured components, and an overall score with nothing to measure, are
+  now null in `vg scan --format json` and `n/a` in the text and Markdown
+  summary. A score that was actually computed, including a real 0, is
+  unchanged. `--drift-budget` skips the comparison when the score is absent
+  instead of treating that absence as 0.
+
 - **`vg show arch` clipped the map to a fixed viewport.** Columns that ran off the
   bottom of the window could not be scrolled or zoomed; the canvas is now a
   pannable, zoomable map (scroll or drag, pinch / Ctrl-scroll, + / −).

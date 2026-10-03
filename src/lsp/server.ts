@@ -118,9 +118,11 @@ export interface ScanArtifactNotification {
 
 /** `vibgrate/score` — pushed whenever the score changes. Drives the status bar. */
 export interface ScoreNotification {
-  score: number;
-  /** DRIFTSCORE-V3-SPEC §5. Clients map band → theme colour; we never send one. */
-  band: Band;
+  /** DriftScore, or null when the scan measured nothing. Never 0 for an absent score. */
+  score: number | null;
+  /** DRIFTSCORE-V3-SPEC §5. Clients map band → theme colour; we never send one.
+   *  `none` means the score was not measured. */
+  band: Band | 'none';
   /** `estimated` renders with a leading `~` (v3 §2.4). Offline is NOT estimated. */
   mode: 'verified' | 'estimated';
   /** Clients must break trend lines across a change here (v3 version-tag note). */
@@ -991,19 +993,29 @@ export class VibgrateLanguageServer {
     // `riskLevel` is what `driftscore-2.0` ships; v3 renames it `band` (§5
     // envelope). We normalise to `band` on the wire so clients are already
     // speaking v3 and need no change when the engine catches up.
-    const band = (a.drift.riskLevel ?? 'low') as Band;
+    // `none` stays `none` — an unscored scan is not low risk.
+    const band: Band | 'none' =
+      a.drift.riskLevel === 'moderate' || a.drift.riskLevel === 'high' || a.drift.riskLevel === 'low'
+        ? a.drift.riskLevel
+        : 'none';
+    const numericScore = typeof a.drift.score === 'number' ? a.drift.score : null;
 
     // History + drift diff (plan §5.6/§5.8): diff against the last recorded
     // entry, then record this one. Both engine-side — clients only render.
-    const historyEntry: ScoreHistoryEntry = {
-      ts: a.timestamp,
-      score: a.drift.score,
-      band,
-      mode: a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated'),
-      methodology: a.drift.methodologyVersion ?? 'unknown',
-    };
-    const delta = deltaFrom(lastEntry(this.opts.root), historyEntry);
-    recordScore(this.opts.root, historyEntry);
+    // An absent score is not recorded; a 0 on the sparkline would look measured.
+    const mode = a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated');
+    let delta: number | undefined;
+    if (numericScore !== null && band !== 'none') {
+      const historyEntry: ScoreHistoryEntry = {
+        ts: a.timestamp,
+        score: numericScore,
+        band,
+        mode,
+        methodology: a.drift.methodologyVersion ?? 'unknown',
+      };
+      delta = deltaFrom(lastEntry(this.opts.root), historyEntry);
+      recordScore(this.opts.root, historyEntry);
+    }
 
     // Per-dependency state for the inline/hover surfaces — all O(deps), once
     // per scan, never in a hover or decoration hot path (coverage plan §5).
@@ -1016,19 +1028,19 @@ export class VibgrateLanguageServer {
         }
       }
     }
-    const snapshot = { ts: a.timestamp, methodology: historyEntry.methodology, drifted: driftedKeys };
+    const snapshot = { ts: a.timestamp, methodology: a.drift.methodologyVersion ?? 'unknown', drifted: driftedKeys };
     this.newDrift = newlyDrifted(readInventory(this.opts.root), snapshot);
     recordInventory(this.opts.root, snapshot);
 
     const payload: ScoreNotification = {
-      score: a.drift.score,
+      score: numericScore,
       band,
       // v3 §2.4: `estimated` means "no timestamps at all" — it is NOT an
       // offline marker. An air-gapped scan against a dated snapshot is Verified.
       // The score now carries the authoritative provenance (driftscore-3.0
       // envelope); fall back to the artifact heuristic for pre-v3 engines.
-      mode: historyEntry.mode,
-      methodology: historyEntry.methodology,
+      mode,
+      methodology: a.drift.methodologyVersion ?? 'unknown',
       scale: '0 best, 100 worst',
       counts: { behind, eol, unmaintained, total },
       rootPath: a.rootPath,
@@ -1246,9 +1258,11 @@ export class VibgrateLanguageServer {
       (project.drift?.mode ?? a.drift.mode ?? (hasReleaseDates(a) ? 'verified' : 'estimated')) ===
       'estimated';
     const mode = estimated ? '~' : '';
-    const score = project.drift?.score ?? a.drift.score;
-    const band = project.drift?.riskLevel ?? a.drift.riskLevel;
-    const title = `Vibgrate · drift ${mode}${score} (${band}) · ${behind} behind · ${eol} EOL`;
+    const rawScore = project.drift ? project.drift.score : a.drift.score;
+    const rawBand = project.drift ? project.drift.riskLevel : a.drift.riskLevel;
+    const scoreText = typeof rawScore === 'number' ? `${mode}${rawScore}` : 'n/a';
+    const bandText = typeof rawScore === 'number' ? rawBand : 'n/a';
+    const title = `Vibgrate · drift ${scoreText} (${bandText}) · ${behind} behind · ${eol} EOL`;
 
     return [
       {
@@ -2151,8 +2165,10 @@ function buildProjectRefs(rootDir: string, projects: ProjectScan[]): ProjectRef[
       name: rel,
       manifestPath: manifestRelativePath(p),
       ...(lockfilePath ? { lockfilePath } : {}),
-      score: p.drift.score,
-      band: (p.drift.riskLevel ?? 'low') as Band,
+      ...(typeof p.drift.score === 'number' ? { score: p.drift.score } : {}),
+      ...(p.drift.riskLevel === 'low' || p.drift.riskLevel === 'moderate' || p.drift.riskLevel === 'high'
+        ? { band: p.drift.riskLevel }
+        : {}),
       mode: (p.drift.mode ?? 'verified') as 'verified' | 'estimated',
     });
   }
@@ -2201,9 +2217,14 @@ function scoreForProject(rootDir: string, a: ScanArtifact, proj: ProjectScan): S
   ).length;
   const hasDates = (proj.dependencies ?? []).some((d) => d.ageDays !== null && d.ageDays !== undefined);
 
+  const score = typeof proj.drift.score === 'number' ? proj.drift.score : null;
+  const band: Band | 'none' =
+    proj.drift.riskLevel === 'low' || proj.drift.riskLevel === 'moderate' || proj.drift.riskLevel === 'high'
+      ? proj.drift.riskLevel
+      : 'none';
   return {
-    score: proj.drift.score,
-    band: (proj.drift.riskLevel ?? 'low') as Band,
+    score,
+    band,
     mode: proj.drift.mode ?? (hasDates ? 'verified' : 'estimated'),
     methodology: proj.drift.methodologyVersion ?? a.drift.methodologyVersion ?? 'unknown',
     scale: '0 best, 100 worst',

@@ -170,17 +170,19 @@ export interface MermaidDiagram {
 
 export interface DriftScore {
   /**
-   * Aggregate drift score, 0–100. Lower is better: 0 = no drift, 100 = maximum drift.
-   * Risk bands: 0–30 = low, 31–60 = moderate, 61–100 = high.
+   * Aggregate drift score, 0–100, or null when nothing was measured.
+   * Lower is better: 0 = no drift, 100 = maximum drift. Null is absent, not
+   * a perfect score. Risk bands: 0–30 = low, 31–60 = moderate, 61–100 = high.
+   * `none` means the score was not computed.
    */
-  score: number;
+  score: number | null;
   riskLevel: RiskLevel;
-  /** Per-component drift scores (0 = no drift, 100 = maximum drift). */
+  /** Per-component drift scores (0 = no drift, 100 = maximum drift). Null means that component was not measured. */
   components: {
-    runtimeScore: number;
-    frameworkScore: number;
-    dependencyScore: number;
-    eolScore: number;
+    runtimeScore: number | null;
+    frameworkScore: number | null;
+    dependencyScore: number | null;
+    eolScore: number | null;
   };
   /** Which components had sufficient data to score. Missing = no data available. */
   measured?: ('runtime' | 'framework' | 'dependency' | 'eol')[];

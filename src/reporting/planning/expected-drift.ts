@@ -21,7 +21,7 @@ import type { ScanArtifact, ProjectScan } from '../../core-open/index.js';
  */
 
 /** Recompute the DriftScore assuming every package named in `upgraded` lands at latest. */
-export function estimateDriftScore(artifact: ScanArtifact, upgraded: Set<string>): number {
+export function estimateDriftScore(artifact: ScanArtifact, upgraded: Set<string>): number | null {
   const projects: ProjectScan[] = JSON.parse(JSON.stringify(artifact.projects ?? []));
   for (const p of projects) {
     const buckets = p.dependencyAgeBuckets;

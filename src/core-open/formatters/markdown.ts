@@ -28,8 +28,9 @@ export function formatMarkdown(artifact: ScanArtifact): string {
   lines.push('');
   lines.push(`| Metric | Value |`);
   lines.push(`|--------|-------|`);
-  lines.push(`| **DriftScore** | ${artifact.drift.score}/100 |`);
-  lines.push(`| **Risk Level** | ${artifact.drift.riskLevel.toUpperCase()} |`);
+  const score = artifact.drift.score;
+  lines.push(`| **DriftScore** | ${typeof score === 'number' ? `${score}/100` : 'n/a'} |`);
+  lines.push(`| **Risk Level** | ${typeof score === 'number' ? artifact.drift.riskLevel.toUpperCase() : 'n/a'} |`);
   lines.push(`| **Projects** | ${artifact.projects.length} |`);
   if (billing) {
     // Per-size billable contribution (count ÷ ratio) to 1–2 dp, so tiny projects
@@ -64,10 +65,11 @@ export function formatMarkdown(artifact: ScanArtifact): string {
   lines.push('');
   lines.push(`| Component | Score |`);
   lines.push(`|-----------|-------|`);
-  lines.push(`| Runtime | ${artifact.drift.components.runtimeScore} |`);
-  lines.push(`| Frameworks | ${artifact.drift.components.frameworkScore} |`);
-  lines.push(`| Dependencies | ${artifact.drift.components.dependencyScore} |`);
-  lines.push(`| EOL Risk | ${artifact.drift.components.eolScore} |`);
+  const cell = (value: number | null): string => (typeof value === 'number' ? String(value) : 'n/a');
+  lines.push(`| Runtime | ${cell(artifact.drift.components.runtimeScore)} |`);
+  lines.push(`| Frameworks | ${cell(artifact.drift.components.frameworkScore)} |`);
+  lines.push(`| Dependencies | ${cell(artifact.drift.components.dependencyScore)} |`);
+  lines.push(`| EOL Risk | ${cell(artifact.drift.components.eolScore)} |`);
   lines.push('');
 
   // Per project

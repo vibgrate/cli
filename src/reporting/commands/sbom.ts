@@ -468,7 +468,11 @@ export function formatDeltaText(base: ScanArtifact, current: ScanArtifact): stri
     '===================',
     `Baseline: ${base.timestamp}`,
     `Current:  ${current.timestamp}`,
-    `DriftScore delta: ${(current.drift.score - base.drift.score).toFixed(2)} points`,
+    `DriftScore delta: ${
+      typeof current.drift.score === 'number' && typeof base.drift.score === 'number'
+        ? `${(current.drift.score - base.drift.score).toFixed(2)} points`
+        : 'n/a'
+    }`,
     '',
     `Added dependencies (${added.length})`,
     ...added.map((d) => `  + ${d}`),

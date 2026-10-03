@@ -16,9 +16,30 @@ export interface DriftBudgetGateInput {
   raw: unknown;
   /** Where the config came from, for messages. */
   configFile: string | null;
-  headScore: number;
+  /** Null when the scan did not measure a DriftScore. Never treat that as 0. */
+  headScore: number | null;
   /** Score before this change: `headScore - delta` when `--baseline` was used. */
   baseScore: number | null;
+}
+
+/**
+ * Compare a DriftScore to `--drift-budget`.
+ * An absent score is not compared and does not fail the scan.
+ */
+export function driftBudgetFlagDecision(
+  score: number | null,
+  budget: number,
+): { exitCode: 0 | 2; message: string | null } {
+  if (score === null) {
+    return { exitCode: 0, message: 'DriftScore is absent; --drift-budget was not applied.' };
+  }
+  if (score > budget) {
+    return {
+      exitCode: 2,
+      message: `Failing fitness function: DriftScore ${score}/100 exceeds budget ${budget}.`,
+    };
+  }
+  return { exitCode: 0, message: null };
 }
 
 export type GateLineLevel = 'info' | 'warn' | 'error';
@@ -42,6 +63,14 @@ export function evaluateConfigDriftBudget(input: DriftBudgetGateInput): DriftBud
         { level: 'warn', text: `driftBudget in ${source} was not applied:` },
         ...parsed.errors.map((e) => ({ level: 'warn' as const, text: `  ${e}` })),
       ],
+    };
+  }
+
+  if (input.headScore === null) {
+    return {
+      exitCode: 0,
+      verdict: null,
+      lines: [{ level: 'info', text: 'DriftScore is absent; the drift budget was not applied.' }],
     };
   }
 

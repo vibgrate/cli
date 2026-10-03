@@ -5,6 +5,8 @@ import { describe, it, expect } from 'vitest';
 import { formatSarif as formatSarifCore } from '../../core-open/formatters/sarif.js';
 import { formatMarkdown } from '../formatters/markdown.js';
 import { formatText } from '../formatters/text.js';
+import { formatMarkdown as formatScanMarkdown } from '../../core-open/formatters/markdown.js';
+import { formatText as formatScanText } from '../../core-open/formatters/text.js';
 import type { ScanArtifact } from '../types.js';
 
 // The reporting-side artifact type has drifted from core-open's (a stale
@@ -371,5 +373,67 @@ describe('formatText', () => {
   it('handles empty projects', () => {
     const text = formatText(makeArtifact({ projects: [], findings: [] }));
     expect(text).toContain('Vibgrate Drift Report');
+  });
+
+  it('renders an absent DriftScore as n/a and a measured zero as 0', () => {
+    const absent = makeArtifact({
+      projects: [],
+      findings: [],
+      drift: {
+        score: null,
+        riskLevel: 'none',
+        components: {
+          runtimeScore: null,
+          frameworkScore: null,
+          dependencyScore: null,
+          eolScore: null,
+        },
+        measured: [],
+      },
+    });
+    const text = formatText(absent);
+    expect(text).toContain('n/a');
+    expect(text).not.toContain('0/100');
+    const md = formatMarkdown(absent);
+    expect(md).toContain('| **DriftScore** | n/a');
+    expect(md).toContain('| Runtime | n/a |');
+    expect(md).not.toContain('0/100');
+
+    const zero = formatText(makeArtifact({
+      drift: {
+        score: 0,
+        riskLevel: 'low',
+        components: {
+          runtimeScore: 0,
+          frameworkScore: 0,
+          dependencyScore: 0,
+          eolScore: 0,
+        },
+        measured: ['runtime', 'framework', 'dependency', 'eol'],
+      },
+    }));
+    expect(zero).toContain('0/100');
+  });
+
+  it('scan summary keeps an absent DriftScore absent in text, markdown, and JSON', () => {
+    const drift = {
+      score: null,
+      riskLevel: 'none' as const,
+      components: {
+        runtimeScore: null,
+        frameworkScore: null,
+        dependencyScore: null,
+        eolScore: null,
+      },
+      measured: [] as const,
+    };
+    const artifact = { ...makeArtifact({ projects: [], findings: [] }), drift };
+    const text = formatScanText(artifact as never);
+    const md = formatScanMarkdown(artifact as never);
+    expect(text).toContain('n/a');
+    expect(text).not.toContain('0/100');
+    expect(md).toContain('| **DriftScore** | n/a |');
+    expect(md).toContain('| Runtime | n/a |');
+    expect(JSON.parse(JSON.stringify(drift)).score).toBeNull();
   });
 });

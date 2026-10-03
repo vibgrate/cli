@@ -286,17 +286,18 @@ export interface MermaidDiagram {
 export interface DriftScore {
   /**
    * DriftScore (`driftscore-2.0`): 0–100 where **0 = no drift (best)** and
-   * **100 = maximum drift (worst)**. Higher is worse — consistent with
-   * RiskScore and the "drift budget" model. Components below are also drift
-   * (0 = fully current).
+   * **100 = maximum drift (worst)**, or null when nothing was measured.
+   * Higher is worse — consistent with RiskScore and the "drift budget" model.
+   * Null is absent, not a perfect score. Components below are also drift
+   * (0 = fully current); a null component was not measured.
    */
-  score: number;
+  score: number | null;
   riskLevel: RiskLevel;
   components: {
-    runtimeScore: number;
-    frameworkScore: number;
-    dependencyScore: number;
-    eolScore: number;
+    runtimeScore: number | null;
+    frameworkScore: number | null;
+    dependencyScore: number | null;
+    eolScore: number | null;
     /**
      * Libyear-based dependency-freshness sub-score as drift (0–100, 0 = fresh).
      * Optional/additive: only present when release-date data was available, so
