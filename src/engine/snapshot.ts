@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as zlib from 'node:zlib';
 import { Packr } from 'msgpackr';
-import { parseGraph } from './serialize.js';
+import { assertSupportedGraph, parseGraph } from './serialize.js';
 import { VERSION } from '../version.js';
 import type { VgGraph } from '../schema.js';
 
@@ -216,24 +216,23 @@ function readSnapshotHeader(file: string): SnapshotHeader | null {
  * Load a map file, preferring the binary snapshot and self-healing it.
  * Fast path: valid snapshot (sidecar or standalone) → decode it. Fallback:
  * parse `graph.json`, then (best-effort) rewrite the sidecar so the next load
- * takes the fast path. Returns null only when neither representation yields a
- * graph — exactly the cases the pre-snapshot code treated as "no graph".
+ * takes the fast path.
+ *
+ * Returns null only when no map file is there. A file that is truncated, not
+ * valid JSON, or written with a schema this version cannot read throws
+ * `GraphLoadError` — it is not reported as missing, and the parser message
+ * (which can quote the file) is not surfaced.
  */
 export function loadGraphFileWithSnapshot(graphPath: string): VgGraph | null {
   const snap = readGraphSnapshot(graphPath);
-  if (snap) return snap;
+  if (snap) return assertSupportedGraph(snap);
   let json: string;
   try {
     json = fs.readFileSync(graphPath, 'utf8');
   } catch {
     return null;
   }
-  let graph: VgGraph;
-  try {
-    graph = parseGraph(json);
-  } catch {
-    return null;
-  }
+  const graph = parseGraph(json);
   writeGraphSnapshot(graphPath, graph);
   return graph;
 }

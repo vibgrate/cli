@@ -15,7 +15,7 @@ import { coveringTests } from '../engine/test-query.js';
 import { loadOrDiscoverFederation } from '../runtime/federation.js';
 import { highConfidenceBridges } from '../runtime/bridge-edges.js';
 import { repositoryIdFromRoot } from '../runtime/paths.js';
-import { parseGraph } from '../engine/serialize.js';
+import { GraphLoadError, parseGraph } from '../engine/serialize.js';
 import { loadVulnerabilities, filterBySeverity, resolvePackageTarget, openFixableAdvisories } from './vuln-data.js';
 import { attributedInventory } from './attribution.js';
 import { computeUpgradeImpact, getChangelogSignals, type VulnSeverity } from '../core-open/index.js';
@@ -622,8 +622,11 @@ export const TOOLS: VgTool[] = [
             graph: { corpusHash: mg.provenance.corpusHash },
             matches,
           };
-        } catch {
-          return { member: m.label, root: m.root, via, graph: null, note: 'member map unreadable — rebuild with `vg`' };
+        } catch (err) {
+          const note = err instanceof GraphLoadError
+            ? err.message
+            : 'member map unreadable — rebuild it with `vg build`';
+          return { member: m.label, root: m.root, via, graph: null, note };
         }
       });
 

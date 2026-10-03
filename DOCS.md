@@ -3369,6 +3369,12 @@ CI and agents branch on these, so they are a stable contract.
 The same rule is why [`vg review`](#vg-review) exits `6` when there is no code map, and why `--explain`
 exits `6` rather than quietly producing a review no model contributed to.
 
+A code map that is **missing** stays exit `3` (`no map found`). A map that is
+on disk but truncated, not valid JSON, or written with a schema this version
+cannot read (`vg-graph/1.0` and `vg-graph/1.1` are the ones it reads) exits `1`
+instead. The message names which of those it is and says to rebuild with
+`vg build`. It does not include the file.
+
 ---
 
 ## Programmatic API

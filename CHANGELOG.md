@@ -131,6 +131,15 @@ backward compatible.
 
 ### Fixed
 
+- **A damaged code map now fails with a clear error.** Commands that load the
+  map (`vg show`, `vg impact`, `vg ask`, and the rest) used to treat a
+  truncated or invalid `graph.json` as if the map were missing, or surface a
+  parser stack that quoted the file. They now exit `1` and name the failure —
+  truncated, not valid JSON, or a schema this version cannot read — and say
+  to rebuild with `vg build`. The message does not include the file. A map
+  that is simply absent is still reported as missing (exit `3`). Maps this
+  version already reads (`vg-graph/1.0` and `vg-graph/1.1`) load as before.
+
 - **`vg show arch` clipped the map to a fixed viewport.** Columns that ran off the
   bottom of the window could not be scrolled or zoomed; the canvas is now a
   pannable, zoomable map (scroll or drag, pinch / Ctrl-scroll, + / −).

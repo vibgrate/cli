@@ -15,6 +15,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { cacheDir } from './cache.js';
 import { loadGraphFileWithSnapshot } from './snapshot.js';
+import { assertSupportedGraph, isSupportedSchemaVersion } from './serialize.js';
 import type {
   Area,
   EpistemicTier,
@@ -351,7 +352,9 @@ export function loadGraphFromIndex(root: string): VgGraph | null {
 /**
  * Load the graph preferring the SQLite index when its corpusHash matches the
  * committed graph.json provenance (or when only the index exists). Falls back
- * to graph.json. Returns null if neither is usable.
+ * to graph.json. Returns null when neither is present. A present `graph.json`
+ * that this version cannot read throws `GraphLoadError` (see `parseGraph`)
+ * instead of falling through to a stale index.
  */
 export function loadGraphPreferIndex(
   root: string,
@@ -363,12 +366,14 @@ export function loadGraphPreferIndex(
   const jsonGraph: VgGraph | null = loadGraphFileWithSnapshot(graphJsonPath);
 
   const fromIndex = loadGraphFromIndex(root);
-  if (fromIndex) {
+  if (fromIndex && isSupportedSchemaVersion(fromIndex.schemaVersion)) {
     if (!jsonGraph || fromIndex.provenance.corpusHash === jsonGraph.provenance.corpusHash) {
       return { graph: fromIndex, source: 'index' };
     }
     // Index stale vs graph.json — prefer canonical JSON and let next build refresh.
   }
   if (jsonGraph) return { graph: jsonGraph, source: 'json' };
+  // The index is the only map, and its schema is not one this version reads.
+  if (fromIndex) assertSupportedGraph(fromIndex);
   return null;
 }

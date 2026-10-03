@@ -35,7 +35,7 @@ function node(id: string, name: string, file: string, over: Partial<GraphNode> =
 
 function graphWith(nodes: GraphNode[], corpusHash: string): VgGraph {
   return {
-    schemaVersion: 1,
+    schemaVersion: 'vg-graph/1.0',
     generatedAt: 'x',
     provenance: { corpusHash },
     meta: { root: '.', languages: ['typescript'], counts: { nodes: nodes.length, edges: 0, areas: 1, tests: 0, untested: 0 }, cluster: 'none' },

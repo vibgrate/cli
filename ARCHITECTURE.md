@@ -56,7 +56,7 @@ src/
 │   ├── hash.ts, ids.ts   Content hashing and stable, content-derived IDs
 │   ├── rng.ts            Seeded RNG (no nondeterministic randomness)
 │   ├── serialize.ts      Stable serialization to graph.json
-│   ├── load.ts           Load graph.json back into memory
+│   ├── load.ts           Load graph.json; truncated, invalid, or unsupported maps error with a rebuild hint
 │   ├── query.ts, queries.ts, lookup.ts, test-query.ts   Query layer
 │   ├── impact.ts, paths.ts                              Graph algorithms
 │   ├── cache.ts, artifacts.ts                           On-disk artifacts

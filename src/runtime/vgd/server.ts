@@ -86,10 +86,19 @@ export async function startVgdServer(options: VgdServerOptions = {}): Promise<Vg
     new FreshnessSupervisor({
       log,
       reload: (repositoryId, root, gitRef) => {
-        const graph = loadGraph(root);
-        if (!graph) return Promise.resolve(null);
-        registry.putGraph(repositoryId, gitRef, graph);
-        return Promise.resolve(graph.nodes?.length ?? 0);
+        try {
+          const graph = loadGraph(root);
+          if (!graph) return Promise.resolve(null);
+          registry.putGraph(repositoryId, gitRef, graph);
+          return Promise.resolve(graph.nodes?.length ?? 0);
+        } catch (err) {
+          // A truncated or unreadable map must not reject the watcher. The
+          // message already names the failure and how to rebuild.
+          log(
+            `freshness: could not reload the code map for ${repositoryId} — ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return Promise.resolve(null);
+        }
       },
       select: (repositoryId, gitRef) => registry.selectGitRef(repositoryId, gitRef),
     });

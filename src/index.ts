@@ -14,7 +14,8 @@ export { resolveLimits, ResourceLimitError } from './engine/limits.js';
 export type { ResourceLimits } from './engine/limits.js';
 
 export { loadGraph } from './engine/load.js';
-export { serializeGraph, parseGraph, stableStringify } from './engine/serialize.js';
+export { serializeGraph, parseGraph, stableStringify, GraphLoadError } from './engine/serialize.js';
+export type { GraphLoadFailure } from './engine/serialize.js';
 export {
   writeArtifacts,
   defaultGraphPath,

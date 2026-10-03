@@ -16,7 +16,9 @@ function makeSource(refreshImpl: RefreshImpl): { source: GraphSource; root: stri
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'staleness-'));
   const graphPath = path.join(root, '.vibgrate', 'graph.json');
   fs.mkdirSync(path.dirname(graphPath), { recursive: true });
-  fs.writeFileSync(graphPath, '{}');
+  // A schema this version reads. `{}` is not a map, and get() must refuse it
+  // before the freshness probe runs.
+  fs.writeFileSync(graphPath, '{"schemaVersion":"vg-graph/1.1"}\n');
   const source = new GraphSource(graphPath, true, { root, refreshImpl, probeIntervalMs: 0, refreshBudgetMs: 5_000 });
   return { source, root };
 }
