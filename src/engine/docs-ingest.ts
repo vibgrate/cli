@@ -21,6 +21,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
+import { addExcludePatterns, addGitignore } from '../core-open/utils/blank-patterns.js';
 import { redactSecrets } from '../core-open/utils/redact.js';
 import { nodeId } from './ids.js';
 import { isSkippedDirName, SKIP_FILES } from './discover.js';
@@ -308,12 +309,12 @@ function buildRootIgnore(root: string, exclude: string[]): Ignore {
   const gitignorePath = path.join(root, '.gitignore');
   if (fs.existsSync(gitignorePath)) {
     try {
-      ig.add(fs.readFileSync(gitignorePath, 'utf8'));
+      addGitignore(ig, fs.readFileSync(gitignorePath, 'utf8'));
     } catch {
       /* ignore */
     }
   }
-  if (exclude.length) ig.add(exclude);
+  addExcludePatterns(ig, exclude);
   return ig;
 }
 

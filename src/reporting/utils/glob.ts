@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { omitBlankPatterns } from '../../core-open/utils/blank-patterns.js';
 
 /**
  * Lightweight glob matcher — zero external dependencies.
@@ -22,9 +23,12 @@ import * as path from 'node:path';
  * Returns `null` if the pattern list is empty (nothing excluded).
  */
 export function compileGlobs(patterns: string[]): ((relPath: string) => boolean) | null {
-  if (patterns.length === 0) return null;
+  // Blank entries match nothing on purpose. A whitespace-only glob must not
+  // be compiled into a rule that hides the tree.
+  const usable = omitBlankPatterns(patterns);
+  if (usable.length === 0) return null;
 
-  const matchers = patterns.map((p) => compileOne(normalise(p)));
+  const matchers = usable.map((p) => compileOne(normalise(p)));
 
   return (relPath: string) => {
     const norm = normalise(relPath);

@@ -36,6 +36,7 @@ import { formatSarif } from './formatters/sarif.js';
 import { formatMarkdown } from './formatters/markdown.js';
 import { loadConfig, appendExcludePatterns } from './config.js';
 import { pathExists, readJsonFile, writeJsonFile, writeTextFile, ensureDir, FileCache, quickTreeCount } from './utils/fs.js';
+import { omitBlankPatterns } from './utils/blank-patterns.js';
 import { detectVcs } from './utils/vcs.js';
 import { resolveRepositoryName } from './utils/repository-name.js';
 import { ScanProgress } from './ui/progress.js';
@@ -171,7 +172,9 @@ export async function runCoreScan(
   const fileCache = new FileCache();
   // Merge config-file excludes with any patterns passed on the command line
   // (--exclude). CLI patterns are additive and de-duplicated.
-  const excludePatterns = [...new Set([...(config.exclude ?? []), ...(opts.exclude ?? [])])];
+  const excludePatterns = omitBlankPatterns([
+    ...new Set([...(config.exclude ?? []), ...(opts.exclude ?? [])]),
+  ]);
   fileCache.setExcludePatterns(excludePatterns);
   const projectScanTimeoutMs = ((opts.projectScanTimeout ?? config.projectScanTimeout ?? 180) * 1000);
   fileCache.setMaxFileSize(config.maxFileSizeToScan ?? 5_242_880);

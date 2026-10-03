@@ -22,6 +22,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
 import { XMLParser } from 'fast-xml-parser';
+import { addExcludePatterns, addGitignore } from '../core-open/utils/blank-patterns.js';
 import { nodeId, edgeId } from './ids.js';
 import { isSkippedDirName } from './discover.js';
 import { parseToml } from '../core-open/utils/toml.js';
@@ -455,12 +456,12 @@ function buildRootIgnore(root: string, exclude: string[]): Ignore {
   const gitignorePath = path.join(root, '.gitignore');
   if (fs.existsSync(gitignorePath)) {
     try {
-      ig.add(fs.readFileSync(gitignorePath, 'utf8'));
+      addGitignore(ig, fs.readFileSync(gitignorePath, 'utf8'));
     } catch {
       /* ignore */
     }
   }
-  if (exclude.length) ig.add(exclude);
+  addExcludePatterns(ig, exclude);
   return ig;
 }
 

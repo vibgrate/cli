@@ -1339,7 +1339,7 @@ Maps source code into a graph artifact, enabling all downstream queries (`vg sho
 |------|---------|-------------|
 | `[paths...]` | `.` | Folders or files to map |
 | `--only <langs>` | — | Restrict to languages (e.g. `ts,py,go`) |
-| `--exclude <glob>` | — | Extra ignore glob (repeatable) |
+| `--exclude <glob>` | — | Extra ignore glob (repeatable). Empty and whitespace-only values are skipped |
 | `--jobs <n>` | auto | Worker count (`1` = single-threaded) |
 | `--scip <file>` | auto-detect | Ingest a SCIP index for precise resolution |
 | `--no-scip` | — | Ignore any SCIP index |
@@ -2911,6 +2911,11 @@ Vibgrate reads the first it finds in the order `.vibgrate/config.yml`,
 `.vibgrate/config.yaml`, `vibgrate.config.ts`, `vibgrate.config.js`,
 `vibgrate.config.json`, and never merges two. YAML and JSON take exactly the
 same settings; `vg doctor` names any config file that is present but ignored.
+
+An empty or whitespace-only `exclude` entry is skipped, and so is a blank
+`.gitignore` line — including a file whose only content is a carriage return.
+A blank entry never hides the project. A real pattern written next to one
+still applies, for both `vg build` and `vg scan`.
 
 ### Drift budget
 

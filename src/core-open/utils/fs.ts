@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import type { Dirent } from 'node:fs';
 import ignore, { type Ignore } from 'ignore';
 import { Semaphore } from './semaphore.js';
+import { meaningfulGitignoreLines } from './blank-patterns.js';
 import { compileGlobs } from './glob.js';
 
 
@@ -35,7 +36,11 @@ interface GitignoreLevel {
 async function extendGitignoreLevels(dir: string, levels: GitignoreLevel[]): Promise<GitignoreLevel[]> {
   try {
     const txt = await fs.readFile(path.join(dir, '.gitignore'), 'utf8');
-    return [...levels, { dir, ig: ignore().add(txt) }];
+    // Drop blank lines, including a file that is only a carriage return.
+    // Those are separators; compiling one matches every path in the tree.
+    const lines = meaningfulGitignoreLines(txt);
+    if (lines.length === 0) return levels;
+    return [...levels, { dir, ig: ignore().add(lines) }];
   } catch {
     return levels;
   }

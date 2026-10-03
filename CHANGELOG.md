@@ -131,6 +131,13 @@ backward compatible.
 
 ### Fixed
 
+- **Blank ignore and exclude patterns no longer hide the whole tree.** An empty
+  or whitespace-only exclude — from `--exclude`, from project config, or from a
+  `.gitignore` line, including a file that contains only a carriage return —
+  was compiled as a pattern that matches every path, so `vg build` and
+  `vg scan` walked nothing. Those entries are skipped. A real pattern next to
+  a blank one still applies.
+
 - **`vg show arch` clipped the map to a fixed viewport.** Columns that ran off the
   bottom of the window could not be scrolled or zoomed; the canvas is now a
   pannable, zoomable map (scroll or drag, pinch / Ctrl-scroll, + / −).

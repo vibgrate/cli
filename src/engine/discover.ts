@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
 import { langForExtension, langById, type LanguageDef } from './languages.js';
 import { readDataConfigSync } from '../core-open/config.js';
+import { addExcludePatterns, addGitignore, omitBlankPatterns } from '../core-open/utils/blank-patterns.js';
 
 /**
  * Deterministic file discovery.
@@ -187,7 +188,7 @@ export function readConfigExcludes(root: string): string[] {
 export function mergeExcludes(root: string, extra?: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const pattern of [...readConfigExcludes(root), ...(extra ?? [])]) {
+  for (const pattern of omitBlankPatterns([...readConfigExcludes(root), ...(extra ?? [])])) {
     if (seen.has(pattern)) continue;
     seen.add(pattern);
     out.push(pattern);
@@ -200,9 +201,9 @@ function buildRootIgnore(root: string, exclude: string[]): Ignore {
   const ig = ignore();
   const gitignorePath = path.join(root, '.gitignore');
   if (fs.existsSync(gitignorePath)) {
-    ig.add(fs.readFileSync(gitignorePath, 'utf8'));
+    addGitignore(ig, fs.readFileSync(gitignorePath, 'utf8'));
   }
-  if (exclude.length) ig.add(exclude);
+  addExcludePatterns(ig, exclude);
   return ig;
 }
 
