@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { buildGraph } from './build.js';
+import { ProjectConfigError } from '../core-open/config.js';
 import { mergeExcludes } from './discover.js';
 import { probeFreshness, writeSnapshot, hasDrift, type Drift } from './freshness.js';
 import { writeArtifacts, vibgrateDir } from './artifacts.js';
@@ -120,6 +121,7 @@ export async function refreshIfStale(root: string, opts: RefreshOptions = {}): P
       wrote,
     };
   } catch (err) {
+    if (err instanceof ProjectConfigError) throw err;
     return { status: 'error', message: (err as Error).message };
   } finally {
     releaseLock(lock);

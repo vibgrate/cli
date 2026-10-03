@@ -20,6 +20,9 @@ export {
   isDataConfigFile,
   parseDataConfig,
   readDataConfigSync,
+  projectConfigError,
+  assertProjectConfig,
+  ProjectConfigError,
   type ConfigFile,
   type DataConfigRead,
 } from './config.js';

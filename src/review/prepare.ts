@@ -40,7 +40,7 @@ import { acquireLock, releaseLock } from '../engine/lock.js';
 import { cacheDir } from '../engine/cache.js';
 import { ProgressBar } from '../util/progress.js';
 import { REVIEW_CONFIG_PATH, loadReviewConfig } from './config.js';
-import { CONFIG_FILES, isDataConfigFile, parseDataConfig, readDataConfigSync } from '../core-open/config.js';
+import { CONFIG_FILES, ProjectConfigError, isDataConfigFile, parseDataConfig, readDataConfigSync } from '../core-open/config.js';
 import type { GitRunner } from './git.js';
 
 /** Matches `refresh.ts` — one lock, so a refresh and an auto-build never race. */
@@ -144,6 +144,7 @@ async function firstBuild(
     writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats, { exclude });
     return { action: 'built', files: result.totalFiles, ms: Date.now() - start };
   } catch (err) {
+    if (err instanceof ProjectConfigError) throw err;
     return { action: 'skipped', reason: (err as Error).message };
   } finally {
     releaseLock(lock);

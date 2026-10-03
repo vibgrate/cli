@@ -18,7 +18,7 @@ import { parseDsn } from '../reporting/commands/push.js';
 import { gatherSystemMemory } from '../code/local-runtime.js';
 import { buildLocalInferenceStatus, type LocalInferenceStatus } from '../runtime/local-inference-status.js';
 import { VERSION } from '../version.js';
-import { findConfigFile, readDataConfigSync, shadowedConfigFiles } from '../core-open/config.js';
+import { findConfigFile, projectConfigError, readDataConfigSync, shadowedConfigFiles } from '../core-open/config.js';
 import { c, info, json } from '../util/output.js';
 import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.js';
 import { rootOf } from './util.js';
@@ -68,7 +68,8 @@ export function configNotes(root: string): string[] {
   if (!file) return [];
   const notes = shadowedConfigFiles(root).map((other) => `${other} is ignored: ${file} is the config in use`);
   const read = readDataConfigSync(root);
-  if (read.error && !read.error.includes('is code')) notes.push(read.error);
+  const problem = projectConfigError(read);
+  if (problem) notes.push(problem);
   if (read.config?.review !== undefined) {
     for (const legacy of LEGACY_REVIEW_SETTINGS) {
       if (fs.existsSync(path.join(root, legacy))) {

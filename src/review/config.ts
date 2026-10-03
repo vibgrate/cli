@@ -20,7 +20,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseToml } from '../core-open/utils/toml.js';
-import { CONFIG_FILES, isDataConfigFile, parseDataConfig, readDataConfigSync } from '../core-open/config.js';
+import {
+  CONFIG_FILES,
+  ProjectConfigError,
+  isDataConfigFile,
+  parseDataConfig,
+  projectConfigError,
+  readDataConfigSync,
+} from '../core-open/config.js';
 import type { GitRunner } from './git.js';
 import type { ReviewEnforcement } from './schemas.js';
 
@@ -157,7 +164,8 @@ function normalise(review: Record<string, unknown>, source: ReviewConfig['source
 /**
  * The project config's `review` block as committed at `ref`, when the config
  * there is data. Returns `undefined` when there is no block to use — no
- * config, a `.ts`/`.js` config, an unparseable file, or no `review` key.
+ * config, a `.ts`/`.js` config, or no `review` key. A data file that does
+ * not parse throws {@link ProjectConfigError}.
  */
 function reviewBlockAtRef(root: string, ref: string, run: GitRunner): { file: string; block: unknown } | undefined {
   for (const file of CONFIG_FILES) {
@@ -167,12 +175,8 @@ function reviewBlockAtRef(root: string, ref: string, run: GitRunner): { file: st
     // shadowed one, or base and working tree could disagree about which file
     // is in force.
     if (!isDataConfigFile(file)) return undefined;
-    try {
-      const doc = parseDataConfig(res.stdout, file);
-      return doc.review === undefined ? undefined : { file, block: doc.review };
-    } catch {
-      return undefined;
-    }
+    const doc = parseDataConfig(res.stdout, file);
+    return doc.review === undefined ? undefined : { file, block: doc.review };
   }
   return undefined;
 }
@@ -198,8 +202,14 @@ export function loadReviewConfig(
     return res.status === 0 && res.stdout.trim() ? parseReviewConfig(res.stdout, source) : null;
   };
 
+  // A broken working-tree config is never "no policy", even when the copy
+  // review applies comes from git. Same message `vg doctor` prints.
+  const problem = projectConfigError(readDataConfigSync(root));
+  if (problem) throw new ProjectConfigError(problem);
+
   // With a base, the base is the only source. Falling back to HEAD would let a
   // change introduce a weaker policy in a repository whose base has none.
+
   if (base) return fromRef(base, 'base-branch') ?? { ...DEFAULT_REVIEW_CONFIG };
   const head = fromRef('HEAD', 'head');
   if (head) return head;

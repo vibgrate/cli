@@ -119,13 +119,15 @@ export function probeFreshness(root: string): ProbeResult | null {
   if (!snapshot) return null;
 
   const { scope } = snapshot;
-  const exclude = mergeExcludes(root, scope.exclude);
   // Must match the build's fileStats universe: language sources + context docs
   // (README, CI yaml, package manifests, …). Probing only `discover()` left
   // every document in the snapshot as "removed" after a successful build, so
   // `vg status` kept reporting hundreds of drifted files after ask/serve refresh.
+  // A config that does not parse is unknown freshness here — `vg doctor` reports
+  // that message itself and must not exit on it.
   let discovered: { rel: string; abs: string }[];
   try {
+    const exclude = mergeExcludes(root, scope.exclude);
     const code = discover({ root, only: scope.only, exclude, paths: scope.paths });
     const docs = discoverDocs({ root, exclude, paths: scope.paths });
     const byRel = new Map<string, string>();

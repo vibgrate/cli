@@ -31,6 +31,7 @@ import * as path from 'node:path';
 import type { KeyObject } from 'node:crypto';
 import type { Command } from 'commander';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
+import { assertProjectConfig } from '../core-open/config.js';
 import { CliError, ExitCode } from '../util/exit.js';
 import { c, info, out } from '../util/output.js';
 import { rootOf } from './util.js';
@@ -141,6 +142,7 @@ export function registerReview(program: Command): void {
     .action(async function (this: Command, opts: ReviewOpts) {
       const global = readGlobal(this);
       const root = rootOf(global);
+      assertProjectConfig(root);
 
       if (!FORMATS.includes(opts.format)) {
         throw new CliError(`unknown --format "${opts.format}" (expected ${FORMATS.join(', ')})`, ExitCode.USAGE_ERROR);

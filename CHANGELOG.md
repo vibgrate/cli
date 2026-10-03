@@ -12,6 +12,16 @@ backward compatible.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A broken project config stops the command instead of crashing or being
+  ignored.** `vg scan`, `vg build`, and `vg review` exit with an error that
+  names `.vibgrate/config.yml` (or `vibgrate.config.json`) and, when the parser
+  can tell, the line and the key to fix. The broken line is not printed, so a
+  token-like value there is not echoed. An `exclude` value that is not a list
+  of strings is rejected. An empty file, and a `.ts` or `.js` config, behave as
+  before. `vg doctor` reports the same message and does not exit on it.
+
 ### Added
 
 - **`vg sbom export` now reports the full resolved dependency tree, not just

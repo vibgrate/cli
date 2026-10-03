@@ -453,7 +453,7 @@ unguarded_entrypoint = false
     const calls: string[][] = [];
     const run: GitRunner = (args) => {
       calls.push(args);
-      if (args[0] === 'show' && args[1]?.startsWith('origin/main:')) {
+      if (args[1] === 'origin/main:.vibgrate/review.toml') {
         return { stdout: '[review]\nenforcement = "enforced"\n', status: 0 };
       }
       return { stdout: '', status: 1 };

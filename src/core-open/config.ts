@@ -33,20 +33,117 @@ export function isDataConfigFile(file: string): boolean {
 }
 
 /**
- * Parse a data config (YAML or JSON) into a plain object. Throws an Error
- * naming the file when the text is not a valid mapping.
+ * A project config that cannot be used. The message names the file and, when
+ * the parser can tell, the line and the key. It never includes the source line,
+ * so a token-like value on that line is not echoed.
+ */
+export class ProjectConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProjectConfigError';
+  }
+}
+
+function configKind(file: string): 'YAML' | 'JSON' {
+  return /\.ya?ml$/.test(file) ? 'YAML' : 'JSON';
+}
+
+function isStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+/** A mapping key at the start of a line. The rest of the line is ignored. */
+function keyOnLine(line: string): string | undefined {
+  const match = /^\s*(?:-\s+)?[{,]?\s*(?:(['"])([A-Za-z_][\w.-]*)\1|([A-Za-z_][\w.-]*))\s*:/.exec(line);
+  const key = match?.[2] ?? match?.[3];
+  return key && key.length > 0 ? key : undefined;
+}
+
+/**
+ * The key to fix for a parser line. The broken line is preferred; an unclosed
+ * value often lands on the following blank line, so the nearest key above it
+ * is used. Only the key is returned — never the line text.
+ */
+function keyForLine(text: string, line: number): string | undefined {
+  const lines = text.split(/\r?\n/);
+  const start = line - 1;
+  const from = start >= 0 && start < lines.length ? start : lines.length - 1;
+  for (let i = from; i >= 0; i--) {
+    const key = keyOnLine(lines[i] ?? '');
+    if (key) return key;
+  }
+  return undefined;
+}
+
+function lineOfKey(text: string, key: string): number | undefined {
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (keyOnLine(lines[i] ?? '') === key) return i + 1;
+  }
+  return undefined;
+}
+
+/** Line number from the parser, without copying any of its message text. */
+function parserLine(text: string, err: unknown): number | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const pretty = (err as { linePos?: Array<{ line?: number }> }).linePos?.[0]?.line;
+  if (typeof pretty === 'number' && Number.isInteger(pretty) && pretty > 0) return pretty;
+  const pos = (err as { pos?: Array<number | null | undefined> }).pos?.[0];
+  if (typeof pos === 'number' && Number.isInteger(pos) && pos >= 0) {
+    return text.slice(0, Math.min(pos, text.length)).split('\n').length;
+  }
+  if (err instanceof Error) {
+    const named = /\(line (\d+)\b/.exec(err.message);
+    if (named) {
+      const line = Number(named[1]);
+      if (Number.isInteger(line) && line > 0) return line;
+    }
+    const position = /\bposition (\d+)\b/.exec(err.message);
+    if (position) {
+      const index = Number(position[1]);
+      if (Number.isInteger(index) && index >= 0) {
+        return text.slice(0, Math.min(index, text.length)).split('\n').length;
+      }
+    }
+  }
+  return undefined;
+}
+
+function formatParseError(file: string, text: string, err: unknown): string {
+  const line = parserLine(text, err);
+  const key = line ? keyForLine(text, line) : undefined;
+  let message = `${file} is not valid ${configKind(file)}`;
+  if (line) message += ` at line ${line}`;
+  if (key) message += `, key ${key}`;
+  return message;
+}
+
+function formatExcludeError(file: string, text: string): string {
+  const line = lineOfKey(text, 'exclude');
+  let message = `${file}: exclude must be a list of strings`;
+  if (line) message += ` at line ${line}`;
+  return message;
+}
+
+/**
+ * Parse a data config (YAML or JSON) into a plain object. Throws
+ * {@link ProjectConfigError} naming the file when the text is not a valid
+ * mapping, or when `exclude` is present and is not a list of strings.
+ * An empty file is an empty config, not an error.
  */
 export function parseDataConfig(text: string, file: string): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = /\.ya?ml$/.test(file) ? parseYaml(text) : JSON.parse(text);
   } catch (err) {
-    const reason = err instanceof Error ? err.message.split('\n')[0] : 'unreadable';
-    throw new Error(`${file} is not valid ${/\.ya?ml$/.test(file) ? 'YAML' : 'JSON'}: ${reason}`);
+    throw new ProjectConfigError(formatParseError(file, text, err));
   }
   // An empty YAML file is an empty config, not an error.
   if (parsed === null || parsed === undefined) return {};
-  if (!isRecord(parsed)) throw new Error(`${file} must contain a mapping of settings.`);
+  if (!isRecord(parsed)) throw new ProjectConfigError(`${file} must contain a mapping of settings.`);
+  if ('exclude' in parsed && !isStringList(parsed.exclude)) {
+    throw new ProjectConfigError(formatExcludeError(file, text));
+  }
   return parsed;
 }
 
@@ -86,6 +183,21 @@ export function readDataConfigSync(rootDir: string): DataConfigRead {
   } catch (err) {
     return { file, config: null, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * The config problem to show or fail on. A `.ts` / `.js` config is code and is
+ * reported separately (`is code`); it is not a parse failure.
+ */
+export function projectConfigError(read: DataConfigRead): string | undefined {
+  if (!read.error || read.error.includes('is code')) return undefined;
+  return read.error;
+}
+
+/** Throw when the project data config cannot be read. No-op when there is none. */
+export function assertProjectConfig(rootDir: string): void {
+  const problem = projectConfigError(readDataConfigSync(rootDir));
+  if (problem) throw new ProjectConfigError(problem);
 }
 
 const TRUSTED_CONFIG_ENV = 'VIBGRATE_TRUST_CONFIG';

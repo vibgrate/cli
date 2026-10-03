@@ -17,6 +17,7 @@ import {
   parseExcludePatterns,
   loadConfig,
   findConfigFile,
+  assertProjectConfig,
 } from '../../core-open/index.js';
 import { evaluateConfigDriftBudget } from '../drift-budget-gate.js';
 import type { ScanOptions, ScanArtifact } from '../../core-open/index.js';
@@ -443,6 +444,9 @@ export const scanCommand = new Command('scan')
       console.error(chalk.red(`Path does not exist: ${rootDir}`));
       process.exit(1);
     }
+    // A broken config must stop the scan before any work, not fall through
+    // to defaults. Doctor reports the same message without exiting.
+    assertProjectConfig(rootDir);
 
     // `--fail-on` is parsed up front so a typo is a usage error before a long
     // scan, not after it. One legacy value keeps its meaning exactly; the

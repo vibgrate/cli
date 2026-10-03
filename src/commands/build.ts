@@ -20,6 +20,7 @@ import { writeAreaSkills } from '../install/area-skills.js';
 import { serializeGraph } from '../engine/serialize.js';
 import { renderReport } from '../engine/report.js';
 import { renderHtml } from '../engine/html.js';
+import { assertProjectConfig } from '../core-open/config.js';
 import { UsageError, mergeExcludes } from '../engine/discover.js';
 import { ResourceLimitError } from '../engine/limits.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
@@ -100,6 +101,7 @@ export async function runBuild(
   hooks?: RunBuildHooks,
 ): Promise<void> {
   const root = path.resolve(global.cwd ?? '.');
+  assertProjectConfig(root);
 
   if (opts.verify) {
     await verifyGraph(root, opts, global);

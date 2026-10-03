@@ -2912,6 +2912,13 @@ Vibgrate reads the first it finds in the order `.vibgrate/config.yml`,
 `vibgrate.config.json`, and never merges two. YAML and JSON take exactly the
 same settings; `vg doctor` names any config file that is present but ignored.
 
+A file that is present but not valid YAML or JSON stops `vg scan`, `vg build`,
+and `vg review`. The error names the file and, when the parser can tell, the
+line and the key to fix, and it does not print the broken line. `exclude` must
+be a list of strings; any other shape is the same kind of error, not an empty
+exclude list. An empty file is an empty config. `vg doctor` prints the same
+message and does not exit because of it. `.ts` and `.js` configs are unchanged.
+
 ### Drift budget
 
 `driftBudget` sets limits on DriftScore that `vg scan` and the Vibgrate GitHub
