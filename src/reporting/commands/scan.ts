@@ -40,7 +40,8 @@ import { isUsableHaileSymbol } from '../../engine/haile/format.js';
 import { writeSnapshot } from '../../engine/freshness.js';
 import { detectAiAssistant, printAiContextPrompt } from '../ai-context-prompt.js';
 import { resolveCliInvocation } from '../../util/cli-invocation.js';
-import { usageError } from '../../util/exit.js';
+import { CliError, ExitCode, usageError } from '../../util/exit.js';
+import { loadPackageVersionManifest, PackageVersionManifestError } from '../package-version-manifest.js';
 import { runSecurityPacks, type SecurityRunResult } from '../../security/run-packs.js';
 import { evaluateSecurityGate, lowestThreshold, parseFailOn } from '../../security/gate.js';
 import { securityFindingRow, securityPacksLabel } from '../../core-open/formatters/text.js';
@@ -396,7 +397,7 @@ export const scanCommand = new Command('scan')
   .option('--full', 'Comprehensive scan: turns on known-vulnerability detection (= --vulns), infrastructure misconfiguration rules (= --iac) and, when a standards policy exists, a banned-dependency report — on top of drift scoring and the code map')
   .option('--vulns', 'Also scan installed dependencies for known vulnerabilities (OSV online, or advisories from --package-manifest when offline)')
   .option('--iac', "Evaluate infrastructure misconfiguration rules (Terraform, Kubernetes, Helm, Dockerfiles) with the Architecture module's iac-cis-v1 pack; needs the code map")
-  .option('--package-manifest <file>', 'Use local package-version manifest JSON/ZIP (for offline mode)')
+  .option('--package-manifest <file>', 'Use a local JSON or ZIP package-version manifest (offline mode). A missing, unreadable, or unusable path fails before the scan.')
   .option('--project-scan-timeout <seconds>', 'Per-project scan timeout in seconds (default: 180)')
   .option('--drift-budget <score>', 'Fail if DriftScore is above budget (0-100); overrides driftBudget in the project config')
   .option('--drift-worsening <percent>', 'Fail if drift worsens by more than % since baseline; overrides driftBudget in the project config')
@@ -442,6 +443,20 @@ export const scanCommand = new Command('scan')
     if (!(await pathExists(rootDir))) {
       console.error(chalk.red(`Path does not exist: ${rootDir}`));
       process.exit(1);
+    }
+
+    // A bad --package-manifest stops here, before discovery, registry lookups,
+    // or any scan artifact write. The error names the path and what to pass.
+    if (opts.packageManifest) {
+      try {
+        await loadPackageVersionManifest(opts.packageManifest);
+      } catch (err) {
+        if (err instanceof PackageVersionManifestError) throw new CliError(err.message, ExitCode.ERROR);
+        throw new CliError(
+          `--package-manifest ${JSON.stringify(opts.packageManifest)} is not a package-version manifest. Pass a JSON or ZIP package-version manifest to --package-manifest.`,
+          ExitCode.ERROR,
+        );
+      }
     }
 
     // `--fail-on` is parsed up front so a typo is a usage error before a long

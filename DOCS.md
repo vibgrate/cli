@@ -1121,6 +1121,8 @@ vg scan --baseline .vibgrate/baseline.json --drift-budget 40 --drift-worsening 5
 vg scan --push --strict
 ```
 
+A `--package-manifest` path that is missing, unreadable, or not a JSON or ZIP package-version manifest stops the scan before it starts. The command exits non-zero and the error names that path.
+
 Expected results:
 
 - Clear score/risk output in terminal (or JSON/SARIF when selected).

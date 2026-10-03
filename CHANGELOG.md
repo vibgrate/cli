@@ -131,6 +131,15 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan --package-manifest` fails closed when that path cannot be used.**
+  A missing path, an unreadable path, or a path that is not a usable
+  package-version manifest — a directory, invalid JSON, JSON in some other
+  shape, or a ZIP with no package-version manifest entry — stops before the
+  scan, exits non-zero, and prints an error that names the path and asks for
+  a JSON or ZIP package-version manifest. The message does not include file
+  contents. A readable JSON or ZIP package-version manifest still scans as
+  before.
+
 - **`vg show arch` clipped the map to a fixed viewport.** Columns that ran off the
   bottom of the window could not be scrolled or zoomed; the canvas is now a
   pannable, zoomable map (scroll or drag, pinch / Ctrl-scroll, + / −).
