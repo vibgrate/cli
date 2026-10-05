@@ -1068,6 +1068,54 @@ stderr. The warning names the package and its ecosystem. The purl rules above
 are the identity a scanner should store. The rest of this section says how that
 identity behaves when one package is installed more than once.
 
+#### Declared licenses
+
+A dependency row may carry license evidence (`license.raw`: the declared SPDX
+id or expression). `vg sbom export` copies that declaration onto the component.
+It does not read source files to discover a license, and it does not invent one
+when the row has none.
+
+CycloneDX 1.5 writes one `licenses` entry when the declaration is representable:
+
+- A single SPDX-listed id, such as `MIT`, is `{ "license": { "id": "MIT" } }`.
+  The id is the license-list spelling (`mit` is written `MIT`).
+- A `LicenseRef-*` id, or any compound SPDX expression (`MIT OR LicenseRef-Acme-1.0`,
+  `Apache-2.0 WITH LLVM-exception`), is one `{ "expression": "..." }` entry.
+  A `LicenseRef-*` is never written to `license.id`. The entry stays one
+  expression so `OR`, `AND`, and `WITH` keep their SPDX meaning. Several
+  `license` objects in the `licenses` array would mean every one of them applies.
+
+SPDX 2.3 sets `licenseConcluded` to `NOASSERTION` (this export does not
+conclude a license from file contents) and `licenseDeclared` to that same
+expression. Every `LicenseRef-*` used in the document appears once in
+`hasExtractedLicensingInfos`, sorted by `licenseId`. The scan records the
+identifier, not the license text, so `extractedText` says the text was not
+included in the scan artifact and `name` is the identifier.
+
+When the row has no license, `license.raw` is null, or the declaration is an
+explicit unknown (`NOASSERTION`, `unknown`, `none`, `n/a`, or empty), CycloneDX
+omits `licenses` and SPDX sets `licenseDeclared` to `NOASSERTION`. Neither
+field is an empty string.
+
+A well-formed `LicenseRef-<idstring>` — `LicenseRef-` plus letters, digits,
+`.`, and `-` — is kept character for character, including inside a compound
+expression. It is not reported as `vibgrate/license-parse-failed`. Operators
+in an expression are written in uppercase with one space on each side, and
+parentheses are kept only where SPDX precedence needs them.
+
+A declaration that cannot be represented (for example `LicenseRef-has space`)
+is left off the license fields. CycloneDX sets `vibgrate:licenseStatus` to
+`unavailable` and records the reason on `vibgrate:licenseWarning`. SPDX sets
+`licenseDeclared` to `NOASSERTION`, records `licenseStatus=unavailable` on the
+package annotation, and repeats the reason in a following annotation.
+`vg sbom export` prints the same warning on stderr. The warning names the
+package and version. Document-level `vibgrate/license-parse-failed` notes
+already stored on the scan are still repeated, unchanged.
+
+The license written for a shared `name@version` is the license on the row
+deduplication keeps (the first project in the scan artifact that declared that
+version). A lockfile-only row has no license evidence.
+
 #### Several versions of one package
 
 A component's identity is **package name + resolved version**. That pair is what
@@ -1122,8 +1170,10 @@ and the names inside one lockfile edge are sorted on their own.
 `--root`, `vg sbom export` writes the same JSON on every run, including the
 CycloneDX `serialNumber` and the SPDX `documentNamespace`. Those document ids
 are a hash of that artifact — timestamp included — and of the ordered component
-list and edges. A later scan of the same tree records a new timestamp, so the
-document id changes. Purls and CycloneDX `bom-ref` values do not.
+list, edges, and declared licenses. Changing a declared license changes the
+document id. A scan with no license evidence does not, by itself, change the
+id. A later scan of the same tree records a new timestamp, so the document id
+changes. Purls and CycloneDX `bom-ref` values do not.
 
 **Known limitations** (the exporters are unchanged):
 

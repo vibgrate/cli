@@ -2,8 +2,10 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { toCycloneDx, toSpdx, formatDeltaText, npmPurl, purlFor, collectLockfileGraph, collectPurlWarnings, describeUnavailablePurl } from './sbom.js';
-import { LICENSE_PARSE_FAILED } from '../../core-open/licenses/diagnostic.js';
+import { toCycloneDx, toSpdx, formatDeltaText, npmPurl, purlFor, collectLockfileGraph, collectPurlWarnings, describeUnavailablePurl, collectLicenseWarnings, describeUnrepresentableLicense } from './sbom.js';
+import { buildDependencyLicense } from '../../core-open/licenses/dependency-license.js';
+import { LICENSE_PARSE_FAILED, licenseParseDiagnostic } from '../../core-open/licenses/diagnostic.js';
+import { normalizeLicense } from '../../core-open/licenses/normalize.js';
 import type { ProjectScan, ScanArtifact } from '../types.js';
 import type { LockfileGraph } from '../../engine/lockfile.js';
 
@@ -52,12 +54,20 @@ describe('sbom helpers', () => {
     const sbom = toCycloneDx(makeArtifact('5.3.0', 90)) as { bomFormat: string; components: Array<{ name: string }> };
     expect(sbom.bomFormat).toBe('CycloneDX');
     expect(sbom.components[0].name).toBe('chalk');
+    expect(sbom.components[0]).not.toHaveProperty('licenses');
   });
 
   it('exports SPDX with package entries', () => {
-    const sbom = toSpdx(makeArtifact('5.3.0', 90)) as { spdxVersion: string; packages: Array<{ name: string }> };
+    const sbom = toSpdx(makeArtifact('5.3.0', 90)) as {
+      spdxVersion: string;
+      packages: Array<{ name: string; licenseDeclared: string; licenseConcluded: string }>;
+      hasExtractedLicensingInfos?: unknown;
+    };
     expect(sbom.spdxVersion).toBe('SPDX-2.3');
     expect(sbom.packages[0].name).toBe('chalk');
+    expect(sbom.packages[0].licenseDeclared).toBe('NOASSERTION');
+    expect(sbom.packages[0].licenseConcluded).toBe('NOASSERTION');
+    expect(sbom.hasExtractedLicensingInfos).toBeUndefined();
   });
 
   it('folds lockfile-only packages in as transitive components alongside the direct ones', () => {
@@ -424,5 +434,198 @@ describe('sbom helpers', () => {
     const text = formatDeltaText(base, current);
     expect(text).toContain('DriftScore delta: -4.00 points');
     expect(text).toContain('Changed dependencies (1)');
+  });
+});
+
+describe('sbom declared licenses', () => {
+  function declared(raw: string | null, spdxId: string | null) {
+    return {
+      raw,
+      spdxId,
+      source: raw ? ('registry' as const) : ('none' as const),
+      confidence: raw ? 1 : 0,
+    };
+  }
+
+  /** Repro rows: listed id, LicenseRef, compound, exception, invalid ref, and no license. */
+  function licenseArtifact(): ScanArtifact {
+    const artifact = makeArtifact('1.0.0', 10);
+    const base = artifact.projects[0]!.dependencies[0]!;
+    const row = (name: string, version: string, license?: ReturnType<typeof declared>) => ({
+      ...base,
+      package: name,
+      currentSpec: version,
+      resolvedVersion: version,
+      ...(license ? { license } : {}),
+    });
+    artifact.projects[0]!.dependencies = [
+      row('mit-pkg', '1.0.0', declared('MIT', 'MIT')),
+      // spdxId left null: a scan that has not canonicalised the ref still exports it from `raw`.
+      row('acme-pkg', '2.0.0', declared('LicenseRef-Acme-1.0', null)),
+      row('or-pkg', '3.0.0', declared('MIT OR LicenseRef-Acme-1.0', null)),
+      row('with-pkg', '4.0.0', declared('Apache-2.0 WITH LLVM-exception', null)),
+      row('bad-pkg', '5.0.0', declared('LicenseRef-has space', null)),
+      row('bare-pkg', '6.0.0'),
+      row('empty-pkg', '7.0.0', declared(null, null)),
+      row('unknown-pkg', '8.0.0', declared('NOASSERTION', null)),
+      row('zed-pkg', '9.0.0', declared('LicenseRef-Zed-1.0', null)),
+    ];
+    return artifact;
+  }
+
+  const badWarning = describeUnrepresentableLicense('npm', 'bad-pkg', '5.0.0', 'LicenseRef-has space');
+
+  it('writes representable licenses into CycloneDX and warns, by name, for an invalid ref', () => {
+    const artifact = licenseArtifact();
+    const sbom = toCycloneDx(artifact) as {
+      serialNumber: string;
+      components: Array<{
+        name: string;
+        licenses?: Array<{ license?: { id: string }; expression?: string }>;
+        properties: Array<{ name: string; value: string }>;
+      }>;
+    };
+    expect(JSON.stringify(toCycloneDx(artifact))).toBe(JSON.stringify(sbom));
+    expect(sbom.serialNumber).toBe((toCycloneDx(artifact) as { serialNumber: string }).serialNumber);
+
+    const byName = new Map(sbom.components.map((component) => [component.name, component]));
+    expect(byName.get('mit-pkg')!.licenses).toEqual([{ license: { id: 'MIT' } }]);
+    expect(byName.get('acme-pkg')!.licenses).toEqual([{ expression: 'LicenseRef-Acme-1.0' }]);
+    expect(byName.get('or-pkg')!.licenses).toEqual([{ expression: 'MIT OR LicenseRef-Acme-1.0' }]);
+    expect(byName.get('with-pkg')!.licenses).toEqual([{ expression: 'Apache-2.0 WITH LLVM-exception' }]);
+    expect(byName.get('zed-pkg')!.licenses).toEqual([{ expression: 'LicenseRef-Zed-1.0' }]);
+
+    for (const name of ['bad-pkg', 'bare-pkg', 'empty-pkg', 'unknown-pkg']) {
+      expect(byName.get(name)).not.toHaveProperty('licenses');
+    }
+
+    const bad = byName.get('bad-pkg')!;
+    expect(bad.properties.find((property) => property.name === 'vibgrate:licenseStatus')?.value).toBe('unavailable');
+    expect(bad.properties.find((property) => property.name === 'vibgrate:licenseWarning')?.value).toBe(badWarning);
+    expect(badWarning).toContain('npm package "bad-pkg"');
+    expect(badWarning).toContain('version "5.0.0"');
+    expect(collectLicenseWarnings(artifact)).toEqual([badWarning]);
+
+    const json = JSON.stringify(sbom);
+    expect(json).not.toMatch(/"id": "LicenseRef-/);
+    expect(json).not.toContain('"id": ""');
+    expect(json).not.toContain('"expression": ""');
+    expect(json).not.toContain('"licenses": []');
+  });
+
+  it('writes SPDX licenseDeclared, concludes nothing, and dedupes extracted LicenseRefs', () => {
+    const artifact = licenseArtifact();
+    const sbom = toSpdx(artifact) as {
+      documentNamespace: string;
+      packages: Array<{
+        name: string;
+        licenseDeclared: string;
+        licenseConcluded: string;
+        annotations: Array<{ comment: string }>;
+      }>;
+      hasExtractedLicensingInfos: Array<{ licenseId: string; extractedText: string; name: string }>;
+    };
+    expect(JSON.stringify(toSpdx(artifact))).toBe(JSON.stringify(sbom));
+    expect(sbom.documentNamespace).toBe((toSpdx(artifact) as { documentNamespace: string }).documentNamespace);
+
+    const byName = new Map(sbom.packages.map((pkg) => [pkg.name, pkg]));
+    expect(byName.get('mit-pkg')!.licenseDeclared).toBe('MIT');
+    expect(byName.get('acme-pkg')!.licenseDeclared).toBe('LicenseRef-Acme-1.0');
+    expect(byName.get('or-pkg')!.licenseDeclared).toBe('MIT OR LicenseRef-Acme-1.0');
+    expect(byName.get('with-pkg')!.licenseDeclared).toBe('Apache-2.0 WITH LLVM-exception');
+    expect(byName.get('zed-pkg')!.licenseDeclared).toBe('LicenseRef-Zed-1.0');
+    for (const name of ['bad-pkg', 'bare-pkg', 'empty-pkg', 'unknown-pkg']) {
+      expect(byName.get(name)!.licenseDeclared).toBe('NOASSERTION');
+    }
+    for (const pkg of sbom.packages) {
+      expect(pkg.licenseConcluded).toBe('NOASSERTION');
+      expect(pkg.licenseDeclared).not.toBe('');
+    }
+
+    const bad = byName.get('bad-pkg')!;
+    expect(bad.annotations[0]!.comment).toContain('licenseStatus=unavailable');
+    expect(bad.annotations[1]!.comment).toBe(badWarning);
+    expect(byName.get('mit-pkg')!.annotations).toHaveLength(1);
+    expect(byName.get('mit-pkg')!.annotations[0]!.comment).not.toContain('licenseStatus');
+
+    expect(sbom.hasExtractedLicensingInfos).toEqual([
+      {
+        licenseId: 'LicenseRef-Acme-1.0',
+        extractedText: 'License text for LicenseRef-Acme-1.0 was not included in the scan artifact.',
+        name: 'LicenseRef-Acme-1.0',
+      },
+      {
+        licenseId: 'LicenseRef-Zed-1.0',
+        extractedText: 'License text for LicenseRef-Zed-1.0 was not included in the scan artifact.',
+        name: 'LicenseRef-Zed-1.0',
+      },
+    ]);
+    expect(JSON.stringify(sbom)).not.toContain('"licenseDeclared": ""');
+    expect(JSON.stringify(sbom.hasExtractedLicensingInfos)).not.toContain('LLVM-exception');
+    expect(JSON.stringify(sbom.hasExtractedLicensingInfos)).not.toContain('LicenseRef-has space');
+  });
+
+  it('changes the document id when a declared license changes, and only then', () => {
+    const artifact = licenseArtifact();
+    const cyclone = toCycloneDx(artifact) as { serialNumber: string };
+    const spdx = toSpdx(artifact) as { documentNamespace: string };
+    expect((toCycloneDx(artifact) as { serialNumber: string }).serialNumber).toBe(cyclone.serialNumber);
+    expect((toSpdx(artifact) as { documentNamespace: string }).documentNamespace).toBe(spdx.documentNamespace);
+
+    const changed = licenseArtifact();
+    changed.projects[0]!.dependencies[0]!.license = declared('ISC', 'ISC');
+    expect((toCycloneDx(changed) as { serialNumber: string }).serialNumber).not.toBe(cyclone.serialNumber);
+    expect((toSpdx(changed) as { documentNamespace: string }).documentNamespace).not.toBe(spdx.documentNamespace);
+
+    const plain = makeArtifact('5.3.0', 90);
+    expect((toCycloneDx(plain) as { serialNumber: string }).serialNumber).toBe(
+      (toCycloneDx(makeArtifact('5.3.0', 90)) as { serialNumber: string }).serialNumber,
+    );
+  });
+
+  it('does not flag a valid LicenseRef as a license parse failure', () => {
+    expect(licenseParseDiagnostic('LicenseRef-Acme-1.0', 'apps/web/package.json', 'acme-pkg')).toBeNull();
+    expect(licenseParseDiagnostic('MIT OR LicenseRef-Acme-1.0', 'apps/web/package.json', 'or-pkg')).toBeNull();
+    expect(licenseParseDiagnostic('Apache-2.0 WITH LLVM-exception', 'apps/web/package.json', 'with-pkg')).toBeNull();
+    expect(normalizeLicense('LicenseRef-Acme-1.0').matchStatus).not.toBe('unknown');
+    expect(normalizeLicense('LicenseRef-Acme-1.0').spdxId).toBe('LicenseRef-Acme-1.0');
+    expect(buildDependencyLicense('LicenseRef-Acme-1.0', 'registry').spdxId).toBe('LicenseRef-Acme-1.0');
+
+    const bad = licenseParseDiagnostic('LicenseRef-has space', 'apps/web/package.json', 'bad-pkg');
+    expect(bad?.code).toBe(LICENSE_PARSE_FAILED);
+    expect(bad?.message).toContain('bad-pkg');
+    expect(bad?.message).toContain('LicenseRef-has space');
+  });
+
+  it('canonicalizes a single SPDX id and keeps LicenseRef-Proprietary out of license.id', () => {
+    const artifact = makeArtifact('1.0.0', 1);
+    const base = artifact.projects[0]!.dependencies[0]!;
+    artifact.projects[0]!.dependencies = [
+      { ...base, package: 'lower', license: declared('mit', 'MIT') },
+      { ...base, package: 'prop', currentSpec: '2.0.0', resolvedVersion: '2.0.0', license: declared('LicenseRef-Proprietary', 'LicenseRef-Proprietary') },
+    ];
+    const cyclone = toCycloneDx(artifact) as {
+      components: Array<{ name: string; licenses: Array<{ license?: { id: string }; expression?: string }> }>;
+    };
+    expect(cyclone.components.find((component) => component.name === 'lower')!.licenses).toEqual([{ license: { id: 'MIT' } }]);
+    expect(cyclone.components.find((component) => component.name === 'prop')!.licenses).toEqual([{ expression: 'LicenseRef-Proprietary' }]);
+    const spdx = toSpdx(artifact) as {
+      hasExtractedLicensingInfos: Array<{ licenseId: string }>;
+    };
+    expect(spdx.hasExtractedLicensingInfos.map((info) => info.licenseId)).toEqual(['LicenseRef-Proprietary']);
+  });
+
+  it('keeps the first project\'s license when two projects share name@version', () => {
+    const artifact = makeArtifact('1.0.0', 1);
+    const base = artifact.projects[0]!.dependencies[0]!;
+    artifact.projects[0]!.dependencies[0] = { ...base, license: declared('MIT', 'MIT') };
+    artifact.projects.push({
+      ...artifact.projects[0]!,
+      name: 'other',
+      dependencies: [{ ...base, license: declared('Apache-2.0', 'Apache-2.0') }],
+    } as ProjectScan);
+    const sbom = toCycloneDx(artifact) as { components: Array<{ licenses: Array<{ license: { id: string } }> }> };
+    expect(sbom.components).toHaveLength(1);
+    expect(sbom.components[0]!.licenses).toEqual([{ license: { id: 'MIT' } }]);
   });
 });

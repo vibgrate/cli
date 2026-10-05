@@ -12,7 +12,9 @@
  * manifest-relative path.
  *
  * An explicit unknown (`NOASSERTION`, `unknown`, `none`, `n/a`, or empty)
- * is not a failure. A fuzzy family match is not a failure either.
+ * is not a failure. A fuzzy family match is not a failure either. A
+ * well-formed `LicenseRef-<idstring>` (letters, digits, `.`, `-`) is not a
+ * failure; an ill-formed one is.
  */
 
 import { isExplicitUnknownLicense, normalizeLicense } from './normalize.js';
@@ -68,6 +70,11 @@ function truncateLicense(value: string): string {
   return `${value.slice(0, LICENSE_RAW_LIMIT - 1)}…`;
 }
 
+/** Truncated, credential-redacted license text safe to repeat in a diagnostic or SBOM warning. */
+export function displayLicenseRaw(raw: string): string {
+  return truncateLicense(redactLicenseText(raw));
+}
+
 function expressionHasUnresolvedId(input: string): boolean {
   const parsed = parseLicenseExpression(input);
   return parsed.licenseIds.some((id) => normalizeLicense(id).matchStatus === 'unknown');
@@ -76,8 +83,9 @@ function expressionHasUnresolvedId(input: string): boolean {
 /**
  * One diagnostic when `raw` is a non-empty license that does not resolve, or
  * an expression that contains a constituent id that does not resolve.
- * Returns null for an explicit unknown, a fuzzy match, and a fully resolved
- * id or expression. Same inputs always return the same object.
+ * Returns null for an explicit unknown, a fuzzy match, a well-formed
+ * LicenseRef, and a fully resolved id or expression. Same inputs always
+ * return the same object.
  */
 export function licenseParseDiagnostic(
   raw: string | null | undefined,
@@ -91,7 +99,7 @@ export function licenseParseDiagnostic(
     verdict.matchStatus === 'expression' && expressionHasUnresolvedId(input);
   if (verdict.matchStatus !== 'unknown' && !unresolvedExpression) return null;
 
-  const shown = truncateLicense(redactLicenseText(input));
+  const shown = displayLicenseRaw(input);
   const pkg = packageName?.trim();
   const where = pkg ? `for ${pkg} at ${manifestPath}` : `at ${manifestPath}`;
   const message =
