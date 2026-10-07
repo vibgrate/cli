@@ -148,6 +148,8 @@ describe('report degrade warnings', () => {
     if (parsed.status !== 'invalid') return;
     expect(parsed.diagnostic.warnCode).toBe('VG_WARN_CVSS_UNPARSEABLE');
     expect(parsed.diagnostic.code).toBe('cvss-vector-parse-failed');
-    expect(parsed.diagnostic.message.startsWith('VG_WARN_CVSS_UNPARSEABLE: ')).toBe(true);
+    expect(parsed.diagnostic.message).toBe(
+      'CVSS vector failed to parse (cvss-vector-parse-failed): "not-a-vector" is not a CVSS:3.0 or CVSS:3.1 base vector. Replace it with a CVSS:3.0 or CVSS:3.1 base vector, or omit the vector and supply a numeric base score.',
+    );
   });
 });

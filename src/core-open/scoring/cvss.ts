@@ -61,7 +61,7 @@ function preview(vector: string): string {
 
 function invalid(reason: string): CvssParseResult {
   const message = redactSecrets(
-    `${WarningCodes.CVSS_UNPARSEABLE}: CVSS vector failed to parse (${CVSS_VECTOR_PARSE_FAILED}): ${reason}. ${NEXT_STEP}`,
+    `CVSS vector failed to parse (${CVSS_VECTOR_PARSE_FAILED}): ${reason}. ${NEXT_STEP}`,
   );
   return {
     status: 'invalid',
