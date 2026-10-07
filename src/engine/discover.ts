@@ -5,6 +5,7 @@ import { langForExtension, langById, type LanguageDef } from './languages.js';
 import { requireDataConfig } from '../core-open/config.js';
 import { dropBlankPatterns, gitignoreWithoutBlankLines } from '../core-open/utils/glob.js';
 import { assertLockfileFile, lockfileKind } from '../core-open/utils/lockfile-parse.js';
+import { warnUnknownOptionalLockfile } from './lockfile-optional.js';
 import { assertSafeWalkRoot, createWalkBudget, noteWalkEntry } from '../core-open/utils/root-safety.js';
 
 /**
@@ -248,6 +249,7 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
 
   const found = new Map<string, DiscoveredFile>();
   const budget = createWalkBudget(root, options.maxEntries);
+  const lockfiles: string[] = [];
 
   const considerFile = (abs: string): void => {
     const rel = toPosix(path.relative(root, abs));
@@ -256,7 +258,12 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
     if (SKIP_FILES.has(path.basename(abs).toLowerCase())) {
       // Lockfiles are not source, but a truncated one must fail the build
       // here — before the parse pool starts — rather than being skipped.
-      if (lockfileKind(path.basename(abs))) assertLockfileFile(abs);
+      // A file that parses keeps its packages; unknown optional fields warn
+      // after the walk, in path order.
+      if (lockfileKind(path.basename(abs))) {
+        assertLockfileFile(abs);
+        lockfiles.push(abs);
+      }
       return;
     }
     const lang = langForExtension(path.extname(abs));
@@ -295,6 +302,21 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
       assertSafeWalkRoot(scope);
       walk(scope);
     } else if (stat.isFile()) considerFile(scope);
+  }
+
+  lockfiles.sort((a, b) => {
+    const ra = toPosix(path.relative(root, a));
+    const rb = toPosix(path.relative(root, b));
+    return ra < rb ? -1 : ra > rb ? 1 : 0;
+  });
+  for (const abs of lockfiles) {
+    let text: string;
+    try {
+      text = fs.readFileSync(abs, 'utf8');
+    } catch {
+      continue;
+    }
+    warnUnknownOptionalLockfile(root, abs, text);
   }
 
   return [...found.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));

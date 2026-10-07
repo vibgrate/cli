@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import { readTextFile, pathExists, findPackageJsonFiles, readJsonFile, FileCache } from '../../core-open/index.js';
 import { assertLockfileText, parseLockfileJson } from '../../core-open/utils/lockfile-parse.js';
+import { warnUnknownOptionalLockfile } from '../../engine/lockfile-optional.js';
 import type { PackageJson, DependencyGraphResult, DuplicatedPackage, PhantomDependency } from '../../core-open/index.js';
 
 interface LockEntry {
@@ -101,15 +102,18 @@ export async function scanDependencyGraph(rootDir: string, cache?: FileCache): P
     result.lockfileType = 'pnpm';
     const content = await _readTextFile(pnpmLock);
     assertLockfileText(pnpmLock, content, 'YAML');
+    warnUnknownOptionalLockfile(rootDir, pnpmLock, content);
     entries = parsePnpmLock(content);
   } else if (await _pathExists(npmLock)) {
     result.lockfileType = 'npm';
     const content = await _readTextFile(npmLock);
     entries = parseNpmLock(content, npmLock);
+    warnUnknownOptionalLockfile(rootDir, npmLock, content);
   } else if (await _pathExists(yarnLock)) {
     result.lockfileType = 'yarn';
     const content = await _readTextFile(yarnLock);
     assertLockfileText(yarnLock, content, 'yarn.lock');
+    warnUnknownOptionalLockfile(rootDir, yarnLock, content);
     entries = parseYarnLock(content);
   }
 

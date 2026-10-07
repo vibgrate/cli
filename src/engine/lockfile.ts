@@ -7,6 +7,7 @@ import {
   parseLockfileJson,
 } from '../core-open/utils/lockfile-parse.js';
 import type { DepRecord } from './drift.js';
+import { warnUnknownOptionalLockfile } from './lockfile-optional.js';
 
 /**
  * Read a lockfile that may be absent. A missing file is `undefined` (the
@@ -29,6 +30,9 @@ function readCheckedText(root: string, file: string): string | undefined {
   if (text === undefined) return undefined;
   const kind = lockfileKind(file);
   if (kind) assertLockfileText(abs, text, kind);
+  // Syntax already passed. An unknown optional field warns and the text is
+  // still returned, so the dependency set is kept.
+  warnUnknownOptionalLockfile(root, abs, text);
   return text;
 }
 
@@ -36,7 +40,9 @@ function readCheckedJson(root: string, file: string): unknown | undefined {
   const abs = path.join(root, file);
   const text = readOptionalText(abs);
   if (text === undefined) return undefined;
-  return parseLockfileJson(abs, text);
+  const parsed = parseLockfileJson(abs, text);
+  warnUnknownOptionalLockfile(root, abs, text);
+  return parsed;
 }
 
 /**

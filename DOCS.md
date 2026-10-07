@@ -9,6 +9,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
 ## Table of Contents
 
 - [How It Works](#how-it-works)
+- [Lockfiles with unknown fields](#lockfiles-with-unknown-fields)
 - [Choosing a rollout model: one-off vs CI](#choosing-a-rollout-model-one-off-vs-ci)
 - [Commands Reference](#commands-reference)
   - [vg baseline](#vg-baseline)
@@ -178,6 +179,18 @@ Vibgrate evaluates **upgrade drift** in depth for:
 - **Java** (`pom.xml`, Gradle-style manifests). Which Maven profiles, scopes, and Gradle configurations become a `vg scan` row or a `vg build` edge is in [Maven and Gradle manifests](#maven-and-gradle-manifests).
 
 **Known-vulnerability detection** (`--vulns`) and **dependency attribution** (`vg why`, exposure windows) additionally cover npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle, read from each project's lockfile. Go is matched from direct `require` lines in `go.mod`. Pseudo-versions and `+incompatible` tags follow [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).
+
+### Lockfiles with unknown fields
+
+Lockfile formats grow optional fields. A pnpm `catalogs` block and a package `devEngines` entry are two examples. When the file still resolves a dependency set, `vg` keeps every package it understands and writes one warning per unknown field name:
+
+```text
+warning: pnpm-lock.yaml: unknown optional lockfile field "catalogs"; kept the dependencies this file already resolved
+```
+
+The warning line contains the field name and the lockfile's path relative to the project root. The same file and the same field produce the same line on every run. Several unknown fields on one file are sorted by field name, and a field that appears many times is warned once. Field values stay off that line, including registry tokens and authorization header values.
+
+`vg build` prints the warning while it discovers the tree. `vg sbom export` prints it while it reads the lockfile graph. A lockfile that is truncated, unreadable, or missing the structure that dialect requires still exits non-zero. The error names the file and the format and leaves the file's contents out. `go.sum` and `gradle.lockfile` have no optional-key slot: a line that is not valid for that dialect is this structural failure.
 
 ### End-to-end workflow (recommended)
 
