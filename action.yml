@@ -1,6 +1,5 @@
 name: 'Vibgrate Scan'
-# Public Marketplace blurb. GitHub rejects a description of 125 characters or longer.
-description: 'Your dependencies age quietly. Pull requests score DriftScore (how far behind) and RiskScore (exposed now) and upload SARIF.'
+description: 'Stop dependency drift entering your main branch. Scans every pull request for a 0-100 DriftScore and uploads SARIF to GitHub Security. No account needed.'
 author: 'Vibgrate'
 
 branding:
@@ -63,7 +62,7 @@ inputs:
   image-tag:
     description: 'Scanner image tag to run (defaults to a pinned, tested release).'
     required: false
-    default: '2026.1006.2' # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
+    default: '2026.1007.1' # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
   verify:
     description: 'Verify the image cosign signature + provenance before running (requires cosign on the runner).'
     required: false
