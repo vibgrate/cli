@@ -100,6 +100,11 @@ export interface BuildOptions {
   /** Resource-safeguard overrides (else VG_MAX_FILE_BYTES / VG_MAX_FILES /
    * VG_TSC_MAX_FILES / VG_MEMORY_BUDGET_MB env vars, else defaults). */
   limits?: Partial<ResourceLimits>;
+  /**
+   * Print discovery's skipped-symlink notice. Default true.
+   * `vg scan` sets this false: the scan walk prints the notice itself.
+   */
+  symlinkNotice?: boolean;
 }
 
 /** Stat + content hash of one corpus file at build time. */
@@ -163,6 +168,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     exclude,
     paths: options.paths,
     maxEntries: limits.maxFiles,
+    symlinkNotice: options.symlinkNotice,
   });
   timer.end('discover');
 

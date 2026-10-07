@@ -17,6 +17,7 @@ import {
   parseExcludePatterns,
   loadConfig,
   findConfigFile,
+  isSkippedDirName,
 } from '../../core-open/index.js';
 import { writeScanSummary } from '../scan-summary.js';
 import { compareDriftBudget, evaluateConfigDriftBudget } from '../drift-budget-gate.js';
@@ -64,6 +65,7 @@ import { loadPackageVersionManifest, PackageManifestError } from '../package-ver
 import { runSecurityPacks, type SecurityRunResult } from '../../security/run-packs.js';
 import { evaluateSecurityGate, lowestThreshold, parseFailOn } from '../../security/gate.js';
 import { securityFindingRow, securityPacksLabel } from '../../core-open/formatters/text.js';
+import { collectScanSkippedSymlinks, emitSkippedSymlinkNotice } from '../../util/skipped-symlinks.js';
 
 /** The security packs `--iac` requests from the Architecture module. */
 const IAC_PACKS = ['iac-cis-v1'] as const;
@@ -706,6 +708,8 @@ export const scanCommand = new Command('scan')
         const result = await buildGraph({
           root: rootDir,
           exclude: opts.exclude,
+          // The scan walk already printed the skipped-symlink notice.
+          symlinkNotice: false,
           onParseProgress: (done, total) => report(done, total, 'parsing'),
         });
         builtGraph = result.graph;
@@ -760,6 +764,13 @@ export const scanCommand = new Command('scan')
     // Open base scan. The optional advanced-analysis hook is a no-op in this
     // open build, so the scan runs entirely on the open base engine.
     const advanced = await loadAdvancedScanHook();
+    // The scan walk (core-open FileCache) does not follow symlinks: it
+    // recurses only when Dirent.isDirectory() is true. The notice lives
+    // here, not in that vendored file, so a later vendor sync cannot drop
+    // it. Excludes match the walk: config first, then CLI, de-duplicated.
+    const noticeConfig = await loadConfig(rootDir);
+    const noticeExclude = [...new Set([...(noticeConfig.exclude ?? []), ...(opts.exclude ?? [])])];
+    emitSkippedSymlinkNotice(collectScanSkippedSymlinks(rootDir, noticeExclude, isSkippedDirName));
     const artifact = await runCoreScan(rootDir, scanOpts, advanced);
 
     // The scan just built a code map (its `postScan` step). Start the local

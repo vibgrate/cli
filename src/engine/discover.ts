@@ -6,6 +6,7 @@ import { requireDataConfig } from '../core-open/config.js';
 import { dropBlankPatterns, gitignoreWithoutBlankLines } from '../core-open/utils/glob.js';
 import { assertLockfileFile, lockfileKind } from '../core-open/utils/lockfile-parse.js';
 import { assertSafeWalkRoot, createWalkBudget, noteWalkEntry } from '../core-open/utils/root-safety.js';
+import { emitSkippedSymlinkNotice } from '../util/skipped-symlinks.js';
 
 /**
  * Deterministic file discovery.
@@ -166,6 +167,12 @@ export interface DiscoverOptions {
    * Default: `VG_MAX_FILES`, else 100000.
    */
   maxEntries?: number;
+  /**
+   * Print the skipped-symlink notice on stderr. Default true.
+   * The walk never follows links either way. `vg scan` passes false
+   * when it builds a map, because the scan walk already printed one.
+   */
+  symlinkNotice?: boolean;
 }
 
 export interface DiscoveredFile {
@@ -248,6 +255,15 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
 
   const found = new Map<string, DiscoveredFile>();
   const budget = createWalkBudget(root, options.maxEntries);
+  // Links the walk refused to follow. Sorted later, when the notice is formatted.
+  const skippedSymlinks: string[] = [];
+
+  const noteSymlink = (rel: string): void => {
+    if (!rel || rel.startsWith('..')) return;
+    // Already ignored or excluded: the operator asked for this path to be skipped.
+    if (rootIg.ignores(rel) || rootIg.ignores(`${rel}/`)) return;
+    skippedSymlinks.push(rel);
+  };
 
   const considerFile = (abs: string): void => {
     const rel = toPosix(path.relative(root, abs));
@@ -285,16 +301,26 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
         const over = noteWalkEntry(budget);
         if (over) throw over;
         considerFile(abs);
+      } else if (entry.isSymbolicLink()) {
+        // isDirectory() / isFile() do not follow links, so a symlink is
+        // neither branch above. Leave it unentered: a link that points
+        // at its parent would otherwise cycle. The target is indexed
+        // only when it is also a real path under the root.
+        noteSymlink(rel);
       }
     }
   };
 
-  for (const scope of scopeAbs) {
-    const stat = fs.statSync(scope);
-    if (stat.isDirectory()) {
-      assertSafeWalkRoot(scope);
-      walk(scope);
-    } else if (stat.isFile()) considerFile(scope);
+  try {
+    for (const scope of scopeAbs) {
+      const stat = fs.statSync(scope);
+      if (stat.isDirectory()) {
+        assertSafeWalkRoot(scope);
+        walk(scope);
+      } else if (stat.isFile()) considerFile(scope);
+    }
+  } finally {
+    if (options.symlinkNotice !== false) emitSkippedSymlinkNotice(skippedSymlinks);
   }
 
   return [...found.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
