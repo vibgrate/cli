@@ -4534,6 +4534,18 @@ Dependency identity in this file is `projects[].type` plus `dependencies[].packa
 vg scan --vulns --format sarif --out vibgrate.sarif
 ```
 
+#### Result identity
+
+Every result sets `partialFingerprints["vg/finding-id/v1"]`. Code scanning uses that value to match an unchanged alert on the next run. The value comes from the finding. Result order and the scan clock stay out of the hash. `runs[].invocations[].startTimeUtc` remains the artifact timestamp.
+
+| Result | `vg/finding-id/v1` |
+| ------ | ------------------ |
+| Drift finding | The first 32 hex characters of SHA-256 over a length-prefixed payload: the tag `vg-sarif-result/v1`, the rule id, and the location. A vulnerability result then adds the ecosystem, package name, installed version, and advisory id, so two advisories on one package stay two alerts. The message is not part of that hash, so a day count in the text does not move it. Any other drift result adds the message and the finding details (object keys sorted). `exposureDays` and `introducedDate` are left out of the hash. |
+| Baseline suppression | The baseline suppression id already stored on the result: the hash of the rule id and the location. `suppressions[].properties.id` is that same id. |
+| Security-pack result (`vg scan --iac`) | The finding `id`. See [Finding identity](./docs/security-packs.md#finding-identity). |
+
+The same finding produces the same value. A different rule, location, message, package, or advisory id produces a different one.
+
 #### Advisories with several ids
 
 One advisory often has its own id plus aliases: a GHSA, a CVE, and sometimes another OSV id. SARIF writes **one result per package and advisory**. Every alias stays on that result. A second result appears only when the scan kept a second advisory id. Two advisories stay two results when one lists the other as an alias.
@@ -4546,6 +4558,7 @@ A near-duplicate code-scanning alert is expected in that case. If the vulnerabil
 | `level` | `error` for critical and high, `warning` for moderate, `note` for low and unknown. |
 | `message.text` | Starts with `package@version:` and the advisory id. When an alias starts with `CVE-` and that alias is not already the advisory id, the first such alias is added in parentheses. Further CVE aliases stay in `properties.aliases`. |
 | `locations[0].physicalLocation.artifactLocation.uri` | The package name. |
+| `partialFingerprints["vg/finding-id/v1"]` | Content hash of the ecosystem, package name, installed version, and advisory id, prefixed by the rule id and location. See [Result identity](#result-identity). |
 | `properties.advisoryId` | The advisory's own id. This is the primary id. |
 | `properties.aliases` | The alias list, in the order the advisory supplied. Distinct advisory ids stay distinct results. |
 | `properties` | The finding details, copied as-is: ecosystem, package, installed version, severity, CVSS, and fixing versions, plus introduction details when the scan attributed the advisory. |
@@ -4568,6 +4581,9 @@ The ids in this example show the field shape. A real scan fills them from the ad
       }
     }
   ],
+  "partialFingerprints": {
+    "vg/finding-id/v1": "dd5a118102af5cbdee3ada40cbaf3021"
+  },
   "properties": {
     "ecosystem": "npm",
     "package": "lodash",

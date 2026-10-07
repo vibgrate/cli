@@ -1,17 +1,30 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
+import { createHash } from 'node:crypto';
 import type { BaselineSuppression, ScanArtifact, Finding, SecurityFinding, SecuritySection, SecuritySeverity } from '../types.js';
+
+/**
+ * `partialFingerprints` key on every `vg scan` SARIF result.
+ * Security-pack results and baseline suppressions keep the id they already
+ * published under this key. Other drift results use {@link driftResultFingerprint}.
+ */
+const FINDING_FINGERPRINT_KEY = 'vg/finding-id/v1';
+
+/**
+ * Detail keys that move with the clock. They stay on `properties` and in the
+ * message, and they never enter the fingerprint.
+ */
+const CLOCK_DETAIL_KEYS = new Set(['exposureDays', 'introducedDate']);
 
 /**
  * Generate a SARIF 2.1.0 document from scan artifact.
  *
- * The first run carries the drift findings and is byte-for-byte what it has
- * always been. When the artifact carries security-pack findings
- * (`extended.security`, from `vg scan --iac`), a second run is appended for
- * them — one run per artifact, with every pack listed under
- * `tool.extensions`, so a scan that ran no pack produces exactly the same
- * bytes as before.
+ * The first run carries the drift findings. When the artifact carries
+ * security-pack findings (`extended.security`, from `vg scan --iac`), a
+ * second run is appended for them — one run per artifact, with every pack
+ * listed under `tool.extensions`. A scan that ran no pack still emits one run.
+ * Every result carries `partialFingerprints["vg/finding-id/v1"]`.
  */
 export function formatSarif(artifact: ScanArtifact): object {
   const suppressed = suppressionIndex(artifact);
@@ -105,7 +118,7 @@ function securityRun(security: SecuritySection, artifact: ScanArtifact): object 
     ],
     // Stable across a move of the block and a rename that keeps the address —
     // what code-scanning UIs key "same finding as last time" on.
-    partialFingerprints: { 'vg/finding-id/v1': f.id },
+    partialFingerprints: { [FINDING_FINGERPRINT_KEY]: f.id },
     properties: {
       severity: f.severity,
       address: f.address ?? '',
@@ -212,6 +225,12 @@ function toSarifResult(finding: Finding, suppression?: BaselineSuppression) {
         },
       },
     ],
+    // Content identity for code scanning. A baseline match keeps the
+    // suppression id (rule + location). Every other drift result hashes the
+    // finding, never the artifact timestamp or the result index.
+    partialFingerprints: {
+      [FINDING_FINGERPRINT_KEY]: suppression ? suppression.id : driftResultFingerprint(finding),
+    },
     // Surface structured finding detail (e.g. advisory id, CVSS, fixed version)
     // to consumers like GitHub code scanning without bloating the message text.
     ...(finding.details && Object.keys(finding.details).length > 0 ? { properties: finding.details } : {}),
@@ -219,7 +238,6 @@ function toSarifResult(finding: Finding, suppression?: BaselineSuppression) {
     // `baselineComparison.suppressed`, so a baseline match is not dropped.
     ...(suppression
       ? {
-          partialFingerprints: { 'vg/finding-id/v1': suppression.id },
           suppressions: [
             {
               kind: 'external',
@@ -235,4 +253,63 @@ function toSarifResult(finding: Finding, suppression?: BaselineSuppression) {
         }
       : {}),
   };
+}
+
+function encodePart(value: string): string {
+  return `${Buffer.byteLength(value, 'utf8')}:${value}`;
+}
+
+function stringDetail(details: Finding['details'], key: string): string | undefined {
+  const value = details?.[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+function canonicalValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return `s:${value}`;
+  if (typeof value === 'boolean') return `b:${value ? '1' : '0'}`;
+  if (typeof value === 'number') return `n:${Number.isFinite(value) ? JSON.stringify(value) : ''}`;
+  if (Array.isArray(value)) return `a:[${value.map(canonicalValue).join(',')}]`;
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    return `o:{${keys.map((key) => encodePart(key) + canonicalValue(record[key])).join(',')}}`;
+  }
+  return '';
+}
+
+/** Sorted detail payload. Clock-derived keys are omitted. Object key order is ignored. */
+function canonicalDetails(details: Finding['details']): string {
+  if (!details) return '';
+  const keys = Object.keys(details).filter((key) => !CLOCK_DETAIL_KEYS.has(key)).sort();
+  return keys.map((key) => `${encodePart(key)}${encodePart(canonicalValue(details[key]))}`).join('\n');
+}
+
+/**
+ * Content fingerprint for a drift result that is not baseline-suppressed.
+ * 32 lowercase hex characters (128 bits of SHA-256). Parts are length-prefixed
+ * so concatenation cannot collide. A vulnerability result is identified by
+ * its package coordinates and advisory id, so a day count in the message
+ * cannot move the value. Other results include the message, which is what
+ * separates two frameworks or two packages that share a rule and a path.
+ */
+function driftResultFingerprint(finding: Finding): string {
+  const parts = [
+    encodePart('vg-sarif-result/v1'),
+    encodePart(finding.ruleId),
+    encodePart(finding.location),
+  ];
+  const advisoryId = stringDetail(finding.details, 'advisoryId');
+  if (advisoryId) {
+    parts.push(
+      encodePart(stringDetail(finding.details, 'ecosystem') ?? ''),
+      encodePart(stringDetail(finding.details, 'package') ?? ''),
+      encodePart(stringDetail(finding.details, 'installedVersion') ?? ''),
+      encodePart(advisoryId),
+    );
+  } else {
+    parts.push(encodePart(finding.message));
+    parts.push(encodePart(canonicalDetails(finding.details)));
+  }
+  return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 32);
 }
