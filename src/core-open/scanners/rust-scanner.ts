@@ -1,6 +1,7 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
+import { WarningCodes, degradeLine } from '../../warnings/codes.js';
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
@@ -211,7 +212,7 @@ export async function scanRustProjects(
       } else {
         const relPath = path.relative(rootDir, dir);
         if (cache) cache.addStuckPath(relPath || '.');
-        console.error(`Timeout scanning Rust project ${dir} (>${STUCK_TIMEOUT_MS / 1000}s) — skipped`);
+        console.error(degradeLine(WarningCodes.SKIPPED_SUBTREE, `Timeout scanning Rust project ${dir} (>${STUCK_TIMEOUT_MS / 1000}s) — skipped`));
         if (cache?.shouldShowTimeoutHint()) {
           console.error(`  Tip: increase projectScanTimeout in vibgrate.config.ts (or --project-scan-timeout <seconds>) for large projects`);
         }
@@ -219,7 +220,7 @@ export async function scanRustProjects(
     } catch (e: unknown) {
       rethrowLockfileParseError(e);
       const msg = e instanceof Error ? e.message : String(e);
-      console.error(`Error scanning Rust project ${dir}: ${msg}`);
+      console.error(degradeLine(WarningCodes.SCAN_DEGRADE, `Error scanning Rust project ${dir}: ${msg}`));
     }
   }
 

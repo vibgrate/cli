@@ -285,6 +285,11 @@ export interface ScanArtifact {
   treeSummary?: TreeCount;
   /** Workspace-level relationship diagram */
   relationshipDiagram?: MermaidDiagram;
+  /**
+   * Degrade-and-continue warnings from this scan. Omitted when none fired.
+   * Sorted by code, then message.
+   */
+  degradeWarnings?: Array<{ code: string; message: string }>;
 }
 
 // ── CLI option types ──

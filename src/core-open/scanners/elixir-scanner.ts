@@ -1,6 +1,7 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
+import { WarningCodes, degradeLine } from '../../warnings/codes.js';
 import { fetchHexVersionsBulk } from './hex-cache.js';
 import { gt, minVersion, validRange } from 'semver';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
@@ -320,7 +321,7 @@ export async function scanElixirProjects(
       }
     } catch (error) {
       // Skip projects that fail to scan
-      console.error(`Error scanning Elixir project at ${dir}:`, error);
+      console.error(degradeLine(WarningCodes.SCAN_DEGRADE, `Error scanning Elixir project at ${dir}:`), error);
     }
   }
 

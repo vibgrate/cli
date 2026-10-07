@@ -3,6 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import type { CvssDiagnostic, VulnSeverity } from '../types.js';
 import { redactSecrets } from '../utils/redact.js';
+import { WarningCodes } from '../../warnings/codes.js';
 
 /**
  * Minimal, dependency-free CVSS v3.0/v3.1 base-score calculator.
@@ -60,11 +61,11 @@ function preview(vector: string): string {
 
 function invalid(reason: string): CvssParseResult {
   const message = redactSecrets(
-    `CVSS vector failed to parse (${CVSS_VECTOR_PARSE_FAILED}): ${reason}. ${NEXT_STEP}`,
+    `${WarningCodes.CVSS_UNPARSEABLE}: CVSS vector failed to parse (${CVSS_VECTOR_PARSE_FAILED}): ${reason}. ${NEXT_STEP}`,
   );
   return {
     status: 'invalid',
-    diagnostic: { code: CVSS_VECTOR_PARSE_FAILED, message },
+    diagnostic: { code: CVSS_VECTOR_PARSE_FAILED, warnCode: WarningCodes.CVSS_UNPARSEABLE, message },
   };
 }
 

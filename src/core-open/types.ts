@@ -478,6 +478,11 @@ export interface CvssDiagnostic {
   /** Stable code, identical for every unparseable vector. */
   code: 'cvss-vector-parse-failed';
   /**
+   * Degrade-and-continue code (`VG_WARN_CVSS_UNPARSEABLE`). Present when this
+   * CLI built the diagnostic. The `code` field above is unchanged.
+   */
+  warnCode?: 'VG_WARN_CVSS_UNPARSEABLE';
+  /**
    * What failed and what to do next. Deterministic for a given vector.
    * Credential-shaped text from the vector is redacted.
    */
@@ -809,6 +814,12 @@ export interface ScanArtifact {
   relationshipDiagram?: MermaidDiagram;
   /** Billing roll-up derived from per-project function/project classifications */
   billing?: BillingSummary;
+  /**
+   * Degrade-and-continue warnings from this scan (skipped paths, an unreadable
+   * baseline). Omitted when none fired. Sorted by code, then message. Does
+   * not change whether the scan succeeded.
+   */
+  degradeWarnings?: Array<{ code: string; message: string }>;
   /**
    * Vulnerable-symbol reachability results from the LOCAL code-graph query
    * (`vg scan` with a DSN): the risky-symbol manifest from the scan symbols

@@ -125,6 +125,7 @@ describe('sbom export: multi-project lockfile merge', () => {
     expect(prop(left.properties, 'vibgrate:projects')).toBe('docs, web');
     expect(prop(left.properties, 'vibgrate:scope')).toBe('direct');
     expect(props(left.properties, 'vibgrate:mergeWarning')).toEqual([LOSSY_EDGE_WARNING]);
+    expect(props(left.properties, 'vibgrate:mergeWarningCode')).toEqual(['VG_WARN_SBOM_MERGE']);
 
     const widgetOld = cdx.components.find((c) => c.purl === 'pkg:npm/widget@1.0.0')!;
     const widgetNew = cdx.components.find((c) => c.purl === 'pkg:npm/widget@2.0.0')!;
@@ -328,7 +329,7 @@ describe('sbom export: multi-project lockfile merge', () => {
     expect(stdout).toHaveLength(2);
     expect(stdout[0]).toBe(stdout[1]);
     expect(stdout[0]).toContain('"bomFormat": "CycloneDX"');
-    expect(stderr.join('\n')).toContain(`warning: ${LOSSY_EDGE_WARNING}`);
+    expect(stderr.join('\n')).toContain(`warning: VG_WARN_SBOM_MERGE: ${LOSSY_EDGE_WARNING}`);
     expect(stderr.join('\n')).not.toContain('http');
   });
 });

@@ -4,6 +4,7 @@ import chalk from 'chalk';
 import { pathExists, readJsonFile, writeTextFile } from '../utils/fs.js';
 import type { DependencyRow, Finding, ProjectScan, ScanArtifact } from '../types.js';
 import { LICENSE_PARSE_FAILED } from '../../core-open/licenses/diagnostic.js';
+import { WarningCodes, degradeLine } from '../../warnings/codes.js';
 import { fullDependencyGraph, type LockfileComponent, type LockfileGraph } from '../../engine/lockfile.js';
 import { ECOSYSTEMS, type Ecosystem } from '../../engine/drift.js';
 import { componentLicense, extractedLicensingInfos, type ComponentLicense } from './sbom-license.js';
@@ -765,10 +766,13 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
       },
       ...(licenseNotes.length
         ? {
-            properties: licenseNotes.map((f) => ({
-              name: LICENSE_PARSE_FAILED,
-              value: `${f.location}: ${f.message}`,
-            })),
+            properties: licenseNotes.flatMap((f) => [
+              {
+                name: LICENSE_PARSE_FAILED,
+                value: `${f.location}: ${f.message}`,
+              },
+              { name: 'vibgrate:warningCode', value: WarningCodes.LICENSE_UNPARSEABLE },
+            ]),
           }
         : {}),
     },
@@ -787,16 +791,21 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
         properties.push(
           { name: PURL_STATUS_PROPERTY, value: PURL_STATUS_UNAVAILABLE },
           { name: PURL_WARNING_PROPERTY, value: warning },
+          { name: `${PURL_WARNING_PROPERTY}Code`, value: WarningCodes.PURL_UNAVAILABLE },
         );
       }
       if (license.warning) {
         properties.push(
           { name: LICENSE_STATUS_PROPERTY, value: LICENSE_STATUS_UNREPRESENTABLE },
           { name: LICENSE_WARNING_PROPERTY, value: license.warning },
+          { name: `${LICENSE_WARNING_PROPERTY}Code`, value: WarningCodes.LICENSE_UNPARSEABLE },
         );
       }
       for (const warning of dep.mergeWarnings) {
-        properties.push({ name: 'vibgrate:mergeWarning', value: warning });
+        properties.push(
+          { name: 'vibgrate:mergeWarning', value: warning },
+          { name: 'vibgrate:mergeWarningCode', value: WarningCodes.SBOM_MERGE },
+        );
       }
       return {
         type: 'library',
@@ -809,6 +818,20 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
       };
     }),
     ...(dependencyGraph ? { dependencies: dependencyGraph } : {}),
+  };
+}
+
+function spdxNote(artifact: ScanArtifact, comment: string): {
+  annotationType: string;
+  annotator: string;
+  annotationDate: string;
+  comment: string;
+} {
+  return {
+    annotationType: 'OTHER',
+    annotator: 'Tool: @vibgrate/cli',
+    annotationDate: artifact.timestamp,
+    comment,
   };
 }
 
@@ -842,28 +865,22 @@ export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<st
         },
       ];
       if (warning) {
-        annotations.push({
-          annotationType: 'OTHER',
-          annotator: 'Tool: @vibgrate/cli',
-          annotationDate: artifact.timestamp,
-          comment: warning,
-        });
+        annotations.push(
+          spdxNote(artifact, warning),
+          spdxNote(artifact, WarningCodes.PURL_UNAVAILABLE),
+        );
       }
       if (license.warning) {
-        annotations.push({
-          annotationType: 'OTHER',
-          annotator: 'Tool: @vibgrate/cli',
-          annotationDate: artifact.timestamp,
-          comment: license.warning,
-        });
+        annotations.push(
+          spdxNote(artifact, license.warning),
+          spdxNote(artifact, WarningCodes.LICENSE_UNPARSEABLE),
+        );
       }
       for (const warning of dep.mergeWarnings) {
-        annotations.push({
-          annotationType: 'OTHER',
-          annotator: 'Tool: @vibgrate/cli',
-          annotationDate: artifact.timestamp,
-          comment: warning,
-        });
+        annotations.push(
+          spdxNote(artifact, warning),
+          spdxNote(artifact, WarningCodes.SBOM_MERGE),
+        );
       }
       return {
         name: dep.package,
@@ -891,12 +908,10 @@ export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<st
     ...(relationships ? { relationships } : {}),
     ...(licenseNotes.length
       ? {
-          annotations: licenseNotes.map((f) => ({
-            annotationType: 'OTHER',
-            annotator: 'Tool: @vibgrate/cli',
-            annotationDate: artifact.timestamp,
-            comment: `${f.ruleId}: ${f.message}`,
-          })),
+          annotations: licenseNotes.flatMap((f) => [
+            spdxNote(artifact, `${f.ruleId}: ${f.message}`),
+            spdxNote(artifact, WarningCodes.LICENSE_UNPARSEABLE),
+          ]),
         }
       : {}),
   };
@@ -1023,13 +1038,13 @@ const exportCommand = new Command('export')
 
     const sbom = format === 'cyclonedx' ? toCycloneDx(artifact, lockfileGraph) : toSpdx(artifact, lockfileGraph);
     for (const warning of collectPurlWarnings(artifact, lockfileGraph)) {
-      console.error(chalk.yellow(`warning: ${warning}`));
+      console.error(chalk.yellow(`warning: ${degradeLine(WarningCodes.PURL_UNAVAILABLE, warning)}`));
     }
     for (const warning of collectLicenseWarnings(artifact, lockfileGraph)) {
-      console.error(chalk.yellow(`warning: ${warning}`));
+      console.error(chalk.yellow(`warning: ${degradeLine(WarningCodes.LICENSE_UNPARSEABLE, warning)}`));
     }
     for (const warning of collectMergeWarnings(artifact, lockfileGraph)) {
-      console.error(chalk.yellow(`warning: ${warning}`));
+      console.error(chalk.yellow(`warning: ${degradeLine(WarningCodes.SBOM_MERGE, warning)}`));
     }
     const body = JSON.stringify(sbom, null, 2);
 

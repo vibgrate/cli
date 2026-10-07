@@ -449,6 +449,12 @@ describe('sbom helpers', () => {
         annotationDate: '2026-02-19T00:00:00.000Z',
         comment: `${LICENSE_PARSE_FAILED}: ${message}`,
       },
+      {
+        annotationType: 'OTHER',
+        annotator: 'Tool: @vibgrate/cli',
+        annotationDate: '2026-02-19T00:00:00.000Z',
+        comment: 'VG_WARN_LICENSE_UNPARSEABLE',
+      },
     ]);
     expect(JSON.stringify(spdx)).not.toContain('unrelated');
 
@@ -458,6 +464,7 @@ describe('sbom helpers', () => {
     };
     expect(cdx.metadata.properties).toEqual([
       { name: LICENSE_PARSE_FAILED, value: `apps/web: ${message}` },
+      { name: 'vibgrate:warningCode', value: 'VG_WARN_LICENSE_UNPARSEABLE' },
     ]);
     expect(toCycloneDx(withFailure)).toEqual(cdx);
     expect(cdx.serialNumber).not.toBe((toCycloneDx(plain) as { serialNumber: string }).serialNumber);

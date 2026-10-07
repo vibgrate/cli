@@ -1,6 +1,7 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
+import { WarningCodes, degradeLine } from '../../warnings/codes.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as semver from 'semver';
@@ -244,7 +245,7 @@ export async function scanNodeProjects(
       if (cache) {
         cache.addStuckPath(relPath || '.');
       }
-      console.error(`Timeout scanning ${pjPath} (>${STUCK_TIMEOUT_MS / 1000}s) — skipped`);
+      console.error(degradeLine(WarningCodes.SKIPPED_SUBTREE, `Timeout scanning ${pjPath} (>${STUCK_TIMEOUT_MS / 1000}s) — skipped`));
       if (cache?.shouldShowTimeoutHint()) {
         console.error(`  Tip: increase projectScanTimeout in vibgrate.config.ts (or --project-scan-timeout <seconds>) for large projects`);
       }
@@ -252,7 +253,7 @@ export async function scanNodeProjects(
     } catch (e: unknown) {
       rethrowLockfileParseError(e);
       const msg = e instanceof Error ? e.message : String(e);
-      console.error(`Error scanning ${pjPath}: ${msg}`);
+      console.error(degradeLine(WarningCodes.SCAN_DEGRADE, `Error scanning ${pjPath}: ${msg}`));
       return null;
     }
   })));

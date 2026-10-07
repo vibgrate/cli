@@ -3,6 +3,7 @@ import { renderReport } from './report.js';
 import { renderHtml } from './html.js';
 import type { DepRecord } from './drift.js';
 import { resolvePurl } from '../reporting/commands/sbom.js';
+import { WarningCodes } from '../warnings/codes.js';
 import type { LocalModel } from './models.js';
 import type { VgGraph } from '../schema.js';
 
@@ -266,6 +267,7 @@ function cyclonedx(ctx: ExportContext): string {
         properties: [
           { name: 'vibgrate:purlStatus', value: 'unavailable' },
           { name: 'vibgrate:purlWarning', value: resolved.warning },
+          { name: 'vibgrate:purlWarningCode', value: WarningCodes.PURL_UNAVAILABLE },
         ],
       });
     }

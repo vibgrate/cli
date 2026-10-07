@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import type { ScanArtifact, BillingSummary, ExtendedScanResults, InventoryItem, ServiceDependencyItem, ArchitectureResult, SecurityFinding, SecuritySection } from '../types.js';
 import { baselineSuppressionLabel } from '../baseline-suppressions.js';
 import { humanFindingText } from './fix-hint.js';
+import { degradeWarningBlock, ruleWithWarnCode } from '../../warnings/codes.js';
 import { driftBar } from '../ui/bar.js';
 import { titleBox, panelBox } from '../ui/box.js';
 
@@ -132,9 +133,16 @@ export function formatText(artifact: ScanArtifact, opts: FormatTextOptions = {})
       const icon = f.level === 'error' ? chalk.red('✖') : f.level === 'warning' ? chalk.yellow('⚠') : chalk.blue('ℹ');
       const shown = humanFindingText(f);
       lines.push(`    ${icon} ${shown.message}`);
-      lines.push(chalk.dim(`      ${f.ruleId} in ${f.location}`));
+      lines.push(chalk.dim(`      ${ruleWithWarnCode(f.ruleId, f.details)} in ${f.location}`));
       if (shown.hint) lines.push(chalk.dim(`      ${shown.hint}`));
     }
+    lines.push('');
+  }
+
+  const degradeLines = degradeWarningBlock(artifact.degradeWarnings);
+  if (degradeLines.length) {
+    lines.push(chalk.bold.underline(`  ${degradeLines[0]}`));
+    for (const line of degradeLines.slice(1)) lines.push(chalk.yellow(line));
     lines.push('');
   }
 

@@ -38,6 +38,7 @@ import { formatMarkdown } from './formatters/markdown.js';
 import { loadConfig, appendExcludePatterns } from './config.js';
 import { pathExists, readJsonFile, writeJsonFile, writeTextFile, ensureDir, FileCache, quickTreeCount } from './utils/fs.js';
 import { assertSafeWalkRoot } from './utils/root-safety.js';
+import { WarningCodes, degradeLine, stableWarningRecords, type WarningRecord } from '../warnings/codes.js';
 import { detectVcs } from './utils/vcs.js';
 import { isCiEnvironment, hasVibgrateWorkflow } from './utils/ci-env.js';
 import { resolveRepositoryName } from './utils/repository-name.js';
@@ -762,15 +763,20 @@ export async function runCoreScan(
 
   progress.finish();
 
-  const stuckPaths = fileCache.stuckPaths;
-  const skippedLarge = fileCache.skippedLargeFiles;
+  const stuckPaths = [...fileCache.stuckPaths].sort();
+  const skippedLarge = [...fileCache.skippedLargeFiles].sort();
+  const degradeWarnings: WarningRecord[] = [];
 
   if (stuckPaths.length > 0) {
     console.log(
-      chalk.yellow(`\n⚠ ${stuckPaths.length} path${stuckPaths.length === 1 ? '' : 's'} timed out (>${Math.round(projectScanTimeoutMs / 1000)}s) and ${stuckPaths.length === 1 ? 'was' : 'were'} skipped:`),
+      chalk.yellow(`\n⚠ ${degradeLine(WarningCodes.SKIPPED_SUBTREE, `${stuckPaths.length} path${stuckPaths.length === 1 ? '' : 's'} timed out (>${Math.round(projectScanTimeoutMs / 1000)}s) and ${stuckPaths.length === 1 ? 'was' : 'were'} skipped`)}:`),
     );
     for (const d of stuckPaths) {
       console.log(chalk.dim(`  → ${d}`));
+      degradeWarnings.push({
+        code: WarningCodes.SKIPPED_SUBTREE,
+        message: `${d}: skipped — scan timed out`,
+      });
     }
     const newExcludes = stuckPaths.map((d) => `${d}/**`);
     const updated = await appendExcludePatterns(rootDir, newExcludes);
@@ -783,8 +789,14 @@ export async function runCoreScan(
     const sizeLimit = config.maxFileSizeToScan ?? 5_242_880;
     const sizeMB = (sizeLimit / 1_048_576).toFixed(0);
     console.log(
-      chalk.yellow(`\n⚠ ${skippedLarge.length} file${skippedLarge.length === 1 ? '' : 's'} skipped (>${sizeMB} MB):`),
+      chalk.yellow(`\n⚠ ${degradeLine(WarningCodes.SKIPPED_FILE, `${skippedLarge.length} file${skippedLarge.length === 1 ? '' : 's'} skipped (>${sizeMB} MB)`)}:`),
     );
+    for (const f of skippedLarge) {
+      degradeWarnings.push({
+        code: WarningCodes.SKIPPED_FILE,
+        message: `${f}: skipped — file exceeds the scan size limit`,
+      });
+    }
     for (const f of skippedLarge.slice(0, 10)) {
       console.log(chalk.dim(`  → ${f}`));
     }
@@ -845,10 +857,16 @@ export async function runCoreScan(
         const baselineFindings = Array.isArray(baseline.findings) ? baseline.findings : [];
         artifact.baselineComparison = compareBaselineFindings(artifact.findings, baselineFindings);
       } catch {
-        console.error(chalk.yellow(`Warning: Could not read baseline file: ${baselinePath}`));
+        const where = baselineWarningPath(rootDir, baselinePath);
+        const message = `Could not read baseline file: ${where}`;
+        console.error(chalk.yellow(`Warning: ${degradeLine(WarningCodes.BASELINE_UNREADABLE, message)}`));
+        degradeWarnings.push({ code: WarningCodes.BASELINE_UNREADABLE, message });
       }
     }
   }
+
+  const stableDegrade = stableWarningRecords(degradeWarnings);
+  if (stableDegrade.length) artifact.degradeWarnings = stableDegrade;
 
   if (!opts.noLocalArtifacts && !maxPrivacyMode) {
     const vibgrateDir = path.join(rootDir, '.vibgrate');
@@ -992,4 +1010,11 @@ async function buildRepositoryInfo(rootDir: string, remoteUrl: string | undefine
     ...(ciSystems && ciSystems.length > 0 ? { pipeline: ciSystems.join(',') } : {}),
     ...(remoteUrl ? { remoteUrl } : {}),
   };
+}
+
+/** Baseline path safe to print and store: repo-relative, or the basename when it sits outside the repo. */
+function baselineWarningPath(rootDir: string, baselinePath: string): string {
+  const rel = path.relative(rootDir, baselinePath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return path.basename(baselinePath);
+  return rel.split('\\').join('/');
 }
