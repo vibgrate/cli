@@ -42,7 +42,7 @@ export type ProjectType =
 
 export type OutputFormat = 'text' | 'json' | 'sarif' | 'md';
 
-export type ReportFormat = 'md' | 'text' | 'json';
+export type ReportFormat = 'md' | 'text' | 'json' | 'html';
 
 // ── Package.json shape ──
 

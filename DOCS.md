@@ -18,6 +18,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg fix](#vg-fix)
   - [vg init](#vg-init)
   - [vg report](#vg-report)
+    - [HTML report](#html-report)
   - [vg review](#vg-review)
   - [vg sbom](#vg-sbom)
     - [Choosing CycloneDX or SPDX](#choosing-cyclonedx-or-spdx)
@@ -450,16 +451,43 @@ Creates:
 
 ### vg report
 
-Generate a human-readable report from a scan artifact.
+Render a report from a local scan artifact. `text`, `md`, and `json` are unchanged. `html` is a self-contained page generated on this machine: a compact summary, then the full finding tables. The page does not load anything from the network.
 
 ```bash
-vg report [--in <file>] [--format md|text|json]
+vg report [--in <file>] [--format md|text|json|html]
+vg report --in .vibgrate/scan_result.json --format html
 ```
 
-| Flag       | Default                      | Description                            |
-| ---------- | ---------------------------- | -------------------------------------- |
-| `--in`     | `.vibgrate/scan_result.json` | Input artifact file                    |
-| `--format` | `text`                       | Output format: `md`, `text`, or `json` |
+| Flag       | Default                      | Description                                                                 |
+| ---------- | ---------------------------- | --------------------------------------------------------------------------- |
+| `--in`     | `.vibgrate/scan_result.json` | Input artifact file                                                         |
+| `--format` | `text`                       | `md`, `text`, `json`, or `html`. Any other value is a usage error (exit `5`) |
+
+An unknown value is rejected before the file is read. The process exits `5`, writes nothing to stdout, and prints one stderr line that names the value and lists the valid ones:
+
+```text
+error: unknown --format "sarif" (expected md, text, json, html)
+```
+
+The comparison is exact. `HTML` is unknown. Omitting `--format` stays on `text`.
+
+#### HTML report
+
+`--format html` reads the artifact already on disk (the same file `text`, `md`, and `json` read) and prints one page:
+
+1. A summary (`#summary`) at the top.
+2. The full tables: vulnerabilities (`#vulnerabilities`), security (`#security`), and the other findings (`#findings`).
+3. An empty footer (`#report-footer`).
+
+The summary counts vulnerability findings by severity (`critical`, `high`, `moderate`, `low`, `unknown`). Security findings are counted on their own scale (`critical`, `high`, `medium`, `low`, `info`). A count greater than zero links to the first row of that severity. The section links stay in the summary when a table is empty, so the summary is navigation and the tables below stay complete.
+
+A severity that was not recorded on a finding is `absent`. That bucket is omitted when nothing is absent, and it is never shown as `0` or folded into `unknown`. A vulnerability scan that did not run is `not scanned`, not a row of zeros. An unreachable scan is `not checked`. A security section that is missing from the artifact is `not evaluated`. A scan that ran and found nothing shows measured zeros.
+
+CVSS and DriftScore follow the same rule. A missing score is `n/a`. A score that was computed as `0` stays `0`.
+
+When a vulnerability finding has `details.fixedVersions` with at least one version, the summary includes a fix-available count and that row is marked `data-fix-available="yes"`. An empty list or a missing field adds nothing, and the page does not say that no fix exists.
+
+The same artifact produces the same HTML. Rows are sorted by severity, then by the remaining columns. The page embeds no clock, no remote assets, and no script. Text from the artifact is escaped, and credential-shaped text is redacted.
 
 ---
 
