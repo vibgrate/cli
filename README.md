@@ -10,6 +10,9 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@vibgrate/cli"><img src="https://img.shields.io/npm/v/@vibgrate/cli?color=blue&label=npm" alt="npm version" /></a>
+  <a href="https://dash.vibgrate.com/badges/driftscore/vibgrate/cli"><img src="https://badges.vibgrate.com/vibgrate/cli" alt="Vibgrate DriftScore" /></a>
+  <a href="https://dash.vibgrate.com/badges/riskscore/vibgrate/cli"><img src="https://badges.vibgrate.com/riskscore/vibgrate/cli" alt="Vibgrate RiskScore" /></a>
+  <a href="https://dash.vibgrate.com/badges/driftrisk/vibgrate/cli"><img src="https://badges.vibgrate.com/driftrisk/vibgrate/cli" alt="Vibgrate DriftRisk" /></a>
   <a href="https://vibgrate.com/cli"><img src="https://img.shields.io/badge/live%20demo-vibgrate.com%2Fcli-3FB0A4" alt="live demo" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="Apache 2.0" /></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="node 22+" />
