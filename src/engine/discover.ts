@@ -6,6 +6,7 @@ import { requireDataConfig } from '../core-open/config.js';
 import { dropBlankPatterns, gitignoreWithoutBlankLines } from '../core-open/utils/glob.js';
 import { assertLockfileFile, lockfileKind } from '../core-open/utils/lockfile-parse.js';
 import { assertSafeWalkRoot, createWalkBudget, noteWalkEntry } from '../core-open/utils/root-safety.js';
+import { emitSkippedSymlinkNotice } from '../core-open/utils/skipped-symlinks.js';
 
 /**
  * Deterministic file discovery.
@@ -248,6 +249,10 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
 
   const found = new Map<string, DiscoveredFile>();
   const budget = createWalkBudget(root, options.maxEntries);
+  // Symlinks are not followed. Dirent.isDirectory() / isFile() are false for a
+  // link, so a directory link to its parent cannot re-enter this walk. The
+  // notice lists the ones this walk skipped; ignored links stay quiet.
+  const skippedSymlinks: string[] = [];
 
   const considerFile = (abs: string): void => {
     const rel = toPosix(path.relative(root, abs));
@@ -274,6 +279,11 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
     for (const entry of entries) {
       const abs = path.join(dir, entry.name);
       const rel = toPosix(path.relative(root, abs));
+      if (entry.isSymbolicLink()) {
+        if (rel && (rootIg.ignores(rel) || rootIg.ignores(`${rel}/`))) continue;
+        if (rel) skippedSymlinks.push(rel);
+        continue;
+      }
       if (entry.isDirectory()) {
         if (isSkippedDirName(entry.name)) continue;
         if (rel && rootIg.ignores(`${rel}/`)) continue;
@@ -297,6 +307,7 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
     } else if (stat.isFile()) considerFile(scope);
   }
 
+  emitSkippedSymlinkNotice(skippedSymlinks);
   return [...found.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 }
 

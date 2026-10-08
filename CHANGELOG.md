@@ -12,6 +12,15 @@ backward compatible.
 
 ## [Unreleased]
 
+### Changed
+
+- **`vg build` and `vg scan` do not follow symlinks, and they say so.** A
+  directory symlink is not entered, so a link to its parent cannot hang the
+  walk, and a file symlink is not read. When any are skipped, one stderr
+  notice lists the count and the first few root-relative paths. Nothing is
+  printed when there are none. Output files, the exit code, and JSON on
+  stdout stay the same.
+
 ### Added
 
 - **Unknown optional lockfile fields warn and continue.** When a lockfile still lists dependencies vg can read, an extra field does not drop that graph or the SBOM rows built from it. The command prints one warning per lockfile path and field name, sorted by path then field: `pnpm-lock.yaml: unknown optional lockfile field "<name>"; continuing with the fields this version understands.` A field name that is not a plain identifier is reported as `(name omitted)`. A truncated lockfile, or one missing the structure its format requires, still exits non-zero.

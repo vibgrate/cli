@@ -110,6 +110,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vibgrate.config.ts](#vibgrateconfigts)
   - [Thresholds](#thresholds)
   - [Scanner Toggles](#scanner-toggles)
+  - [Symlinks](#symlinks)
 - [Extended Scanners](#extended-scanners)
   - [Platform Matrix](#platform-matrix)
   - [Dependency Risk](#dependency-risk)
@@ -2128,6 +2129,8 @@ Switches (flags that take no value, such as `--vulns`, `--offline` or `--no-grap
 
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
+`vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once on stderr. See [Symlinks](#symlinks).
+
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
 
 ### Unknown lockfile fields
@@ -2717,6 +2720,8 @@ Maps source code into a graph artifact, enabling all downstream queries (`vg sho
 | `--attest-key <path>` | `$VG_ATTEST_KEY`, else `.vibgrate/attest-key.pem` | Ed25519 private key PEM used by `--attest` |
 | `--attestation <file>` | `.vibgrate/attestation.intoto.jsonl` | Where `--attest` writes, and where `--verify` reads |
 | `--pub <path>` | — | Public key PEM that pins the signer for `--verify` |
+
+`vg build` does not follow symlinks while it discovers files. A skipped link is named once on stderr. See [Symlinks](#symlinks). `.gitignore` and `--exclude` still apply.
 
 **Local by default — no git churn.** The first time vg writes into `.vibgrate/` it also creates `.vibgrate/.gitignore`, keeping the graph artifacts (`graph.json`, `graph.html`, `GRAPH_REPORT.md`, `facts.jsonl`, `mcp-navigation.json`) and the cache out of git — so builds, auto-refreshes, and MCP use never leave your branch dirty. Run `vg share` when you want the map committed for your team (it rewrites that ignore file). vg never touches an existing `.vibgrate/.gitignore`, so edit it (or leave it empty) to manage the ignores yourself.
 
@@ -5030,6 +5035,32 @@ Skips are deterministic functions of the input (file size, file count) — never
 of observed memory — so identical input still produces an identical
 `graph.json`. To give the build more room instead of limiting it, raise the
 Node heap: `NODE_OPTIONS=--max-old-space-size=8192`.
+
+### Symlinks
+
+`vg build` and `vg scan` do not follow symlinks. While walking, a directory
+symlink is not entered and a file symlink is not read. That includes a link
+that points at its own parent, so a cycle cannot make the walk hang. The link
+is left out of the map and out of the scan. Output files do not change, and
+the exit code stays the same.
+
+The directory you pass as the root is opened even when that path itself is a
+symlink. Links found underneath it are not followed. To include the files a
+link points at, point the root at that target, or pass a narrower directory
+that already contains them. To leave a link out without a notice, list it in
+`.gitignore` or pass `--exclude`.
+
+When a walk skips one or more symlinks, vg prints one notice on stderr and
+nothing when there are none. The notice is the count, then the first few
+root-relative paths in sorted order (at most five; further links are a
+`+N more` count). Paths are relative to the root you passed. Absolute paths
+are not printed. The line goes to stderr, so `--format json` and
+`vg build --json` keep a JSON document on stdout. `--quiet` hides promotional
+text only; it does not hide this notice.
+
+```text
+notice: skipped 3 symlinks (alias.ts, nested/cycle, via). vg does not follow symlinks. Point the root at the link target, or pass --exclude or a narrower root.
+```
 
 ---
 

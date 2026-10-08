@@ -408,6 +408,8 @@ export function discoverDocs(options: DiscoverDocsOptions): DiscoveredDoc[] {
       if (found.size >= maxFiles) return;
       const abs = path.join(dir, entry.name);
       const rel = toPosix(path.relative(root, abs));
+      // Not followed. discover() prints the one notice for this tree.
+      if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         if (isSkippedDirName(entry.name)) continue;
         // Workflows / .github must be walked even if other tools ignore them
