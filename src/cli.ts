@@ -45,13 +45,14 @@ import { registerReview } from './commands/review.js';
 import { ConfigFileError } from './core-open/config.js';
 import { LockfileParseError } from './core-open/utils/lockfile-parse.js';
 import { UnsafeRootError } from './core-open/utils/root-safety.js';
-import { CliError, ExitCode } from './util/exit.js';
+import { CliError, ExitCode, usageError } from './util/exit.js';
 import { c, info, disableColor, exitAfterFlush } from './util/output.js';
 
 // Drift-reporting commands (merged from the Vibgrate CLI). These run on the
 // open base engine (`@vibgrate/core-open`) — no proprietary kernel.
 import { initCommand } from './reporting/commands/init.js';
 import { scanCommand } from './reporting/commands/scan.js';
+import { switchValueError } from './cli-switch-values.js';
 import { fixCommand } from './reporting/commands/fix.js';
 import { baselineCommand } from './reporting/commands/baseline.js';
 import { reportCommand } from './reporting/commands/report.js';
@@ -398,6 +399,9 @@ export async function main(argv = process.argv): Promise<void> {
     // dispatch() can throw (e.g. a moved-command hint) — keep it inside the
     // handler so those surface as a clean `error:` line, not a raw stack.
     const dispatched = dispatch(raw, cwd);
+    // Commander would reject these as an unknown option; say what works instead.
+    const switchError = switchValueError(program, dispatched);
+    if (switchError) throw usageError(switchError);
     await program.parseAsync(dispatched, { from: 'user' });
   } catch (err) {
     handleError(err);

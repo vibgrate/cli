@@ -86,7 +86,7 @@ describe('license findings in machine-readable scan output', () => {
       'apps/api',
       'package.json',
     ]);
-    expect(licenseFindings[1]?.details).toEqual({ raw: 'Also-Not-SPDX' });
+    expect(licenseFindings[1]?.details).toEqual({ raw: 'Also-Not-SPDX', warnCode: 'VG_WARN_LICENSE_UNPARSEABLE' });
     expect(JSON.stringify(scan.findings)).not.toContain('beta-ok');
 
     const json = JSON.stringify(scan, null, 2);
@@ -114,7 +114,7 @@ describe('license findings in machine-readable scan output', () => {
     ]);
     expect(results[0]?.properties?.sourcePath).toBe('apps/web/package.json');
     expect(results[2]?.properties?.sourcePath).toBe('package.json');
-    expect(results[1]?.properties).toEqual({ raw: 'Also-Not-SPDX' });
+    expect(results[1]?.properties).toEqual({ raw: 'Also-Not-SPDX', warnCode: 'VG_WARN_LICENSE_UNPARSEABLE' });
     expect(results[2]?.locations).toHaveLength(1);
     expect(JSON.stringify(sarif)).not.toContain('beta-ok');
   });

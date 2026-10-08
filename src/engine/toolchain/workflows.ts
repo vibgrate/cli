@@ -12,6 +12,7 @@ import type {
   ToolchainExtractor,
   ToolchainNodeDraft,
 } from './types.js';
+import { stampWarning, WARNING_CODES } from '../../core-open/warnings.js';
 
 /**
  * CI workflow extraction — GitHub Actions and GitLab CI.
@@ -168,7 +169,7 @@ export const githubActionsExtractor: ToolchainExtractor = {
 
     for (const [jobId, job] of jobs) {
       if (nodes.length >= TOOLCHAIN_NODES_PER_FILE_MAX) {
-        warnings.push(`${rel}: stopped at ${TOOLCHAIN_NODES_PER_FILE_MAX} nodes`);
+        warnings.push(stampWarning(WARNING_CODES.TOOLCHAIN_NODE_CAP, `${rel}: stopped at ${TOOLCHAIN_NODES_PER_FILE_MAX} nodes`));
         break;
       }
       const jobAddress = `job:${jobId}`;
@@ -244,7 +245,7 @@ export const githubActionsExtractor: ToolchainExtractor = {
       });
 
       if (steps.length > MAX_STEPS_PER_JOB) {
-        warnings.push(`${rel}: job ${jobId} has ${steps.length} steps — enumerated the first ${MAX_STEPS_PER_JOB}`);
+        warnings.push(stampWarning(WARNING_CODES.WORKFLOW_STEP_CAP, `${rel}: job ${jobId} has ${steps.length} steps — enumerated the first ${MAX_STEPS_PER_JOB}`));
       }
 
       // Secret *names* referenced anywhere in the job.
@@ -306,7 +307,7 @@ export const gitlabCiExtractor: ToolchainExtractor = {
 
     for (const [jobId, job] of jobs) {
       if (nodes.length >= TOOLCHAIN_NODES_PER_FILE_MAX) {
-        warnings.push(`${rel}: stopped at ${TOOLCHAIN_NODES_PER_FILE_MAX} nodes`);
+        warnings.push(stampWarning(WARNING_CODES.TOOLCHAIN_NODE_CAP, `${rel}: stopped at ${TOOLCHAIN_NODES_PER_FILE_MAX} nodes`));
         break;
       }
       const jobAddress = `job:${jobId}`;
