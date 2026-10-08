@@ -88,6 +88,11 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg policy](#vg-policy)
 - [DriftScore](#driftscore)
 - [Drift Baselines & Fitness Functions](#drift-baselines--fitness-functions)
+  - [Record and refresh](#record-and-refresh)
+  - [CI gates](#ci-gates)
+  - [Suppressions](#suppressions)
+  - [What to commit](#what-to-commit)
+  - [CI example](#ci-example)
   - [How the Score Is Calculated](#how-the-score-is-calculated)
   - [Risk Levels](#risk-levels)
   - [Score Components](#score-components)
@@ -217,13 +222,15 @@ Drift scoring, baselines, reports, supply-chain evidence, and related local tool
 
 ### vg baseline
 
-Create a drift baseline snapshot for delta comparison.
+Run a full scan and write `.vibgrate/baseline.json`. There is no `create` or `update` subcommand. Running the command again overwrites that file. That second run is how you refresh the snapshot after planned upgrades land on the main branch.
 
 ```bash
 vg baseline [path]
 ```
 
-Runs a full scan and saves the result to `.vibgrate/baseline.json`. Use this as the starting point for tracking drift over time.
+`[path]` is the project directory to scan. It defaults to `.`. The file is always `<path>/.vibgrate/baseline.json`.
+
+Gating, suppressions, what to commit, and a CI example: [Drift Baselines & Fitness Functions](#drift-baselines--fitness-functions).
 
 ---
 
@@ -1957,7 +1964,7 @@ vg scan [path] [--vulns] [--full] [--iac] [--format text|json|sarif|md] [--out <
 | `--out <file>` | — | Write output to a file |
 | `--junit <file>` | — | Also write a deterministic JUnit XML report of findings and gates. See [JUnit](#junit). Does not replace `--format` |
 | `--fail-on <level>` | — | Exit with code 2 if findings at this level exist. `warn` / `error` gate on drift findings. `architecture-finding` (hard boundary violations) and `architecture-warning` (violations and warnings) gate on the architecture module's boundary findings, judged under the policy pack in force — `hexagonal-v1` unless `.vibgrate/architecture.toml`, `VIBGRATE_ARCHITECTURE_POLICY` or `vg build --policy` says `layered-v1`. The output names the pack whether the gate passes or fails; each failing row is `file:line  symbol  violation: … (rule)`. Pick the pack before turning this on: see [Architecture policy packs](./docs/architecture-policies.md) |
-| `--baseline <file>` | — | Compare against a previous baseline. JSON records matching findings in `baselineComparison` (rule, location, and id, sorted). Text prints the count. SARIF lists the same ids as suppressions. Those findings stay in the report |
+| `--baseline <file>` | — | Compare against a previous baseline. JSON records matching findings in `baselineComparison` (rule, location, and id, sorted). Text prints the count. SARIF lists the same ids as suppressions. Those findings stay in the report and still count toward `--fail-on`. See [Drift Baselines & Fitness Functions](#drift-baselines--fitness-functions) |
 | `--changed-only` | — | Only scan changed files |
 | `--concurrency <n>` | `8` | Max concurrent npm registry calls |
 | `--drift-budget <score>` | — | Fitness gate: fail if drift score is above this budget |
@@ -4456,30 +4463,106 @@ Exit non-zero from `verify` when the production gate is not ready (so CI can blo
 
 ## Drift Baselines & Fitness Functions
 
-Vibgrate stores scan state under `.vibgrate/`:
+`vg baseline [path]` is one command. There is no `create` or `update` subcommand. `[path]` is the directory to scan (default `.`). The command runs a full scan and writes the scan artifact to `<path>/.vibgrate/baseline.json`, replacing the file when it already exists. Run that same command again after planned upgrades land on the main branch. That second run is the refresh.
+
+The file is a full scan artifact: scores, findings, and VCS metadata (commit, branch, and remote URL). Userinfo and credential query parameters are stripped from the remote URL before it is stored. `timestamp` and `durationMs` change on every run, so a refresh rewrites the file even when the score is unchanged. See [JSON Artifact](#json-artifact).
+
+Other files under `.vibgrate/`:
 
 - `.vibgrate/scan_result.json`: latest scan artifact
-- `.vibgrate/baseline.json`: explicit baseline snapshot (`vg baseline`)
+- `.vibgrate/baseline.json`: the snapshot `vg baseline` wrote
 - `<project>/.vibgrate/project_score.json`: per-project score snapshots
 
-Recommended workflow:
+### Record and refresh
 
-1. Create baseline once on main branch:
+1. On the main branch, record the snapshot:
    ```bash
    vg baseline
    ```
-2. In CI, run scan with comparison and gates:
+2. In CI, compare the pull request with that file and apply the gates:
    ```bash
-   vg scan --baseline .vibgrate/baseline.json --drift-budget 40 --drift-worsening 5
+   vg scan --baseline .vibgrate/baseline.json --drift-budget 40 --drift-worsening 5 --fail-on error
    ```
-3. When planned upgrades land, refresh baseline:
-   ```bash
-   vg baseline
-   ```
+3. When planned upgrades land on the main branch, run `vg baseline` again and commit the new file.
 
-This makes drift a formal quality gate (fitness function), not just reporting.
+### CI gates
 
-`vg scan --baseline` still compares the DriftScore (`delta`, and `--drift-worsening`). It also records findings that already appear in the snapshot — the same rule at the same location — on the scan document as `baselineComparison`. The list is sorted by rule, location, then id. The text report prints how many were suppressed. SARIF marks those same ids as suppressions. The findings stay in the report, so a comparison does not drop them without that record.
+A failed gate exits `2` (`GATE_FAILED`). See [Exit Codes](#exit-codes).
+
+| Gate | Exit `2` | Stays successful for this gate |
+| --- | --- | --- |
+| `--drift-budget <score>` | The measured DriftScore is above the budget. A score equal to the budget passes | An unmeasured score (`null`) is not compared. The message is `DriftScore is absent; --drift-budget <score> was not compared.` |
+| `--drift-worsening <percent>` | Worsening versus the baseline is above the percent. A measured score with no numeric `delta` also fails | Worsening equal to the percent, or `delta` ≤ 0. An unmeasured score is not compared. The message is `DriftScore is absent; --drift-worsening was not compared.` |
+| `--fail-on error` | Any finding at level `error`, including one the baseline already recorded | Warnings and notes |
+| `--fail-on warn` | Any finding at level `warning` or `error`, including one the baseline already recorded | Notes |
+
+An unmeasured DriftScore is `null`, not `0`. It skips both `--drift-budget` and `--drift-worsening`, and those two flags then leave the process exit code unchanged. `--fail-on` still applies to findings.
+
+`delta` is set only when `--baseline` names a readable file, this scan's DriftScore is a number, and the baseline DriftScore is a number. With `--drift-worsening` set, a measured score and no `delta` exits `2`: `Failing fitness function: --drift-worsening requires --baseline to compare against previous drift.` That covers a missing `--baseline` flag, a missing or unreadable file, and a baseline whose score was not measured.
+
+With `--drift-budget` or `--drift-worsening` on the command line, the scan judges those flags. `driftBudget` in the project config is applied only when neither flag is set. A config `maxWorseningPercent` with no baseline is reported as not evaluated, and it does not fail the scan.
+
+JUnit `gates` cases follow the same rules. A breach is `<failure>`. An unmeasured score is `<skipped>`. `--drift-worsening` with a measured score and no baseline delta is `<failure>`. A config worsening limit with no baseline, and a warn-mode or shadow breach, are `<skipped>`. See [JUnit](#junit).
+
+### Suppressions
+
+With `--baseline`, a finding that already appears in the snapshot — the same rule at the same location — stays in `findings`. The scan adds `baselineComparison` on the same document:
+
+- `compared` is `true` when the baseline file was read
+- `suppressed` is sorted by rule, then location, then id
+- each `id` is the first 32 hexadecimal characters of the SHA-256 of that rule and location
+
+The text report prints the count (`1 finding suppressed by baseline`, or `N findings suppressed by baseline`), including when the count is zero. SARIF keeps the result and adds a suppression (`kind: external`, `status: accepted`, justification `Matches the drift baseline`) that cites the same id.
+
+Baselined findings still count toward `--fail-on`. The exit path reads `findings` and does not skip ids listed in `baselineComparison`. An error that the baseline already recorded still fails `--fail-on error` with exit `2`. The suppression is the audit record in JSON, text, and SARIF.
+
+A row that exists only in the baseline is omitted. Nothing in the current scan was suppressed for it.
+
+### What to commit
+
+Commit `.vibgrate/baseline.json` on the main branch after you have read it, or produce that file as a CI artifact from the main branch and restore it in the gate job. The [example](#ci-example) checks the committed file out with the repository.
+
+Leave tokens, a DSN, and `~/.vibgrate/credentials.json` out of the repository. `vg baseline` has no `--dsn` flag. A `VIBGRATE_DSN` value in the environment is still read, and the workspace id is folded into project and solution ids. The DSN string itself is not written into the file. Unset `VIBGRATE_DSN` before you record a snapshot you will commit, and review the file: it holds findings and VCS metadata. `.vibgrate/scan_result.json` is the latest run, not the accepted snapshot.
+
+### CI example
+
+One job. Checkout brings the committed `.vibgrate/baseline.json`. The scan writes `vibgrate.sarif` before a failing gate exits, and the last step stores that file as a workflow artifact. The job sets no DSN and does not send the file to code scanning.
+
+```yaml
+name: Drift baseline
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Drift gate
+        run: npx @vibgrate/cli scan --baseline .vibgrate/baseline.json --drift-budget 40 --drift-worsening 5 --fail-on error --format sarif --out vibgrate.sarif
+
+      - name: Save SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibgrate-sarif
+          path: vibgrate.sarif
+```
+
+Exit `2` fails the Drift gate step. Leave `continue-on-error` unset on that step. `if: always()` keeps `vibgrate.sarif` when the gate fails. Pin the CLI calendar version on a gate you keep; see `examples/github-actions/README.md`.
 
 ## DriftScore
 
@@ -4627,7 +4710,7 @@ A finding is a `<failure>` only when its level fails the drift gate you set. Any
 | `warning` | skipped | failure | skipped |
 | `note` | skipped | skipped | skipped |
 
-Budget cases follow the same exit rules as the CLI. `--drift-budget` / an enforced `driftBudget` breach is a `<failure>`. A score that was not measured, a worsening limit with no `--baseline`, and a warn-mode or shadow breach are `<skipped>` — they do not fail the scan. Every requested gate is included, including gates after the one that stopped the process. The confirmation line goes to stderr, so `--format json` on stdout stays intact. See [Exit Codes](#exit-codes): the XML is written, then the process exits `2` when a gate fails. SARIF stays the code-scanning artifact; see [SARIF](#sarif).
+Budget cases follow the same exit rules as the CLI. A `--drift-budget` breach, or an enforced `driftBudget` breach, is a `<failure>`. An unmeasured score is `<skipped>` and does not fail `--drift-budget` or `--drift-worsening`. `--drift-worsening` with a measured score and no baseline delta is a `<failure>`, and the process exits `2`. A config `maxWorseningPercent` with no baseline, and a warn-mode or shadow breach, are `<skipped>` and do not fail the scan. Flag and config rules: [Drift Baselines & Fitness Functions](#drift-baselines--fitness-functions). Every requested gate is included, including gates after the one that stopped the process. The confirmation line goes to stderr, so `--format json` on stdout stays intact. See [Exit Codes](#exit-codes): the XML is written, then the process exits `2` when a gate fails. SARIF stays the code-scanning artifact; see [SARIF](#sarif).
 
 ```bash
 vg scan --format sarif --out vibgrate.sarif --junit vibgrate.junit.xml --fail-on error --drift-budget 40
