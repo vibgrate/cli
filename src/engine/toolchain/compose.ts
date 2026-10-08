@@ -12,6 +12,7 @@ import type {
   ToolchainExtractor,
   ToolchainNodeDraft,
 } from './types.js';
+import { stampWarning, WARNING_CODES } from '../../core-open/warnings.js';
 
 /**
  * Docker Compose extraction.
@@ -51,7 +52,7 @@ export const composeExtractor: ToolchainExtractor = {
 
     for (const [name, service] of services) {
       if (nodes.length >= TOOLCHAIN_NODES_PER_FILE_MAX) {
-        warnings.push(`${rel}: stopped at ${TOOLCHAIN_NODES_PER_FILE_MAX} nodes`);
+        warnings.push(stampWarning(WARNING_CODES.TOOLCHAIN_NODE_CAP, `${rel}: stopped at ${TOOLCHAIN_NODES_PER_FILE_MAX} nodes`));
         break;
       }
       const address = `service:${name}`;

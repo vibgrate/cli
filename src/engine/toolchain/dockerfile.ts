@@ -12,6 +12,7 @@ import type {
   ToolchainExtractor,
   ToolchainNodeDraft,
 } from './types.js';
+import { stampWarning, WARNING_CODES } from '../../core-open/warnings.js';
 
 /**
  * Dockerfile extraction — a deterministic scanner, no grammar.
@@ -357,7 +358,7 @@ export const dockerfileExtractor: ToolchainExtractor = {
 
     for (const line of logicalLines(source)) {
       if (nodes.length >= TOOLCHAIN_NODES_PER_FILE_MAX) {
-        warnings.push(`${rel}: stopped at ${TOOLCHAIN_NODES_PER_FILE_MAX} nodes`);
+        warnings.push(stampWarning(WARNING_CODES.TOOLCHAIN_NODE_CAP, `${rel}: stopped at ${TOOLCHAIN_NODES_PER_FILE_MAX} nodes`));
         break;
       }
 

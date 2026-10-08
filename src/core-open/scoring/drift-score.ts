@@ -4,6 +4,7 @@
 import * as crypto from 'node:crypto';
 import type { ProjectScan, DriftScore, Finding, RiskLevel, VibgrateConfig } from '../types.js';
 import { licenseParseDiagnostic } from '../licenses/diagnostic.js';
+import { WARNING_CODES } from '../warnings.js';
 import { normalizeLicenseSourcePath } from '../licenses/dependency-license.js';
 import { aggregateDependencyDrift } from './dependency-drift-v3.js';
 
@@ -409,7 +410,9 @@ export function generateFindings(
         level: 'warning',
         message: diag.message,
         location,
-        details: sourcePath ? { raw: diag.raw, sourcePath } : { raw: diag.raw },
+        details: sourcePath
+          ? { raw: diag.raw, sourcePath, warnCode: WARNING_CODES.LICENSE_UNPARSEABLE }
+          : { raw: diag.raw, warnCode: WARNING_CODES.LICENSE_UNPARSEABLE },
       });
     }
     findings.push(...licenseFindings);

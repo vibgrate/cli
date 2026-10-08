@@ -195,6 +195,7 @@ More on the badge host: [vibgrate.com/badges](https://vibgrate.com/badges). What
 | --- | --- |
 | `driftscore-ci.yml` | The workflow on this page. JSON report plus a failing drift gate. |
 | `driftscore-sarif.yml` | SARIF upload to code scanning. Upload runs with `if: always()` so a failed gate still files the alerts. |
+| `driftscore-junit.yml` | SARIF to code scanning plus `--junit` published as a test report, from one scan. Both publish steps run with `if: always()`. |
 | `vulnerabilities-sarif.yml` | Known-vulnerability gate via the composite Action (`fail-on: error` fails the job on critical and high). |
 | `vibgrate-review.yml` | `vg review` with `--fail-on fail`. Only a `fail` decision stops the job. |
 | `vibgrate-review-sarif.yml` | Review SARIF only. `continue-on-error` so the upload still runs. The pass/fail job is `vibgrate-review.yml`. |
