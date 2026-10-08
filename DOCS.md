@@ -9,7 +9,6 @@ For a quick overview, see the [README](./README.md). This document covers everyt
 ## Table of Contents
 
 - [How It Works](#how-it-works)
-- [Lockfiles with unknown fields](#lockfiles-with-unknown-fields)
 - [Choosing a rollout model: one-off vs CI](#choosing-a-rollout-model-one-off-vs-ci)
 - [Commands Reference](#commands-reference)
   - [vg baseline](#vg-baseline)
@@ -28,6 +27,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
     - [CycloneDX type and SPDX primaryPackagePurpose](#cyclonedx-type-and-spdx-primarypackagepurpose)
     - [Production, development, and optional scope](./docs/sbom-dependency-scope.md)
   - [vg scan](#vg-scan)
+    - [Unknown lockfile fields](#unknown-lockfile-fields)
     - [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest)
     - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
       - [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible)
@@ -186,18 +186,6 @@ Vibgrate evaluates **upgrade drift** in depth for:
 - **Java** (`pom.xml`, Gradle-style manifests). Which Maven profiles, scopes, and Gradle configurations become a `vg scan` row or a `vg build` edge is in [Maven and Gradle manifests](#maven-and-gradle-manifests).
 
 **Known-vulnerability detection** (`--vulns`) and **dependency attribution** (`vg why`, exposure windows) additionally cover npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle, read from each project's lockfile. Go is matched from direct `require` lines in `go.mod`. Pseudo-versions and `+incompatible` tags follow [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).
-
-### Lockfiles with unknown fields
-
-Lockfile formats grow optional fields. A pnpm `catalogs` block and a package `devEngines` entry are two examples. When the file still resolves a dependency set, `vg` keeps every package it understands and writes one warning per unknown field name:
-
-```text
-warning: pnpm-lock.yaml: unknown optional lockfile field "catalogs"; kept the dependencies this file already resolved
-```
-
-The warning line contains the field name and the lockfile's path relative to the project root. The same file and the same field produce the same line on every run. Several unknown fields on one file are sorted by field name, and a field that appears many times is warned once. Field values stay off that line, including registry tokens and authorization header values.
-
-`vg build` prints the warning while it discovers the tree. `vg sbom export` prints it while it reads the lockfile graph. A lockfile that is truncated, unreadable, or missing the structure that dialect requires still exits non-zero. The error names the file and the format and leaves the file's contents out. `go.sum` and `gradle.lockfile` have no optional-key slot: a line that is not valid for that dialect is this structural failure.
 
 ### End-to-end workflow (recommended)
 
@@ -2140,6 +2128,22 @@ Switches (flags that take no value, such as `--vulns`, `--offline` or `--no-grap
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
+
+### Unknown lockfile fields
+
+Package managers add fields to lockfiles as they release. When the file still lists dependencies vg can read, an extra field does not erase that graph or the SBOM rows built from it. vg keeps the package names, versions, and dependency edges it understands.
+
+vg prints one warning on stderr for each unknown field name in that file. Lines are sorted by lockfile path, then by field name. The same path and field name is printed once. A warning looks like this:
+
+```text
+pnpm-lock.yaml: unknown optional lockfile field "futureOptional"; continuing with the fields this version understands.
+```
+
+The path is relative to the directory you ran the command from, when the lockfile is under that directory. Otherwise the warning uses the file name only. The warning names the field. It does not print the field's value, an environment value, or an authorization header. A field name that is not a plain identifier is reported as `(name omitted)`.
+
+A lockfile that is truncated, empty, or missing the structure its format requires still fails the command. The error names the file and the format, tells you to regenerate the file with your package manager, and the process exits non-zero. The error does not include the file's contents.
+
+`vg scan` and `vg sbom export` follow this for npm, pnpm, yarn, poetry, uv, pdm, Pipfile, Cargo, Composer, NuGet, Swift package pins, and pub. A Gradle lock line, a Gemfile spec, and a `go.sum` line do not have optional field names. A line that does not match that format is invalid, and the command fails.
 
 ### Offline scan with a package-version manifest
 
