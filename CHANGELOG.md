@@ -14,13 +14,6 @@ backward compatible.
 
 ### Added
 
-- **`vg report --format html` prints a self-contained findings page.** The page
-  opens with a compact summary — vulnerability and security counts by severity,
-  anchor links into the tables below, and a fix-available rollup when a finding
-  already carries `details.fixedVersions`. A missing score stays `n/a`, never
-  `0`. `text`, `md`, and `json` are unchanged. Any other `--format` is a usage
-  error (exit `5`).
-
 - **`vg build --attest` and `vg build --verify` are documented.** The docs
   cover the DSSE in-toto statement written to
   `.vibgrate/attestation.intoto.jsonl`, the Ed25519 key

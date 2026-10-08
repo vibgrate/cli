@@ -459,46 +459,63 @@ Creates:
 
 ### vg report
 
-Render a saved scan artifact. There is no HTML report. The formats are `md`,
-`text`, and `json`. `text` is the default. `json` prints the artifact unchanged
-and is the only stable machine-readable contract. `sarif` is not a `vg report`
-format; write that with `vg scan --format sarif`.
+Render a saved scan artifact. The formats are `md`, `text`, `json`, and `html`.
+`text` is the default. `json` prints the artifact unchanged and is the only
+stable machine-readable contract. `sarif` is not a `vg report` format; write
+that with `vg scan --format sarif`.
 
 ```bash
-vg report [--in <file>] [--format md|text|json]
+vg report [--in <file>] [--format md|text|json|html]
 ```
 
-| Flag       | Default                      | Description                                                                 |
-| ---------- | ---------------------------- | --------------------------------------------------------------------------- |
-| `--in`     | `.vibgrate/scan_result.json` | Input artifact file                                                         |
-| `--format` | `text`                       | `md`, `text`, or `json`. Any other value is a usage error (exit `5`)        |
+| Flag       | Default                      | Description                                                                      |
+| ---------- | ---------------------------- | -------------------------------------------------------------------------------- |
+| `--in`     | `.vibgrate/scan_result.json` | Input artifact file                                                              |
+| `--format` | `text`                       | `md`, `text`, `json`, or `html`. Any other value is a usage error (exit `5`)     |
 
 An unknown value is rejected before the file is read. The process exits `5`,
 writes nothing to stdout, and prints one stderr line that names the value and
 lists the valid ones:
 
 ```text
-error: unknown --format "html" (expected md, text, json)
+error: unknown --format "sarif" (expected md, text, json, html)
 ```
 
 The comparison is exact. `HTML`, `sarif`, and `md ` are unknown. Omitting
 `--format` stays on `text`.
 
+`md`, `text`, and `json` are unchanged. `html` writes one self-contained page
+from that same artifact. It does not call the network and does not load
+external files. The page opens with a summary:
+
+- DriftScore and the four component scores. A missing score is `n/a`. A measured `0` stays `0`.
+- Counts by severity for vulnerability findings and for security findings. A check that did not run stays "Not scanned" rather than a row of zeros. A check that finished with nothing to report shows zeros.
+- When a finding carries `details.fixedVersions`, how many of those findings name a fix.
+- Links to the full tables under the summary: vulnerabilities, security findings, and the other findings.
+
+The same artifact always produces the same page. Save it with a shell redirect:
+
+```bash
+vg report --format html > report.html
+```
+
 #### Report format coverage
 
 `--format md` is `formatMarkdown` (`src/reporting/formatters/markdown.ts`).
-`--format text` is `formatText` (`src/reporting/formatters/text.ts`). Both read
-the same artifact. A section below is omitted when its guard is false. Lists
-follow artifact order except where a sort is named. Colours in the text report
-are terminal styling; under `NO_COLOR` the same words are plain. A null score
-is `n/a` in both formats. A measured `0` stays `0`.
+`--format text` is `formatText` (`src/reporting/formatters/text.ts`).
+`--format html` is `formatHtmlReport` (`src/reporting/formatters/html.ts`).
+All three read the same artifact. A section below is omitted when its guard is
+false. Lists follow artifact order except where a sort is named. Colours in the
+text report are terminal styling; under `NO_COLOR` the same words are plain. A
+null score is `n/a` in the human formats. A measured `0` stays `0`.
 
-The same artifact, three times:
+The same artifact, four formats:
 
 ```bash
 vg report --in .vibgrate/scan_result.json --format md
 vg report --in .vibgrate/scan_result.json --format text
 vg report --in .vibgrate/scan_result.json --format json
+vg report --in .vibgrate/scan_result.json --format html
 ```
 
 ##### Markdown (`formatMarkdown`)
@@ -566,7 +583,11 @@ When set:
 | Architecture Layers | `extended.architecture`. `archetype`, `archetypeConfidence`, `totalClassified`, `unclassified`. **Folders** — the first 12 of `folders`: `path`, `layer`, `confidence`, `fileCount`. **Coverage**, when set — `ratio`, `classified`, `unclassified`, and `bySource` counts sorted by count descending then source name. **Unclassified source** — `unclassifiedFiles.length` when that list is non-empty. **Unclassified by folder** — the first 8 of `unclassifiedFolders`: `count`, `path`. **Layers** with `fileCount` greater than 0: `layer`, `fileCount`, `driftScore`, `riskLevel`. **Boundary violations** — violations whose `rule` does not start with `graph-conflict:`, first 8: `fromFile`, `toFile`, `rule`. **Layer conflicts** — the `graph-conflict:` violations, first 8, same three fields. A capped violation list is marked when `violationsCapped` is set |
 | Solution Drift Summary | `solutions` is non-empty. `name`, `projectPaths.length`, and `drift.score` or `n/a` |
 
-`relationshipDiagram` is not rendered. The text formatter leaves that diagram in the JSON artifact.
+`relationshipDiagram` is not rendered. Markdown, text, and HTML leave that diagram in the JSON artifact.
+
+##### HTML (`formatHtmlReport`)
+
+`vg report --format html` writes one self-contained page from the same artifact. It does not call the network and does not load external files. The page opens with the summary listed above (DriftScore, severity counts, a fix-available count when a finding carries `details.fixedVersions`, and links to the tables), then the full vulnerability, security, and other-finding tables. A check that did not run stays "Not scanned". A missing score is `n/a`. The same artifact always produces the same page.
 
 ##### Differences
 
@@ -579,10 +600,11 @@ When set:
 - DriftScore: Markdown puts the lower-is-better gloss in the opening cell. Text puts the score in **DriftScore Summary** without that gloss.
 - VCS: Markdown uses separate VCS, Branch, and Commit rows, and Commit requires `vcs.sha`. Text uses one line and can show `shortSha` without requiring `sha`.
 - Runtime wording: Markdown always says `major(s)`. Text says `major` or `majors`.
+- HTML is the browser page: the summary above, then the vulnerability, security, and other-finding tables. It does not print Markdown's recommended-standards section or the text inventory.
 
 ##### JSON
 
-`--format json` prints `JSON.stringify` of the loaded artifact with a two-space indent. Keys, values, and omissions are unchanged. Parse this when a script needs a field. Markdown and text drop fields, cap lists, and add derived lines; they are not a stable contract.
+`--format json` prints `JSON.stringify` of the loaded artifact with a two-space indent. Keys, values, and omissions are unchanged. Parse this when a script needs a field. Markdown, text, and HTML drop fields, cap lists, and add derived lines; they are not a stable contract.
 
 ---
 
