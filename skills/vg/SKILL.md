@@ -3,7 +3,7 @@ name: vg
 description: Query the local code graph (vg) for structure, impact, and navigation instead of grepping/reading many files.
 ---
 
-<!-- vg:v4 · managed by `vg install` — auto-refreshed when these instructions evolve; remove this line to opt out -->
+<!-- vg:v5 · managed by `vg install` — auto-refreshed when these instructions evolve; remove this line to opt out -->
 
 # vg — the code map
 
@@ -39,7 +39,7 @@ measured and the tools improved):
 - **Upgrade drift:** `vg drift` lists what is outdated across dependencies
   (offline; `--online` for currency). `vg scan` scores upgrade drift
   (`text`, `json`, `sarif`, or `md`). `vg report` renders a saved scan
-  artifact as `text` (the default), `md`, or `json`. There is no HTML report.
+  artifact as `text` (the default), `md`, `json`, or `html` (a self-contained page).
 - **Version-correct docs:** `vg lib <name>` returns drift-annotated, version-
   specific usage docs for a library — inject these instead of guessing an API.
 

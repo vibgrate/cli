@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { main } from '../../cli.js';
 import { ExitCode } from '../../util/exit.js';
+import { REPORT_FORMATS, reportCommand } from './report.js';
 
 const SENTINEL = 'report-format-sentinel';
 
@@ -91,14 +92,45 @@ async function runCli(args: string[]): Promise<{ code: number; stderr: string; s
 }
 
 describe('vg report --format', () => {
+  it('names html in help and in the accepted list', () => {
+    const option = reportCommand.options.find((item) => item.long === '--format');
+    expect(option?.description).toBe('Output format (md|text|json|html)');
+    expect(REPORT_FORMATS).toEqual(['md', 'text', 'json', 'html']);
+  });
+
+  it('renders html from the local artifact and leaves text, json, and md alone', async () => {
+    const file = writeArtifact();
+    const html = await runCli(['report', '--in', file, '--format', 'html']);
+    expect(html.code).toBe(0);
+    expect(html.stdout).toContain('<!doctype html>');
+    expect(html.stdout).toContain('id="summary"');
+    expect(html.stdout).toContain('id="drift-score">1');
+    expect(html.stderr).toBe('');
+
+    const text = await runCli(['report', '--in', file]);
+    expect(text.code).toBe(0);
+    expect(text.stdout).toContain('Vibgrate Drift Report');
+    expect(text.stdout).not.toContain('<!doctype');
+
+    const md = await runCli(['report', '--in', file, '--format', 'md']);
+    expect(md.code).toBe(0);
+    expect(md.stdout).toContain('# Vibgrate Drift Report');
+    expect(md.stdout).not.toContain('<!doctype');
+
+    const json = await runCli(['report', '--in', file, '--format', 'json']);
+    expect(json.code).toBe(0);
+    expect(JSON.parse(json.stdout)).toEqual(artifact);
+    expect(json.stdout).not.toContain('<!doctype');
+  });
+
   it('rejects an unknown format with exit 5, the value, the valid list, and empty stdout', async () => {
     const file = writeArtifact();
-    for (const format of ['html', 'HTML', 'sarif']) {
+    for (const format of ['HTML', 'sarif', 'html ']) {
       const result = await runCli(['report', '--in', file, '--format', format]);
       expect(result.code).toBe(ExitCode.USAGE_ERROR);
       expect(result.stdout).toBe('');
       expect(result.stderr).toBe(
-        `error: unknown --format ${JSON.stringify(format)} (expected md, text, json)\n`,
+        `error: unknown --format ${JSON.stringify(format)} (expected md, text, json, html)\n`,
       );
       expect(result.stderr).not.toContain(SENTINEL);
     }

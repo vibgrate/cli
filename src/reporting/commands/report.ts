@@ -5,10 +5,11 @@ import { usageError } from '../../util/exit.js';
 import { pathExists, readJsonFile } from '../utils/fs.js';
 import { formatText } from '../formatters/text.js';
 import { formatMarkdown } from '../formatters/markdown.js';
+import { formatHtmlReport } from '../formatters/html.js';
 import type { ReportFormat, ScanArtifact } from '../types.js';
 
-/** Accepted by `vg report --format`. `text` is the commander default. */
-const REPORT_FORMATS = ['md', 'text', 'json'] as const satisfies readonly ReportFormat[];
+/** Formats `vg report` accepts. `text` is the default. */
+export const REPORT_FORMATS = ['md', 'text', 'json', 'html'] as const satisfies readonly ReportFormat[];
 
 function assertReportFormat(format: string): asserts format is ReportFormat {
   if ((REPORT_FORMATS as readonly string[]).includes(format)) return;
@@ -42,6 +43,9 @@ export const reportCommand = new Command('report')
         break;
       case 'text':
         console.log(formatText(artifact));
+        break;
+      case 'html':
+        console.log(formatHtmlReport(artifact));
         break;
     }
   });
