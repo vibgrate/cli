@@ -98,7 +98,6 @@ For a quick overview, see the [README](./README.md). This document covers everyt
     - [Advisories with several ids](#advisories-with-several-ids)
   - [Markdown](#markdown)
   - [JUnit](#junit)
-  - [Degrade warning codes](#degrade-warning-codes)
 - [Configuration](#configuration)
   - [vibgrate.config.ts](#vibgrateconfigts)
   - [Thresholds](#thresholds)
@@ -131,6 +130,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
 - [Troubleshooting: registry, auth, and network](#troubleshooting-registry-auth-and-network)
 - [Privacy & Security](#privacy--security)
 - [Exit Codes](#exit-codes)
+- [Warning codes](#warning-codes)
 - [Programmatic API](#programmatic-api)
 
 ---
@@ -1528,12 +1528,9 @@ separator), that component stays in the document and
 the purl is omitted. CycloneDX sets `vibgrate:purlStatus` to `unavailable` and
 records the reason on `vibgrate:purlWarning`. SPDX omits the purl externalRef,
 records `purlStatus=unavailable` on the package annotation, and repeats the
-reason in a second annotation. CycloneDX also sets `vibgrate:purlWarningCode`
-to `VG_WARN_PURL_UNAVAILABLE`. SPDX adds an annotation whose comment is that
-same code. `vg sbom export` prints the code and the reason on stderr. The
-warning names the package and its ecosystem. The purl rules above
-are the identity a scanner should store. The full code list is in
-[Degrade warning codes](#degrade-warning-codes).
+reason in a second annotation. `vg sbom export` prints the same warning on
+stderr. The warning names the package and its ecosystem. The purl rules above
+are the identity a scanner should store.
 
 #### Component identity
 
@@ -1665,10 +1662,8 @@ A value that cannot be represented, such as `LicenseRef-has space`, stays
 visible. The component remains in the document. CycloneDX sets
 `vibgrate:licenseStatus` to `unrepresentable` and records the reason on
 `vibgrate:licenseWarning`. SPDX adds `licenseStatus=unrepresentable` to the
-package annotation and repeats the reason in a second annotation. Both formats
-also record `VG_WARN_LICENSE_UNPARSEABLE` (`vibgrate:licenseWarningCode` on
-CycloneDX; an SPDX annotation whose comment is that code). `vg sbom
-export` prints the code and the same warning on stderr. The warning names the ecosystem,
+package annotation and repeats the reason in a second annotation. `vg sbom
+export` prints the same warning on stderr. The warning names the ecosystem,
 the package, and the version. No license field is left as an empty string,
 and no license is filled in from a guess.
 
@@ -1710,9 +1705,8 @@ wins. A later copy is not an error. `vibgrate:projects` (SPDX: `projects=` on
 the package annotation) lists every project that contributed the identity,
 sorted. When a later manifest row carries different drift, spec, or license
 metadata, that metadata is dropped, the component stays, and
-`vibgrate:mergeWarning` records the drop. CycloneDX sets `vibgrate:mergeWarningCode`
-to `VG_WARN_SBOM_MERGE`. The same warning is an additional SPDX
-annotation, followed by an annotation whose comment is that code, and `vg sbom export` prints the code and the warning on stderr.
+`vibgrate:mergeWarning` records the drop. The same warning is an additional SPDX
+annotation, and `vg sbom export` prints it on stderr.
 
 `vibgrate:scope` (SPDX: `scope=` on the package annotation) is `direct` when a
 scanned manifest declared that exact identity, and `transitive` when the
@@ -5359,34 +5353,6 @@ have.
 
 ---
 
-## Degrade warning codes
-
-`vg build`, `vg scan`, and `vg sbom export` keep going when one file, path, or field cannot be used. Those warnings carry a short code so a CI check or an assistant can match the code instead of the prose.
-
-A published code does not change. A new warning gets a new code. Codes are fixed tokens: they do not include a path, a file body, or a secret. The message next to the code is the human detail. When several warnings fire they are ordered by code, then by message, and an identical pair is emitted once.
-
-On `vg build`, the human line on stderr names the codes that fired. `vg build --json` keeps `warnings` as an array of strings, each `CODE: message`, and adds `warningRecords`: an array of `{ "code", "message" }` in that same order. Exit codes are unchanged.
-
-On `vg scan`, the same strings are printed when a path times out, a file is over the scan size limit, or a baseline file cannot be read. `vg scan --format json` and `.vibgrate/scan_result.json` add `degradeWarnings` (omitted when nothing fired) with the same `{ "code", "message" }` objects. A license that does not resolve still uses rule id `vibgrate/license-parse-failed` and adds `details.warnCode`. A CVSS vector that does not parse still uses `cvss-vector-parse-failed` and adds `warnCode` on `cvssDiagnostic`. `vg report` prints `degradeWarnings` and any warn code stored on a finding.
-
-On `vg sbom export`, stderr lines are `warning: CODE: message`. CycloneDX keeps the existing warning properties and adds a code property beside each one (`vibgrate:purlWarningCode`, `vibgrate:licenseWarningCode`, `vibgrate:mergeWarningCode`, and `vibgrate:warningCode` on a document-level license-parse note). SPDX keeps the existing annotation and adds one whose comment is the code. The document id does not include these new fields.
-
-| Code | When it fires |
-| --- | --- |
-| `VG_WARN_PARSE_DEGRADE` | A source file threw during parse. The build keeps the other files. |
-| `VG_WARN_SKIPPED_FILE` | A file was over the build per-file cap or the scan size limit and was not read. |
-| `VG_WARN_SKIPPED_SUBTREE` | A directory could not be read during `vg build`, or a scan path timed out and was skipped. |
-| `VG_WARN_TSC_SKIPPED` | The TypeScript resolver was skipped because the file count was over `VG_TSC_MAX_FILES`. The heuristic resolver still ran. |
-| `VG_WARN_TOOLCHAIN_DEGRADE` | Infrastructure or CI extraction degraded for one file. The rest of the map was still written. |
-| `VG_WARN_PURL_UNAVAILABLE` | An SBOM component was kept and its Package URL was omitted. |
-| `VG_WARN_LICENSE_UNPARSEABLE` | A declared license did not resolve to SPDX, or could not be written on the SBOM. |
-| `VG_WARN_CVSS_UNPARSEABLE` | A CVSS vector was present and did not parse. The advisory is kept. |
-| `VG_WARN_SBOM_MERGE` | An SBOM merge dropped or guessed a fact and still wrote the component. |
-| `VG_WARN_BASELINE_UNREADABLE` | A baseline file could not be read. The scan continued without a delta. |
-| `VG_WARN_SCAN_DEGRADE` | One project scanner failed and that project was skipped. |
-
-An unknown optional lockfile field is not one of these codes. When that warning exists it gets its own code in the same registry, rather than reusing one of the rows above.
-
 ## Exit Codes
 
 CI and agents branch on these, so they are a stable contract.
@@ -5406,6 +5372,50 @@ CI and agents branch on these, so they are a stable contract.
 `6` is deliberately distinct from `2`: a CI gate must never read "engine missing" as a gate verdict.
 The same rule is why [`vg review`](#vg-review) exits `6` when there is no code map, and why `--explain`
 exits `6` rather than quietly producing a review no model contributed to.
+
+---
+
+## Warning codes
+
+A warning means the command continued. The process exit code stays the one in [Exit Codes](#exit-codes). Each published code keeps its meaning. A later release may add a code. It does not rename or reuse a code that has shipped. A code never contains a path, a secret, or file contents. When several warnings fire, JSON lists them by code, then by message.
+
+Stderr lines look like `warning [VG_WARN_PARSE_FAILED]: …`. The code is the token a CI check or an assistant asserts on. The sentence after the code can be reworded.
+
+`vg build --json` keeps `warnings` as strings and adds `codedWarnings`: an array of `{ code, message }` in that same order. Each string in `warnings` ends with ` [CODE]`. `codedWarnings` is left out when there are no warnings.
+
+`vg scan --format json` adds `degradations` when a path was skipped or a baseline file could not be read. The field is left out when there are none. `vg report` prints those same rows.
+
+`vg sbom export` prints the code on stderr. CycloneDX adds a `vibgrate:warningCode` property next to the existing warning property. SPDX adds an annotation whose comment is `warningCode=VG_WARN_…`. The warning sentences already stored on the document stay as they are.
+
+License findings keep the rule id `vibgrate/license-parse-failed` and also carry `warnCode`. CVSS findings keep `cvss-vector-parse-failed` and also carry `warnCode`.
+
+A truncated or invalid lockfile stops the command. Warning codes cover conditions that let the command continue.
+
+| Code | Command | Meaning |
+| --- | --- | --- |
+| `VG_WARN_PARSE_FAILED` | `vg build` | A source file failed to parse. The map continues without its symbols. |
+| `VG_WARN_BUILD_FILE_OVERSIZE` | `vg build` | A file exceeded the per-file size cap and was left out of the map. |
+| `VG_WARN_TSC_RESOLVER_SKIPPED` | `vg build` | The TypeScript resolver was skipped because the corpus exceeded its file cap. |
+| `VG_WARN_YAML_PARSE_FAILED` | `vg build` | YAML for an infrastructure file failed to parse. |
+| `VG_WARN_YAML_DOCUMENT_SKIPPED` | `vg build` | A YAML document in a stream had errors and was skipped. |
+| `VG_WARN_YAML_DOCUMENT_UNMATERIALISED` | `vg build` | A YAML document could not be materialised. |
+| `VG_WARN_TOOLCHAIN_EXTRACTION_FAILED` | `vg build` | An infrastructure extractor failed. That file contributes no structure. |
+| `VG_WARN_TOOLCHAIN_NODE_CAP` | `vg build` | An extractor stopped at the per-file node cap. |
+| `VG_WARN_HCL_GRAMMAR_UNAVAILABLE` | `vg build` | The HCL grammar was unavailable, so no Terraform structure was extracted. |
+| `VG_WARN_HCL_NO_TREE` | `vg build` | HCL parse produced no tree. |
+| `VG_WARN_HCL_PARTIAL` | `vg build` | HCL parse recovered from a syntax error. Extraction may be partial. |
+| `VG_WARN_WORKFLOW_STEP_CAP` | `vg build` | A workflow job listed more steps than the extractor enumerates. |
+| `VG_WARN_SCAN_PATH_SKIPPED` | `vg scan` | A scan path timed out and was skipped. |
+| `VG_WARN_SCAN_FILE_OVERSIZE` | `vg scan` | A scan file exceeded the size cap and was skipped. |
+| `VG_WARN_BASELINE_UNREADABLE` | `vg scan` | A baseline file could not be read. The scan continues without a comparison. |
+| `VG_WARN_LICENSE_UNPARSEABLE` | `vg scan`, `vg sbom` | A declared license string could not be resolved to SPDX. |
+| `VG_WARN_LICENSE_UNREPRESENTABLE` | `vg sbom` | A declared license cannot be represented in an SBOM. |
+| `VG_WARN_CVSS_UNPARSEABLE` | `vg scan` | A CVSS vector was present and could not be parsed. |
+| `VG_WARN_PURL_UNAVAILABLE` | `vg sbom` | A package URL could not be formed. The component is included without a purl. |
+| `VG_WARN_SBOM_LOSSY_EDGES` | `vg sbom` | Merge dropped a different dependency list for one package. |
+| `VG_WARN_SBOM_LOSSY_MANIFEST` | `vg sbom` | Merge dropped differing manifest metadata for one package. |
+| `VG_WARN_SBOM_UNKNOWN_ECOSYSTEM` | `vg sbom` | Merge recorded an unknown ecosystem as npm. |
+| `VG_WARN_SBOM_UNTRACKED_EDGES` | `vg sbom` | A lockfile format does not record dependency edges. |
 
 ---
 

@@ -45,6 +45,7 @@ const stubGraph = {} as VgGraph;
 
 const PARSE_FAILED = {
   code: 'cvss-vector-parse-failed' as const,
+  warnCode: 'VG_WARN_CVSS_UNPARSEABLE' as const,
   message:
     'CVSS vector failed to parse (cvss-vector-parse-failed): "not-a-vector" is not a CVSS:3.0 or CVSS:3.1 base vector. Replace it with a CVSS:3.0 or CVSS:3.1 base vector, or omit the vector and supply a numeric base score.',
 };

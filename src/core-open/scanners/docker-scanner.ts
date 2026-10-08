@@ -1,7 +1,6 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
-import { WarningCodes, degradeLine } from '../../warnings/codes.js';
 import { fetchDockerVersionsBulk, parseDockerImage } from './docker-cache.js';
 import { gt, SemVer } from 'semver';
 import type { ProjectScan, DependencyRow } from '../types.js';
@@ -261,7 +260,7 @@ export async function scanDockerProjects(
       }
     } catch (error) {
       // Skip projects that fail to scan
-      console.error(degradeLine(WarningCodes.SCAN_DEGRADE, `Error scanning Docker project at ${dir}:`), error);
+      console.error(`Error scanning Docker project at ${dir}:`, error);
     }
   }
 

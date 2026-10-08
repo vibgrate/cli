@@ -1,6 +1,6 @@
 import type { ScanArtifact } from '../types.js';
 import { baselineSuppressionLabel } from '../../core-open/baseline-suppressions.js';
-import { degradeWarningBlock, ruleWithWarnCode } from '../../warnings/codes.js';
+import { findingRuleLabel, formatDegradationLines } from '../../core-open/warnings.js';
 
 /** A measured zero stays `0`. An unmeasured component is `n/a`, never `0`. */
 function markdownDriftCell(score: number | null): string {
@@ -116,6 +116,14 @@ export function formatMarkdown(artifact: ScanArtifact): string {
     }
     lines.push('');
   }
+  const degradationLines = formatDegradationLines(artifact.degradations);
+  if (degradationLines.length > 0) {
+    lines.push('## Degradations');
+    lines.push('');
+    for (const line of degradationLines) lines.push(`- ${line}`);
+    lines.push('');
+  }
+
   // Findings
   if (artifact.findings.length > 0) {
     lines.push('## Findings');
@@ -124,16 +132,8 @@ export function formatMarkdown(artifact: ScanArtifact): string {
     lines.push(`|-------|------|---------|----------|`);
     for (const f of artifact.findings) {
       const emoji = f.level === 'error' ? '🔴' : f.level === 'warning' ? '🟡' : '🔵';
-      lines.push(`| ${emoji} ${f.level} | ${ruleWithWarnCode(f.ruleId, f.details)} | ${f.message} | ${f.location} |`);
+      lines.push(`| ${emoji} ${f.level} | ${findingRuleLabel(f.ruleId, f.details)} | ${f.message} | ${f.location} |`);
     }
-    lines.push('');
-  }
-
-  const degradeLines = degradeWarningBlock(artifact.degradeWarnings);
-  if (degradeLines.length) {
-    lines.push(`## ${degradeLines[0]}`);
-    lines.push('');
-    for (const line of degradeLines.slice(1)) lines.push(`- ${line.trim()}`);
     lines.push('');
   }
 

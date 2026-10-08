@@ -166,12 +166,6 @@ export interface DiscoverOptions {
    * Default: `VG_MAX_FILES`, else 100000.
    */
   maxEntries?: number;
-  /**
-   * Repo-relative directories that could not be read. Appended in sorted
-   * order. The walk continues. The OS error is not copied — it can name a
-   * path outside the message we want to keep.
-   */
-  skippedSubtrees?: string[];
 }
 
 export interface DiscoveredFile {
@@ -254,7 +248,6 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
 
   const found = new Map<string, DiscoveredFile>();
   const budget = createWalkBudget(root, options.maxEntries);
-  const skippedSubtrees: string[] = [];
 
   const considerFile = (abs: string): void => {
     const rel = toPosix(path.relative(root, abs));
@@ -276,11 +269,7 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
-      // Unreadable dir — skip rather than crash the build. The relative path
-      // is the whole notice; the OS error is not copied.
-      const rel = toPosix(path.relative(root, dir));
-      skippedSubtrees.push(rel === '' ? '.' : rel);
-      return;
+      return; // unreadable dir — skip rather than crash the build
     }
     for (const entry of entries) {
       const abs = path.join(dir, entry.name);
@@ -306,10 +295,6 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
       assertSafeWalkRoot(scope);
       walk(scope);
     } else if (stat.isFile()) considerFile(scope);
-  }
-
-  if (options.skippedSubtrees) {
-    for (const rel of [...new Set(skippedSubtrees)].sort()) options.skippedSubtrees.push(rel);
   }
 
   return [...found.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));

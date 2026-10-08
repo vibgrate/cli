@@ -1,14 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { discover, mergeExcludes, type DiscoveredFile } from './discover.js';
-import {
-  WarningCodes,
-  isParseFailureWarning,
-  parseRenderedWarning,
-  renderWarning,
-  stableWarningRecords,
-  type WarningRecord,
-} from '../warnings/codes.js';
 import { parseFiles } from './pool.js';
 import { resolve } from './resolve.js';
 import { inheritDuties } from './duties-inherit.js';
@@ -58,6 +50,8 @@ import type { FileParse } from './types.js';
 import type { ResolveResult } from './resolve.js';
 import { fileRolesFromParses } from './ast-roles.js';
 import type { AstRoleHit } from '../core-open/scanners/architecture/ast-roles.js';
+import { stampWarning, WARNING_CODES, type CodedWarning } from '../core-open/warnings.js';
+import { assembleEngineWarnings } from './warning-codes.js';
 
 export interface BuildOptions {
   /** Directory to build (default cwd). */
@@ -151,13 +145,12 @@ export interface BuildResult {
   scip?: { documents: number; references: number; resolved: number; tool?: string };
   /** SQLite index write result. */
   index?: { ok: boolean; path?: string; reason?: string };
-  /**
-   * Degrade-and-continue warnings. Each string is `CODE: message`.
-   * Same order as {@link warningRecords}.
-   */
   warnings: string[];
-  /** Structured form of {@link warnings}. Sorted by code, then message. */
-  warningRecords: WarningRecord[];
+  /**
+   * Same notices as `warnings`, split into a stable code and the prose.
+   * Sorted by code, then message. Empty when there are no warnings.
+   */
+  codedWarnings: CodedWarning[];
   /** Architecture role hits extracted during the parse already paid for. */
   fileRoles: AstRoleHit[];
 }
@@ -171,20 +164,14 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   // instead of reading a filesystem root or an enormous unpack first.
   const limits = resolveLimits(options.limits);
   timer.start('discover');
-  const skippedSubtrees: string[] = [];
   const files = discover({
     root,
     only: options.only,
     exclude,
     paths: options.paths,
     maxEntries: limits.maxFiles,
-    skippedSubtrees,
   });
   timer.end('discover');
-  const warningRecordsAcc: WarningRecord[] = skippedSubtrees.map((rel) => ({
-    code: WarningCodes.SKIPPED_SUBTREE,
-    message: `${rel}: skipped — directory could not be read`,
-  }));
 
   // Resource safeguards (see limits.ts): stop a pathological corpus before it
   // OOM-kills the process. Skips are deterministic functions of the input.
@@ -221,7 +208,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const fileStats: FileStat[] = [];
   const toParse: DiscoveredFile[] = [];
   const reused: FileParse[] = [];
-  const buildWarningRecords: WarningRecord[] = [];
+  const buildWarnings: string[] = [];
   /** Files skipped for size — in fileStats under a sentinel hash, never in the manifest. */
   const oversizeRels = new Set<string>();
   let statHits = 0;
@@ -247,12 +234,13 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
         hash: hashString(`vg:oversize:${stat.size}`),
       });
       oversizeRels.add(file.rel);
-      buildWarningRecords.push({
-        code: WarningCodes.SKIPPED_FILE,
-        message:
+      buildWarnings.push(
+        stampWarning(
+          WARNING_CODES.BUILD_FILE_OVERSIZE,
           `${file.rel}: skipped — ${formatBytes(stat.size)} exceeds the ` +
-          `${formatBytes(limits.maxFileBytes)} per-file limit (set VG_MAX_FILE_BYTES to raise it, 0 to disable)`,
-      });
+            `${formatBytes(limits.maxFileBytes)} per-file limit (set VG_MAX_FILE_BYTES to raise it, 0 to disable)`,
+        ),
+      );
       continue;
     }
 
@@ -321,7 +309,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     // corrupted wasm heap) would otherwise poison the cache for that content
     // hash and every later build would reuse the empty parse instead of
     // re-parsing the file.
-    if (p.defs.length === 0 && p.warnings?.some((w) => isParseFailureWarning(w))) continue;
+    if (p.defs.length === 0 && p.warnings?.some((w) => w.startsWith('parse failed:'))) continue;
     const st = fileStats.find((f) => f.rel === p.rel);
     cache.set(p.rel, p, st ? { mtimeMs: st.mtimeMs, size: st.size } : undefined);
   }
@@ -335,18 +323,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0,
   );
 
-  warningRecordsAcc.push(...buildWarningRecords);
-  for (const p of parses) {
-    for (const w of p.warnings ?? []) {
-      const parsed = parseRenderedWarning(w);
-      const message = parsed?.message ?? w;
-      const withPath = message.startsWith(`${p.rel}:`) ? message : `${p.rel}: ${message}`;
-      warningRecordsAcc.push({
-        code: parsed?.code ?? WarningCodes.PARSE_DEGRADE,
-        message: withPath,
-      });
-    }
-  }
+  const warnings = [...buildWarnings, ...parses.flatMap((p) => p.warnings ?? [])];
 
   // Resolve → nodes/edges. The module resolver follows relative imports plus
   // tsconfig path aliases and workspace-package names (so monorepo cross-package
@@ -412,13 +389,14 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     // A ts.Program over the whole corpus is the largest single memory consumer
     // in the build. Past the cap, fall back to the heuristic floor (still a
     // complete graph, just less precise call resolution).
-    warningRecordsAcc.push({
-      code: WarningCodes.TSC_SKIPPED,
-      message:
+    warnings.push(
+      stampWarning(
+        WARNING_CODES.TSC_RESOLVER_SKIPPED,
         `typescript resolver skipped — ${tsFiles.length.toLocaleString()} TS/JS files exceed the ` +
-        `${limits.tscMaxFiles.toLocaleString()}-file limit; calls use the heuristic resolver ` +
-        `(set VG_TSC_MAX_FILES to raise it, 0 to disable)`,
-    });
+          `${limits.tscMaxFiles.toLocaleString()}-file limit; calls use the heuristic resolver ` +
+          `(set VG_TSC_MAX_FILES to raise it, 0 to disable)`,
+      ),
+    );
     tsFiles = [];
   }
   timer.start('tsc');
@@ -568,11 +546,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   }
   const toolchainResult = await extractToolchain(docs, { fileNodes: fileNodesByPath });
   if (toolchainResult.nodes.length) nodes = [...nodes, ...toolchainResult.nodes];
-  for (const message of toolchainResult.warnings) {
-    warningRecordsAcc.push({ code: WarningCodes.TOOLCHAIN_DEGRADE, message });
-  }
-  const warningRecords = stableWarningRecords(warningRecordsAcc);
-  const warnings = warningRecords.map(renderWarning);
+  if (toolchainResult.warnings.length) warnings.push(...toolchainResult.warnings);
   timer.end('toolchain');
 
   // Analyse → centrality/areas/surprise (test/coverage edges excluded from these).
@@ -702,6 +676,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
 
   timer.end('total');
   const stages = timer.snapshot();
+  const assembled = assembleEngineWarnings(warnings);
 
   return {
     graph,
@@ -716,8 +691,8 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     tsc: tscStats,
     scip: scipStats,
     index: indexResult,
-    warnings,
-    warningRecords,
+    warnings: assembled.warnings,
+    codedWarnings: assembled.codedWarnings,
     fileRoles: fileRolesFromParses(parses),
   };
 }

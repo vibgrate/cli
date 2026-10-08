@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import { parseSource } from './parse.js';
 import { setGrammarsOverride, resetParser } from './grammars.js';
 import type { FileParse } from './types.js';
-import { parseDegradeWarning } from '../warnings/codes.js';
+import { stampWarning, WARNING_CODES } from '../core-open/warnings.js';
 
 /**
  * tinypool worker entry. Receives a chunk of files, reads and parses each, and
@@ -47,7 +47,7 @@ export default async function run(payload: ParsePayload): Promise<FileParse[]> {
         heritage: [],
         typeRefs: [],
         guards: [],
-        warnings: [parseDegradeWarning((err as Error).message)],
+        warnings: [stampWarning(WARNING_CODES.PARSE_FAILED, `parse failed: ${(err as Error).message}`)],
       });
     }
   }

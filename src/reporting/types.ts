@@ -1,4 +1,5 @@
 import type { DependencyLicense } from '../core-open/types.js';
+import type { CodedWarning } from '../core-open/warnings.js';
 
 // ── Core types for Vibgrate CLI ──
 
@@ -271,6 +272,11 @@ export interface ScanArtifact {
   solutions?: SolutionScan[];
   drift: DriftScore;
   findings: Finding[];
+  /**
+   * Degrade-and-continue scan notices (skipped paths, unreadable baseline).
+   * Omitted when there are none. Sorted by code, then by message.
+   */
+  degradations?: CodedWarning[];
   /** Repo-relative path of the `--baseline` file, when one was compared. */
   baseline?: string;
   /** Present only after a baseline file was read. Absent means no comparison. */
@@ -285,11 +291,6 @@ export interface ScanArtifact {
   treeSummary?: TreeCount;
   /** Workspace-level relationship diagram */
   relationshipDiagram?: MermaidDiagram;
-  /**
-   * Degrade-and-continue warnings from this scan. Omitted when none fired.
-   * Sorted by code, then message.
-   */
-  degradeWarnings?: Array<{ code: string; message: string }>;
 }
 
 // ── CLI option types ──

@@ -4,11 +4,18 @@ import chalk from 'chalk';
 import { pathExists, readJsonFile, writeTextFile } from '../utils/fs.js';
 import type { DependencyRow, Finding, ProjectScan, ScanArtifact } from '../types.js';
 import { LICENSE_PARSE_FAILED } from '../../core-open/licenses/diagnostic.js';
-import { WarningCodes, degradeLine } from '../../warnings/codes.js';
 import { fullDependencyGraph, type LockfileComponent, type LockfileGraph } from '../../engine/lockfile.js';
 import { ECOSYSTEMS, type Ecosystem } from '../../engine/drift.js';
 import { componentLicense, extractedLicensingInfos, type ComponentLicense } from './sbom-license.js';
 import { vexCommand } from './vex.js';
+import {
+  codedWarning,
+  formatWarningLine,
+  sortCodedWarnings,
+  WARNING_CODES,
+  type CodedWarning,
+  type WarningCode,
+} from '../../core-open/warnings.js';
 
 export { describeUnrepresentableLicense } from './sbom-license.js';
 
@@ -148,6 +155,8 @@ const PURL_STATUS_UNAVAILABLE = 'unavailable';
 const LICENSE_STATUS_PROPERTY = 'vibgrate:licenseStatus';
 const LICENSE_WARNING_PROPERTY = 'vibgrate:licenseWarning';
 const LICENSE_STATUS_UNREPRESENTABLE = 'unrepresentable';
+/** CycloneDX property that carries the stable warning code beside a prose warning. */
+const WARNING_CODE_PROPERTY = 'vibgrate:warningCode';
 
 /** The purl type/namespace/name portion, without a version — shared by every ecosystem branch of `purlFor`. */
 function purlPath(ecosystem: Ecosystem, name: string): string | null {
@@ -382,6 +391,22 @@ function describeLossyManifest(ecosystem: string, packageName: string, version: 
 
 function describeUntrackedEdges(ecosystem: string, packageName: string, version: string, projects: string[]): string {
   return `Dependency edges are not recorded for ${ecosystem} package "${packageName}@${version}" from ${projectPhrase(projects)}. An empty dependsOn is not a claim that the package has no dependencies.`;
+}
+
+/** Map a known SBOM warning sentence to its code. Unknown prose stays uncoded. */
+function sbomWarningCode(message: string): WarningCode | undefined {
+  if (message.startsWith('Package URL unavailable')) return WARNING_CODES.PURL_UNAVAILABLE;
+  if (message.startsWith('Declared license')) return WARNING_CODES.LICENSE_UNREPRESENTABLE;
+  if (message.startsWith('Dropped a different dependency list')) return WARNING_CODES.SBOM_LOSSY_EDGES;
+  if (message.startsWith('Dropped differing manifest metadata')) return WARNING_CODES.SBOM_LOSSY_MANIFEST;
+  if (message.startsWith('Ecosystem unknown')) return WARNING_CODES.SBOM_UNKNOWN_ECOSYSTEM;
+  if (message.startsWith('Dependency edges are not recorded')) return WARNING_CODES.SBOM_UNTRACKED_EDGES;
+  return undefined;
+}
+
+function pushWarningCode(properties: Array<{ name: string; value: string }>, message: string): void {
+  const code = sbomWarningCode(message);
+  if (code) properties.push({ name: WARNING_CODE_PROPERTY, value: code });
 }
 
 function sortedUnique(names: Iterable<string>): string[] {
@@ -771,7 +796,7 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
                 name: LICENSE_PARSE_FAILED,
                 value: `${f.location}: ${f.message}`,
               },
-              { name: 'vibgrate:warningCode', value: WarningCodes.LICENSE_UNPARSEABLE },
+              { name: WARNING_CODE_PROPERTY, value: WARNING_CODES.LICENSE_UNPARSEABLE },
             ]),
           }
         : {}),
@@ -791,21 +816,19 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
         properties.push(
           { name: PURL_STATUS_PROPERTY, value: PURL_STATUS_UNAVAILABLE },
           { name: PURL_WARNING_PROPERTY, value: warning },
-          { name: `${PURL_WARNING_PROPERTY}Code`, value: WarningCodes.PURL_UNAVAILABLE },
         );
+        pushWarningCode(properties, warning);
       }
       if (license.warning) {
         properties.push(
           { name: LICENSE_STATUS_PROPERTY, value: LICENSE_STATUS_UNREPRESENTABLE },
           { name: LICENSE_WARNING_PROPERTY, value: license.warning },
-          { name: `${LICENSE_WARNING_PROPERTY}Code`, value: WarningCodes.LICENSE_UNPARSEABLE },
         );
+        pushWarningCode(properties, license.warning);
       }
-      for (const warning of dep.mergeWarnings) {
-        properties.push(
-          { name: 'vibgrate:mergeWarning', value: warning },
-          { name: 'vibgrate:mergeWarningCode', value: WarningCodes.SBOM_MERGE },
-        );
+      for (const mergeWarning of dep.mergeWarnings) {
+        properties.push({ name: 'vibgrate:mergeWarning', value: mergeWarning });
+        pushWarningCode(properties, mergeWarning);
       }
       return {
         type: 'library',
@@ -818,20 +841,6 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
       };
     }),
     ...(dependencyGraph ? { dependencies: dependencyGraph } : {}),
-  };
-}
-
-function spdxNote(artifact: ScanArtifact, comment: string): {
-  annotationType: string;
-  annotator: string;
-  annotationDate: string;
-  comment: string;
-} {
-  return {
-    annotationType: 'OTHER',
-    annotator: 'Tool: @vibgrate/cli',
-    annotationDate: artifact.timestamp,
-    comment,
   };
 }
 
@@ -864,24 +873,26 @@ export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<st
           comment: `project=${dep.project}; projects=${dep.projects.join(', ')}; drift=${dep.drift}; majorsBehind=${dep.majorsBehind ?? 'unknown'}; scope=${dep.scope}${purlStatus}${licenseStatus}`,
         },
       ];
-      if (warning) {
-        annotations.push(
-          spdxNote(artifact, warning),
-          spdxNote(artifact, WarningCodes.PURL_UNAVAILABLE),
-        );
-      }
-      if (license.warning) {
-        annotations.push(
-          spdxNote(artifact, license.warning),
-          spdxNote(artifact, WarningCodes.LICENSE_UNPARSEABLE),
-        );
-      }
-      for (const warning of dep.mergeWarnings) {
-        annotations.push(
-          spdxNote(artifact, warning),
-          spdxNote(artifact, WarningCodes.SBOM_MERGE),
-        );
-      }
+      const pushSpdxWarning = (message: string): void => {
+        annotations.push({
+          annotationType: 'OTHER',
+          annotator: 'Tool: @vibgrate/cli',
+          annotationDate: artifact.timestamp,
+          comment: message,
+        });
+        const code = sbomWarningCode(message);
+        if (code) {
+          annotations.push({
+            annotationType: 'OTHER',
+            annotator: 'Tool: @vibgrate/cli',
+            annotationDate: artifact.timestamp,
+            comment: `warningCode=${code}`,
+          });
+        }
+      };
+      if (warning) pushSpdxWarning(warning);
+      if (license.warning) pushSpdxWarning(license.warning);
+      for (const mergeWarning of dep.mergeWarnings) pushSpdxWarning(mergeWarning);
       return {
         name: dep.package,
         SPDXID: `SPDXRef-Package-${i + 1}`,
@@ -909,8 +920,18 @@ export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<st
     ...(licenseNotes.length
       ? {
           annotations: licenseNotes.flatMap((f) => [
-            spdxNote(artifact, `${f.ruleId}: ${f.message}`),
-            spdxNote(artifact, WarningCodes.LICENSE_UNPARSEABLE),
+            {
+              annotationType: 'OTHER',
+              annotator: 'Tool: @vibgrate/cli',
+              annotationDate: artifact.timestamp,
+              comment: `${f.ruleId}: ${f.message}`,
+            },
+            {
+              annotationType: 'OTHER',
+              annotator: 'Tool: @vibgrate/cli',
+              annotationDate: artifact.timestamp,
+              comment: `warningCode=${WARNING_CODES.LICENSE_UNPARSEABLE}`,
+            },
           ]),
         }
       : {}),
@@ -1037,14 +1058,22 @@ const exportCommand = new Command('export')
     const lockfileGraph = opts.transitive ? collectLockfileGraph(artifact, path.resolve(opts.root)) : undefined;
 
     const sbom = format === 'cyclonedx' ? toCycloneDx(artifact, lockfileGraph) : toSpdx(artifact, lockfileGraph);
-    for (const warning of collectPurlWarnings(artifact, lockfileGraph)) {
-      console.error(chalk.yellow(`warning: ${degradeLine(WarningCodes.PURL_UNAVAILABLE, warning)}`));
+    const coded: CodedWarning[] = [];
+    const plain: string[] = [];
+    for (const warning of [
+      ...collectPurlWarnings(artifact, lockfileGraph),
+      ...collectLicenseWarnings(artifact, lockfileGraph),
+      ...collectMergeWarnings(artifact, lockfileGraph),
+    ]) {
+      const code = sbomWarningCode(warning);
+      if (code) coded.push(codedWarning(code, warning));
+      else plain.push(warning);
     }
-    for (const warning of collectLicenseWarnings(artifact, lockfileGraph)) {
-      console.error(chalk.yellow(`warning: ${degradeLine(WarningCodes.LICENSE_UNPARSEABLE, warning)}`));
+    for (const warning of sortCodedWarnings(coded)) {
+      console.error(chalk.yellow(formatWarningLine(warning)));
     }
-    for (const warning of collectMergeWarnings(artifact, lockfileGraph)) {
-      console.error(chalk.yellow(`warning: ${degradeLine(WarningCodes.SBOM_MERGE, warning)}`));
+    for (const warning of plain) {
+      console.error(chalk.yellow(`warning: ${warning}`));
     }
     const body = JSON.stringify(sbom, null, 2);
 

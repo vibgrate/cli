@@ -87,9 +87,6 @@ src/
 │   ├── config.ts, credentials.ts, regions.ts, version.ts
 │   └── utils/
 │
-├── warnings/         Stable degrade-and-continue warning codes
-│   └── codes.ts          One registry (`VG_WARN_…`); published strings stay stable
-│
 └── util/             Shared helpers
     ├── output.ts, progress.ts, logo.ts, exit.ts
 ```

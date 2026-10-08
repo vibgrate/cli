@@ -453,7 +453,7 @@ describe('sbom helpers', () => {
         annotationType: 'OTHER',
         annotator: 'Tool: @vibgrate/cli',
         annotationDate: '2026-02-19T00:00:00.000Z',
-        comment: 'VG_WARN_LICENSE_UNPARSEABLE',
+        comment: 'warningCode=VG_WARN_LICENSE_UNPARSEABLE',
       },
     ]);
     expect(JSON.stringify(spdx)).not.toContain('unrelated');

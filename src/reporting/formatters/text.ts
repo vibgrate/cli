@@ -3,7 +3,7 @@ import type { ScanArtifact, ExtendedScanResults, InventoryItem, ServiceDependenc
 import { baselineSuppressionLabel } from '../../core-open/baseline-suppressions.js';
 import { VERSION } from '../version.js';
 import { humanFindingText } from '../../core-open/formatters/fix-hint.js';
-import { degradeWarningBlock, ruleWithWarnCode } from '../../warnings/codes.js';
+import { findingRuleLabel, formatDegradationLines } from '../../core-open/warnings.js';
 import { driftBar } from '../../core-open/ui/bar.js';
 import { titleBox } from '../../core-open/ui/box.js';
 
@@ -82,6 +82,13 @@ export function formatText(artifact: ScanArtifact): string {
     lines.push(...formatExtended(artifact.extended));
   }
 
+  const degradationLines = formatDegradationLines(artifact.degradations);
+  if (degradationLines.length > 0) {
+    lines.push(chalk.bold.underline('  Degradations'));
+    for (const line of degradationLines) lines.push(chalk.yellow(`    ${line}`));
+    lines.push('');
+  }
+
   // Findings
   if (artifact.findings.length > 0) {
     const errors = artifact.findings.filter((f) => f.level === 'error');
@@ -98,16 +105,9 @@ export function formatText(artifact: ScanArtifact): string {
       const icon = f.level === 'error' ? chalk.red('✖') : f.level === 'warning' ? chalk.yellow('⚠') : chalk.blue('ℹ');
       const shown = humanFindingText(f);
       lines.push(`    ${icon} ${shown.message}`);
-      lines.push(chalk.dim(`      ${ruleWithWarnCode(f.ruleId, f.details)} in ${f.location}`));
+      lines.push(chalk.dim(`      ${findingRuleLabel(f.ruleId, f.details)} in ${f.location}`));
       if (shown.hint) lines.push(chalk.dim(`      ${shown.hint}`));
     }
-    lines.push('');
-  }
-
-  const degradeLines = degradeWarningBlock(artifact.degradeWarnings);
-  if (degradeLines.length) {
-    lines.push(chalk.bold.underline(`  ${degradeLines[0]}`));
-    for (const line of degradeLines.slice(1)) lines.push(chalk.yellow(line));
     lines.push('');
   }
 

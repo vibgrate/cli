@@ -3,8 +3,8 @@
 // and re-run the vendor script. Apache-2.0.
 import type { ScanArtifact } from '../types.js';
 import { baselineSuppressionLabel } from '../baseline-suppressions.js';
+import { findingRuleLabel, formatDegradationLines } from '../warnings.js';
 import { securityPacksLabel } from './text.js';
-import { degradeWarningBlock, ruleWithWarnCode } from '../../warnings/codes.js';
 
 /** Rows shown before the infrastructure-findings table is cut with an "… N more" line. */
 const SECURITY_ROWS_MAX = 50;
@@ -174,6 +174,14 @@ export function formatMarkdown(artifact: ScanArtifact): string {
     }
     lines.push('');
   }
+  const degradationLines = formatDegradationLines(artifact.degradations);
+  if (degradationLines.length > 0) {
+    lines.push('## Degradations');
+    lines.push('');
+    for (const line of degradationLines) lines.push(`- ${line}`);
+    lines.push('');
+  }
+
   // Findings
   if (artifact.findings.length > 0) {
     lines.push('## Findings');
@@ -182,16 +190,8 @@ export function formatMarkdown(artifact: ScanArtifact): string {
     lines.push(`|-------|------|---------|----------|`);
     for (const f of artifact.findings) {
       const emoji = f.level === 'error' ? '🔴' : f.level === 'warning' ? '🟡' : '🔵';
-      lines.push(`| ${emoji} ${f.level} | ${ruleWithWarnCode(f.ruleId, f.details)} | ${f.message} | ${f.location} |`);
+      lines.push(`| ${emoji} ${f.level} | ${findingRuleLabel(f.ruleId, f.details)} | ${f.message} | ${f.location} |`);
     }
-    lines.push('');
-  }
-
-  const degradeLines = degradeWarningBlock(artifact.degradeWarnings);
-  if (degradeLines.length) {
-    lines.push(`## ${degradeLines[0]}`);
-    lines.push('');
-    for (const line of degradeLines.slice(1)) lines.push(`- ${line.trim()}`);
     lines.push('');
   }
 

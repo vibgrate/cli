@@ -9,6 +9,7 @@ import type {
   ToolchainExtractor,
   ToolchainNodeDraft,
 } from './types.js';
+import { stampWarning, WARNING_CODES } from '../../core-open/warnings.js';
 
 /**
  * Terraform / OpenTofu extraction over the HCL concrete syntax tree.
@@ -614,12 +615,12 @@ export const terraformExtractor: ToolchainExtractor = {
       return {
         nodes: [],
         edges: [],
-        warnings: [`${rel}: HCL grammar unavailable — no Terraform structure extracted`],
+        warnings: [stampWarning(WARNING_CODES.HCL_GRAMMAR_UNAVAILABLE, `${rel}: HCL grammar unavailable — no Terraform structure extracted`)],
       };
     }
 
     const tree = parser.parse(source);
-    if (!tree) return { nodes: [], edges: [], warnings: [`${rel}: HCL parse produced no tree`] };
+    if (!tree) return { nodes: [], edges: [], warnings: [stampWarning(WARNING_CODES.HCL_NO_TREE, `${rel}: HCL parse produced no tree`)] };
 
     const lines = new LineIndex(source);
     const nodes: ToolchainNodeDraft[] = [];
@@ -632,12 +633,12 @@ export const terraformExtractor: ToolchainExtractor = {
     const pendingEdges: ToolchainEdgeDraft[] = [];
 
     if (tree.rootNode.hasError) {
-      warnings.push(`${rel}: HCL parse recovered from a syntax error — extraction may be partial`);
+      warnings.push(stampWarning(WARNING_CODES.HCL_PARTIAL, `${rel}: HCL parse recovered from a syntax error — extraction may be partial`));
     }
 
     for (const block of topLevelBlocks(tree.rootNode)) {
       if (nodes.length >= TOOLCHAIN_NODES_PER_FILE_MAX) {
-        warnings.push(`${rel}: stopped at ${TOOLCHAIN_NODES_PER_FILE_MAX} nodes`);
+        warnings.push(stampWarning(WARNING_CODES.TOOLCHAIN_NODE_CAP, `${rel}: stopped at ${TOOLCHAIN_NODES_PER_FILE_MAX} nodes`));
         break;
       }
       const { type, labels } = blockHead(block);

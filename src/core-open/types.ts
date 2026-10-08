@@ -4,6 +4,7 @@
 // ── Core types for Vibgrate CLI ──
 
 import type { DriftBudgetConfig } from './drift-budget.js';
+import type { CodedWarning } from './warnings.js';
 
 export type DepSection = 'dependencies' | 'devDependencies' | 'peerDependencies' | 'optionalDependencies';
 
@@ -478,10 +479,10 @@ export interface CvssDiagnostic {
   /** Stable code, identical for every unparseable vector. */
   code: 'cvss-vector-parse-failed';
   /**
-   * Degrade-and-continue code (`VG_WARN_CVSS_UNPARSEABLE`). Present when this
-   * CLI built the diagnostic. The `code` field above is unchanged.
+   * Degrade-and-continue warning code. Stable across releases.
+   * `code` stays `cvss-vector-parse-failed`.
    */
-  warnCode?: 'VG_WARN_CVSS_UNPARSEABLE';
+  warnCode: 'VG_WARN_CVSS_UNPARSEABLE';
   /**
    * What failed and what to do next. Deterministic for a given vector.
    * Credential-shaped text from the vector is redacted.
@@ -792,6 +793,12 @@ export interface ScanArtifact {
   drift: DriftScore;
   findings: Finding[];
   /**
+   * Degrade-and-continue notices from this scan (skipped paths, an unreadable
+   * baseline). Omitted when there are none — absent is not an empty list.
+   * Sorted by code, then by message. Does not change the exit code.
+   */
+  degradations?: CodedWarning[];
+  /**
    * Repo-relative path (or basename, when the file is outside the repo) of the
    * `--baseline` snapshot this scan compared against.
    */
@@ -814,12 +821,6 @@ export interface ScanArtifact {
   relationshipDiagram?: MermaidDiagram;
   /** Billing roll-up derived from per-project function/project classifications */
   billing?: BillingSummary;
-  /**
-   * Degrade-and-continue warnings from this scan (skipped paths, an unreadable
-   * baseline). Omitted when none fired. Sorted by code, then message. Does
-   * not change whether the scan succeeded.
-   */
-  degradeWarnings?: Array<{ code: string; message: string }>;
   /**
    * Vulnerable-symbol reachability results from the LOCAL code-graph query
    * (`vg scan` with a DSN): the risky-symbol manifest from the scan symbols
