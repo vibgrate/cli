@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, FileCache } from '../utils/fs.js';
 import { assertLockfileText, LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
+import { lockfileWarningPath, notePubspecLockText, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
 import { PubCache } from './pub-cache.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
@@ -188,6 +189,10 @@ async function parsePubspecLock(filePath: string, cache?: FileCache): Promise<Ma
   assertLockfileText(filePath, content, 'YAML');
 
   try {
+    withLockfileNotes(undefined, (bucket) => {
+      notePubspecLockText(content, lockfileWarningPath(filePath), bucket);
+      return undefined;
+    });
     let currentPackage: string | null = null;
 
     for (const line of content.split(/\r?\n/)) {

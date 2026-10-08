@@ -6,6 +6,21 @@ import {
   LockfileParseError,
   parseLockfileJson,
 } from '../core-open/utils/lockfile-parse.js';
+import {
+  emitUnknownOptionalLockfileWarnings,
+  lockfileWarningPath,
+  LockfileUnknownFields,
+  noteComposerLock,
+  noteNugetLock,
+  notePackageLock,
+  notePackageResolved,
+  notePipfileLock,
+  notePnpmLockText,
+  notePubspecLockText,
+  noteTomlLockText,
+  noteYarnLockText,
+  type TomlLockKind,
+} from '../core-open/utils/lockfile-unknown.js';
 import type { DepRecord } from './drift.js';
 
 /**
@@ -37,6 +52,21 @@ function readCheckedJson(root: string, file: string): unknown | undefined {
   const text = readOptionalText(abs);
   if (text === undefined) return undefined;
   return parseLockfileJson(abs, text);
+}
+
+function tomlKind(file: string): TomlLockKind | undefined {
+  if (file === 'Cargo.lock') return 'cargo';
+  if (file === 'poetry.lock') return 'poetry';
+  if (file === 'uv.lock') return 'uv';
+  if (file === 'pdm.lock') return 'pdm';
+  return undefined;
+}
+
+/** Record unknown optional keys on a lockfile that already parsed. */
+function reportLockfileFields(root: string, file: string, fill: (rel: string, notes: LockfileUnknownFields) => void): void {
+  const notes = new LockfileUnknownFields();
+  fill(lockfileWarningPath(file, root), notes);
+  emitUnknownOptionalLockfileWarnings(notes);
 }
 
 /**
@@ -79,6 +109,7 @@ function gradleLock(root: string, name: string): string | undefined {
 function packageResolved(root: string, name: string): string | undefined {
   const parsed = readCheckedJson(root, 'Package.resolved');
   if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'Package.resolved', (rel, notes) => notePackageResolved(parsed, rel, notes));
   const data = parsed as {
     pins?: Array<{ identity?: string; package?: string; state?: { version?: string } }>;
     object?: { pins?: Array<{ identity?: string; package?: string; state?: { version?: string } }> };
@@ -97,6 +128,7 @@ function packageResolved(root: string, name: string): string | undefined {
 function pubspecLock(root: string, name: string): string | undefined {
   const text = readCheckedText(root, 'pubspec.lock');
   if (text === undefined) return undefined;
+  reportLockfileFields(root, 'pubspec.lock', (rel, notes) => notePubspecLockText(text, rel, notes));
   let inPkg = false;
   for (const line of text.split('\n')) {
     const key = /^  ([A-Za-z0-9_.]+):\s*$/.exec(line);
@@ -130,6 +162,7 @@ function gemfileLock(root: string, name: string): string | undefined {
 function composerLock(root: string, name: string): string | undefined {
   const parsed = readCheckedJson(root, 'composer.lock');
   if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'composer.lock', (rel, notes) => noteComposerLock(parsed, rel, notes));
   const data = parsed as Record<string, Array<{ name?: string; version?: string }>>;
   for (const section of ['packages', 'packages-dev']) {
     const arr = data[section];
@@ -144,6 +177,7 @@ function composerLock(root: string, name: string): string | undefined {
 function packagesLock(root: string, name: string): string | undefined {
   const parsed = readCheckedJson(root, 'packages.lock.json');
   if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'packages.lock.json', (rel, notes) => noteNugetLock(parsed, rel, notes));
   const data = parsed as { dependencies?: Record<string, Record<string, { resolved?: string }>> };
   const target = name.toLowerCase();
   for (const fw of Object.values(data.dependencies ?? {})) {
@@ -182,6 +216,8 @@ function pypiLockVersion(root: string, name: string): string | undefined {
 function tomlPackageLock(root: string, file: string, name: string, normalize: (s: string) => string): string | undefined {
   const text = readCheckedText(root, file);
   if (text === undefined) return undefined;
+  const kind = tomlKind(file);
+  if (kind) reportLockfileFields(root, file, (rel, notes) => noteTomlLockText(text, rel, notes, kind));
   const target = normalize(name);
   for (const block of text.split(/\[\[package\]\]/)) {
     const nm = /(?:^|\n)\s*name\s*=\s*"([^"]+)"/.exec(block);
@@ -197,6 +233,7 @@ function tomlPackageLock(root: string, file: string, name: string, normalize: (s
 function pipfileLock(root: string, name: string): string | undefined {
   const parsed = readCheckedJson(root, 'Pipfile.lock');
   if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'Pipfile.lock', (rel, notes) => notePipfileLock(parsed, rel, notes));
   const data = parsed as Record<string, Record<string, { version?: string }>>;
   const target = pep503(name);
   for (const section of ['default', 'develop']) {
@@ -302,6 +339,7 @@ interface NpmV2Package {
 function npmLockGraph(root: string): LockfileGraph | undefined {
   const parsed = readCheckedJson(root, 'package-lock.json');
   if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'package-lock.json', (rel, notes) => notePackageLock(parsed, rel, notes));
   const data = parsed as {
     packages?: Record<string, NpmV2Package>;
     dependencies?: Record<string, { version?: string; dependencies?: Record<string, unknown> }>;
@@ -386,6 +424,7 @@ function walkNpmV1Tree(
 function pnpmLockTree(root: string): LockfileComponent[] | undefined {
   const text = readCheckedText(root, 'pnpm-lock.yaml');
   if (text === undefined) return undefined;
+  reportLockfileFields(root, 'pnpm-lock.yaml', (rel, notes) => notePnpmLockText(text, rel, notes));
   const section = sectionOf(text, 'packages');
   if (!section) return undefined;
   const out = new Map<string, LockfileComponent>();
@@ -406,6 +445,7 @@ function pnpmLockTree(root: string): LockfileComponent[] | undefined {
 function yarnLockTree(root: string): LockfileComponent[] | undefined {
   const text = readCheckedText(root, 'yarn.lock');
   if (text === undefined) return undefined;
+  reportLockfileFields(root, 'yarn.lock', (rel, notes) => noteYarnLockText(text, rel, notes));
   const out = new Map<string, LockfileComponent>();
   let pendingNames: string[] = [];
   for (const line of text.split('\n')) {
@@ -473,6 +513,7 @@ function yarnHeaderRealName(spec: string): string | undefined {
 function cargoLockTree(root: string): LockfileComponent[] | undefined {
   const text = readCheckedText(root, 'Cargo.lock');
   if (text === undefined) return undefined;
+  reportLockfileFields(root, 'Cargo.lock', (rel, notes) => noteTomlLockText(text, rel, notes, 'cargo'));
   const out = new Map<string, LockfileComponent>();
   for (const block of text.split(/\[\[package\]\]/)) {
     const nm = /(?:^|\n)\s*name\s*=\s*"([^"]+)"/.exec(block);
@@ -512,6 +553,8 @@ function goSumTree(root: string): LockfileComponent[] | undefined {
 function poetryLikeLockTree(root: string, file: string): LockfileComponent[] | undefined {
   const text = readCheckedText(root, file);
   if (text === undefined) return undefined;
+  const kind = tomlKind(file);
+  if (kind) reportLockfileFields(root, file, (rel, notes) => noteTomlLockText(text, rel, notes, kind));
   const out = new Map<string, LockfileComponent>();
   for (const block of text.split(/\[\[package\]\]/)) {
     const nm = /(?:^|\n)\s*name\s*=\s*"([^"]+)"/.exec(block);
@@ -525,6 +568,7 @@ function poetryLikeLockTree(root: string, file: string): LockfileComponent[] | u
 function packageLockVersion(root: string, name: string): string | undefined {
   const parsed = readCheckedJson(root, 'package-lock.json');
   if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'package-lock.json', (rel, notes) => notePackageLock(parsed, rel, notes));
   const data = parsed as { packages?: Record<string, { version?: string }>; dependencies?: Record<string, { version?: string }> };
   // v2/v3: packages keyed by install path; the top-level dep is "node_modules/<name>".
   const top = data.packages?.[`node_modules/${name}`]?.version;
@@ -550,6 +594,7 @@ function packageLockVersion(root: string, name: string): string | undefined {
 function pnpmLockVersion(root: string, name: string): string | undefined {
   const text = readCheckedText(root, 'pnpm-lock.yaml');
   if (text === undefined) return undefined;
+  reportLockfileFields(root, 'pnpm-lock.yaml', (rel, notes) => notePnpmLockText(text, rel, notes));
   const importers = sectionOf(text, 'importers');
   if (!importers) return undefined;
   // Entries look like:
@@ -584,6 +629,7 @@ function sectionOf(text: string, key: string): string | undefined {
 function yarnLockVersion(root: string, name: string): string | undefined {
   const text = readCheckedText(root, 'yarn.lock');
   if (text === undefined) return undefined;
+  reportLockfileFields(root, 'yarn.lock', (rel, notes) => noteYarnLockText(text, rel, notes));
   let inBlock = false;
   for (const line of text.split('\n')) {
     if (line && !/^\s/.test(line) && !line.startsWith('#')) {

@@ -21,6 +21,13 @@
  */
 import * as path from 'node:path';
 import { assertLockfileText, LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
+import {
+  type LockfileUnknownFields,
+  type TomlLockKind,
+  notePipfileLock,
+  noteTomlLockDoc,
+  withLockfileNotes,
+} from '../utils/lockfile-unknown.js';
 import { parseToml } from '../utils/toml.js';
 import type { LockfileIo } from './npm-lockfile.js';
 export type { LockfileIo } from './npm-lockfile.js';
@@ -48,9 +55,21 @@ function bareVersion(v: string): string | null {
  * name → version from a TOML lockfile of `[[package]]` tables (poetry / uv / pdm). First occurrence
  * wins. Keys are PEP 503 normalized.
  */
-export function parsePyTomlLock(text: string): Map<string, string> {
+export function parsePyTomlLock(
+  text: string,
+  relPath = 'poetry.lock',
+  notes?: LockfileUnknownFields,
+  kind: TomlLockKind = 'poetry',
+): Map<string, string> {
+  return withLockfileNotes(notes, (bucket) => {
+    const doc = parseToml(text);
+    noteTomlLockDoc(doc, relPath, bucket, kind);
+    return parsePyTomlLockBody(doc);
+  });
+}
+
+function parsePyTomlLockBody(doc: Record<string, unknown> | null): Map<string, string> {
   const out = new Map<string, string>();
-  const doc = parseToml(text);
   const packages = doc?.package;
   if (!Array.isArray(packages)) return out;
   for (const entry of packages) {
@@ -64,7 +83,18 @@ export function parsePyTomlLock(text: string): Map<string, string> {
 }
 
 /** name → version from a Pipfile.lock (JSON `default` + `develop` maps). Keys are PEP 503 normalized. */
-export function parsePipfileLock(json: unknown): Map<string, string> {
+export function parsePipfileLock(
+  json: unknown,
+  relPath = 'Pipfile.lock',
+  notes?: LockfileUnknownFields,
+): Map<string, string> {
+  return withLockfileNotes(notes, (bucket) => {
+    notePipfileLock(json, relPath, bucket);
+    return parsePipfileLockBody(json);
+  });
+}
+
+function parsePipfileLockBody(json: unknown): Map<string, string> {
   const out = new Map<string, string>();
   if (!json || typeof json !== 'object') return out;
   const doc = json as Record<string, unknown>;
@@ -96,7 +126,7 @@ export async function loadPythonLockIndex(dir: string, io: LockfileIo): Promise<
     try {
       const text = await io.readText(p);
       assertLockfileText(p, text, 'TOML');
-      const map = parsePyTomlLock(text);
+      const map = parsePyTomlLock(text, p, undefined, source);
       if (map.size) return { source, size: map.size, resolve: (n) => map.get(normalizePyName(n)) ?? null };
     } catch (err) {
       rethrowLockfileParseError(err);
@@ -112,7 +142,7 @@ export async function loadPythonLockIndex(dir: string, io: LockfileIo): Promise<
       rethrowLockfileParseError(err);
       throw new LockfileParseError(pipfile, 'JSON');
     }
-    const map = parsePipfileLock(json);
+    const map = parsePipfileLock(json, pipfile);
     if (map.size) return { source: 'pipfile', size: map.size, resolve: (n) => map.get(normalizePyName(n)) ?? null };
   }
   return null;

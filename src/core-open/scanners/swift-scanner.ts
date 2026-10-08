@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, FileCache } from '../utils/fs.js';
 import { parseLockfileJson, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
+import { lockfileWarningPath, notePackageResolved, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
 import { SwiftCache } from './swift-cache.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
@@ -134,6 +135,11 @@ function parsePackageResolved(filePath: string, content: string): Map<string, st
       };
     }>;
   } | null;
+
+  withLockfileNotes(undefined, (bucket) => {
+    notePackageResolved(data, lockfileWarningPath(filePath), bucket);
+    return undefined;
+  });
 
   if (!data || typeof data !== 'object' || !data.pins) return resolved;
   for (const pin of data.pins) {

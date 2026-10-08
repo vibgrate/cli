@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as semver from 'semver';
 import { FileCache, readJsonFile } from '../utils/fs.js';
 import { LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
+import { lockfileWarningPath, noteComposerLock, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
 import { ComposerCache } from './composer-cache.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
@@ -146,19 +147,23 @@ async function parseComposerLock(filePath: string, cache?: FileCache): Promise<M
   }
 
   try {
-    // Parse packages
-    for (const pkg of (data.packages ?? []) as Array<{ name?: string; version?: string }>) {
-      if (pkg.name && pkg.version) {
-        resolved.set(pkg.name, pkg.version);
+    withLockfileNotes(undefined, (bucket) => {
+      noteComposerLock(data, lockfileWarningPath(filePath), bucket);
+      // Parse packages
+      for (const pkg of (data.packages ?? []) as Array<{ name?: string; version?: string }>) {
+        if (pkg.name && pkg.version) {
+          resolved.set(pkg.name, pkg.version);
+        }
       }
-    }
-    
-    // Parse dev packages
-    for (const pkg of (data['packages-dev'] ?? []) as Array<{ name?: string; version?: string }>) {
-      if (pkg.name && pkg.version) {
-        resolved.set(pkg.name, pkg.version);
+
+      // Parse dev packages
+      for (const pkg of (data['packages-dev'] ?? []) as Array<{ name?: string; version?: string }>) {
+        if (pkg.name && pkg.version) {
+          resolved.set(pkg.name, pkg.version);
+        }
       }
-    }
+      return resolved;
+    });
   } catch (err) {
     rethrowLockfileParseError(err);
     throw new LockfileParseError(filePath, 'JSON');

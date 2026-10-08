@@ -27,6 +27,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
     - [CycloneDX type and SPDX primaryPackagePurpose](#cyclonedx-type-and-spdx-primarypackagepurpose)
     - [Production, development, and optional scope](./docs/sbom-dependency-scope.md)
   - [vg scan](#vg-scan)
+    - [Unknown lockfile fields](#unknown-lockfile-fields)
     - [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest)
     - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
       - [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible)
@@ -2128,6 +2129,22 @@ Switches (flags that take no value, such as `--vulns`, `--offline` or `--no-grap
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
+
+### Unknown lockfile fields
+
+Package managers add fields to lockfiles as they release. When the file still lists dependencies vg can read, an extra field does not erase that graph or the SBOM rows built from it. vg keeps the package names, versions, and dependency edges it understands.
+
+vg prints one warning on stderr for each unknown field name in that file. Lines are sorted by lockfile path, then by field name. The same path and field name is printed once. A warning looks like this:
+
+```text
+pnpm-lock.yaml: unknown optional lockfile field "futureOptional"; continuing with the fields this version understands.
+```
+
+The path is relative to the directory you ran the command from, when the lockfile is under that directory. Otherwise the warning uses the file name only. The warning names the field. It does not print the field's value, an environment value, or an authorization header. A field name that is not a plain identifier is reported as `(name omitted)`.
+
+A lockfile that is truncated, empty, or missing the structure its format requires still fails the command. The error names the file and the format, tells you to regenerate the file with your package manager, and the process exits non-zero. The error does not include the file's contents.
+
+`vg scan` and `vg sbom export` follow this for npm, pnpm, yarn, poetry, uv, pdm, Pipfile, Cargo, Composer, NuGet, Swift package pins, and pub. A Gradle lock line, a Gemfile spec, and a `go.sum` line do not have optional field names. A line that does not match that format is invalid, and the command fails.
 
 ### Offline scan with a package-version manifest
 

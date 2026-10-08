@@ -17,6 +17,13 @@
 import * as path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { assertLockfileText, LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
+import {
+  type LockfileUnknownFields,
+  notePackageLock,
+  notePnpmLockDoc,
+  noteYarnLockText,
+  withLockfileNotes,
+} from '../utils/lockfile-unknown.js';
 
 export type NpmLockSource = 'package-lock' | 'yarn' | 'pnpm';
 
@@ -37,7 +44,18 @@ interface PackageLockShape {
 const TOP_LEVEL_NODE_MODULES = /^node_modules\/((?:@[^/]+\/)?[^/]+)$/;
 
 /** name → top-level installed version from a package-lock.json (v2/v3 `packages`, falling back to v1 `dependencies`). */
-export function parsePackageLock(json: unknown): Map<string, string> {
+export function parsePackageLock(
+  json: unknown,
+  relPath = 'package-lock.json',
+  notes?: LockfileUnknownFields,
+): Map<string, string> {
+  return withLockfileNotes(notes, (bucket) => {
+    notePackageLock(json, relPath, bucket);
+    return parsePackageLockBody(json);
+  });
+}
+
+function parsePackageLockBody(json: unknown): Map<string, string> {
   const out = new Map<string, string>();
   if (!json || typeof json !== 'object') return out;
   const lock = json as PackageLockShape;
@@ -79,7 +97,18 @@ function specName(spec: string): string | null {
  * specs ending in `:`, followed by an indented `version: x.y.z`. Returns both a precise `name@range`
  * map and a name fallback.
  */
-export function parseYarnLock(text: string): YarnLockIndex {
+export function parseYarnLock(
+  text: string,
+  relPath = 'yarn.lock',
+  notes?: LockfileUnknownFields,
+): YarnLockIndex {
+  return withLockfileNotes(notes, (bucket) => {
+    noteYarnLockText(text, relPath, bucket);
+    return parseYarnLockBody(text);
+  });
+}
+
+function parseYarnLockBody(text: string): YarnLockIndex {
   const bySpec = new Map<string, string>();
   const byName = new Map<string, string>();
   let currentSpecs: string[] = [];
@@ -123,7 +152,18 @@ function cleanPnpmVersion(v: string): string | null {
  * and the top-level `dependencies`/`devDependencies`/`optionalDependencies` (v5/v6), whose values are
  * either a version string or `{ specifier, version }`. First occurrence wins (the root importer).
  */
-export function parsePnpmLock(doc: unknown): Map<string, string> {
+export function parsePnpmLock(
+  doc: unknown,
+  relPath = 'pnpm-lock.yaml',
+  notes?: LockfileUnknownFields,
+): Map<string, string> {
+  return withLockfileNotes(notes, (bucket) => {
+    notePnpmLockDoc(doc, relPath, bucket);
+    return parsePnpmLockBody(doc);
+  });
+}
+
+function parsePnpmLockBody(doc: unknown): Map<string, string> {
   const out = new Map<string, string>();
   if (!doc || typeof doc !== 'object') return out;
   const d = doc as Record<string, unknown>;
@@ -180,7 +220,7 @@ export async function loadNpmLockIndex(dir: string, io: LockfileIo): Promise<Npm
       rethrowLockfileParseError(err);
       throw new LockfileParseError(pnpmPath, 'YAML');
     }
-    const map = parsePnpmLock(doc);
+    const map = parsePnpmLock(doc, pnpmPath);
     if (map.size) return { source: 'pnpm', size: map.size, resolve: (name) => map.get(name) ?? null };
   }
   // package-lock next: structured JSON and unambiguous.
@@ -192,7 +232,7 @@ export async function loadNpmLockIndex(dir: string, io: LockfileIo): Promise<Npm
       rethrowLockfileParseError(err);
       throw new LockfileParseError(lockPath, 'JSON');
     }
-    const map = parsePackageLock(json);
+    const map = parsePackageLock(json, lockPath);
     if (map.size) return { source: 'package-lock', size: map.size, resolve: (name) => map.get(name) ?? null };
   }
   if (await io.exists(yarnPath).catch(() => false)) {
@@ -200,7 +240,7 @@ export async function loadNpmLockIndex(dir: string, io: LockfileIo): Promise<Npm
     let parsed: ReturnType<typeof parseYarnLock>;
     try {
       assertLockfileText(yarnPath, text, 'yarn.lock');
-      parsed = parseYarnLock(text);
+      parsed = parseYarnLock(text, yarnPath);
     } catch (err) {
       rethrowLockfileParseError(err);
       throw new LockfileParseError(yarnPath, 'yarn.lock');
