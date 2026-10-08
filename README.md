@@ -427,7 +427,7 @@ One scan gives you:
 
 `vg scan --vulns` checks your installed dependencies against the public [OSV](https://vibgrate.com/glossary/osv) database and reports each known vulnerability with its severity, CVSS score, and the version that fixes it — as text, JSON, or SARIF. JSON also includes `epss`, `epssPercentile`, and `kev` when the advisory data already carried them; a missing score is omitted, never written as `0`. Add `--package-manifest` to run it fully offline from a local advisory bundle. Offline and manifest scans do not contact an EPSS service. A missing or invalid manifest exits `1` and does not scan. The manifest shape and the error text are in [DOCS.md](./DOCS.md#offline-scan-with-a-package-version-manifest).
 
-SARIF writes one result per package and advisory (`vg scan --vulns --format sarif`). The advisory's own id is the primary id. CVE and other aliases stay on that result. A second code-scanning alert is expected when the scan kept two advisory ids, including when those ids list each other as aliases. Field layout and result order: [DOCS.md](./DOCS.md#advisories-with-several-ids).
+SARIF writes one result per package and advisory (`vg scan --vulns --format sarif`). Every result includes `partialFingerprints["vg/finding-id/v1"]`, so an unchanged finding keeps the same code-scanning alert. The advisory's own id is the primary id. CVE and other aliases stay on that result. A second code-scanning alert is expected when the scan kept two advisory ids, including when those ids list each other as aliases. Field layout, result order, and what the fingerprint is made from: [DOCS.md](./DOCS.md#advisories-with-several-ids) and [DOCS.md](./DOCS.md#result-fingerprints).
 
 ```bash
 vg scan --vulns                 # drift score + known vulnerabilities
@@ -826,7 +826,7 @@ All HCS computation runs in an optional, separately-licensed engine module that 
 | `vg evidence` | Signed, reproducible regulatory evidence — jurisdiction-neutral regimes (EU CRA first, DORA incident reporting too): `init`, `product`, `release`, `exposure`, `readiness`, `drill`, `watch`, `pack`, `verify`, `push`, `export` |
 | `vg fix` | Ranked, risk-tiered upgrade plans from the hosted planner — then apply the one you choose |
 | `vg init [path]` | Initialise config and `.vibgrate/` |
-| `vg report` | Generate a report from a scan artifact |
+| `vg report` | Render a saved scan artifact as text (default), Markdown, or JSON. There is no HTML report. Field coverage is in [DOCS.md](./DOCS.md#report-format-coverage) |
 | `vg review` | **Vibgrate Review** — architecture + security-control review of the current change, locally (`--in-place`, `--local`, `--loop`). Deterministic blast-radius findings from the code graph via `vg review findings-from-diff`; `vg review propose <id>` attaches a PatchIR dry-run (same `--base` / `--in-place` / `--diff`, `--findings`, or `.vibgrate/review-propose-handoff.json`). One decision (`pass` / `needs_review` / `fail` / `undetermined`) in a signed receipt (Ed25519 over the receipt digest; `vg review verify <receipt.json>` checks it offline); protected findings cannot be blessed into a pass. Reports change integrity, not a proof of security. Builds or refreshes the code map itself when it is missing or stale (`--no-auto-build` opts out) |
 | `vg sbom export` / `delta` / `vex` | Export CycloneDX/SPDX SBOM, diff two artifacts, or emit an OpenVEX document |
 | `vg scan [path]` | Scan for upgrade drift |

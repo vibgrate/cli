@@ -15,6 +15,7 @@
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { assertLockfileText, LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
+import { type LockfileUnknownFields, noteTomlLockDoc, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { parseToml } from '../utils/toml.js';
 import type { LockfileIo } from './npm-lockfile.js';
 export type { LockfileIo } from './npm-lockfile.js';
@@ -30,9 +31,20 @@ export interface CargoLockIndex {
  * Parse a Cargo.lock into name → locked versions. A crate may appear more than once (multiple
  * incompatible majors in the tree), so versions accumulate into a list per name.
  */
-export function parseCargoLock(text: string): Map<string, string[]> {
+export function parseCargoLock(
+  text: string,
+  relPath = 'Cargo.lock',
+  notes?: LockfileUnknownFields,
+): Map<string, string[]> {
+  return withLockfileNotes(notes, (bucket) => {
+    const doc = parseToml(text);
+    noteTomlLockDoc(doc, relPath, bucket, 'cargo');
+    return parseCargoLockBody(doc);
+  });
+}
+
+function parseCargoLockBody(doc: Record<string, unknown> | null): Map<string, string[]> {
   const out = new Map<string, string[]>();
-  const doc = parseToml(text);
   const packages = doc?.package;
   if (!Array.isArray(packages)) return out;
   for (const entry of packages) {
@@ -70,7 +82,7 @@ export async function loadCargoLockIndex(dir: string, io: LockfileIo): Promise<C
   try {
     const text = await io.readText(lockPath);
     assertLockfileText(lockPath, text, 'TOML');
-    const map = parseCargoLock(text);
+    const map = parseCargoLock(text, lockPath);
     if (!map.size) return null;
     return { size: map.size, resolve: (name, spec) => pickLockedVersion(map.get(name), spec) };
   } catch (err) {

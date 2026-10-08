@@ -18,6 +18,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg fix](#vg-fix)
   - [vg init](#vg-init)
   - [vg report](#vg-report)
+    - [Report format coverage](#report-format-coverage)
   - [vg review](#vg-review)
   - [vg sbom](#vg-sbom)
     - [Choosing CycloneDX or SPDX](#choosing-cyclonedx-or-spdx)
@@ -26,6 +27,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
     - [CycloneDX type and SPDX primaryPackagePurpose](#cyclonedx-type-and-spdx-primarypackagepurpose)
     - [Production, development, and optional scope](./docs/sbom-dependency-scope.md)
   - [vg scan](#vg-scan)
+    - [Unknown lockfile fields](#unknown-lockfile-fields)
     - [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest)
     - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
       - [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible)
@@ -100,6 +102,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [Text](#text)
   - [JSON Artifact](#json-artifact)
   - [SARIF](#sarif)
+    - [Result fingerprints](#result-fingerprints)
     - [Advisories with several ids](#advisories-with-several-ids)
   - [Markdown](#markdown)
   - [JUnit](#junit)
@@ -459,16 +462,152 @@ Creates:
 
 ### vg report
 
-Generate a human-readable report from a scan artifact.
+Render a saved scan artifact. The formats are `md`, `text`, `json`, and `html`.
+`text` is the default. `json` prints the artifact unchanged and is the only
+stable machine-readable contract. `sarif` is not a `vg report` format; write
+that with `vg scan --format sarif`.
 
 ```bash
-vg report [--in <file>] [--format md|text|json]
+vg report [--in <file>] [--format md|text|json|html]
 ```
 
-| Flag       | Default                      | Description                            |
-| ---------- | ---------------------------- | -------------------------------------- |
-| `--in`     | `.vibgrate/scan_result.json` | Input artifact file                    |
-| `--format` | `text`                       | Output format: `md`, `text`, or `json` |
+| Flag       | Default                      | Description                                                                      |
+| ---------- | ---------------------------- | -------------------------------------------------------------------------------- |
+| `--in`     | `.vibgrate/scan_result.json` | Input artifact file                                                              |
+| `--format` | `text`                       | `md`, `text`, `json`, or `html`. Any other value is a usage error (exit `5`)     |
+
+An unknown value is rejected before the file is read. The process exits `5`,
+writes nothing to stdout, and prints one stderr line that names the value and
+lists the valid ones:
+
+```text
+error: unknown --format "sarif" (expected md, text, json, html)
+```
+
+The comparison is exact. `HTML`, `sarif`, and `md ` are unknown. Omitting
+`--format` stays on `text`.
+
+`md`, `text`, and `json` are unchanged. `html` writes one self-contained page
+from that same artifact. It does not call the network and does not load
+external files. The page opens with a summary:
+
+- DriftScore and the four component scores. A missing score is `n/a`. A measured `0` stays `0`.
+- Counts by severity for vulnerability findings and for security findings. A check that did not run stays "Not scanned" rather than a row of zeros. A check that finished with nothing to report shows zeros.
+- When a finding carries `details.fixedVersions`, how many of those findings name a fix.
+- Links to the full tables under the summary: vulnerabilities, security findings, and the other findings.
+
+The same artifact always produces the same page. Save it with a shell redirect:
+
+```bash
+vg report --format html > report.html
+```
+
+#### Report format coverage
+
+`--format md` is `formatMarkdown` (`src/reporting/formatters/markdown.ts`).
+`--format text` is `formatText` (`src/reporting/formatters/text.ts`).
+`--format html` is `formatHtmlReport` (`src/reporting/formatters/html.ts`).
+All three read the same artifact. A section below is omitted when its guard is
+false. Lists follow artifact order except where a sort is named. Colours in the
+text report are terminal styling; under `NO_COLOR` the same words are plain. A
+null score is `n/a` in the human formats. A measured `0` stays `0`.
+
+The same artifact, four formats:
+
+```bash
+vg report --in .vibgrate/scan_result.json --format md
+vg report --in .vibgrate/scan_result.json --format text
+vg report --in .vibgrate/scan_result.json --format json
+vg report --in .vibgrate/scan_result.json --format html
+```
+
+##### Markdown (`formatMarkdown`)
+
+Always:
+
+| Section | Fields |
+| --- | --- |
+| Title | `# Vibgrate Drift Report` |
+| Metrics table | **DriftScore** — `n/a`, or `{drift.score}/100` plus `_(lower is better; 0 = no drift)_`. **Risk Level** — `drift.riskLevel` uppercased, or `n/a` when it is missing. **Projects** — `projects.length`. **Scanned** — `timestamp`; when set, `durationMs` as seconds with one decimal, `filesScanned` as `{n} files`, and `treeSummary` as `{totalFiles} workspace files · {totalDirs} dirs`. **VCS** — `vcs.type`, only when `vcs` is set. **Branch** — `vcs.branch`, when set. **Commit** — `` `vcs.shortSha` ``, only when `vcs.sha` is set |
+| Score Breakdown | `drift.components.runtimeScore`, `frameworkScore`, `dependencyScore`, `eolScore` |
+| Projects | One `### {name} ({type})` per project. **Runtime**, when `runtime` is set: the runtime, then ` — {runtimeMajorsBehind} major(s) behind` when that count is greater than 0, otherwise ` — current`. **Frameworks**, when the list is non-empty: `name`, `currentVersion` or `?`, `latestVersion` or `?`, and `majorsBehind` as `current` (`0`), `{n} behind`, or `unknown` (`null`). **Dependencies**, when `current + oneBehind + twoPlusBehind + unknown` is greater than 0: those four `dependencyAgeBuckets` counts |
+
+When the artifact carries the data:
+
+| Section | Guard and fields |
+| --- | --- |
+| Product Purpose Signals | `extended.uiPurpose`. **Frameworks** — `detectedFrameworks`, or `unknown`. **Evidence Items** — `topEvidence.length`, plus `(capped from {evidenceCount})` when `capped` is set. **Top Evidence** — the first 10 of `topEvidence`: `kind`, `value`, `file`. **Unknowns** — the first 5 of `unknownSignals` |
+| Recommended Standards | `extended.standards.recommended` is non-empty. **Detected purpose** — `projectPurposes` as `{project} → {category}`, when that list is non-empty. **Compliance framework coverage** — `frameworks`: `name`, `recommendedMembers`, `totalMembers`. **Top standards to consider** — the first 10 of `recommended`: `name`, `reason`, and `_(compliance)_` when `complianceRelevant` is set |
+| Findings | `findings` is non-empty. Table of `level` (error, warning, or anything else), `ruleId`, the stored `message`, and `location` |
+| Drift Delta | `delta` is set. The signed number, `vs baseline`, and `_(worsened)_` when positive, `_(improved)_` when negative, or neither when zero |
+| Baseline suppressions | `baselineComparison.compared` is true. `{n} finding suppressed by baseline` or `{n} findings suppressed by baseline`, where `n` is `baselineComparison.suppressed.length` |
+
+##### Text (`formatText`)
+
+Always, including an artifact with no projects:
+
+| Section | Fields |
+| --- | --- |
+| Banner | The word `vibgrate` and `Code Intelligence Engine v` plus the running CLI version. This version is not a field of the artifact |
+| Title | `Vibgrate Drift Report` |
+| DriftScore Summary | **DriftScore** — `n/a` or `{drift.score}/100`. **Risk Level** — `LOW`, `MODERATE`, or `HIGH` for `low`, `moderate`, and `high`; the raw string for any other non-empty level; `n/a` when missing. **Projects** — `projects.length`. **VCS**, when `vcs` is set — `vcs.type`, then `vcs.branch` and `vcs.shortSha` when those are set |
+| Score Breakdown | The same four component scores as Markdown, each drawn as a bar when measured |
+| Footer | `Scanned at {timestamp}`; when set, `durationMs` as seconds with one decimal, `{n} file scanned` or `{n} files scanned`, `{treeSummary.totalFiles} workspace files`, and `{treeSummary.totalDirs} dirs` |
+
+Per project, in artifact order:
+
+| Line | Guard and fields |
+| --- | --- |
+| Heading | `name`, `type`, `path` |
+| Runtime | `runtime` when set, and `runtimeMajorsBehind` as `{n} major` or `majors behind` when greater than 0, otherwise `current` |
+| Target | `targetFramework` when set |
+| Frameworks | Same version fields as Markdown (`name`, `currentVersion`, `latestVersion`, `majorsBehind`) |
+| Dependencies | The four `dependencyAgeBuckets` counts when their sum is greater than 0 |
+
+When set:
+
+| Section | Guard and fields |
+| --- | --- |
+| Drift Delta | `delta` is set. The signed number and `(vs baseline)`. Zero prints `0`. No worsened or improved word |
+| Baseline suppressions | Same sentence as Markdown, when `baselineComparison.compared` is true |
+| Tech Stack | `extended.toolingInventory` has a category with items. Category label, then each item's `name`. Labels: Frontend, Meta-frameworks, Bundlers, CSS / UI, Backend, ORM / Database, Testing, Lint & Format, API & Messaging, Observability, Payment, Auth, Email, Cloud, Databases, Messaging, CRM & Comms, Storage, Search & AI. An unlisted category key is printed as stored |
+| Services & Integrations | `extended.serviceDependencies`, same category labels. Each item's `name`, and `version` when set |
+| Breaking Change Exposure | `extended.breakingChangeExposure` has a deprecated package or a legacy polyfill. `exposureScore`, `deprecatedPackages`, `legacyPolyfills`, a peer-conflict line when `peerConflictsDetected` is set, `overallRecommendation`, and up to 3 `projectIntelligence` rows that have packages (project `project` and `recommendation`; up to 2 packages: `package`, `currentVersion`, `targetVersion`, `usage.touchedPercent`, `automatable`) |
+| TypeScript | `extended.tsModernity.typescriptVersion` is set. The version, `strict` (`strict` is omitted when it is neither true nor false), `moduleType`, and `target` |
+| Build & Deploy | `extended.buildDeploy` has CI entries, a Dockerfile, or a package manager. `ci`, Docker `dockerfileCount` and `baseImages`, `packageManagers`, `monorepoTools`, `iac` — each line only when that list or count is non-empty |
+| Product Purpose Signals | `extended.uiPurpose`. `detectedFrameworks` or `unknown`. Evidence count is `topEvidence.length`, and `of {evidenceCount} (capped)` when `capped` is set. **Top Signals** — the first 8 of `topEvidence`: `kind`, `value`, `file`. **Unknowns** — the first 4 of `unknownSignals` |
+| Security Posture | `extended.securityPosture`. `lockfilePresent`, `gitignoreCoversEnv`, `gitignoreCoversNodeModules`. `multipleLockfileTypes` and `envFilesTracked` only when true |
+| Platform | `extended.platformMatrix` has a native module or a Docker base image. `nativeModules` when non-empty. `osAssumptions` when non-empty. `dockerBaseImages` only decides whether the section exists; it is not its own line |
+| Code Quality | `extended.codeQuality`. `filesAnalyzed`, `functionsAnalyzed`, `avgCyclomaticComplexity`, `avgFunctionLength`, `maxNestingDepth`, `circularDependencies`, `deadCodePercent`. **God files** — the first 3 of `godFiles`: `path`, `lines` |
+| Database Schema | `extended.databaseSchema`. `providers`, model count, enum count. **Sources** when models use more than one `source`, sorted by source name. **Models** — the first 5 `name`s, then a remaining count |
+| Dependency Graph | `extended.dependencyGraph.lockfileType` is set. `lockfileType`, `totalUnique`, `totalInstalled`. Duplicated count when `duplicatedPackages` is non-empty. Phantom count when `phantomDependencies` is non-empty |
+| Findings | `findings` is non-empty. Counts of `error`, `warning`, and `note`. Each row is the message from `humanFindingText`, then `ruleId` and `location`, then a hint when that helper returns one. The helper drops a stored ` — no fix available` and adds `fix available (...)` from `details.fixedVersions` only when the message does not already contain `fix available` |
+| Top Priority Actions | Up to five derived lines, highest severity first. Each line has a title and an explanation; **Impact** is printed only for the runtime, framework, and dependency-rot actions. The triggers are: a runtime `runtimeMajorsBehind` of 3 or more; a framework `majorsBehind` of 3 or more; a project whose `twoPlusBehind / (current + oneBehind + twoPlusBehind)` is at least 40 percent; a framework exactly 2 majors behind; any deprecated package or legacy polyfill on `breakingChangeExposure`; 10 or more `phantomDependencies`; `securityPosture.envFilesTracked` or a missing lockfile; 3 or more `duplicatedPackages` that each have 3 or more versions. Explanations quote project `path`, runtime `runtime` / `runtimeLatest`, framework versions, dependency `package` / `resolvedVersion` or `currentSpec` / `latestStable` / `majorsBehind`, and the matching posture or graph fields |
+| Architecture Layers | `extended.architecture`. `archetype`, `archetypeConfidence`, `totalClassified`, `unclassified`. **Folders** — the first 12 of `folders`: `path`, `layer`, `confidence`, `fileCount`. **Coverage**, when set — `ratio`, `classified`, `unclassified`, and `bySource` counts sorted by count descending then source name. **Unclassified source** — `unclassifiedFiles.length` when that list is non-empty. **Unclassified by folder** — the first 8 of `unclassifiedFolders`: `count`, `path`. **Layers** with `fileCount` greater than 0: `layer`, `fileCount`, `driftScore`, `riskLevel`. **Boundary violations** — violations whose `rule` does not start with `graph-conflict:`, first 8: `fromFile`, `toFile`, `rule`. **Layer conflicts** — the `graph-conflict:` violations, first 8, same three fields. A capped violation list is marked when `violationsCapped` is set |
+| Solution Drift Summary | `solutions` is non-empty. `name`, `projectPaths.length`, and `drift.score` or `n/a` |
+
+`relationshipDiagram` is not rendered. Markdown, text, and HTML leave that diagram in the JSON artifact.
+
+##### HTML (`formatHtmlReport`)
+
+`vg report --format html` writes one self-contained page from the same artifact. It does not call the network and does not load external files. The page opens with the summary listed above (DriftScore, severity counts, a fix-available count when a finding carries `details.fixedVersions`, and links to the tables), then the full vulnerability, security, and other-finding tables. A check that did not run stays "Not scanned". A missing score is `n/a`. The same artifact always produces the same page.
+
+##### Differences
+
+- Markdown is a short table. Text is the terminal report: banner and CLI version, project `path` and `targetFramework`, the extended sections above, findings with a fix hint, derived priority actions, architecture, solutions, score bars, and the scanned-at footer.
+- Markdown prints **Recommended Standards**. Text does not.
+- Text prints Tech Stack, Services, Breaking Change Exposure, TypeScript, Build & Deploy, Security Posture, Platform, Code Quality, Database Schema, and Dependency Graph. Markdown does not.
+- Product purpose: Markdown shows 10 evidence rows and 5 unknowns (`Evidence Items`, `Top Evidence`). Text shows 8 and 4 (`Evidence`, `Top Signals`).
+- Findings: Markdown prints the stored `message` in a table. Text prints counts plus `humanFindingText` (the stored message, a removed ` — no fix available`, and the fix hint).
+- Drift delta: Markdown adds `_(worsened)_` or `_(improved)_`. Text prints the signed number only.
+- DriftScore: Markdown puts the lower-is-better gloss in the opening cell. Text puts the score in **DriftScore Summary** without that gloss.
+- VCS: Markdown uses separate VCS, Branch, and Commit rows, and Commit requires `vcs.sha`. Text uses one line and can show `shortSha` without requiring `sha`.
+- Runtime wording: Markdown always says `major(s)`. Text says `major` or `majors`.
+- HTML is the browser page: the summary above, then the vulnerability, security, and other-finding tables. It does not print Markdown's recommended-standards section or the text inventory.
+
+##### JSON
+
+`--format json` prints `JSON.stringify` of the loaded artifact with a two-space indent. Keys, values, and omissions are unchanged. Parse this when a script needs a field. Markdown, text, and HTML drop fields, cap lists, and add derived lines; they are not a stable contract.
 
 ---
 
@@ -1993,6 +2132,22 @@ By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifa
 `vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once on stderr. See [Symlinks](#symlinks).
 
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
+
+### Unknown lockfile fields
+
+Package managers add fields to lockfiles as they release. When the file still lists dependencies vg can read, an extra field does not erase that graph or the SBOM rows built from it. vg keeps the package names, versions, and dependency edges it understands.
+
+vg prints one warning on stderr for each unknown field name in that file. Lines are sorted by lockfile path, then by field name. The same path and field name is printed once. A warning looks like this:
+
+```text
+pnpm-lock.yaml: unknown optional lockfile field "futureOptional"; continuing with the fields this version understands.
+```
+
+The path is relative to the directory you ran the command from, when the lockfile is under that directory. Otherwise the warning uses the file name only. The warning names the field. It does not print the field's value, an environment value, or an authorization header. A field name that is not a plain identifier is reported as `(name omitted)`.
+
+A lockfile that is truncated, empty, or missing the structure its format requires still fails the command. The error names the file and the format, tells you to regenerate the file with your package manager, and the process exits non-zero. The error does not include the file's contents.
+
+`vg scan` and `vg sbom export` follow this for npm, pnpm, yarn, poetry, uv, pdm, Pipfile, Cargo, Composer, NuGet, Swift package pins, and pub. A Gradle lock line, a Gemfile spec, and a `go.sum` line do not have optional field names. A line that does not match that format is invalid, and the command fails.
 
 ### Offline scan with a package-version manifest
 
@@ -4621,9 +4776,26 @@ Dependency identity in this file is `projects[].type` plus `dependencies[].packa
 
 [Static Analysis Results Interchange Format](https://sarifweb.azurewebsites.net/) (SARIF) 2.1.0. GitHub code scanning and Azure DevOps read this file. It contains findings only. The DriftScore and the other metrics stay in the JSON artifact. Drift findings come first. Vulnerability findings follow when the scan ran with `--vulns`.
 
+Every result includes `partialFingerprints`. Code scanning uses that object to recognize the same finding on a later run, so an unchanged finding stays one alert. The scan time, the result order, and the artifact timestamp are not part of the value. The message text is left as the scanner wrote it.
+
 ```bash
 vg scan --vulns --format sarif --out vibgrate.sarif
 ```
+
+#### Result fingerprints
+
+The key on every result is `vg/finding-id/v1`. The value is a content id: 32 lowercase hex characters. What goes into it depends on the result.
+
+| Result | What the value is made from |
+| ------ | --------------------------- |
+| Drift finding identified by its rule and location (runtime end-of-life, runtime lag, dependency rot) | The rule id and the location. This is the same id `vg scan --baseline` stores when that finding is suppressed. A change to the message, such as a newer latest version, does not change the value. |
+| Known vulnerability (`vibgrate/vulnerability`) | The rule id, the location, the ecosystem, the package name, and the advisory id. A package URL is included when the finding has one. Two advisories on one package get two values. The installed version, CVSS score, aliases, and message are not included. |
+| Dependency or framework major lag | The rule id, the location, and the package or framework name. The name is the text before ` is <number> major versions behind`. A later count, or a newer latest version, does not change the value. If the message does not have that shape, the whole message is used. |
+| License that could not be resolved | The rule id, the location, the declared license text, and the message. The message names the package, so two packages in one manifest stay distinct. |
+| Finding suppressed by `--baseline` | The baseline id for that rule and location. The key is unchanged. That id does not include an advisory id, so every suppressed result with that rule and location shares it. |
+| Infrastructure finding (`vg scan --iac`) | The finding id. Moving the block without changing the address does not change the value. |
+
+The same finding contents produce the same value. A different finding produces a different value.
 
 #### Advisories with several ids
 
@@ -4637,13 +4809,14 @@ A near-duplicate code-scanning alert is expected in that case. If the vulnerabil
 | `level` | `error` for critical and high, `warning` for moderate, `note` for low and unknown. |
 | `message.text` | Starts with `package@version:` and the advisory id. When an alias starts with `CVE-` and that alias is not already the advisory id, the first such alias is added in parentheses. Further CVE aliases stay in `properties.aliases`. |
 | `locations[0].physicalLocation.artifactLocation.uri` | The package name. |
+| `partialFingerprints["vg/finding-id/v1"]` | Content id for this result. See [Result fingerprints](#result-fingerprints). |
 | `properties.advisoryId` | The advisory's own id. This is the primary id. |
 | `properties.aliases` | The alias list, in the order the advisory supplied. Distinct advisory ids stay distinct results. |
 | `properties` | The finding details, copied as-is: ecosystem, package, installed version, severity, CVSS, and fixing versions, plus introduction details when the scan attributed the advisory. |
 
 The same advisory set always produces the same result order. Packages are ordered by ecosystem, package name, then version. Advisories on one package are ordered by severity from critical down to unknown, then by advisory id. SARIF emits results in that order: drift findings, then those vulnerability results.
 
-The ids in this example show the field shape. A real scan fills them from the advisory it read. A critical `GHSA-bbbb` whose aliases are `CVE-2024-1111` and `OSV-1`, fixed in 4.17.21, is one result:
+The ids in this example show the field shape. A real scan fills them from the advisory it read. The fingerprint is the content id for the rule, the location, the ecosystem, the package, and `GHSA-bbbb` shown here. A critical `GHSA-bbbb` whose aliases are `CVE-2024-1111` and `OSV-1`, fixed in 4.17.21, is one result:
 
 ```json
 {
@@ -4659,6 +4832,9 @@ The ids in this example show the field shape. A real scan fills them from the ad
       }
     }
   ],
+  "partialFingerprints": {
+    "vg/finding-id/v1": "82efba63199c173114225d3195aa15aa"
+  },
   "properties": {
     "ecosystem": "npm",
     "package": "lodash",

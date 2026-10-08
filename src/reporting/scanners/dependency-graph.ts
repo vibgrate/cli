@@ -1,6 +1,13 @@
 import * as path from 'node:path';
 import { readTextFile, pathExists, findPackageJsonFiles, readJsonFile, FileCache } from '../../core-open/index.js';
 import { assertLockfileText, parseLockfileJson } from '../../core-open/utils/lockfile-parse.js';
+import {
+  lockfileWarningPath,
+  notePackageLock,
+  notePnpmLockText,
+  noteYarnLockText,
+  withLockfileNotes,
+} from '../../core-open/utils/lockfile-unknown.js';
 import type { PackageJson, DependencyGraphResult, DuplicatedPackage, PhantomDependency } from '../../core-open/index.js';
 
 interface LockEntry {
@@ -36,6 +43,10 @@ function parseNpmLock(content: string, filePath: string): LockEntry[] {
     dependencies?: Record<string, { version?: string; dependencies?: Record<string, unknown> }>;
   } | null;
   if (lock && typeof lock === 'object') {
+    withLockfileNotes(undefined, (bucket) => {
+      notePackageLock(lock, lockfileWarningPath(filePath), bucket);
+      return undefined;
+    });
 
     // v2/v3 format: `packages` keyed by path like "node_modules/lodash"
     if (lock.packages && typeof lock.packages === 'object') {
@@ -102,6 +113,10 @@ export async function scanDependencyGraph(rootDir: string, cache?: FileCache): P
     const content = await _readTextFile(pnpmLock);
     assertLockfileText(pnpmLock, content, 'YAML');
     entries = parsePnpmLock(content);
+    withLockfileNotes(undefined, (bucket) => {
+      notePnpmLockText(content, lockfileWarningPath(pnpmLock), bucket);
+      return undefined;
+    });
   } else if (await _pathExists(npmLock)) {
     result.lockfileType = 'npm';
     const content = await _readTextFile(npmLock);
@@ -111,6 +126,10 @@ export async function scanDependencyGraph(rootDir: string, cache?: FileCache): P
     const content = await _readTextFile(yarnLock);
     assertLockfileText(yarnLock, content, 'yarn.lock');
     entries = parseYarnLock(content);
+    withLockfileNotes(undefined, (bucket) => {
+      noteYarnLockText(content, lockfileWarningPath(yarnLock), bucket);
+      return undefined;
+    });
   }
 
   if (entries.length === 0) return result;

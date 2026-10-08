@@ -1,17 +1,26 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
+import { createHash } from 'node:crypto';
+import { baselineSuppressionId } from '../baseline-suppressions.js';
 import type { BaselineSuppression, ScanArtifact, Finding, SecurityFinding, SecuritySection, SecuritySeverity } from '../types.js';
+
+/**
+ * SARIF `partialFingerprints` key for every result `vg scan` emits.
+ * The value is a content id. It is never a result index, a clock, or the
+ * artifact timestamp.
+ */
+const FINDING_FINGERPRINT_KEY = 'vg/finding-id/v1';
 
 /**
  * Generate a SARIF 2.1.0 document from scan artifact.
  *
- * The first run carries the drift findings and is byte-for-byte what it has
- * always been. When the artifact carries security-pack findings
- * (`extended.security`, from `vg scan --iac`), a second run is appended for
- * them — one run per artifact, with every pack listed under
- * `tool.extensions`, so a scan that ran no pack produces exactly the same
- * bytes as before.
+ * The first run is the drift findings. Every result in it carries
+ * `partialFingerprints["vg/finding-id/v1"]`. When the artifact carries
+ * security-pack findings (`extended.security`, from `vg scan --iac`), a
+ * second run is appended for them — one run per artifact, with every pack
+ * listed under `tool.extensions`. A scan that ran no pack is still one run,
+ * and an empty pack section does not change the document.
  */
 export function formatSarif(artifact: ScanArtifact): object {
   const suppressed = suppressionIndex(artifact);
@@ -105,7 +114,7 @@ function securityRun(security: SecuritySection, artifact: ScanArtifact): object 
     ],
     // Stable across a move of the block and a rename that keeps the address —
     // what code-scanning UIs key "same finding as last time" on.
-    partialFingerprints: { 'vg/finding-id/v1': f.id },
+    partialFingerprints: { [FINDING_FINGERPRINT_KEY]: f.id },
     properties: {
       severity: f.severity,
       address: f.address ?? '',
@@ -198,6 +207,67 @@ function suppressionIndex(artifact: ScanArtifact): Map<string, BaselineSuppressi
   return index;
 }
 
+/** Detail fields that identify a finding. Scores, aliases, and versions are not identity. */
+const IDENTITY_DETAIL_KEYS = ['advisoryId', 'ecosystem', 'package', 'purl', 'raw'] as const;
+
+/**
+ * Rules that can emit more than one finding at the same path, with the
+ * subject named only in the message: `<name> is <n> major versions behind`.
+ * The name is stable when the count or the latest version changes.
+ */
+const LAG_SUBJECT_RULES = new Set([
+  'vibgrate/dependency-major-lag',
+  'vibgrate/framework-major-lag',
+]);
+
+/** License failures name the package only in the message. */
+const LICENSE_PARSE_FAILED_RULE = 'vibgrate/license-parse-failed';
+
+const LAG_SUBJECT = /^(.*) is \d+ major versions behind\b/;
+
+function identityDetail(details: Finding['details'], key: string): string | null {
+  const value = details?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function lagSubject(message: string): string | null {
+  const subject = LAG_SUBJECT.exec(message)?.[1]?.trim() ?? '';
+  return subject.length > 0 ? subject : null;
+}
+
+function hashFingerprint(parts: readonly string[]): string {
+  const input = parts.map((part) => `${part.length}\n${part}`).join('\n');
+  return createHash('sha256').update(input).digest('hex').slice(0, 32);
+}
+
+/**
+ * Content id for a drift or vulnerability result that is not baseline-suppressed.
+ *
+ * Rule and location are always included. Advisory id, ecosystem, package name,
+ * package URL, and declared license text are included when the finding carries
+ * them. Major-lag findings add the package or framework name from the message.
+ * License findings add the message, which names the package. Anything else
+ * (the scan clock, result order, severity, CVSS, aliases, installed version)
+ * is left out, so a refreshed wording of the same finding keeps the id.
+ *
+ * A finding with no extra identity uses {@link baselineSuppressionId}, so the
+ * fingerprint matches the id `--baseline` will record for that rule and location.
+ */
+function driftResultFingerprint(finding: Finding): string {
+  const extras: string[] = [];
+  for (const key of IDENTITY_DETAIL_KEYS) {
+    const value = identityDetail(finding.details, key);
+    if (value) extras.push(key, value);
+  }
+  if (LAG_SUBJECT_RULES.has(finding.ruleId)) {
+    extras.push('subject', lagSubject(finding.message) ?? finding.message);
+  } else if (finding.ruleId === LICENSE_PARSE_FAILED_RULE) {
+    extras.push('message', finding.message);
+  }
+  if (extras.length === 0) return baselineSuppressionId(finding.ruleId, finding.location);
+  return hashFingerprint(['vg-sarif-partial/v1', finding.ruleId, finding.location, ...extras]);
+}
+
 function toSarifResult(finding: Finding, suppression?: BaselineSuppression) {
   return {
     ruleId: finding.ruleId,
@@ -212,6 +282,12 @@ function toSarifResult(finding: Finding, suppression?: BaselineSuppression) {
         },
       },
     ],
+    // Content-stable across runs. A baseline match keeps the suppression id
+    // (`vg/finding-id/v1` already meant that). Every other result gets an id
+    // from the finding itself, not from order or the artifact clock.
+    partialFingerprints: {
+      [FINDING_FINGERPRINT_KEY]: suppression ? suppression.id : driftResultFingerprint(finding),
+    },
     // Surface structured finding detail (e.g. advisory id, CVSS, fixed version)
     // to consumers like GitHub code scanning without bloating the message text.
     ...(finding.details && Object.keys(finding.details).length > 0 ? { properties: finding.details } : {}),
@@ -219,7 +295,6 @@ function toSarifResult(finding: Finding, suppression?: BaselineSuppression) {
     // `baselineComparison.suppressed`, so a baseline match is not dropped.
     ...(suppression
       ? {
-          partialFingerprints: { 'vg/finding-id/v1': suppression.id },
           suppressions: [
             {
               kind: 'external',

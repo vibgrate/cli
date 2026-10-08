@@ -23,6 +23,8 @@ backward compatible.
 
 ### Added
 
+- **Unknown optional lockfile fields warn and continue.** When a lockfile still lists dependencies vg can read, an extra field does not drop that graph or the SBOM rows built from it. The command prints one warning per lockfile path and field name, sorted by path then field: `pnpm-lock.yaml: unknown optional lockfile field "<name>"; continuing with the fields this version understands.` A field name that is not a plain identifier is reported as `(name omitted)`. A truncated lockfile, or one missing the structure its format requires, still exits non-zero.
+
 - **`vg build --attest` and `vg build --verify` are documented.** The docs
   cover the DSSE in-toto statement written to
   `.vibgrate/attestation.intoto.jsonl`, the Ed25519 key
@@ -32,6 +34,19 @@ backward compatible.
   are retired names for those flags.
 
 ### Fixed
+
+- **`vg report --format` rejects values other than `md`, `text`, and `json`.**
+  An unknown value, including `html`, exits `5` with a usage error that names
+  the value and lists the valid ones. Stdout is empty. `text` stays the
+  default. There is no HTML report. Markdown, text, and JSON field coverage
+  is documented on `vg report`.
+
+- **`vg scan --format sarif` sets a content-stable fingerprint on every result.**
+  `partialFingerprints["vg/finding-id/v1"]` is derived from the finding (rule,
+  location, and advisory or package when those identify it), not from the scan
+  time or the result order. GitHub code scanning can keep the same alert across
+  runs. Message text is unchanged. Baseline suppressions and infrastructure
+  findings keep the ids they already used.
 
 - **`vg sbom export` merges multi-project lockfiles by ecosystem, name, and
   version.** The same package from two projects stays one component, and
