@@ -1978,6 +1978,8 @@ vg scan [path] [--vulns] [--full] [--iac] [--format text|json|sarif|md] [--out <
 | `--force` | — | Always create a fresh ingest, even when the repository is unchanged since the last scan |
 | `--quiet` | — | Suppress promotional output; scan results are unaffected |
 
+Switches (flags that take no value, such as `--vulns`, `--offline` or `--no-graph`) are off unless you pass them. They do not accept a value or an invented `--no-` form: `--vulns=false`, `--vulns=true` and `--no-vulns` stop with exit code `5` and name the form that works. In a CI template, add or leave out the flag itself rather than passing `true` or `false`.
+
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
