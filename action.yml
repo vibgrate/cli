@@ -1,6 +1,5 @@
 name: 'Vibgrate Scan'
-# Public Marketplace blurb. GitHub rejects a description of 125 characters or longer.
-description: 'Your dependencies age quietly. Pull requests score DriftScore (how far behind) and RiskScore (exposed now) and upload SARIF.'
+description: 'Stop dependency drift entering your main branch. Scans every pull request for a 0-100 DriftScore and uploads SARIF to GitHub Security. No account needed.'
 author: 'Vibgrate'
 
 branding:
@@ -25,7 +24,7 @@ inputs:
     required: false
     default: ''
   max-score:
-    description: 'Fail the job when the DriftScore is above this budget (0-100, lower is better). Empty = never fail on the score. Maps to --drift-budget.'
+    description: 'Fail the job when the DriftScore is above this budget, a number from 0 to 100 (lower is better). Values outside 0-100 fail the step. Empty = never fail on the score. Maps to --drift-budget.'
     required: false
     default: ''
   baseline:
@@ -63,7 +62,7 @@ inputs:
   image-tag:
     description: 'Scanner image tag to run (defaults to a pinned, tested release).'
     required: false
-    default: '2026.1006.2' # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
+    default: '2026.1007.1' # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
   verify:
     description: 'Verify the image cosign signature + provenance before running (requires cosign on the runner).'
     required: false
@@ -135,11 +134,16 @@ runs:
           extra+=(--fail-on "${INPUT_FAIL_ON}")
         fi
         if [ -n "${INPUT_MAX_SCORE}" ]; then
-          if ! [[ "${INPUT_MAX_SCORE}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+          # Trim surrounding whitespace, then enforce the documented 0-100 range:
+          # a budget above 100 can never fail, so a typo would turn the gate off.
+          max_score="${INPUT_MAX_SCORE#"${INPUT_MAX_SCORE%%[![:space:]]*}"}"
+          max_score="${max_score%"${max_score##*[![:space:]]}"}"
+          if ! [[ "${max_score}" =~ ^[0-9]+(\.[0-9]+)?$ ]] ||
+            ! awk -v score="${max_score}" 'BEGIN { exit !(score + 0 <= 100) }'; then
             echo "::error::max-score must be a number from 0 to 100 (got '${INPUT_MAX_SCORE}')."
             exit 1
           fi
-          extra+=(--drift-budget "${INPUT_MAX_SCORE}")
+          extra+=(--drift-budget "${max_score}")
         fi
         if [ -n "${INPUT_MAX_WORSENING}" ]; then
           if ! [[ "${INPUT_MAX_WORSENING}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then

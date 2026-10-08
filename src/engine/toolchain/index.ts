@@ -10,6 +10,7 @@ import { terraformExtractor } from './terraform.js';
 import { githubActionsExtractor, gitlabCiExtractor } from './workflows.js';
 import { linkToolchain } from './link.js';
 import { safeDoc, TOOLCHAIN_FILE_MAX_BYTES, toPosix } from './util.js';
+import { stampWarning, WARNING_CODES } from '../../core-open/warnings.js';
 import type {
   ToolchainExtraction,
   ToolchainExtractor,
@@ -151,7 +152,7 @@ async function readExtractions(docs: DiscoveredDoc[]): Promise<{ files: FileExtr
     try {
       files.push({ rel, format: extractor.format, extraction: await extractor.extract(rel, source) });
     } catch (err) {
-      warnings.push(`${rel}: ${extractor.format} extraction failed (${(err as Error).message})`);
+      warnings.push(stampWarning(WARNING_CODES.TOOLCHAIN_EXTRACTION_FAILED, `${rel}: ${extractor.format} extraction failed (${(err as Error).message})`));
     }
   }
 

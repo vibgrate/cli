@@ -1,0 +1,68 @@
+# SARIF for GitHub code scanning plus JUnit for the test summary, from one scan.
+#
+# vibgrate.sarif goes to code scanning, so findings show up as alerts in the
+# Security tab and on the pull request diff. vibgrate.junit.xml goes to a test
+# reporter, so each finding and budget gate shows as a passed, skipped or
+# failed test case in a check run and the job summary. What each case means:
+# the JUnit section of DOCS.md.
+#
+# --fail-on error exits 2 on an error-level finding. Both files are written
+# before that exit, so the two publish steps use if: always() and still run
+# when the gate fails, which is when you most want to read them.
+# Pins, warn versus fail, and the DriftScore badge: examples/github-actions/README.md.
+
+name: DriftScore JUnit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write # upload-sarif
+  checks: write # action-junit-report creates the test-report check run
+
+jobs:
+  drift-junit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Calendar pin. Same version as action.yml image-tag. Do not use @latest on a gate.
+      - name: Drift gate
+        run: |
+          npx @vibgrate/cli@2026.1005.1 scan \
+            --format sarif \
+            --out vibgrate.sarif \
+            --junit vibgrate.junit.xml \
+            --fail-on error
+
+      - name: Upload SARIF to GitHub code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: vibgrate.sarif
+          category: vibgrate-drift
+
+      # Third-party action, so it is pinned to a full commit SHA. The gate step
+      # above owns pass/fail; fail_on_failure stays off so this step only reports.
+      # On pull requests from forks GITHUB_TOKEN is read-only, so no check run
+      # can be created; annotate_only switches to annotations there instead.
+      - name: Publish JUnit test report
+        if: always()
+        uses: mikepenz/action-junit-report@b7b80d7ac5b1da46d6aaff9fb57ad50d8453bcb3 # v6.6.0
+        with:
+          report_paths: vibgrate.junit.xml
+          check_name: Vibgrate findings
+          include_passed: true
+          fail_on_failure: false
+          annotate_only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}

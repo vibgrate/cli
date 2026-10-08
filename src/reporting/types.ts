@@ -1,4 +1,5 @@
-import type { DependencyLicense } from '../core-open/types.js';
+import type { DependencyLicense, SecuritySection, VulnerabilityScanResult } from '../core-open/types.js';
+import type { CodedWarning } from '../core-open/warnings.js';
 
 // ── Core types for Vibgrate CLI ──
 
@@ -42,7 +43,7 @@ export type ProjectType =
 
 export type OutputFormat = 'text' | 'json' | 'sarif' | 'md';
 
-export type ReportFormat = 'md' | 'text' | 'json';
+export type ReportFormat = 'md' | 'text' | 'json' | 'html';
 
 // ── Package.json shape ──
 
@@ -271,6 +272,11 @@ export interface ScanArtifact {
   solutions?: SolutionScan[];
   drift: DriftScore;
   findings: Finding[];
+  /**
+   * Degrade-and-continue scan notices (skipped paths, unreadable baseline).
+   * Omitted when there are none. Sorted by code, then by message.
+   */
+  degradations?: CodedWarning[];
   /** Repo-relative path of the `--baseline` file, when one was compared. */
   baseline?: string;
   /** Present only after a baseline file was read. Absent means no comparison. */
@@ -1083,4 +1089,14 @@ export interface ExtendedScanResults {
   assetBranding?: AssetBrandingResult;
   ossGovernance?: OssGovernanceResult;
   standards?: StandardsRecommendations;
+  /**
+   * Known-vulnerability result. Absent means that check did not run.
+   * `source: 'unreachable'` means it did not finish, so a zero count is not a result.
+   */
+  vulnerabilities?: VulnerabilityScanResult;
+  /**
+   * Security-pack findings (`vg scan --iac`). Absent means no pack ran.
+   * An empty `findings` array is a real result from the pack.
+   */
+  security?: SecuritySection;
 }

@@ -26,6 +26,12 @@ backward compatible.
 
 ### Fixed
 
+- **`vg report --format` rejects values other than `md`, `text`, and `json`.**
+  An unknown value, including `html`, exits `5` with a usage error that names
+  the value and lists the valid ones. Stdout is empty. `text` stays the
+  default. There is no HTML report. Markdown, text, and JSON field coverage
+  is documented on `vg report`.
+
 - **`vg sbom export` merges multi-project lockfiles by ecosystem, name, and
   version.** The same package from two projects stays one component, and
   `vibgrate:projects` lists every project that contributed it. A sub-project
