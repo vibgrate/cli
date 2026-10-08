@@ -4590,6 +4590,20 @@ The ids in this example show the field shape. A real scan fills them from the ad
 
 The same package can also carry `CVE-2024-1111` as its own advisory, with alias `GHSA-bbbb`. That is a second result. Its `properties.advisoryId` is `CVE-2024-1111`, its message names that CVE on its own (the id is already the advisory id), and `properties.aliases` is `["GHSA-bbbb"]`.
 
+#### Severity and `level`
+
+Each vulnerability result's `level` follows the advisory severity, which the result also carries in `properties.severity`:
+
+| `properties.severity` | `level` |
+| --------------------- | ------- |
+| `critical` | `error` |
+| `high` | `error` |
+| `moderate` | `warning` |
+| `low` | `note` |
+| `unknown` | `note` |
+
+`unknown` means the advisory data gave no usable severity, for example no severity label and no CVSS score. It gets `note`, the same as `low`, so an unscored advisory never outranks a scored one. Read `properties.severity` to tell the two apart. The `vibgrate/vulnerability` rule carries no `security-severity` property, so GitHub code scanning shows these alerts as Error, Warning, or Note from `level`.
+
 Test reporters that ingest JUnit can take a companion file from the same scan. See [JUnit](#junit). The process exit code is unchanged either way; see [Exit Codes](#exit-codes).
 
 ### Markdown
