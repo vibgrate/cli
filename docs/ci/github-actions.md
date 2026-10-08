@@ -82,6 +82,7 @@ workflow that already references it, with `max-worsening` left commented out.
 - Drift gate (failure versus warn, pins, DriftScore badge): `examples/github-actions/README.md`
 - CI drift gate template: `examples/github-actions/driftscore-ci.yml`
 - SARIF upload template: `examples/github-actions/driftscore-sarif.yml`
+- SARIF plus JUnit test report template: `examples/github-actions/driftscore-junit.yml`
 - Vulnerability gate + SARIF template: `examples/github-actions/vulnerabilities-sarif.yml`
 
 Copy any template into your repository under `.github/workflows/`. The README is enough to add the basic gate: the workflow, when the job fails, and how a README badge is filled in.
@@ -184,6 +185,8 @@ npx @vibgrate/cli scan --format sarif --out vibgrate-results.sarif --junit vibgr
 ```
 
 What each testcase means (finding vs budget gate, pass / failure / skipped) is in [JUnit](../../DOCS.md#junit).
+
+To publish it on GitHub as a check run and job summary next to the SARIF upload, start from `examples/github-actions/driftscore-junit.yml`.
 
 ## DriftScore badge
 

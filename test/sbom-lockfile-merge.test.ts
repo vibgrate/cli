@@ -328,7 +328,7 @@ describe('sbom export: multi-project lockfile merge', () => {
     expect(stdout).toHaveLength(2);
     expect(stdout[0]).toBe(stdout[1]);
     expect(stdout[0]).toContain('"bomFormat": "CycloneDX"');
-    expect(stderr.join('\n')).toContain(`warning: ${LOSSY_EDGE_WARNING}`);
+    expect(stderr.join('\n')).toContain(`warning [VG_WARN_SBOM_LOSSY_EDGES]: ${LOSSY_EDGE_WARNING}`);
     expect(stderr.join('\n')).not.toContain('http');
   });
 });

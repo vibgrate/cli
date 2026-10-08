@@ -1,6 +1,7 @@
 import YAML from 'yaml';
 import type { LineIndex } from './util.js';
 import type { ToolchainSpan } from './types.js';
+import { stampWarning, WARNING_CODES } from '../../core-open/warnings.js';
 
 /**
  * Shared YAML access for the toolchain extractors.
@@ -55,21 +56,21 @@ export function parseYamlStream(rel: string, source: string): YamlParseResult {
       uniqueKeys: false,
     });
   } catch (err) {
-    warnings.push(`${rel}: YAML parse failed (${(err as Error).message})`);
+    warnings.push(stampWarning(WARNING_CODES.YAML_PARSE_FAILED, `${rel}: YAML parse failed (${(err as Error).message})`));
     return { docs: [], warnings };
   }
 
   const docs: YamlDoc[] = [];
   parsed.forEach((ast, index) => {
     if (ast.errors.length) {
-      warnings.push(`${rel}: YAML document ${index + 1} has errors — skipped`);
+      warnings.push(stampWarning(WARNING_CODES.YAML_DOCUMENT_SKIPPED, `${rel}: YAML document ${index + 1} has errors — skipped`));
       return;
     }
     let value: unknown;
     try {
       value = ast.toJS({ maxAliasCount: 100 });
     } catch (err) {
-      warnings.push(`${rel}: YAML document ${index + 1} could not be materialised (${(err as Error).message})`);
+      warnings.push(stampWarning(WARNING_CODES.YAML_DOCUMENT_UNMATERIALISED, `${rel}: YAML document ${index + 1} could not be materialised (${(err as Error).message})`));
       return;
     }
     if (value === null || value === undefined) return;

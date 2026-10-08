@@ -1,14 +1,14 @@
 {
   "name": "@vibgrate/cli",
-  "version": "2026.1006.2",
-  "description": "vg — local codebase intelligence CLI + MCP server for AI coding agents: deterministic code graph, drift reporting, and version-correct library docs (Apache-2.0)",
+  "version": "2026.1007.1",
+  "description": "Vibgrate CLI scans your manifests — never your source — and scores drift (DriftScore) and exposure (RiskScore) separately. Free, offline, in about a minute.",
   "//mcpName": "Official MCP registry ownership proof: the registry fetches the published npm package and requires this field to match the com.vibgrate/ai-context server entry (see docs/marketing/mcp-registry/README.md). Must ship in the published @vibgrate/cli package.json.",
   "mcpName": "com.vibgrate/ai-context",
   "type": "module",
   "license": "Apache-2.0",
   "packageManager": "pnpm@9.0.0",
   "author": "Vibgrate",
-  "homepage": "https://vibgrate.com",
+  "homepage": "https://vibgrate.com/cli",
   "repository": {
     "type": "git",
     "url": "https://github.com/vibgrate/cli.git"
@@ -71,6 +71,8 @@
     "mcp",
     "ai-agents",
     "drift",
+    "eol",
+    "sca",
     "deterministic",
     "impact-analysis",
     "cli"
