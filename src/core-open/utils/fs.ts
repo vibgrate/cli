@@ -17,6 +17,7 @@ import {
   UnsafeRootError,
   type WalkBudgetState,
 } from './root-safety.js';
+import { emitSkippedSymlinkNotice, rememberSkippedSymlink } from './skipped-symlinks.js';
 
 
 const execFileAsync = promisify(execFile);
@@ -490,6 +491,10 @@ export class FileCache {
       if (budgetError) return;
       budgetError = noteWalkEntry(budgetState);
     };
+    // Symlinks are not followed. Dirent.isDirectory() is false for a link, so a
+    // link to a parent cannot re-enter this walk. One notice is printed after
+    // the walk finishes. The prelude count stays quiet so a scan says it once.
+    const skippedSymlinks: string[] = [];
 
     async function walk(dir: string, gitignoreLevels: GitignoreLevel[]) {
       if (budgetError) return;
@@ -542,6 +547,15 @@ export class FileCache {
         if (isExcluded && isExcluded(relPath)) continue;
         if (budgetError) break;
 
+        if (e.isSymbolicLink()) {
+          // Ignored as a file or as a directory: the operator already asked to
+          // skip it, so it does not join the notice.
+          if (!(isGitignored(levels, absPath, false) || isGitignored(levels, absPath, true))) {
+            rememberSkippedSymlink(skippedSymlinks, relPath);
+          }
+          continue;
+        }
+
         if (e.isDirectory()) {
           if (isSkippedDirName(e.name) || extraSkip.has(e.name)) continue;
           // Respect .gitignore (root + any nested ones seen so far) so
@@ -577,6 +591,7 @@ export class FileCache {
 
     await walk(rootDir, []);
     if (budgetError) throw budgetError;
+    emitSkippedSymlinkNotice(skippedSymlinks);
 
     let totalDirs = 0;
     const rootNameIndex = new Map<string, string[]>();
@@ -885,6 +900,10 @@ async function countTreeWithBudget(
       const relPath = path.relative(rootDir, absPath);
       if (isExcluded && isExcluded(relPath)) continue;
 
+      // Not followed. The indexing walk prints the notice; this count does not,
+      // so vg scan does not say the same thing twice.
+      if (e.isSymbolicLink()) continue;
+
       if (e.isDirectory()) {
         if (isSkippedDirName(e.name) || extraSkip.has(e.name)) continue;
         if (isGitignored(levels, absPath, true)) continue;
@@ -975,6 +994,8 @@ export async function countFilesInDir(dir: string, recursive = true): Promise<nu
     }
     const subs: Promise<void>[] = [];
     for (const e of entries) {
+      // Not followed. A link to a parent cannot re-enter this count.
+      if (e.isSymbolicLink()) continue;
       if (e.isDirectory()) {
         if (!recursive) continue;
         if (isSkippedDirName(e.name) || extraSkip.has(e.name)) continue;
@@ -1009,6 +1030,8 @@ export async function bytesInDir(dir: string, recursive = true): Promise<number>
     }
     const subs: Promise<void>[] = [];
     for (const e of entries) {
+      // Not followed. A link to a parent cannot re-enter this size walk.
+      if (e.isSymbolicLink()) continue;
       if (e.isDirectory()) {
         if (!recursive) continue;
         if (isSkippedDirName(e.name) || extraSkip.has(e.name)) continue;
@@ -1044,6 +1067,7 @@ export async function findFiles(
     budgetError = noteWalkEntry(budgetState);
   };
   const results: string[] = [];
+  const skippedSymlinks: string[] = [];
   const cores = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length || 4;
   const maxConcurrentReads = Math.max(8, Math.min(64, cores * 4));
   const readDirSemaphore = new Semaphore(maxConcurrentReads);
@@ -1061,6 +1085,10 @@ export async function findFiles(
 
     for (const e of entries) {
       if (budgetError) break;
+      if (e.isSymbolicLink()) {
+        rememberSkippedSymlink(skippedSymlinks, path.relative(rootDir, path.join(dir, e.name)));
+        continue;
+      }
       if (e.isDirectory()) {
         if (isSkippedDirName(e.name)) continue;
         note();
@@ -1081,6 +1109,7 @@ export async function findFiles(
 
   await walk(rootDir);
   if (budgetError) throw budgetError;
+  emitSkippedSymlinkNotice(skippedSymlinks);
   return results;
 }
 

@@ -12,6 +12,15 @@ backward compatible.
 
 ## [Unreleased]
 
+### Changed
+
+- **`vg build` and `vg scan` do not follow symlinks, and they say so.** A
+  directory symlink is not entered, so a link to its parent cannot hang the
+  walk, and a file symlink is not read. When any are skipped, one stderr
+  notice lists the count and the first few root-relative paths. Nothing is
+  printed when there are none. Output files, the exit code, and JSON on
+  stdout stay the same.
+
 ### Added
 
 - **`vg build --attest` and `vg build --verify` are documented.** The docs
@@ -23,8 +32,6 @@ backward compatible.
   are retired names for those flags.
 
 ### Fixed
-
-- **`vg build` and `vg scan` do not follow symlinks, and they say when they skip one.** A directory symlink that points at its parent cannot cycle the walk. When a walk skips symlinks, one stderr notice lists the count and the first five root-relative paths (sorted). Output files and the exit code stay the same. Point the root at the link target, or pass `--exclude`, or use a narrower root.
 
 - **`vg sbom export` merges multi-project lockfiles by ecosystem, name, and
   version.** The same package from two projects stays one component, and
