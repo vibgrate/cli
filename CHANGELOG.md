@@ -30,6 +30,13 @@ backward compatible.
   default. There is no HTML report. Markdown, text, and JSON field coverage
   is documented on `vg report`.
 
+- **`vg scan --format sarif` sets a content-stable fingerprint on every result.**
+  `partialFingerprints["vg/finding-id/v1"]` is derived from the finding (rule,
+  location, and advisory or package when those identify it), not from the scan
+  time or the result order. GitHub code scanning can keep the same alert across
+  runs. Message text is unchanged. Baseline suppressions and infrastructure
+  findings keep the ids they already used.
+
 - **`vg sbom export` merges multi-project lockfiles by ecosystem, name, and
   version.** The same package from two projects stays one component, and
   `vibgrate:projects` lists every project that contributed it. A sub-project
