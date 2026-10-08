@@ -50,6 +50,8 @@ import type { FileParse } from './types.js';
 import type { ResolveResult } from './resolve.js';
 import { fileRolesFromParses } from './ast-roles.js';
 import type { AstRoleHit } from '../core-open/scanners/architecture/ast-roles.js';
+import { stampWarning, WARNING_CODES, type CodedWarning } from '../core-open/warnings.js';
+import { assembleEngineWarnings } from './warning-codes.js';
 
 export interface BuildOptions {
   /** Directory to build (default cwd). */
@@ -149,6 +151,11 @@ export interface BuildResult {
   /** SQLite index write result. */
   index?: { ok: boolean; path?: string; reason?: string };
   warnings: string[];
+  /**
+   * Same notices as `warnings`, split into a stable code and the prose.
+   * Sorted by code, then message. Empty when there are no warnings.
+   */
+  codedWarnings: CodedWarning[];
   /** Architecture role hits extracted during the parse already paid for. */
   fileRoles: AstRoleHit[];
 }
@@ -234,8 +241,11 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
       });
       oversizeRels.add(file.rel);
       buildWarnings.push(
-        `${file.rel}: skipped — ${formatBytes(stat.size)} exceeds the ` +
-          `${formatBytes(limits.maxFileBytes)} per-file limit (set VG_MAX_FILE_BYTES to raise it, 0 to disable)`,
+        stampWarning(
+          WARNING_CODES.BUILD_FILE_OVERSIZE,
+          `${file.rel}: skipped — ${formatBytes(stat.size)} exceeds the ` +
+            `${formatBytes(limits.maxFileBytes)} per-file limit (set VG_MAX_FILE_BYTES to raise it, 0 to disable)`,
+        ),
       );
       continue;
     }
@@ -386,9 +396,12 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     // in the build. Past the cap, fall back to the heuristic floor (still a
     // complete graph, just less precise call resolution).
     warnings.push(
-      `typescript resolver skipped — ${tsFiles.length.toLocaleString()} TS/JS files exceed the ` +
-        `${limits.tscMaxFiles.toLocaleString()}-file limit; calls use the heuristic resolver ` +
-        `(set VG_TSC_MAX_FILES to raise it, 0 to disable)`,
+      stampWarning(
+        WARNING_CODES.TSC_RESOLVER_SKIPPED,
+        `typescript resolver skipped — ${tsFiles.length.toLocaleString()} TS/JS files exceed the ` +
+          `${limits.tscMaxFiles.toLocaleString()}-file limit; calls use the heuristic resolver ` +
+          `(set VG_TSC_MAX_FILES to raise it, 0 to disable)`,
+      ),
     );
     tsFiles = [];
   }
@@ -539,6 +552,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   }
   const toolchainResult = await extractToolchain(docs, { fileNodes: fileNodesByPath });
   if (toolchainResult.nodes.length) nodes = [...nodes, ...toolchainResult.nodes];
+  if (toolchainResult.warnings.length) warnings.push(...toolchainResult.warnings);
   timer.end('toolchain');
 
   // Analyse → centrality/areas/surprise (test/coverage edges excluded from these).
@@ -668,6 +682,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
 
   timer.end('total');
   const stages = timer.snapshot();
+  const assembled = assembleEngineWarnings(warnings);
 
   return {
     graph,
@@ -682,7 +697,8 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     tsc: tscStats,
     scip: scipStats,
     index: indexResult,
-    warnings,
+    warnings: assembled.warnings,
+    codedWarnings: assembled.codedWarnings,
     fileRoles: fileRolesFromParses(parses),
   };
 }

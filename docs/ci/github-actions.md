@@ -19,7 +19,8 @@ in the file. SARIF upload to private repositories needs GitHub code scanning.
 The `vibgrate/cli` Action fails the job when the DriftScore is above a budget
 you choose. `max-score` takes a number from 0 to 100 (lower is better) and maps
 to `--drift-budget`; leave it empty to never fail on the score. A non-numeric
-value fails the step with a clear error.
+value, or one outside 0 to 100, fails the step with a clear error before the
+scan runs.
 
 ```yaml
 - uses: actions/checkout@v4
@@ -81,6 +82,7 @@ workflow that already references it, with `max-worsening` left commented out.
 - Drift gate (failure versus warn, pins, DriftScore badge): `examples/github-actions/README.md`
 - CI drift gate template: `examples/github-actions/driftscore-ci.yml`
 - SARIF upload template: `examples/github-actions/driftscore-sarif.yml`
+- SARIF plus JUnit test report template: `examples/github-actions/driftscore-junit.yml`
 - Vulnerability gate + SARIF template: `examples/github-actions/vulnerabilities-sarif.yml`
 
 Copy any template into your repository under `.github/workflows/`. The README is enough to add the basic gate: the workflow, when the job fails, and how a README badge is filled in.
@@ -183,6 +185,8 @@ npx @vibgrate/cli scan --format sarif --out vibgrate-results.sarif --junit vibgr
 ```
 
 What each testcase means (finding vs budget gate, pass / failure / skipped) is in [JUnit](../../DOCS.md#junit).
+
+To publish it on GitHub as a check run and job summary next to the SARIF upload, start from `examples/github-actions/driftscore-junit.yml`.
 
 ## DriftScore badge
 

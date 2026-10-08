@@ -19,6 +19,7 @@
 
 import { isExplicitUnknownLicense, normalizeLicense } from './normalize.js';
 import { parseLicenseExpression } from './spdx-expression.js';
+import { WARNING_CODES, type WarningCode } from '../warnings.js';
 
 /** Stable code for scan, report, SARIF, and SBOM. Identical for every failure. */
 export const LICENSE_PARSE_FAILED = 'vibgrate/license-parse-failed';
@@ -28,6 +29,8 @@ export const LICENSE_RAW_LIMIT = 120;
 
 export interface LicenseParseDiagnostic {
   code: typeof LICENSE_PARSE_FAILED;
+  /** Degrade-and-continue warning code. `code` stays the finding rule id. */
+  warnCode: WarningCode;
   /** Actionable, deterministic text. No file body and no credential. */
   message: string;
   /** Manifest-relative path the declaration was read from. */
@@ -109,6 +112,7 @@ export function licenseParseDiagnostic(
     'Replace it with a canonical SPDX id or expression, or NOASSERTION if the license is intentionally unknown.';
   return {
     code: LICENSE_PARSE_FAILED,
+    warnCode: WARNING_CODES.LICENSE_UNPARSEABLE,
     message,
     location: manifestPath,
     raw: shown,

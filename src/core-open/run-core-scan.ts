@@ -55,6 +55,14 @@ import type {
   ScanArtifact, ScanOptions, ProjectScan, ExtendedScanResults, RepositoryInfo, SolutionScan,
   VibgrateConfig, Finding,
 } from './types.js';
+import {
+  codedWarning,
+  formatWarningLine,
+  sortCodedWarnings,
+  warningPathLabel,
+  WARNING_CODES,
+  type CodedWarning,
+} from './warnings.js';
 import type { RuntimeCatalog } from './runtimes/types.js';
 
 /**
@@ -762,15 +770,19 @@ export async function runCoreScan(
 
   progress.finish();
 
-  const stuckPaths = fileCache.stuckPaths;
-  const skippedLarge = fileCache.skippedLargeFiles;
+  const degradations: CodedWarning[] = [];
+  const stuckPaths = [...fileCache.stuckPaths].sort((a, b) => a.localeCompare(b));
+  const skippedLarge = [...fileCache.skippedLargeFiles].sort((a, b) => a.localeCompare(b));
+  const timeoutSeconds = Math.round(projectScanTimeoutMs / 1000);
 
   if (stuckPaths.length > 0) {
-    console.log(
-      chalk.yellow(`\n⚠ ${stuckPaths.length} path${stuckPaths.length === 1 ? '' : 's'} timed out (>${Math.round(projectScanTimeoutMs / 1000)}s) and ${stuckPaths.length === 1 ? 'was' : 'were'} skipped:`),
-    );
-    for (const d of stuckPaths) {
-      console.log(chalk.dim(`  → ${d}`));
+    for (const rel of stuckPaths) {
+      degradations.push(
+        codedWarning(
+          WARNING_CODES.SCAN_PATH_SKIPPED,
+          `${warningPathLabel(rel)} timed out (>${timeoutSeconds}s) and was skipped`,
+        ),
+      );
     }
     const newExcludes = stuckPaths.map((d) => `${d}/**`);
     const updated = await appendExcludePatterns(rootDir, newExcludes);
@@ -782,14 +794,13 @@ export async function runCoreScan(
   if (skippedLarge.length > 0) {
     const sizeLimit = config.maxFileSizeToScan ?? 5_242_880;
     const sizeMB = (sizeLimit / 1_048_576).toFixed(0);
-    console.log(
-      chalk.yellow(`\n⚠ ${skippedLarge.length} file${skippedLarge.length === 1 ? '' : 's'} skipped (>${sizeMB} MB):`),
-    );
-    for (const f of skippedLarge.slice(0, 10)) {
-      console.log(chalk.dim(`  → ${f}`));
-    }
-    if (skippedLarge.length > 10) {
-      console.log(chalk.dim(`  … and ${skippedLarge.length - 10} more`));
+    for (const rel of skippedLarge) {
+      degradations.push(
+        codedWarning(
+          WARNING_CODES.SCAN_FILE_OVERSIZE,
+          `${warningPathLabel(rel)} skipped — larger than ${sizeMB} MB`,
+        ),
+      );
     }
   }
 
@@ -845,8 +856,21 @@ export async function runCoreScan(
         const baselineFindings = Array.isArray(baseline.findings) ? baseline.findings : [];
         artifact.baselineComparison = compareBaselineFindings(artifact.findings, baselineFindings);
       } catch {
-        console.error(chalk.yellow(`Warning: Could not read baseline file: ${baselinePath}`));
+        degradations.push(
+          codedWarning(
+            WARNING_CODES.BASELINE_UNREADABLE,
+            `Could not read baseline file: ${warningPathLabel(path.basename(baselinePath))}`,
+          ),
+        );
       }
+    }
+  }
+
+  const sortedDegradations = sortCodedWarnings(degradations);
+  if (sortedDegradations.length > 0) {
+    artifact.degradations = sortedDegradations;
+    for (const warning of sortedDegradations) {
+      console.error(chalk.yellow(formatWarningLine(warning)));
     }
   }
 
