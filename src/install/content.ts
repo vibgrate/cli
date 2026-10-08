@@ -20,9 +20,11 @@ export const NUDGE_END = '<!-- vg:end -->';
  * History: v1 = the unversioned originals (detected by their headings);
  * v2 = versioned markers + the strong MCP-first recommendation;
  * v3 = library-docs workflow resolves by package name only, and an
- * `entityCount` of 0 means read `node_modules` rather than retry.
+ * `entityCount` of 0 means read `node_modules` rather than retry;
+ * v4 = `vg report` formats are text (default), md, and json. There is no
+ * HTML report, and sarif belongs to `vg scan`.
  */
-export const INSTALL_CONTENT_VERSION = 3;
+export const INSTALL_CONTENT_VERSION = 4;
 
 const VERSION_MARKER_RE = /<!--\s*vg:v(\d+)\b[^>]*-->/;
 
@@ -90,8 +92,9 @@ measured and the tools improved):
 ## Dependencies & library docs
 
 - **Upgrade drift:** \`vg drift\` lists what is outdated across dependencies
-  (offline; \`--online\` for currency). \`vg scan\` scores upgrade drift and
-  \`vg report\` renders it (text | json | sarif | md).
+  (offline; \`--online\` for currency). \`vg scan\` scores upgrade drift
+  (\`text\`, \`json\`, \`sarif\`, or \`md\`). \`vg report\` renders a saved scan
+  artifact as \`text\` (the default), \`md\`, or \`json\`. There is no HTML report.
 - **Version-correct docs:** \`vg lib <name>\` returns drift-annotated, version-
   specific usage docs for a library — inject these instead of guessing an API.
 

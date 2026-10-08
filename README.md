@@ -826,7 +826,7 @@ All HCS computation runs in an optional, separately-licensed engine module that 
 | `vg evidence` | Signed, reproducible regulatory evidence — jurisdiction-neutral regimes (EU CRA first, DORA incident reporting too): `init`, `product`, `release`, `exposure`, `readiness`, `drill`, `watch`, `pack`, `verify`, `push`, `export` |
 | `vg fix` | Ranked, risk-tiered upgrade plans from the hosted planner — then apply the one you choose |
 | `vg init [path]` | Initialise config and `.vibgrate/` |
-| `vg report` | Generate a report from a scan artifact |
+| `vg report` | Render a saved scan artifact as text (default), Markdown, or JSON. There is no HTML report. Field coverage is in [DOCS.md](./DOCS.md#report-format-coverage) |
 | `vg review` | **Vibgrate Review** — architecture + security-control review of the current change, locally (`--in-place`, `--local`, `--loop`). Deterministic blast-radius findings from the code graph via `vg review findings-from-diff`; `vg review propose <id>` attaches a PatchIR dry-run (same `--base` / `--in-place` / `--diff`, `--findings`, or `.vibgrate/review-propose-handoff.json`). One decision (`pass` / `needs_review` / `fail` / `undetermined`) in a signed receipt (Ed25519 over the receipt digest; `vg review verify <receipt.json>` checks it offline); protected findings cannot be blessed into a pass. Reports change integrity, not a proof of security. Builds or refreshes the code map itself when it is missing or stale (`--no-auto-build` opts out) |
 | `vg sbom export` / `delta` / `vex` | Export CycloneDX/SPDX SBOM, diff two artifacts, or emit an OpenVEX document |
 | `vg scan [path]` | Scan for upgrade drift |
