@@ -100,6 +100,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [Text](#text)
   - [JSON Artifact](#json-artifact)
   - [SARIF](#sarif)
+    - [Result fingerprints](#result-fingerprints)
     - [Advisories with several ids](#advisories-with-several-ids)
   - [Markdown](#markdown)
   - [JUnit](#junit)
@@ -4616,21 +4617,26 @@ Dependency identity in this file is `projects[].type` plus `dependencies[].packa
 
 [Static Analysis Results Interchange Format](https://sarifweb.azurewebsites.net/) (SARIF) 2.1.0. GitHub code scanning and Azure DevOps read this file. It contains findings only. The DriftScore and the other metrics stay in the JSON artifact. Drift findings come first. Vulnerability findings follow when the scan ran with `--vulns`.
 
+Every result includes `partialFingerprints`. Code scanning uses that object to recognize the same finding on a later run, so an unchanged finding stays one alert. The scan time, the result order, and the artifact timestamp are not part of the value. The message text is left as the scanner wrote it.
+
 ```bash
 vg scan --vulns --format sarif --out vibgrate.sarif
 ```
 
-#### Result identity
+#### Result fingerprints
 
-Every result sets `partialFingerprints["vg/finding-id/v1"]`. Code scanning uses that value to match an unchanged alert on the next run. The value comes from the finding. Result order and the scan clock stay out of the hash. `runs[].invocations[].startTimeUtc` remains the artifact timestamp.
+The key on every result is `vg/finding-id/v1`. The value is a content id: 32 lowercase hex characters. What goes into it depends on the result.
 
-| Result | `vg/finding-id/v1` |
-| ------ | ------------------ |
-| Drift finding | The first 32 hex characters of SHA-256 over a length-prefixed payload: the tag `vg-sarif-result/v1`, the rule id, and the location. A vulnerability result then adds the ecosystem, package name, installed version, and advisory id, so two advisories on one package stay two alerts. The message is not part of that hash, so a day count in the text does not move it. Any other drift result adds the message and the finding details (object keys sorted). `exposureDays` and `introducedDate` are left out of the hash. |
-| Baseline suppression | The baseline suppression id already stored on the result: the hash of the rule id and the location. `suppressions[].properties.id` is that same id. |
-| Security-pack result (`vg scan --iac`) | The finding `id`. See [Finding identity](./docs/security-packs.md#finding-identity). |
+| Result | What the value is made from |
+| ------ | --------------------------- |
+| Drift finding identified by its rule and location (runtime end-of-life, runtime lag, dependency rot) | The rule id and the location. This is the same id `vg scan --baseline` stores when that finding is suppressed. A change to the message, such as a newer latest version, does not change the value. |
+| Known vulnerability (`vibgrate/vulnerability`) | The rule id, the location, the ecosystem, the package name, and the advisory id. A package URL is included when the finding has one. Two advisories on one package get two values. The installed version, CVSS score, aliases, and message are not included. |
+| Dependency or framework major lag | The rule id, the location, and the package or framework name. The name is the text before ` is <number> major versions behind`. A later count, or a newer latest version, does not change the value. If the message does not have that shape, the whole message is used. |
+| License that could not be resolved | The rule id, the location, the declared license text, and the message. The message names the package, so two packages in one manifest stay distinct. |
+| Finding suppressed by `--baseline` | The baseline id for that rule and location. The key is unchanged. That id does not include an advisory id, so every suppressed result with that rule and location shares it. |
+| Infrastructure finding (`vg scan --iac`) | The finding id. Moving the block without changing the address does not change the value. |
 
-The same finding produces the same value. A different rule, location, message, package, or advisory id produces a different one.
+The same finding contents produce the same value. A different finding produces a different value.
 
 #### Advisories with several ids
 
@@ -4644,14 +4650,14 @@ A near-duplicate code-scanning alert is expected in that case. If the vulnerabil
 | `level` | `error` for critical and high, `warning` for moderate, `note` for low and unknown. |
 | `message.text` | Starts with `package@version:` and the advisory id. When an alias starts with `CVE-` and that alias is not already the advisory id, the first such alias is added in parentheses. Further CVE aliases stay in `properties.aliases`. |
 | `locations[0].physicalLocation.artifactLocation.uri` | The package name. |
-| `partialFingerprints["vg/finding-id/v1"]` | Content hash of the ecosystem, package name, installed version, and advisory id, prefixed by the rule id and location. See [Result identity](#result-identity). |
+| `partialFingerprints["vg/finding-id/v1"]` | Content id for this result. See [Result fingerprints](#result-fingerprints). |
 | `properties.advisoryId` | The advisory's own id. This is the primary id. |
 | `properties.aliases` | The alias list, in the order the advisory supplied. Distinct advisory ids stay distinct results. |
 | `properties` | The finding details, copied as-is: ecosystem, package, installed version, severity, CVSS, and fixing versions, plus introduction details when the scan attributed the advisory. |
 
 The same advisory set always produces the same result order. Packages are ordered by ecosystem, package name, then version. Advisories on one package are ordered by severity from critical down to unknown, then by advisory id. SARIF emits results in that order: drift findings, then those vulnerability results.
 
-The ids in this example show the field shape. A real scan fills them from the advisory it read. A critical `GHSA-bbbb` whose aliases are `CVE-2024-1111` and `OSV-1`, fixed in 4.17.21, is one result:
+The ids in this example show the field shape. A real scan fills them from the advisory it read. The fingerprint is the content id for the rule, the location, the ecosystem, the package, and `GHSA-bbbb` shown here. A critical `GHSA-bbbb` whose aliases are `CVE-2024-1111` and `OSV-1`, fixed in 4.17.21, is one result:
 
 ```json
 {
@@ -4668,7 +4674,7 @@ The ids in this example show the field shape. A real scan fills them from the ad
     }
   ],
   "partialFingerprints": {
-    "vg/finding-id/v1": "dd5a118102af5cbdee3ada40cbaf3021"
+    "vg/finding-id/v1": "82efba63199c173114225d3195aa15aa"
   },
   "properties": {
     "ecosystem": "npm",

@@ -2,29 +2,25 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import { createHash } from 'node:crypto';
+import { baselineSuppressionId } from '../baseline-suppressions.js';
 import type { BaselineSuppression, ScanArtifact, Finding, SecurityFinding, SecuritySection, SecuritySeverity } from '../types.js';
 
 /**
- * `partialFingerprints` key on every `vg scan` SARIF result.
- * Security-pack results and baseline suppressions keep the id they already
- * published under this key. Other drift results use {@link driftResultFingerprint}.
+ * SARIF `partialFingerprints` key for every result `vg scan` emits.
+ * The value is a content id. It is never a result index, a clock, or the
+ * artifact timestamp.
  */
 const FINDING_FINGERPRINT_KEY = 'vg/finding-id/v1';
 
 /**
- * Detail keys that move with the clock. They stay on `properties` and in the
- * message, and they never enter the fingerprint.
- */
-const CLOCK_DETAIL_KEYS = new Set(['exposureDays', 'introducedDate']);
-
-/**
  * Generate a SARIF 2.1.0 document from scan artifact.
  *
- * The first run carries the drift findings. When the artifact carries
+ * The first run is the drift findings. Every result in it carries
+ * `partialFingerprints["vg/finding-id/v1"]`. When the artifact carries
  * security-pack findings (`extended.security`, from `vg scan --iac`), a
  * second run is appended for them — one run per artifact, with every pack
- * listed under `tool.extensions`. A scan that ran no pack still emits one run.
- * Every result carries `partialFingerprints["vg/finding-id/v1"]`.
+ * listed under `tool.extensions`. A scan that ran no pack is still one run,
+ * and an empty pack section does not change the document.
  */
 export function formatSarif(artifact: ScanArtifact): object {
   const suppressed = suppressionIndex(artifact);
@@ -211,6 +207,67 @@ function suppressionIndex(artifact: ScanArtifact): Map<string, BaselineSuppressi
   return index;
 }
 
+/** Detail fields that identify a finding. Scores, aliases, and versions are not identity. */
+const IDENTITY_DETAIL_KEYS = ['advisoryId', 'ecosystem', 'package', 'purl', 'raw'] as const;
+
+/**
+ * Rules that can emit more than one finding at the same path, with the
+ * subject named only in the message: `<name> is <n> major versions behind`.
+ * The name is stable when the count or the latest version changes.
+ */
+const LAG_SUBJECT_RULES = new Set([
+  'vibgrate/dependency-major-lag',
+  'vibgrate/framework-major-lag',
+]);
+
+/** License failures name the package only in the message. */
+const LICENSE_PARSE_FAILED_RULE = 'vibgrate/license-parse-failed';
+
+const LAG_SUBJECT = /^(.*) is \d+ major versions behind\b/;
+
+function identityDetail(details: Finding['details'], key: string): string | null {
+  const value = details?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function lagSubject(message: string): string | null {
+  const subject = LAG_SUBJECT.exec(message)?.[1]?.trim() ?? '';
+  return subject.length > 0 ? subject : null;
+}
+
+function hashFingerprint(parts: readonly string[]): string {
+  const input = parts.map((part) => `${part.length}\n${part}`).join('\n');
+  return createHash('sha256').update(input).digest('hex').slice(0, 32);
+}
+
+/**
+ * Content id for a drift or vulnerability result that is not baseline-suppressed.
+ *
+ * Rule and location are always included. Advisory id, ecosystem, package name,
+ * package URL, and declared license text are included when the finding carries
+ * them. Major-lag findings add the package or framework name from the message.
+ * License findings add the message, which names the package. Anything else
+ * (the scan clock, result order, severity, CVSS, aliases, installed version)
+ * is left out, so a refreshed wording of the same finding keeps the id.
+ *
+ * A finding with no extra identity uses {@link baselineSuppressionId}, so the
+ * fingerprint matches the id `--baseline` will record for that rule and location.
+ */
+function driftResultFingerprint(finding: Finding): string {
+  const extras: string[] = [];
+  for (const key of IDENTITY_DETAIL_KEYS) {
+    const value = identityDetail(finding.details, key);
+    if (value) extras.push(key, value);
+  }
+  if (LAG_SUBJECT_RULES.has(finding.ruleId)) {
+    extras.push('subject', lagSubject(finding.message) ?? finding.message);
+  } else if (finding.ruleId === LICENSE_PARSE_FAILED_RULE) {
+    extras.push('message', finding.message);
+  }
+  if (extras.length === 0) return baselineSuppressionId(finding.ruleId, finding.location);
+  return hashFingerprint(['vg-sarif-partial/v1', finding.ruleId, finding.location, ...extras]);
+}
+
 function toSarifResult(finding: Finding, suppression?: BaselineSuppression) {
   return {
     ruleId: finding.ruleId,
@@ -225,9 +282,9 @@ function toSarifResult(finding: Finding, suppression?: BaselineSuppression) {
         },
       },
     ],
-    // Content identity for code scanning. A baseline match keeps the
-    // suppression id (rule + location). Every other drift result hashes the
-    // finding, never the artifact timestamp or the result index.
+    // Content-stable across runs. A baseline match keeps the suppression id
+    // (`vg/finding-id/v1` already meant that). Every other result gets an id
+    // from the finding itself, not from order or the artifact clock.
     partialFingerprints: {
       [FINDING_FINGERPRINT_KEY]: suppression ? suppression.id : driftResultFingerprint(finding),
     },
@@ -253,63 +310,4 @@ function toSarifResult(finding: Finding, suppression?: BaselineSuppression) {
         }
       : {}),
   };
-}
-
-function encodePart(value: string): string {
-  return `${Buffer.byteLength(value, 'utf8')}:${value}`;
-}
-
-function stringDetail(details: Finding['details'], key: string): string | undefined {
-  const value = details?.[key];
-  return typeof value === 'string' ? value : undefined;
-}
-
-function canonicalValue(value: unknown): string {
-  if (value === null) return 'null';
-  if (typeof value === 'string') return `s:${value}`;
-  if (typeof value === 'boolean') return `b:${value ? '1' : '0'}`;
-  if (typeof value === 'number') return `n:${Number.isFinite(value) ? JSON.stringify(value) : ''}`;
-  if (Array.isArray(value)) return `a:[${value.map(canonicalValue).join(',')}]`;
-  if (typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    const keys = Object.keys(record).sort();
-    return `o:{${keys.map((key) => encodePart(key) + canonicalValue(record[key])).join(',')}}`;
-  }
-  return '';
-}
-
-/** Sorted detail payload. Clock-derived keys are omitted. Object key order is ignored. */
-function canonicalDetails(details: Finding['details']): string {
-  if (!details) return '';
-  const keys = Object.keys(details).filter((key) => !CLOCK_DETAIL_KEYS.has(key)).sort();
-  return keys.map((key) => `${encodePart(key)}${encodePart(canonicalValue(details[key]))}`).join('\n');
-}
-
-/**
- * Content fingerprint for a drift result that is not baseline-suppressed.
- * 32 lowercase hex characters (128 bits of SHA-256). Parts are length-prefixed
- * so concatenation cannot collide. A vulnerability result is identified by
- * its package coordinates and advisory id, so a day count in the message
- * cannot move the value. Other results include the message, which is what
- * separates two frameworks or two packages that share a rule and a path.
- */
-function driftResultFingerprint(finding: Finding): string {
-  const parts = [
-    encodePart('vg-sarif-result/v1'),
-    encodePart(finding.ruleId),
-    encodePart(finding.location),
-  ];
-  const advisoryId = stringDetail(finding.details, 'advisoryId');
-  if (advisoryId) {
-    parts.push(
-      encodePart(stringDetail(finding.details, 'ecosystem') ?? ''),
-      encodePart(stringDetail(finding.details, 'package') ?? ''),
-      encodePart(stringDetail(finding.details, 'installedVersion') ?? ''),
-      encodePart(advisoryId),
-    );
-  } else {
-    parts.push(encodePart(finding.message));
-    parts.push(encodePart(canonicalDetails(finding.details)));
-  }
-  return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 32);
 }

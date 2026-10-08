@@ -24,12 +24,12 @@ backward compatible.
 
 ### Fixed
 
-- **`vg scan --format sarif` sets `partialFingerprints["vg/finding-id/v1"]` on
-  every result.** Drift findings that are not baseline-suppressed now carry a
-  content hash (rule, location, and either advisory coordinates or the message
-  plus stable details). Baseline suppressions and security-pack results keep
-  the ids they already published under that key. The scan clock, the artifact
-  timestamp, and the result order are not part of the value.
+- **`vg scan --format sarif` sets a content-stable fingerprint on every result.**
+  `partialFingerprints["vg/finding-id/v1"]` is derived from the finding (rule,
+  location, and advisory or package when those identify it), not from the scan
+  time or the result order. GitHub code scanning can keep the same alert across
+  runs. Message text is unchanged. Baseline suppressions and infrastructure
+  findings keep the ids they already used.
 
 - **`vg sbom export` merges multi-project lockfiles by ecosystem, name, and
   version.** The same package from two projects stays one component, and
