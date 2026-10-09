@@ -37,6 +37,7 @@ import { formatSarif } from './formatters/sarif.js';
 import { formatMarkdown } from './formatters/markdown.js';
 import { loadConfig, appendExcludePatterns } from './config.js';
 import { pathExists, readJsonFile, writeJsonFile, writeTextFile, ensureDir, FileCache, quickTreeCount } from './utils/fs.js';
+import { redactHomePaths } from './utils/shareable-path.js';
 import { assertSafeWalkRoot } from './utils/root-safety.js';
 import { detectVcs } from './utils/vcs.js';
 import { isCiEnvironment, hasVibgrateWorkflow } from './utils/ci-env.js';
@@ -874,12 +875,17 @@ export async function runCoreScan(
     }
   }
 
+  // Machine-readable artifacts are shareable: home prefixes become paths
+  // relative to the scan root, or `~/…` when the path sits outside it.
+  // Terminal text keeps the original locations.
+  const shareable = redactHomePaths(artifact, rootDir);
+
   if (!opts.noLocalArtifacts && !maxPrivacyMode) {
     const vibgrateDir = path.join(rootDir, '.vibgrate');
     await ensureDir(vibgrateDir);
-    await writeJsonFile(path.join(vibgrateDir, 'scan_result.json'), artifact);
-    await writeJsonFile(path.join(vibgrateDir, 'solutions.json'), {
-      scannedAt: artifact.timestamp,
+    await writeJsonFile(path.join(vibgrateDir, 'scan_result.json'), shareable);
+    await writeJsonFile(path.join(vibgrateDir, 'solutions.json'), redactHomePaths({
+      scannedAt: shareable.timestamp,
       solutions: solutions.map((solution) => ({
         solutionId: solution.solutionId,
         name: solution.name,
@@ -887,7 +893,7 @@ export async function runCoreScan(
         type: solution.type,
         projectPaths: solution.projectPaths,
       })),
-    });
+    }, rootDir));
   }
 
   // scan_history.json is local ETA telemetry, not a result — honour the same
@@ -926,12 +932,12 @@ export async function runCoreScan(
     if (Object.keys(projectScores).length > 0) {
       const vibgrateDir = path.join(rootDir, '.vibgrate');
       await ensureDir(vibgrateDir);
-      await writeJsonFile(path.join(vibgrateDir, 'project_scores.json'), projectScores);
+      await writeJsonFile(path.join(vibgrateDir, 'project_scores.json'), redactHomePaths(projectScores, rootDir));
     }
   }
 
   if (opts.format === 'json') {
-    const jsonStr = JSON.stringify(artifact, null, 2);
+    const jsonStr = JSON.stringify(shareable, null, 2);
     if (opts.out) {
       await writeTextFile(path.resolve(opts.out), jsonStr);
       console.log(chalk.green('✔') + ` JSON written to ${opts.out}`);
@@ -939,7 +945,7 @@ export async function runCoreScan(
       console.log(jsonStr);
     }
   } else if (opts.format === 'sarif') {
-    const sarif = formatSarif(artifact);
+    const sarif = formatSarif(shareable, rootDir);
     const sarifStr = JSON.stringify(sarif, null, 2);
     if (opts.out) {
       await writeTextFile(path.resolve(opts.out), sarifStr);
@@ -948,7 +954,7 @@ export async function runCoreScan(
       console.log(sarifStr);
     }
   } else if (opts.format === 'md') {
-    const markdown = formatMarkdown(artifact);
+    const markdown = formatMarkdown(shareable, rootDir);
     console.log(markdown);
     if (opts.out) {
       await writeTextFile(path.resolve(opts.out), markdown);
@@ -991,7 +997,7 @@ export async function runCoreScan(
     }
   }
 
-  return artifact;
+  return shareable;
 }
 
 async function buildRepositoryInfo(rootDir: string, remoteUrl: string | undefined, ciSystems: string[] | undefined, nameOverride?: string): Promise<RepositoryInfo> {

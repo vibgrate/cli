@@ -19,6 +19,7 @@ import { gatherSystemMemory } from '../code/local-runtime.js';
 import { buildLocalInferenceStatus, type LocalInferenceStatus } from '../runtime/local-inference-status.js';
 import { VERSION } from '../version.js';
 import { findConfigFile, readDataConfigSync, shadowedConfigFiles } from '../core-open/config.js';
+import { redactHomePaths } from '../core-open/utils/shareable-path.js';
 import { c, info, json } from '../util/output.js';
 import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.js';
 import { rootOf } from './util.js';
@@ -218,7 +219,7 @@ async function runDoctor(global: GlobalOpts): Promise<void> {
   };
 
   if (global.json) {
-    json(d);
+    json(redactHomePaths(d, root));
     return;
   }
 

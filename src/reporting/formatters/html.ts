@@ -1,5 +1,6 @@
 import { fixAvailableHint } from '../../core-open/formatters/fix-hint.js';
 import { redactForDisplay } from '../../core-open/utils/redact.js';
+import { redactHomePaths } from '../../core-open/utils/shareable-path.js';
 import type { SecurityFinding } from '../../core-open/types.js';
 import type { Finding, ScanArtifact } from '../types.js';
 
@@ -7,7 +8,8 @@ import type { Finding, ScanArtifact } from '../types.js';
  * Self-contained HTML for `vg report --format html`.
  *
  * Pure function of the artifact: stable sorts, no clock, no randomness, no
- * network, no external assets. Artifact strings are redacted, then escaped.
+ * network, no external assets. Home-directory paths are rewritten to a
+ * repo-relative or `~/` form, then artifact strings are secret-redacted and escaped.
  *
  * Stable ids: `#summary`, `#vulnerabilities`, `#security`, `#findings`.
  *
@@ -42,7 +44,8 @@ const VULN_RANK: Record<VulnSeverityName, number> = {
 
 const LEVEL_RANK: Record<string, number> = { error: 0, warning: 1, note: 2 };
 
-export function formatHtmlReport(artifact: ScanArtifact): string {
+export function formatHtmlReport(artifact: ScanArtifact, root?: string): string {
+  artifact = redactHomePaths(artifact, root);
   const findings = Array.isArray(artifact.findings) ? artifact.findings : [];
   const vulnFindings = findings.filter((f) => f.ruleId === VULN_RULE_ID);
   const otherFindings = findings.filter((f) => f.ruleId !== VULN_RULE_ID);

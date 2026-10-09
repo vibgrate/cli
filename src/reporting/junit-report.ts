@@ -4,7 +4,9 @@
  * The report summarizes drift findings and the gates `vg scan` actually
  * judges (drift `--fail-on`, architecture, security packs, drift budget).
  * It is a pure function of that input: no clock, no host name, no DSN, no
- * repository URL. The optional JUnit `timestamp` attribute is omitted;
+ * repository URL. Home-directory paths are rewritten the same way as the
+ * JSON artifact (relative to the scan root, or `~/…`). The optional JUnit
+ * `timestamp` attribute is omitted;
  * `time` is always `0` because wall-clock duration is not part of the result.
  *
  * Suites, in order:
@@ -19,6 +21,7 @@
  * drift gate; otherwise it is `<skipped>`. Notes never fail a gate.
  */
 import * as path from 'node:path';
+import { shareablePath } from '../core-open/utils/shareable-path.js';
 import { compareDriftBudget, type DriftBudgetGateResult } from './drift-budget-gate.js';
 import { writeTextFile } from './utils/fs.js';
 
@@ -73,6 +76,8 @@ export interface ScanJUnitInput {
   driftGate?: 'warn' | 'error';
   /** Appended after the findings suite, in the order given. Empty suites are dropped. */
   extraSuites?: readonly JUnitSuite[];
+  /** Scan directory. Home paths inside it are written relative to this directory. */
+  root?: string;
 }
 
 export interface ArchitectureJUnitRow {
@@ -146,8 +151,16 @@ function findingBody(f: JUnitFinding): string {
   return `${f.message}\nrule: ${f.ruleId}\nlocation: ${f.location}\nlevel: ${f.level}`;
 }
 
-export function findingsSuite(findings: readonly JUnitFinding[], driftGate?: 'warn' | 'error'): JUnitSuite {
-  const sorted = [...findings].sort(compareFindings);
+export function findingsSuite(
+  findings: readonly JUnitFinding[],
+  driftGate?: 'warn' | 'error',
+  root?: string,
+): JUnitSuite {
+  const sorted = findings.map((f) => ({
+    ...f,
+    location: shareablePath(f.location, root),
+    message: shareablePath(f.message, root),
+  })).sort(compareFindings);
   if (sorted.length === 0) {
     return { name: 'findings', cases: [pass(JUNIT_FINDINGS_CLASS, 'no findings')] };
   }
@@ -170,17 +183,22 @@ export function architectureGateSuite(
     | { status: 'blocked'; message: string }
     | { status: 'clean' }
     | { status: 'failed'; rows: readonly ArchitectureJUnitRow[] },
+  root?: string,
 ): JUnitSuite {
   if (input.status === 'blocked') {
     return {
       name: 'architecture',
-      cases: [failure(JUNIT_ARCHITECTURE_CLASS, 'architecture', 'gate', input.message)],
+      cases: [failure(JUNIT_ARCHITECTURE_CLASS, 'architecture', 'gate', shareablePath(input.message, root))],
     };
   }
   if (input.status === 'clean') {
     return { name: 'architecture', cases: [pass(JUNIT_ARCHITECTURE_CLASS, 'architecture')] };
   }
-  const rows = [...input.rows].sort((a, b) =>
+  const rows = input.rows.map((r) => ({
+    ...r,
+    file: shareablePath(r.file, root),
+    message: shareablePath(r.message, root),
+  })).sort((a, b) =>
     cmp(a.file, b.file)
     || (a.line ?? 0) - (b.line ?? 0)
     || cmp(a.symbol, b.symbol)
@@ -210,15 +228,20 @@ export function securityGateSuite(
   input:
     | { status: 'blocked'; message: string }
     | { status: 'evaluated'; findings: readonly SecurityJUnitFinding[]; failingIds: readonly string[] },
+  root?: string,
 ): JUnitSuite {
   if (input.status === 'blocked') {
     return {
       name: 'security',
-      cases: [failure(JUNIT_SECURITY_CLASS, 'security', 'gate', input.message)],
+      cases: [failure(JUNIT_SECURITY_CLASS, 'security', 'gate', shareablePath(input.message, root))],
     };
   }
   const failing = new Set(input.failingIds);
-  const findings = [...input.findings].sort((a, b) =>
+  const findings = input.findings.map((f) => ({
+    ...f,
+    path: shareablePath(f.path, root),
+    message: shareablePath(f.message, root),
+  })).sort((a, b) =>
     cmp(a.path, b.path)
     || (a.line ?? 0) - (b.line ?? 0)
     || cmp(a.rule, b.rule)
@@ -311,7 +334,7 @@ export function configDriftBudgetCases(gate: DriftBudgetGateResult): JUnitTestCa
 }
 
 export function buildScanJUnitReport(input: ScanJUnitInput): JUnitReport {
-  const suites: JUnitSuite[] = [findingsSuite(input.findings, input.driftGate)];
+  const suites: JUnitSuite[] = [findingsSuite(input.findings, input.driftGate, input.root)];
   for (const suite of input.extraSuites ?? []) {
     if (suite.cases.length > 0) suites.push(suite);
   }

@@ -4,6 +4,7 @@
 import { createHash } from 'node:crypto';
 import { baselineSuppressionId } from '../baseline-suppressions.js';
 import type { BaselineSuppression, ScanArtifact, Finding, SecurityFinding, SecuritySection, SecuritySeverity } from '../types.js';
+import { redactHomePaths } from '../utils/shareable-path.js';
 
 /**
  * SARIF `partialFingerprints` key for every result `vg scan` emits.
@@ -22,7 +23,10 @@ const FINDING_FINGERPRINT_KEY = 'vg/finding-id/v1';
  * listed under `tool.extensions`. A scan that ran no pack is still one run,
  * and an empty pack section does not change the document.
  */
-export function formatSarif(artifact: ScanArtifact): object {
+export function formatSarif(artifact: ScanArtifact, root?: string): object {
+  // Fingerprints and baseline ids use the location, so rewrite home paths
+  // before either is computed. A second pass sees only relative or `~/` paths.
+  artifact = redactHomePaths(artifact, root);
   const suppressed = suppressionIndex(artifact);
   const rules = buildRules(artifact.findings);
   const results = artifact.findings.map((f) => toSarifResult(f, suppressed.get(suppressionKey(f.ruleId, f.location))));
