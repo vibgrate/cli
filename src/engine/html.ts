@@ -1,3 +1,4 @@
+import { portableValue } from '../core-open/utils/portable-path.js';
 import { stableStringify } from './serialize.js';
 import type { VgGraph } from '../schema.js';
 
@@ -12,7 +13,8 @@ import type { VgGraph } from '../schema.js';
 
 const EMBED_NODE_LIMIT = 5_000;
 
-export function renderHtml(graph: VgGraph): string {
+export function renderHtml(graph: VgGraph, root?: string): string {
+  graph = portableValue(graph, root);
   const top = graph.nodes
     .filter((n) => n.kind !== 'file' && n.kind !== 'external')
     .sort((a, b) => b.importance - a.importance || a.qualifiedName.localeCompare(b.qualifiedName))

@@ -14,6 +14,13 @@ backward compatible.
 
 ### Changed
 
+- **Machine-readable output drops absolute home-directory paths (#282).**
+  JSON, SARIF, and reports rewrite `/Users/<user>/` and `/home/<user>/`
+  paths. A path inside the scan or build root is written relative to that
+  root. A path under the same home directory but outside the root is written
+  as `../…`. Any other path only loses that prefix. The result does not use
+  `~/`. The same tree produces the same paths.
+
 - **`vg build` and `vg scan` do not follow symlinks, and they say so.** A
   directory symlink is not entered, so a link to its parent cannot hang the
   walk, and a file symlink is not read. When any are skipped, one stderr

@@ -1,5 +1,6 @@
 import type { ScanArtifact } from '../types.js';
 import { baselineSuppressionLabel } from '../../core-open/baseline-suppressions.js';
+import { portableValue } from '../../core-open/utils/portable-path.js';
 import { findingRuleLabel, formatDegradationLines } from '../../core-open/warnings.js';
 
 /** A measured zero stays `0`. An unmeasured component is `n/a`, never `0`. */
@@ -8,7 +9,8 @@ function markdownDriftCell(score: number | null): string {
 }
 
 /** Generate a Markdown report from scan artifact */
-export function formatMarkdown(artifact: ScanArtifact): string {
+export function formatMarkdown(artifact: ScanArtifact, root?: string): string {
+  artifact = portableValue(artifact, root);
   const lines: string[] = [];
 
   lines.push('# Vibgrate Drift Report');

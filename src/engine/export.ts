@@ -1,3 +1,4 @@
+import { portableValue } from '../core-open/utils/portable-path.js';
 import { serializeGraph, slimGraphForExport } from './serialize.js';
 import { renderReport } from './report.js';
 import { renderHtml } from './html.js';
@@ -61,21 +62,23 @@ export interface ExportContext {
   compact?: boolean;
   /** Drop area members + grounding for smaller artifacts. */
   slim?: boolean;
+  /** Scan/build root. Paths inside it are written relative to it. */
+  root?: string;
 }
 
 export function exportGraph(format: ExportFormat, ctx: ExportContext): string {
-  const graph = ctx.slim ? slimGraphForExport(ctx.graph) : ctx.graph;
+  const graph = portableValue(ctx.slim ? slimGraphForExport(ctx.graph) : ctx.graph, ctx.root);
   const compact =
     ctx.compact === true ||
     (ctx.compact !== false && format === 'json' && graph.meta.counts.nodes > COMPACT_JSON_NODES);
 
   switch (format) {
     case 'json':
-      return serializeGraph(graph, { compact });
+      return serializeGraph(graph, { compact, root: ctx.root });
     case 'md':
-      return renderReport(graph);
+      return renderReport(graph, ctx.root);
     case 'html':
-      return renderHtml(graph);
+      return renderHtml(graph, ctx.root);
     case 'ndjson':
       return ndjson(graph);
     case 'graphml':

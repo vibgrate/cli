@@ -37,6 +37,7 @@ import { formatSarif } from './formatters/sarif.js';
 import { formatMarkdown } from './formatters/markdown.js';
 import { loadConfig, appendExcludePatterns } from './config.js';
 import { pathExists, readJsonFile, writeJsonFile, writeTextFile, ensureDir, FileCache, quickTreeCount } from './utils/fs.js';
+import { portableValue } from './utils/portable-path.js';
 import { assertSafeWalkRoot } from './utils/root-safety.js';
 import { detectVcs } from './utils/vcs.js';
 import { isCiEnvironment, hasVibgrateWorkflow } from './utils/ci-env.js';
@@ -816,7 +817,7 @@ export async function runCoreScan(
   // categorisation, not pricing — the commercial rates live server-side.
   const billing = summarizeBilling(allProjects);
 
-  const artifact: ScanArtifact = {
+  let artifact: ScanArtifact = {
     schemaVersion: '1.0',
     timestamp: new Date().toISOString(),
     vibgrateVersion,
@@ -853,8 +854,8 @@ export async function runCoreScan(
         // Matching findings stay in `findings`. This block is the audit record
         // in the same document — do not filter them out here. A baseline-only
         // row is not a current finding and is not listed.
-        const baselineFindings = Array.isArray(baseline.findings) ? baseline.findings : [];
-        artifact.baselineComparison = compareBaselineFindings(artifact.findings, baselineFindings);
+        const baselineFindings = portableValue(Array.isArray(baseline.findings) ? baseline.findings : [], rootDir);
+        artifact.baselineComparison = compareBaselineFindings(portableValue(artifact.findings, rootDir), baselineFindings);
       } catch {
         degradations.push(
           codedWarning(
@@ -874,11 +875,15 @@ export async function runCoreScan(
     }
   }
 
+  // JSON, SARIF, and the report share this copy. Home-directory prefixes are
+  // gone; paths inside the scan root are relative to it.
+  artifact = portableValue(artifact, rootDir);
+
   if (!opts.noLocalArtifacts && !maxPrivacyMode) {
     const vibgrateDir = path.join(rootDir, '.vibgrate');
     await ensureDir(vibgrateDir);
     await writeJsonFile(path.join(vibgrateDir, 'scan_result.json'), artifact);
-    await writeJsonFile(path.join(vibgrateDir, 'solutions.json'), {
+    await writeJsonFile(path.join(vibgrateDir, 'solutions.json'), portableValue({
       scannedAt: artifact.timestamp,
       solutions: solutions.map((solution) => ({
         solutionId: solution.solutionId,
@@ -887,7 +892,7 @@ export async function runCoreScan(
         type: solution.type,
         projectPaths: solution.projectPaths,
       })),
-    });
+    }, rootDir));
   }
 
   // scan_history.json is local ETA telemetry, not a result — honour the same
@@ -905,7 +910,7 @@ export async function runCoreScan(
 
   if (!opts.noLocalArtifacts && !maxPrivacyMode) {
     const projectScores: Record<string, object> = {};
-    for (const project of allProjects) {
+    for (const project of artifact.projects) {
       if (project.drift && project.path) {
         projectScores[project.path] = {
           projectId: project.projectId,
@@ -926,7 +931,7 @@ export async function runCoreScan(
     if (Object.keys(projectScores).length > 0) {
       const vibgrateDir = path.join(rootDir, '.vibgrate');
       await ensureDir(vibgrateDir);
-      await writeJsonFile(path.join(vibgrateDir, 'project_scores.json'), projectScores);
+      await writeJsonFile(path.join(vibgrateDir, 'project_scores.json'), portableValue(projectScores, rootDir));
     }
   }
 
@@ -939,7 +944,7 @@ export async function runCoreScan(
       console.log(jsonStr);
     }
   } else if (opts.format === 'sarif') {
-    const sarif = formatSarif(artifact);
+    const sarif = formatSarif(artifact, rootDir);
     const sarifStr = JSON.stringify(sarif, null, 2);
     if (opts.out) {
       await writeTextFile(path.resolve(opts.out), sarifStr);
@@ -948,7 +953,7 @@ export async function runCoreScan(
       console.log(sarifStr);
     }
   } else if (opts.format === 'md') {
-    const markdown = formatMarkdown(artifact);
+    const markdown = formatMarkdown(artifact, rootDir);
     console.log(markdown);
     if (opts.out) {
       await writeTextFile(path.resolve(opts.out), markdown);

@@ -1,4 +1,5 @@
 import { SUPPORTED_SCHEMA_VERSIONS, type SupportedSchemaVersion, type VgGraph } from '../schema.js';
+import { portableValue } from '../core-open/utils/portable-path.js';
 import { CliError, ExitCode } from '../util/exit.js';
 
 const REBUILD_HINT = 'Rebuild it with `vg build`.';
@@ -93,10 +94,10 @@ export function unreadableGraphError(): GraphLoadError {
  * Pretty-printed (2-space) and newline-terminated so the committed artifact is
  * human-diffable and plays well with the union merge driver.
  */
-export function serializeGraph(graph: VgGraph, opts?: { compact?: boolean }): string {
+export function serializeGraph(graph: VgGraph, opts?: { compact?: boolean; root?: string }): string {
   // Compact (no pretty-print) for large maps / CI artifacts — still deterministic.
   const indent = opts?.compact ? 0 : 2;
-  return `${stableStringify(graph, indent)}\n`;
+  return `${stableStringify(portableValue(graph, opts?.root), indent)}\n`;
 }
 
 /**

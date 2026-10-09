@@ -3,6 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import type { ScanArtifact } from '../types.js';
 import { baselineSuppressionLabel } from '../baseline-suppressions.js';
+import { portableValue } from '../utils/portable-path.js';
 import { findingRuleLabel, formatDegradationLines } from '../warnings.js';
 import { securityPacksLabel } from './text.js';
 
@@ -24,7 +25,8 @@ function markdownDriftCell(score: number | null): string {
 }
 
 /** Generate a Markdown report from scan artifact */
-export function formatMarkdown(artifact: ScanArtifact): string {
+export function formatMarkdown(artifact: ScanArtifact, root?: string): string {
+  artifact = portableValue(artifact, root);
   const lines: string[] = [];
 
   // Billing (micro-project pricing) is a commercial signal attached by the full

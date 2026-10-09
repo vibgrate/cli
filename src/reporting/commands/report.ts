@@ -6,6 +6,7 @@ import { pathExists, readJsonFile } from '../utils/fs.js';
 import { formatText } from '../formatters/text.js';
 import { formatMarkdown } from '../formatters/markdown.js';
 import { formatHtmlReport } from '../formatters/html.js';
+import { portableValue } from '../../core-open/utils/portable-path.js';
 import type { ReportFormat, ScanArtifact } from '../types.js';
 
 /** Formats `vg report` accepts. `text` is the default. */
@@ -32,7 +33,7 @@ export const reportCommand = new Command('report')
       process.exit(1);
     }
 
-    const artifact = await readJsonFile<ScanArtifact>(artifactPath);
+    const artifact = portableValue(await readJsonFile<ScanArtifact>(artifactPath));
 
     switch (opts.format) {
       case 'md':
