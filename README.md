@@ -595,11 +595,10 @@ Copy-paste CI templates live in `examples/github-actions/`. When the job fails, 
 
 ## Version-correct library docs
 
-`vg lib` fetches usage docs pinned to the **exact version in your lockfile** — never a newer API your code can't call yet:
+`vg lib <pkg>` prints usage docs for one library. When a lockfile in the project root lists that package, the version label is that pin. Which files are read, and what happens when the pin is missing, the install disagrees, or the catalog fetch fails: [DOCS.md](./DOCS.md#lockfile-pin).
 
 ```bash
-vg lib react                    # React docs at your installed version
-vg lib express --fn middleware  # specific function reference
+vg lib react
 ```
 
 AI assistants connected via MCP use `vg lib` automatically when answering questions about library APIs in your project.
