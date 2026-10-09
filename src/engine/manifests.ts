@@ -23,6 +23,7 @@ import * as path from 'node:path';
 import type { Ignore } from 'ignore';
 import { XMLParser } from 'fast-xml-parser';
 import { nodeId, edgeId } from './ids.js';
+import { isUtf8SourceText } from '../core-open/utils/source-text.js';
 import { isSkippedDirName, loadRootIgnore } from './discover.js';
 import { parseToml } from '../core-open/utils/toml.js';
 import type { GraphEdge, GraphNode } from '../schema.js';
@@ -62,7 +63,7 @@ const emptyNode = (
  */
 export function extractManifests(
   root: string,
-  opts: { exclude?: string[]; paths?: string[] } = {},
+  opts: { exclude?: string[]; paths?: string[]; skippedNonUtf8?: string[] } = {},
 ): ManifestExtract {
   const absRoot = path.resolve(root);
   const ig = loadRootIgnore(absRoot, opts.exclude ?? []);
@@ -82,6 +83,16 @@ export function extractManifests(
   for (const rel of [...found.keys()].sort()) {
     const abs = found.get(rel)!;
     const base = path.posix.basename(rel);
+    let manifestBytes: Buffer;
+    try {
+      manifestBytes = fs.readFileSync(abs);
+    } catch {
+      continue;
+    }
+    if (!isUtf8SourceText(manifestBytes)) {
+      opts.skippedNonUtf8?.push(rel);
+      continue;
+    }
     try {
       if (base === 'package.json') {
         deps += ingestPackageJson(rel, abs, nodes, edges);

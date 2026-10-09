@@ -50,6 +50,7 @@ import type { FileParse } from './types.js';
 import type { ResolveResult } from './resolve.js';
 import { fileRolesFromParses } from './ast-roles.js';
 import type { AstRoleHit } from '../core-open/scanners/architecture/ast-roles.js';
+import { emitSkippedNonUtf8Notice, NON_UTF8_SKIP_MARK } from '../core-open/utils/source-text.js';
 import { stampWarning, WARNING_CODES, type CodedWarning } from '../core-open/warnings.js';
 import { assembleEngineWarnings } from './warning-codes.js';
 
@@ -156,6 +157,15 @@ export interface BuildResult {
 }
 
 export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
+  const skippedNonUtf8: string[] = [];
+  try {
+    return await buildGraphUnchecked(options, skippedNonUtf8);
+  } finally {
+    emitSkippedNonUtf8Notice(skippedNonUtf8);
+  }
+}
+
+async function buildGraphUnchecked(options: BuildOptions, skippedNonUtf8: string[]): Promise<BuildResult> {
   const timer = new StageTimer();
   timer.start('total');
   const root = path.resolve(options.root);
@@ -170,6 +180,8 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     exclude,
     paths: options.paths,
     maxEntries: limits.maxFiles,
+    maxSourceBytes: limits.maxFileBytes === 0 ? 32 * 1024 * 1024 : limits.maxFileBytes,
+    skippedNonUtf8,
   });
   timer.end('discover');
 
@@ -295,12 +307,16 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   timer.end('hash');
 
   timer.start('parse');
-  const parsedNew = await parseFiles(toParse, {
+  const parsedNew = (await parseFiles(toParse, {
     jobs: options.jobs,
     inline: options.inline,
     onProgress: options.onParseProgress,
     grammarsDir: options.grammarsDir,
     memoryBudgetMb: limits.memoryBudgetMb,
+  })).filter((parsed) => {
+    if (!parsed.warnings?.includes(NON_UTF8_SKIP_MARK)) return true;
+    skippedNonUtf8.push(parsed.rel);
+    return false;
   });
   timer.end('parse');
   checkMemoryBudget('parse', limits.memoryBudgetMb);
@@ -339,6 +355,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const manifests = extractManifests(root, {
     exclude,
     paths: options.paths,
+    skippedNonUtf8,
   });
   if (manifests.files > 0) {
     const byId = new Map(resolved.nodes.map((n) => [n.id, n]));
@@ -518,6 +535,7 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     exclude,
     paths: options.paths,
     maxEntries: limits.maxFiles,
+    skippedNonUtf8,
   });
   for (const d of docs) {
     try {

@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { Worker } from 'node:worker_threads';
+import { isUtf8SourceText } from '../core-open/utils/source-text.js';
 
 /**
  * The uniform literal-search core for `search_symbols` (VG-LITERAL-INDEX-DESIGN.md
@@ -24,7 +25,6 @@ import { Worker } from 'node:worker_threads';
 
 const MAX_FILE_BYTES = 1_000_000;
 const PREVIEW_CHARS = 120;
-const NUL = '\u0000'; // a NUL byte marks a binary file — skipped, same as ripgrep does
 /**
  * Fan out to workers only above this many candidate BYTES. Benchmarking showed
  * that gating on file *count* is wrong: a few thousand small files (≈8 MB) scan
@@ -149,8 +149,10 @@ function readCandidate(abs: string, knownSize?: number): string | null {
   try {
     const size = knownSize ?? fs.statSync(abs).size;
     if (size > MAX_FILE_BYTES) return null;
-    const text = fs.readFileSync(abs, 'utf8');
-    return text.includes(NUL) ? null : text;
+    const buf = fs.readFileSync(abs);
+    // Binary and non-UTF-8 never become a preview line.
+    if (!isUtf8SourceText(buf)) return null;
+    return buf.toString('utf8');
   } catch {
     return null;
   }
@@ -218,15 +220,17 @@ const WORKER_SOURCE = [
   `const MAX = ${MAX_FILE_BYTES};`,
   `const PREVIEW = ${PREVIEW_CHARS};`,
   `const CAP = ${ROW_CAP};`,
-  'const NUL = String.fromCharCode(0);',
   'const NL = String.fromCharCode(10);',
   'const { root, files, needleLower } = workerData;',
   'const hits = []; let total = 0, truncated = false;',
   'for (const rel of files) {',
   '  const abs = path.join(root, rel);',
+  '  let buf;',
+  '  try { if (fs.statSync(abs).size > MAX) continue; buf = fs.readFileSync(abs); } catch { continue; }',
+  '  if (buf.includes(0)) continue;',
+  '  if (buf.length >= 2 && ((buf[0] === 255 && buf[1] === 254) || (buf[0] === 254 && buf[1] === 255))) continue;',
   '  let text;',
-  '  try { if (fs.statSync(abs).size > MAX) continue; text = fs.readFileSync(abs, "utf8"); } catch { continue; }',
-  '  if (text.includes(NUL)) continue;',
+  '  try { new TextDecoder("utf-8", { fatal: true }).decode(buf); text = buf.toString("utf8"); } catch { continue; }',
   '  const low = text.toLowerCase();',
   '  if (!low.includes(needleLower)) continue;',
   '  const lowLines = low.split(NL); const rawLines = text.split(NL);',

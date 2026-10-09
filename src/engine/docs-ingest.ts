@@ -21,6 +21,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { redactSecrets } from '../core-open/utils/redact.js';
+import { emitSkippedNonUtf8Notice, isUtf8SourceText, readUtf8SourceSync } from '../core-open/utils/source-text.js';
 import { nodeId } from './ids.js';
 import { isSkippedDirName, loadRootIgnore, SKIP_FILES } from './discover.js';
 import { assertSafeWalkRoot, createWalkBudget, noteWalkEntry, UnsafeRootError } from '../core-open/utils/root-safety.js';
@@ -57,6 +58,11 @@ export interface DiscoverDocsOptions {
   maxFiles?: number;
   /** Walk-entry ceiling. `0` disables. Default: `VG_MAX_FILES`, else 100000. */
   maxEntries?: number;
+  /**
+   * When set, binary and non-UTF-8 context files are recorded here and this
+   * call does not print the notice. The caller prints once.
+   */
+  skippedNonUtf8?: string[];
 }
 
 export interface DiscoveredDoc {
@@ -376,6 +382,7 @@ export function discoverDocs(options: DiscoverDocsOptions): DiscoveredDoc[] {
 
   const found = new Map<string, DiscoveredDoc>();
   const budget = createWalkBudget(root, options.maxEntries);
+  const skippedNonUtf8 = options.skippedNonUtf8 ?? [];
 
   const consider = (abs: string): void => {
     if (found.size >= maxFiles) return;
@@ -390,6 +397,12 @@ export function discoverDocs(options: DiscoverDocsOptions): DiscoveredDoc[] {
       const st = fs.statSync(abs);
       if (!st.isFile() || st.size > DOC_FILE_MAX_BYTES) return;
       if (st.size === 0) return;
+      // Context files are stored as text. Refuse binary / non-UTF-8 before
+      // any body is copied into a document node.
+      if (!isUtf8SourceText(fs.readFileSync(abs))) {
+        skippedNonUtf8.push(rel);
+        return;
+      }
     } catch {
       return;
     }
@@ -439,6 +452,7 @@ export function discoverDocs(options: DiscoverDocsOptions): DiscoveredDoc[] {
     }
   }
 
+  if (!options.skippedNonUtf8) emitSkippedNonUtf8Notice(skippedNonUtf8);
   return [...found.values()].sort((a, b) => a.rel.localeCompare(b.rel));
 }
 
@@ -503,7 +517,9 @@ export function documentNodesFromDocs(docs: DiscoveredDoc[]): GraphNode[] {
   for (const d of docs) {
     let raw = '';
     try {
-      raw = fs.readFileSync(d.abs, 'utf8');
+      const text = readUtf8SourceSync(d.abs);
+      if (text === null) continue;
+      raw = text;
     } catch {
       continue;
     }

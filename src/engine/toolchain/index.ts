@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import { edgeId, nodeId } from '../ids.js';
 import type { GraphEdge, GraphNode } from '../../schema.js';
+import { readUtf8SourceSync } from '../../core-open/utils/source-text.js';
+import { stampWarning, WARNING_CODES } from '../../core-open/warnings.js';
 import type { DiscoveredDoc } from '../docs-ingest.js';
 import { composeExtractor } from './compose.js';
 import { dockerfileExtractor } from './dockerfile.js';
@@ -10,7 +12,6 @@ import { terraformExtractor } from './terraform.js';
 import { githubActionsExtractor, gitlabCiExtractor } from './workflows.js';
 import { linkToolchain } from './link.js';
 import { safeDoc, TOOLCHAIN_FILE_MAX_BYTES, toPosix } from './util.js';
-import { stampWarning, WARNING_CODES } from '../../core-open/warnings.js';
 import type {
   ToolchainExtraction,
   ToolchainExtractor,
@@ -139,7 +140,9 @@ async function readExtractions(docs: DiscoveredDoc[]): Promise<{ files: FileExtr
     try {
       const stat = fs.statSync(doc.abs);
       if (stat.size > TOOLCHAIN_FILE_MAX_BYTES) continue;
-      source = fs.readFileSync(doc.abs, 'utf8');
+      const text = readUtf8SourceSync(doc.abs);
+      if (text === null) continue;
+      source = text;
       head = source.slice(0, HEAD_BYTES);
     } catch {
       continue; // unreadable — docs-ingest already tolerates this

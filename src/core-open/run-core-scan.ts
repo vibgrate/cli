@@ -39,6 +39,7 @@ import { loadConfig, appendExcludePatterns } from './config.js';
 import { pathExists, readJsonFile, writeJsonFile, writeTextFile, ensureDir, FileCache, quickTreeCount } from './utils/fs.js';
 import { portableValue } from './utils/portable-path.js';
 import { assertSafeWalkRoot } from './utils/root-safety.js';
+import { emitSkippedNonUtf8Notice } from './utils/source-text.js';
 import { detectVcs } from './utils/vcs.js';
 import { isCiEnvironment, hasVibgrateWorkflow } from './utils/ci-env.js';
 import { resolveRepositoryName } from './utils/repository-name.js';
@@ -805,6 +806,7 @@ export async function runCoreScan(
     }
   }
 
+  emitSkippedNonUtf8Notice(fileCache.skippedNonUtf8);
   fileCache.clear();
 
   if (allProjects.length === 0) {

@@ -17,7 +17,8 @@ import {
   UnsafeRootError,
   type WalkBudgetState,
 } from './root-safety.js';
-import { emitSkippedSymlinkNotice, rememberSkippedSymlink } from './skipped-symlinks.js';
+import { emitSkippedSymlinkNotice, rememberSkippedSymlink, walkRelativePath } from './skipped-symlinks.js';
+import { isUtf8SourceText } from './source-text.js';
 
 
 const execFileAsync = promisify(execFile);
@@ -399,6 +400,13 @@ export class FileCache {
     return this._skippedLargeFiles;
   }
 
+  /** Binary or non-UTF-8 files a text read refused. Paths are root-relative. */
+  private _skippedNonUtf8: string[] = [];
+
+  get skippedNonUtf8(): readonly string[] {
+    return this._skippedNonUtf8;
+  }
+
   // ── Directory walking ──
 
   /**
@@ -770,7 +778,13 @@ export class FileCache {
         }
       }
 
-      const content = await fs.readFile(abs, 'utf8');
+      const buf = await fs.readFile(abs);
+      if (!isUtf8SourceText(buf)) {
+        this.noteNonUtf8(abs);
+        // Cache the refusal so later scanners do not read the blob again.
+        return '';
+      }
+      const content = buf.toString('utf8');
       if (content.length > TEXT_CACHE_MAX_BYTES) {
         // Too large for cache — evict so we don't hold it
         this.textCache.delete(abs);
@@ -824,6 +838,15 @@ export class FileCache {
     this.jsonCache.clear();
     this.existsCache.clear();
     this.sizeCache.clear();
+    this._skippedNonUtf8 = [];
+  }
+
+  /** Record a text read that refused binary or non-UTF-8 bytes. Path only. */
+  private noteNonUtf8(abs: string): void {
+    const rel = this._rootDir ? walkRelativePath(this._rootDir, abs) : '';
+    const label = rel || path.basename(abs);
+    if (!label || this._skippedNonUtf8.includes(label)) return;
+    this._skippedNonUtf8.push(label);
   }
 
   /** Number of file content entries currently held */
@@ -1135,12 +1158,18 @@ export function stripBom(text: string): string {
 }
 
 export async function readJsonFile<T>(filePath: string): Promise<T> {
-  const txt = await fs.readFile(filePath, 'utf8');
-  return JSON.parse(stripBom(txt)) as T;
+  const buf = await fs.readFile(filePath);
+  if (!isUtf8SourceText(buf)) {
+    const base = path.basename(filePath);
+    throw new SyntaxError(`${base || 'file'} is not UTF-8 text`);
+  }
+  return JSON.parse(stripBom(buf.toString('utf8'))) as T;
 }
 
 export async function readTextFile(filePath: string): Promise<string> {
-  return fs.readFile(filePath, 'utf8');
+  const buf = await fs.readFile(filePath);
+  if (!isUtf8SourceText(buf)) return '';
+  return buf.toString('utf8');
 }
 
 export async function pathExists(p: string): Promise<boolean> {

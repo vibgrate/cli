@@ -1,7 +1,7 @@
-import * as fs from 'node:fs';
 import { parseSource } from './parse.js';
 import { setGrammarsOverride, resetParser } from './grammars.js';
 import type { FileParse } from './types.js';
+import { NON_UTF8_SKIP_MARK, readUtf8SourceSync } from '../core-open/utils/source-text.js';
 import { stampWarning, WARNING_CODES } from '../core-open/warnings.js';
 
 /**
@@ -30,7 +30,23 @@ export default async function run(payload: ParsePayload): Promise<FileParse[]> {
   const out: FileParse[] = [];
   for (const task of payload.tasks) {
     try {
-      const source = fs.readFileSync(task.abs, 'utf8');
+      const source = readUtf8SourceSync(task.abs);
+      if (source === null) {
+        out.push({
+          rel: task.rel,
+          lang: task.lang,
+          hash: '',
+          bytes: 0,
+          defs: [],
+          calls: [],
+          imports: [],
+          heritage: [],
+          typeRefs: [],
+          guards: [],
+          warnings: [NON_UTF8_SKIP_MARK],
+        });
+        continue;
+      }
       out.push(await parseSource(task.rel, task.lang, source));
     } catch (err) {
       // A wasm-level parse crash can leave the language's reused parser
