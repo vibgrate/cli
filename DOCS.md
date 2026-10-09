@@ -335,6 +335,8 @@ vg evidence export [--out <dir>] [--regime <id>]
 
 If a command cannot serialize or write a JSON or JSONL file — permission denied, a missing parent directory, a path that is a directory, a full disk, or a value that cannot be serialized — that is an operational error. The command exits `1`. The message names the file. Check the path and permissions, or choose another `--out` or `--bundle`.
 
+`vg evidence verify` reads the bundle before it checks a signature. A bundle that is truncated, not valid JSON, or not a schema this version can read is also an operational error and exits `1`. The message names the failure — the evidence envelope or the evidence result — and says to restore the original bundle or write a new one with `vg evidence exposure --bundle <dir>`. It does not include the bundle contents. That read error is separate from a failure to write a bundle.
+
 No language model touches any figure in the evidence path, and every determination carries an evidence-not-compliance disclaimer. Vibgrate Evidence produces evidence to support your obligations under a regime; it does not determine compliance and is not legal advice.
 
 ---

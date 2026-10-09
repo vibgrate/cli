@@ -42,6 +42,13 @@ backward compatible.
 
 ### Fixed
 
+- **`vg evidence verify` names a truncated or unreadable bundle.** A bundle
+  that is truncated, not valid JSON, or not a schema this version can read
+  exits `1`. The message names the failure — the evidence envelope or the
+  evidence result — and says to restore the bundle or write a new one with
+  `vg evidence exposure --bundle <dir>`. It does not include the bundle
+  contents. A failure to write a bundle stays a separate error. (#287)
+
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
   Package URL when one is written, otherwise by package name, then by version.

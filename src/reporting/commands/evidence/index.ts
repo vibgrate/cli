@@ -21,7 +21,7 @@ import { resolveAdvisory } from './advisory.js';
 import { buildRelease } from './release.js';
 import { buildPushPayload, describePushResult, type PushAttestation, type PushResponse } from './push-payload.js';
 import { buildPack } from './pack.js';
-import { buildEvidenceStatement, signEvidenceStatement, verifyEvidenceEnvelope, resolveSigningKey, writeBundle } from './bundle.js';
+import { buildEvidenceStatement, signEvidenceStatement, verifyEvidenceEnvelope, resolveSigningKey, writeBundle, loadEvidenceBundle } from './bundle.js';
 import { synthesizeAdvisory, undeterminedFields, recordDrill, hasRecentDrill } from './drill.js';
 import { formatExposure, formatReadiness, formatRegimeList } from './format.js';
 import { resolveDsn } from '../../credentials.js';
@@ -391,22 +391,17 @@ const verifyCmd = new Command('verify')
   .argument('<bundle>', 'Path to an evidence bundle directory or evidence.intoto.jsonl')
   .option('--pub <file>', 'Public key PEM to pin the signer (establish trust)')
   .action((bundlePath: string, opts) => {
-    const abs = path.resolve(bundlePath);
-    const envPath = fs.statSync(abs).isDirectory() ? path.join(abs, 'evidence.intoto.jsonl') : abs;
-    if (!fs.existsSync(envPath)) throw new CliError(`no evidence.intoto.jsonl at ${bundlePath}`, ExitCode.NOT_FOUND);
-    const envelope = JSON.parse(fs.readFileSync(envPath, 'utf8').trim().split('\n')[0]) as DsseEnvelope;
-    const resultPath = path.join(path.dirname(envPath), 'result.json');
-    const result = fs.existsSync(resultPath) ? (JSON.parse(fs.readFileSync(resultPath, 'utf8')) as ExposureResult) : undefined;
+    const loaded = loadEvidenceBundle(bundlePath);
     const publicKeyPem = opts.pub ? fs.readFileSync(path.resolve(opts.pub as string), 'utf8') : undefined;
-    const v = verifyEvidenceEnvelope(envelope, { publicKeyPem, result });
+    const v = verifyEvidenceEnvelope(loaded.envelope, { publicKeyPem, result: loaded.result });
     const color = v.status === 'verified' ? chalk.green : v.status === 'failed' ? chalk.red : chalk.yellow;
     console.log('  ' + color(v.status.toUpperCase()) + `  ${v.reason}`);
     if (v.evidenceId) console.log('  ' + chalk.dim(`evidence ${v.evidenceId} · regime ${v.regime} · advisory ${v.advisoryId} · ${v.overallStatus}`));
 
     // RFC 3161 timestamp, when the bundle carries one.
-    const tsrPath = path.join(path.dirname(envPath), 'timestamp.tsr');
-    if (fs.existsSync(tsrPath) && result) {
-      const t = verifyTimestamp(fs.readFileSync(tsrPath), exposureSubjectDigest(result));
+    const tsrPath = path.join(path.dirname(loaded.envelopePath), 'timestamp.tsr');
+    if (fs.existsSync(tsrPath) && loaded.result) {
+      const t = verifyTimestamp(fs.readFileSync(tsrPath), exposureSubjectDigest(loaded.result));
       const tcolor = t.imprintMatches ? chalk.green : chalk.red;
       console.log('  ' + tcolor('TIMESTAMP') + `  ${t.reason}`);
     }
