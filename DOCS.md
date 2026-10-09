@@ -54,6 +54,8 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg impact](#vg-impact)
   - [vg install / vg uninstall](#vg-install)
   - [vg lib](#vg-lib)
+    - [Lockfile pin](#lockfile-pin)
+    - [When a lookup fails](#when-a-lookup-fails)
   - [vg locale](#vg-locale)
   - [vg map / vg hubs / vg areas / vg oddities](#vg-map--vg-hubs--vg-areas--vg-oddities)
   - [vg llm-host](#vg-llm-host)
@@ -1622,7 +1624,7 @@ Use this to treat SBOMs as operational intelligence instead of static compliance
 
 `vg sbom export` writes one JSON document. `--format` accepts `cyclonedx` or `spdx`, compared without regard to case. The default is `cyclonedx`. Any other value prints `Invalid SBOM format. Use cyclonedx or spdx.` and the process exits 1.
 
-Both formats are built from the same scan artifact and the same lockfiles under `--root`. The component list and its order are the same. Each specification then places those facts in its own fields.
+Both formats are built from the same scan artifact and the same lockfiles under `--root`. The component list and its order are the same: Package URL when the component has one, otherwise the package name, then the version. Each specification then places those facts in its own fields.
 
 ```bash
 vg scan --offline
@@ -1640,7 +1642,7 @@ vg sbom export --format spdx --out sbom.spdx.json
 | Created | `metadata.timestamp` is the artifact's `timestamp` | `creationInfo.created` is that same timestamp |
 | Scan root | `metadata.component` has `type` `application`, `bom-ref` `vibgrate-root`, and `name` set to the scan root. That component is not copied into `components` | There is no package for the scan root |
 | Package identity | `components[].purl`. When a purl is written, `bom-ref` is that purl | `packages[].externalRefs[]` with `referenceCategory` `PACKAGE-MANAGER`, `referenceType` `purl`, and `referenceLocator` set to the purl. `SPDXID` is `SPDXRef-Package-N` |
-| Dependency graph | `dependencies` is an array of `{ ref, dependsOn }`. `ref` is a `bom-ref`. The first entry is `vibgrate-root`. Every component is an entry. `dependsOn` lists child `bom-ref` values, or is `[]` when none were recorded for that component | `relationships` is an array of `{ spdxElementId, relatedSpdxElementId, relationshipType }`. `relationshipType` is `DEPENDS_ON`. Edges from the document use `SPDXRef-DOCUMENT`. A row is written only for a recorded edge |
+| Dependency graph | `dependencies` is an array of `{ ref, dependsOn }`. `ref` is a `bom-ref`. The first entry is `vibgrate-root`. Every component is an entry after that, in the component order above. `dependsOn` lists child `bom-ref` values, or is `[]` when none were recorded for that component | `relationships` is an array of `{ spdxElementId, relatedSpdxElementId, relationshipType }`. `relationshipType` is `DEPENDS_ON`. Edges from the document use `SPDXRef-DOCUMENT`. A row is written only for a recorded edge. `SPDXID` values follow the component order above |
 | Licenses | `licenses` is present when the declared license can be written, and absent when it cannot | `licenseDeclared` is set on every package. `licenseConcluded` is `NOASSERTION` on every package. `hasExtractedLicensingInfos` is present when a `LicenseRef-…` is used. Every package has `downloadLocation` `NOASSERTION` and `filesAnalyzed` `false` |
 
 `dataLicense` `CC0-1.0` is the SPDX license for the document data. Package licenses stay on `licenseDeclared`.
@@ -1761,9 +1763,9 @@ Two other strings in the same file are easy to misread as package digests. `vcs.
 | `uv.lock` | `hash` |
 | `go.sum` | `h1:` |
 
-**Several digests, one component.** A lockfile can list more than one digest for one package. The export still writes one component for that ecosystem, name, and version. It does not add a row per digest. `hashes` and `checksums` are omitted, so there is no digest array and no digest order to keep stable. Component order stays the order in [Several versions of one package](#several-versions-of-one-package): direct rows follow the scan artifact, then lockfile-only rows sorted by package name, then version, then ecosystem. Digest text is not part of that sort, and it is not part of the document id. Exporting the same scan artifact again, after a lockfile edit that changes only those digest strings and leaves names, versions, and edges alone, writes the same JSON, including `serialNumber` and `documentNamespace`.
+**Several digests, one component.** A lockfile can list more than one digest for one package. The export still writes one component for that ecosystem, name, and version. It does not add a row per digest. `hashes` and `checksums` are omitted, so there is no digest array and no digest order to keep stable. Component order stays the order in [Several versions of one package](#several-versions-of-one-package): Package URL when the component has one, otherwise the package name, then the version. Digest text is not part of that sort, and it is not part of the document id. Exporting the same scan artifact again, after a lockfile edit that changes only those digest strings and leaves names, versions, and edges alone, writes the same JSON, including `serialNumber` and `documentNamespace`.
 
-`go.sum` lists a module twice: `<module> <version> h1:…` and `<module> <version>/go.mod h1:…`. The `/go.mod` line is not a second component. Both `h1:` values are dropped. A `uv.lock` package block can carry more than one `hash`. Those values are dropped, and the block stays one component, sorted with the others by name and version. An npm `integrity` string and a pnpm `resolution.integrity` string are not read, including when the string names more than one algorithm.
+`go.sum` lists a module twice: `<module> <version> h1:…` and `<module> <version>/go.mod h1:…`. The `/go.mod` line is not a second component. Both `h1:` values are dropped. A `uv.lock` package block can carry more than one `hash`. Those values are dropped, and the block stays one component, in the same order as the other rows. An npm `integrity` string and a pnpm `resolution.integrity` string are not read, including when the string names more than one algorithm.
 
 ```bash
 vg scan --offline --no-graph --format json --out scan.json
@@ -1880,13 +1882,17 @@ absent, and so is the dependency graph. A consumer that filters to
 `vibgrate:scope=direct` sees the same gap: other installed versions of that
 package are still in the full document, marked `transitive`.
 
-**Order.** Direct rows follow `projects` on the scan artifact, and within a
-project they follow that project's `dependencies` array. The npm scanner sorts
-each project's array by drift, then by package name, before it writes the
-artifact. Lockfile-only rows are appended after the direct rows, sorted by
-package name, then by version, then by ecosystem. That combined list is the order of CycloneDX
-`components`, CycloneDX `dependencies`, and SPDX `packages`. `dependsOn` entries
-and the names inside one lockfile edge are sorted on their own.
+**Order.** CycloneDX `components`, SPDX `packages`, and the package entries in
+CycloneDX `dependencies` share one order. A component with a Package URL sorts
+by that purl. A component without one sorts by package name. Version is the
+next key. When two components share a purl and a version, package name orders
+them (`Flask` before `flask`). `dependencies` starts with `vibgrate-root`, then
+those components. The order is the same on every run of the same artifact and
+the same lockfiles. It is independent of project order in the scan artifact,
+directory walk order, and lockfile map order. `dependsOn` entries and the names
+inside one lockfile edge are sorted on their own. SPDX `SPDXID` values are
+`SPDXRef-Package-N` for that order, so they stay put when only discovery order
+changes. The document id stays a content-derived UUID.
 
 **Same inputs, same document.** For one scan artifact and the lockfiles under
 `--root`, `vg sbom export` writes the same JSON on every run, including the
@@ -1901,13 +1907,14 @@ are in [Package digests](#package-digests).
 
 **Known limitations:**
 
-- Direct-row order, and which project's metadata is kept for a shared
-  identity, follow the scan artifact. Reordering projects changes
-  `vibgrate:project` on that row, reassigns SPDX `SPDXID` values to match the
-  new positions, retargets SPDX `DEPENDS_ON` relationships (they point at
-  SPDX IDs), and changes the document serial number and namespace. CycloneDX `bom-ref` stays on the purl,
-  so a scanner that stored the purl still matches. `vibgrate:projects` stays
-  the sorted set of contributing projects.
+- Which project's metadata is kept for a shared identity follows the scan
+  artifact. Reordering projects changes `vibgrate:project` on that row and
+  changes the document serial number and namespace, because the kept project
+  is part of the document id. Component order and SPDX `SPDXID` values stay
+  on the Package URL, or on the name and version when there is no purl, so
+  those identifiers do not move when only project order changes. CycloneDX
+  `bom-ref` stays on the purl, so a scanner that stored the purl still
+  matches. `vibgrate:projects` stays the sorted set of contributing projects.
 - npm `package-lock.json` v2/v3 collapses two install paths of the same
   `name@version` into one component. When those paths declare different
   dependencies, the edge list is the path that appears last in the lockfile
@@ -3545,15 +3552,19 @@ Run `vg install --list` for the live support matrix (ids can grow over time) —
 
 ### vg lib
 
-Version-correct library docs — from the hosted catalog or local ingestion.
+`vg lib <pkg>` prints usage docs for one library. When a lockfile in the project root lists that package, the version label is that pin.
 
 ```bash
-vg lib                  # List the catalog
-vg lib <name>           # Show docs for a library (pinned to your lockfile version)
+vg lib react
+```
+
+```bash
+vg lib                  # List the local catalog
+vg lib <name>           # Docs for one library
 vg lib add <source>     # Ingest docs from a local source
 vg lib publish <name>   # Upload private library docs to the hosted catalog
 vg lib resolve <name>   # Resolve name → catalog id + version
-vg lib refresh          # Re-ingest all local sources
+vg lib refresh          # Re-ingest local sources
 ```
 
 | Flag | Default | Description |
@@ -3566,6 +3577,65 @@ vg lib refresh          # Re-ingest all local sources
 | `--language <lang>` | — | Primary language (for `publish`) |
 | `--region <region>` | `us` | Data-residency region for the hosted catalog |
 | `--ingest <url>` | — | Hosted catalog URL override (wins over `--region`) |
+| `-C, --cwd <dir>` | `.` | Directory whose lockfiles and manifests are read |
+| `--json` | — | Machine-readable JSON, including `source` and `version_mismatch` |
+| `--offline` | off | Skip the hosted catalog |
+| `--local` | off | On-device only; implies `--offline`, so the hosted catalog is skipped |
+
+#### Lockfile pin
+
+A pin is looked up when the name is a declared dependency. For npm that is `dependencies` and `devDependencies` in `package.json`. A name that exists only inside a lockfile has no pin from this command.
+
+The label uses the first version it can read:
+
+1. The lockfile pin, from the files in the table below.
+2. The installed copy, when those files have no entry.
+3. The range written in the manifest, when there is no pin and no installed copy.
+
+`--json` reports that choice as `source`: `lockfile`, `installed`, `declared`, or `unknown`.
+
+Readers open these filenames in the directory you run from (`-C` changes it). A lockfile that lives only in a subdirectory is left unread. For npm, the first file that contains the name wins.
+
+| Ecosystem | File | What is read |
+|-----------|------|----------------|
+| npm | `package-lock.json` | v2/v3: `packages["node_modules/<name>"].version`. v1: `dependencies.<name>.version`. |
+| npm | `pnpm-lock.yaml` | The importer entry's `version`. A peer suffix such as `(zod@4.0.0)` is removed. |
+| npm | `yarn.lock` | The `version` line in the block whose header names the package. |
+| Python | `poetry.lock`, then `uv.lock` | `version` on the `[[package]]` table with that name. Matching ignores case and treats `-`, `_`, and `.` as the same character. |
+| Python | `Pipfile.lock` | `version` under `default` or `develop`, with a leading `==` removed. Same name matching as Poetry. |
+| Rust | `Cargo.lock` | `version` on the `[[package]]` table. Crate names are matched case-insensitively. |
+| Ruby | `Gemfile.lock` | The concrete version in the specs block (`name (1.2.3)`). |
+| PHP | `composer.lock` | `version` in `packages` or `packages-dev`, with a leading `v` removed. |
+| .NET | `packages.lock.json` | `resolved` under `dependencies.<framework>.<id>`. Ids are matched case-insensitively. |
+| Swift | `Package.resolved` | `state.version` for a matching `identity` (v1 `object.pins`, or v2/v3 `pins`). |
+| Dart | `pubspec.lock` | The `version` field on that package. |
+| Java | `gradle.lockfile` | The version in a `group:artifact:version=` line. Pass the name as `group:artifact`. |
+
+The pin lookup skips `go.sum` (Go keeps the version declared in `go.mod`), `pdm.lock`, `npm-shrinkwrap.json`, `bun.lock`, and Maven lockfiles. A Java dependency declared only in `pom.xml` uses that declared version.
+
+The text is chosen separately from the label:
+
+- A catalog entry from `vg lib add` is printed with the version stored on that entry.
+- Otherwise, for an npm package, the command reads the installed package: `llms.txt`, then a README, then markdown under `docs/`, then the `description` in `package.json`. The label stays the lockfile pin when one exists, so the words can be the installed copy while the heading shows the pin.
+- When that text is missing or too thin, and the run may use the network, the hosted catalog is asked by library name. The heading then shows the version the catalog returned. When the catalog omits a version, the heading keeps the lockfile label.
+
+#### When a lookup fails
+
+**Missing lockfile entry.** The lockfile is absent, or it has no row for that name. The label moves to the installed version, then to the declared range. `--json` sets `source` to `installed`, `declared`, or `unknown`.
+
+**Lockfile and install disagree.** When both a pin and an installed version are readable and they differ, the label stays the pin. The command prints a warning that names both versions: the lockfile pins one version and the installed tree has the other. Reinstall from the lockfile, or commit the lockfile that matches what is installed. The warning is omitted when the two versions agree. `--json` puts the same pair on `version_mismatch` (`lockfile`, `installed`, `note`), or `null` when they agree. The installed copy is `node_modules/<name>/package.json` for npm, a `.dist-info` directory under `.venv`, `venv`, `env`, or `.tox` for Python, and `vendor/composer/installed.json` for PHP. Other ecosystems can show a pin without this comparison.
+
+**Offline or `--local`.** `--local` and `--offline` both skip the hosted catalog. A catalog entry and installed npm docs still print. When neither exists, the command exits 3:
+
+```text
+no library docs for "<name>" — add with `vg lib add <path|url> --name <name>` or install the package (or retry with --online for the hosted catalog)
+```
+
+The error text mentions `--online`. Remove `--local` or `--offline` and run the command again; those two flags are what keep the hosted catalog off. The network is on unless you pass one of them.
+
+**Network fetch fails.** A timeout, a connection error, a non-success response, or an empty body counts as no hosted answer. The message leaves out the response body and any credential. A failed attempt is not saved. A successful answer can be reused for about a day, so a later outage can still show that earlier text. When local text exists, it is printed, with a note that the local docs look thin and the hosted catalog had nothing better. When no local text exists either, the command exits 3 with the not-found message above, without the `--online` hint.
+
+**Unreadable lockfile.** A lockfile that is present but truncated, invalid, or unreadable stops the command and exits 1. The message names the file and tells you to restore or regenerate it with your package manager. File contents stay out of the message.
 
 ---
 
