@@ -303,6 +303,37 @@ function componentBomRef(ecosystem: Ecosystem, name: string, version: string): s
   return purlFor(ecosystem, name, version) ?? `vibgrate:${ecosystem}:${name}@${version}`;
 }
 
+/** Code-unit order, so the result does not depend on the process locale. */
+function cmpText(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+/**
+ * Order for SBOM component and dependency rows. Primary key is the Package URL
+ * when one was emitted, otherwise the package name. Version is next. The name
+ * is the last key so two rows that share a purl and a version (PyPI `Flask`
+ * and `flask`) stay in a fixed order instead of discovery order.
+ */
+export function compareSbomOrder(
+  a: { purl?: string | null; name: string; version?: string | null },
+  b: { purl?: string | null; name: string; version?: string | null },
+): number {
+  const aPrimary = a.purl ? a.purl : a.name;
+  const bPrimary = b.purl ? b.purl : b.name;
+  return cmpText(aPrimary, bPrimary) || cmpText(a.version ?? '', b.version ?? '') || cmpText(a.name, b.name);
+}
+
+function compareFlattenedDependency(a: FlattenedDependency, b: FlattenedDependency): number {
+  return (
+    compareSbomOrder(
+      { purl: purlFor(a.ecosystem, a.package, a.version), name: a.package, version: a.version },
+      { purl: purlFor(b.ecosystem, b.package, b.version), name: b.package, version: b.version },
+    ) || cmpText(a.ecosystem, b.ecosystem)
+  );
+}
+
 function splitDependencyKey(key: string): { name: string; version: string } {
   const at = key.lastIndexOf('@');
   return { name: key.slice(0, at), version: key.slice(at + 1) };
@@ -411,42 +442,6 @@ function pushWarningCode(properties: Array<{ name: string; value: string }>, mes
 
 function sortedUnique(names: Iterable<string>): string[] {
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
-}
-
-/** Identity fields used to order SBOM components. `purl` is null when the row has none. */
-export interface SbomComponentOrderKey {
-  purl: string | null;
-  name: string;
-  version: string;
-  ecosystem: string;
-}
-
-/**
- * Order for emitted components: Package URL when one is present, otherwise
- * the package name, then version, then ecosystem. Comparison is UTF-16 code
- * unit order so the result does not depend on locale, scan order, or the
- * order a directory walk returned files.
- */
-export function compareSbomComponentOrder(a: SbomComponentOrderKey, b: SbomComponentOrderKey): number {
-  return (
-    cmpCodePoint(a.purl ?? a.name, b.purl ?? b.name) ||
-    cmpCodePoint(a.name, b.name) ||
-    cmpCodePoint(a.version, b.version) ||
-    cmpCodePoint(a.ecosystem, b.ecosystem)
-  );
-}
-
-function cmpCodePoint(a: string, b: string): number {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
-}
-
-function compareFlattenedDependency(a: FlattenedDependency, b: FlattenedDependency): number {
-  return compareSbomComponentOrder(
-    { purl: purlFor(a.ecosystem, a.package, a.version), name: a.package, version: a.version, ecosystem: a.ecosystem },
-    { purl: purlFor(b.ecosystem, b.package, b.version), name: b.package, version: b.version, ecosystem: b.ecosystem },
-  );
 }
 
 function addProjects(row: FlattenedDependency, names: Iterable<string>): void {
@@ -562,10 +557,6 @@ interface MergedLockfileComponent extends LockfileComponent {
  * first and win over a lockfile row. The same identity from another project
  * stays one component; every contributing project is recorded. Differing
  * manifest metadata is dropped with a warning, not silently.
- *
- * The returned list is the emit order. It is sorted by Package URL when one
- * can be built, otherwise by package name, then version, then ecosystem.
- * Direct rows are not left in scan order ahead of the lockfile-only rows.
  */
 export function flattenDependencies(
   artifact: ScanArtifact,
@@ -648,6 +639,8 @@ export function flattenDependencies(
     index.set(key, row);
     lockfileOnly.push(row);
   }
+  // Sort before any serializer, warning list, or document-id seed reads this
+  // array. Discovery order (project walk, lockfile map) must not leak.
   return [...rows, ...lockfileOnly].sort(compareFlattenedDependency);
 }
 

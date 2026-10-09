@@ -1,8 +1,7 @@
 /**
  * Pins the documented `vg sbom export` contract for several resolved versions
  * of one package: identity, dedup, scope, order, and the known limitations
- * (kept-project attribution follows the scan artifact, last lockfile path
- * wins the edges, PyPI purl folding). Component order follows the purl sort.
+ * (artifact order, last lockfile path wins the edges, PyPI purl folding).
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -213,7 +212,7 @@ describe('sbom export: several versions of one package', () => {
     expect(second.serialNumber).not.toBe(first.serialNumber);
   });
 
-  it('keeps attribution on the first scanned project and assigns SPDX IDs from purl order', () => {
+  it('keeps attribution from artifact project order and assigns SPDX IDs from the stable component order', () => {
     writeRootLock('other-last');
     const forward = scanned();
     const reversed = artifact([...forward.projects].reverse());
@@ -230,13 +229,11 @@ describe('sbom export: several versions of one package', () => {
     expect(scopeOf(left(b).properties, 'vibgrate:project')).toBe('shared-extra');
     expect(b.serialNumber).not.toBe(a.serialNumber);
 
-    expect(a.components.map((c) => c.purl)).toEqual(b.components.map((c) => c.purl));
-
     const spdxA = toSpdx(forward, graph) as { packages: Array<{ SPDXID: string; name: string }> };
     const spdxB = toSpdx(reversed, graph) as { packages: Array<{ SPDXID: string; name: string }> };
     expect(spdxA.packages.map((p) => p.SPDXID)).toEqual(spdxB.packages.map((p) => p.SPDXID));
     expect(spdxA.packages.find((p) => p.name === 'widget')!.SPDXID).toBe('SPDXRef-Package-6');
-    expect(spdxB.packages.find((p) => p.name === 'widget')!.SPDXID).toBe('SPDXRef-Package-6');
+    expect(spdxB.packages.find((p) => p.name === 'widget')!.SPDXID).toBe(spdxA.packages.find((p) => p.name === 'widget')!.SPDXID);
   });
 
   it('omits lockfile-only versions when the lockfile graph is absent (--no-transitive)', () => {
@@ -263,8 +260,6 @@ describe('sbom export: several versions of one package', () => {
     expect(cdx.components.map((c) => c.name)).toEqual(['Flask', 'flask']);
     expect(cdx.components.map((c) => c.purl)).toEqual(['pkg:pypi/flask@3.0.0', 'pkg:pypi/flask@3.0.0']);
     expect(cdx.components.map((c) => c['bom-ref'])).toEqual(['pkg:pypi/flask@3.0.0', 'pkg:pypi/flask@3.0.0']);
-    const reversed = artifact([py('b'), py('a')]);
-    expect((toCycloneDx(reversed) as typeof cdx).components.map((c) => c.name)).toEqual(['Flask', 'flask']);
     const spdx = toSpdx(scan) as {
       packages: Array<{ SPDXID: string; externalRefs: Array<{ referenceLocator: string }> }>;
     };

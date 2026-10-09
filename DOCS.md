@@ -1622,7 +1622,7 @@ Use this to treat SBOMs as operational intelligence instead of static compliance
 
 `vg sbom export` writes one JSON document. `--format` accepts `cyclonedx` or `spdx`, compared without regard to case. The default is `cyclonedx`. Any other value prints `Invalid SBOM format. Use cyclonedx or spdx.` and the process exits 1.
 
-Both formats are built from the same scan artifact and the same lockfiles under `--root`. The component list and its order are the same. Each specification then places those facts in its own fields.
+Both formats are built from the same scan artifact and the same lockfiles under `--root`. The component list and its order are the same: Package URL when the component has one, otherwise the package name, then the version. Each specification then places those facts in its own fields.
 
 ```bash
 vg scan --offline
@@ -1640,7 +1640,7 @@ vg sbom export --format spdx --out sbom.spdx.json
 | Created | `metadata.timestamp` is the artifact's `timestamp` | `creationInfo.created` is that same timestamp |
 | Scan root | `metadata.component` has `type` `application`, `bom-ref` `vibgrate-root`, and `name` set to the scan root. That component is not copied into `components` | There is no package for the scan root |
 | Package identity | `components[].purl`. When a purl is written, `bom-ref` is that purl | `packages[].externalRefs[]` with `referenceCategory` `PACKAGE-MANAGER`, `referenceType` `purl`, and `referenceLocator` set to the purl. `SPDXID` is `SPDXRef-Package-N` |
-| Dependency graph | `dependencies` is an array of `{ ref, dependsOn }`. `ref` is a `bom-ref`. The first entry is `vibgrate-root`. Every component is an entry. `dependsOn` lists child `bom-ref` values, or is `[]` when none were recorded for that component | `relationships` is an array of `{ spdxElementId, relatedSpdxElementId, relationshipType }`. `relationshipType` is `DEPENDS_ON`. Edges from the document use `SPDXRef-DOCUMENT`. A row is written only for a recorded edge |
+| Dependency graph | `dependencies` is an array of `{ ref, dependsOn }`. `ref` is a `bom-ref`. The first entry is `vibgrate-root`. Every component is an entry after that, in the component order above. `dependsOn` lists child `bom-ref` values, or is `[]` when none were recorded for that component | `relationships` is an array of `{ spdxElementId, relatedSpdxElementId, relationshipType }`. `relationshipType` is `DEPENDS_ON`. Edges from the document use `SPDXRef-DOCUMENT`. A row is written only for a recorded edge. `SPDXID` values follow the component order above |
 | Licenses | `licenses` is present when the declared license can be written, and absent when it cannot | `licenseDeclared` is set on every package. `licenseConcluded` is `NOASSERTION` on every package. `hasExtractedLicensingInfos` is present when a `LicenseRef-…` is used. Every package has `downloadLocation` `NOASSERTION` and `filesAnalyzed` `false` |
 
 `dataLicense` `CC0-1.0` is the SPDX license for the document data. Package licenses stay on `licenseDeclared`.
@@ -1761,9 +1761,9 @@ Two other strings in the same file are easy to misread as package digests. `vcs.
 | `uv.lock` | `hash` |
 | `go.sum` | `h1:` |
 
-**Several digests, one component.** A lockfile can list more than one digest for one package. The export still writes one component for that ecosystem, name, and version. It does not add a row per digest. `hashes` and `checksums` are omitted, so there is no digest array and no digest order to keep stable. Component order stays the order in [Several versions of one package](#several-versions-of-one-package): the Package URL when one is written, otherwise the package name, then the version, then the ecosystem. Digest text is not part of that sort, and it is not part of the document id. Exporting the same scan artifact again, after a lockfile edit that changes only those digest strings and leaves names, versions, and edges alone, writes the same JSON, including `serialNumber` and `documentNamespace`.
+**Several digests, one component.** A lockfile can list more than one digest for one package. The export still writes one component for that ecosystem, name, and version. It does not add a row per digest. `hashes` and `checksums` are omitted, so there is no digest array and no digest order to keep stable. Component order stays the order in [Several versions of one package](#several-versions-of-one-package): Package URL when the component has one, otherwise the package name, then the version. Digest text is not part of that sort, and it is not part of the document id. Exporting the same scan artifact again, after a lockfile edit that changes only those digest strings and leaves names, versions, and edges alone, writes the same JSON, including `serialNumber` and `documentNamespace`.
 
-`go.sum` lists a module twice: `<module> <version> h1:…` and `<module> <version>/go.mod h1:…`. The `/go.mod` line is not a second component. Both `h1:` values are dropped. A `uv.lock` package block can carry more than one `hash`. Those values are dropped, and the block stays one component, placed with the others by the order in [Several versions of one package](#several-versions-of-one-package). An npm `integrity` string and a pnpm `resolution.integrity` string are not read, including when the string names more than one algorithm.
+`go.sum` lists a module twice: `<module> <version> h1:…` and `<module> <version>/go.mod h1:…`. The `/go.mod` line is not a second component. Both `h1:` values are dropped. A `uv.lock` package block can carry more than one `hash`. Those values are dropped, and the block stays one component, in the same order as the other rows. An npm `integrity` string and a pnpm `resolution.integrity` string are not read, including when the string names more than one algorithm.
 
 ```bash
 vg scan --offline --no-graph --format json --out scan.json
@@ -1880,16 +1880,17 @@ absent, and so is the dependency graph. A consumer that filters to
 `vibgrate:scope=direct` sees the same gap: other installed versions of that
 package are still in the full document, marked `transitive`.
 
-**Order.** Before the JSON is written, every component is sorted by its
-Package URL when one is written, otherwise by package name, then by version,
-then by ecosystem. The comparison is UTF-16 code unit order, so it does not
-follow the locale, the order of `projects` on the scan artifact, the order of
-a project's `dependencies` array, or the order a directory walk returned
-those files. Direct rows and lockfile-only rows are one list. That list is
-the order of CycloneDX `components`, the component entries of CycloneDX
-`dependencies` (the first entry stays `vibgrate-root`), and SPDX `packages`.
-`SPDXRef-Package-1` is the first package in that list. `dependsOn` entries
-and the names inside one lockfile edge are sorted on their own.
+**Order.** CycloneDX `components`, SPDX `packages`, and the package entries in
+CycloneDX `dependencies` share one order. A component with a Package URL sorts
+by that purl. A component without one sorts by package name. Version is the
+next key. When two components share a purl and a version, package name orders
+them (`Flask` before `flask`). `dependencies` starts with `vibgrate-root`, then
+those components. The order is the same on every run of the same artifact and
+the same lockfiles. It is independent of project order in the scan artifact,
+directory walk order, and lockfile map order. `dependsOn` entries and the names
+inside one lockfile edge are sorted on their own. SPDX `SPDXID` values are
+`SPDXRef-Package-N` for that order, so they stay put when only discovery order
+changes. The document id stays a content-derived UUID.
 
 **Same inputs, same document.** For one scan artifact and the lockfiles under
 `--root`, `vg sbom export` writes the same JSON on every run, including the
@@ -1907,11 +1908,11 @@ are in [Package digests](#package-digests).
 - Which project's metadata is kept for a shared identity follows the scan
   artifact. Reordering projects changes `vibgrate:project` on that row and
   changes the document serial number and namespace, because the kept project
-  is part of the document id. Component order does not follow that project
-  order. SPDX `SPDXID` values and the `DEPENDS_ON` relationships that point
-  at them stay with the purl sort above. CycloneDX `bom-ref` stays on the
-  purl, so a scanner that stored the purl still matches. `vibgrate:projects`
-  stays the sorted set of contributing projects.
+  is part of the document id. Component order and SPDX `SPDXID` values stay
+  on the Package URL, or on the name and version when there is no purl, so
+  those identifiers do not move when only project order changes. CycloneDX
+  `bom-ref` stays on the purl, so a scanner that stored the purl still
+  matches. `vibgrate:projects` stays the sorted set of contributing projects.
 - npm `package-lock.json` v2/v3 collapses two install paths of the same
   `name@version` into one component. When those paths declare different
   dependencies, the edge list is the path that appears last in the lockfile

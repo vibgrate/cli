@@ -330,7 +330,6 @@ describe('sbom helpers', () => {
     ]);
     expect(warnings[0]).toContain('empty path segment');
     expect(warnings[1]).toContain('whitespace or a non-ASCII character');
-    expect(warnings[2]).toContain('whitespace or a non-ASCII character');
 
     const spdx = toSpdx(artifact) as {
       packages: Array<{

@@ -2,7 +2,7 @@ import { serializeGraph, slimGraphForExport } from './serialize.js';
 import { renderReport } from './report.js';
 import { renderHtml } from './html.js';
 import type { DepRecord } from './drift.js';
-import { compareSbomComponentOrder, resolvePurl } from '../reporting/commands/sbom.js';
+import { compareSbomOrder, resolvePurl } from '../reporting/commands/sbom.js';
 import type { LocalModel } from './models.js';
 import type { VgGraph } from '../schema.js';
 
@@ -242,37 +242,21 @@ function sqlBool(v: boolean | null | undefined): string {
   return v == null ? 'NULL' : v ? '1' : '0';
 }
 
-/** Package URL this exporter actually writes for a dependency, or null when it omits one. */
-function emittedDepPurl(dep: DepRecord): string | null {
-  if (dep.ecosystem !== 'npm') return null;
-  return resolvePurl('npm', dep.name, dep.installed ?? '').purl;
-}
-
-function sortExportDeps(deps: DepRecord[]): DepRecord[] {
-  return [...deps].sort((a, b) =>
-    compareSbomComponentOrder(
-      { purl: emittedDepPurl(a), name: a.name, version: a.installed ?? a.declared, ecosystem: a.ecosystem },
-      { purl: emittedDepPurl(b), name: b.name, version: b.installed ?? b.declared, ecosystem: b.ecosystem },
-    ),
-  );
-}
-
-function sortExportModels(models: LocalModel[]): LocalModel[] {
-  return [...models].sort((a, b) =>
-    compareSbomComponentOrder(
-      { purl: null, name: a.name, version: '', ecosystem: a.runtime },
-      { purl: null, name: b.name, version: '', ecosystem: b.runtime },
-    ),
-  );
+interface SbomLibraryComponent {
+  type: string;
+  name: string;
+  version?: string;
+  purl?: string;
+  properties?: Array<{ name: string; value: string | null }>;
 }
 
 function cyclonedx(ctx: ExportContext): string {
   // CycloneDX 1.6 JSON — dependencies as library components + local models as
-  // machine-learning-model components (AI-BOM). Library components are sorted
-  // before serialize (purl, else name, then version, then ecosystem). Models
-  // follow, sorted by name then runtime. No timestamps beyond the pinned generatedAt.
-  const components: unknown[] = [];
-  for (const d of sortExportDeps(ctx.deps ?? [])) {
+  // machine-learning-model components (AI-BOM). Component order is the Package
+  // URL when one is emitted, otherwise the name, then the version. No
+  // timestamps beyond the pinned generatedAt.
+  const components: SbomLibraryComponent[] = [];
+  for (const d of ctx.deps ?? []) {
     const version = d.installed ?? d.declared;
     if (d.ecosystem !== 'npm') {
       components.push({ type: 'library', name: d.name, version, purl: undefined });
@@ -295,9 +279,10 @@ function cyclonedx(ctx: ExportContext): string {
       });
     }
   }
-  for (const m of sortExportModels(ctx.models ?? [])) {
+  for (const m of ctx.models ?? []) {
     components.push({ type: 'machine-learning-model', name: m.name, properties: [{ name: 'vg:runtime', value: m.runtime }] });
   }
+  components.sort((a, b) => compareSbomOrder({ purl: a.purl, name: a.name, version: a.version }, { purl: b.purl, name: b.name, version: b.version }));
   const bom = {
     bomFormat: 'CycloneDX',
     specVersion: '1.6',
@@ -307,13 +292,26 @@ function cyclonedx(ctx: ExportContext): string {
   return JSON.stringify(bom, null, 2) + '\n';
 }
 
+/** Purl this exporter actually writes for a dependency. Non-npm rows omit it. */
+function emittedExportPurl(d: DepRecord): string | null {
+  if (d.ecosystem !== 'npm') return null;
+  return resolvePurl('npm', d.name, d.installed ?? '').purl;
+}
+
 function spdx(ctx: ExportContext): string {
-  const packages = sortExportDeps(ctx.deps ?? []).map((d) => ({
-    SPDXID: `SPDXRef-Package-${cypherLabel(d.name)}`,
-    name: d.name,
-    versionInfo: d.installed ?? d.declared,
-    downloadLocation: 'NOASSERTION',
-  }));
+  const packages = [...(ctx.deps ?? [])]
+    .sort((a, b) =>
+      compareSbomOrder(
+        { purl: emittedExportPurl(a), name: a.name, version: a.installed ?? a.declared },
+        { purl: emittedExportPurl(b), name: b.name, version: b.installed ?? b.declared },
+      ),
+    )
+    .map((d) => ({
+      SPDXID: `SPDXRef-Package-${cypherLabel(d.name)}`,
+      name: d.name,
+      versionInfo: d.installed ?? d.declared,
+      downloadLocation: 'NOASSERTION',
+    }));
   const doc = {
     spdxVersion: 'SPDX-2.3',
     dataLicense: 'CC0-1.0',

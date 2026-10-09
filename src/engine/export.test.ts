@@ -149,22 +149,36 @@ describe('cyclonedx export purl', () => {
     expect(bom.components.find((c) => c.name === 'requests')?.purl).toBeUndefined();
   });
 
-  it('sorts components by purl, then name, version, and ecosystem, independent of input order', () => {
+  it('two runs with reversed inputs emit components in purl, then name, then version order', () => {
     const base = ctx(makeGraph(false));
-    const chalk = { name: 'chalk', ecosystem: 'npm' as const, declared: '^5.0.0', installed: '5.3.0' };
-    const spaced = { name: 'foo bar', ecosystem: 'npm' as const, declared: '1.0.0', installed: '1.0.0' };
-    const requests = { name: 'requests', ecosystem: 'pypi' as const, declared: '2.31.0', installed: '2.31.0' };
-    const alpha = { runtime: 'ollama' as const, name: 'alpha', path: '/a' };
-    const zeta = { runtime: 'gguf' as const, name: 'zeta', path: '/z' };
-    const first = exportGraph('cyclonedx', { ...base, deps: [chalk, spaced, requests], models: [zeta, alpha] });
-    const second = exportGraph('cyclonedx', { ...base, deps: [requests, spaced, chalk], models: [alpha, zeta] });
+    const deps = [
+      { name: 'zzz', ecosystem: 'npm' as const, declared: '1.0.0', installed: '1.0.0' },
+      { name: 'foo bar', ecosystem: 'npm' as const, declared: '1.0.0', installed: '1.0.0' },
+      { name: 'aaa', ecosystem: 'npm' as const, declared: '2.0.0', installed: '2.0.0' },
+      { name: 'requests', ecosystem: 'pypi' as const, declared: '2.31.0', installed: '2.31.0' },
+    ];
+    const models = [
+      { runtime: 'ollama' as const, name: 'llama3:latest', path: '/x' },
+      { runtime: 'ollama' as const, name: 'aaa-model', path: '/y' },
+    ];
+    const first = exportGraph('cyclonedx', { ...base, deps, models });
+    const second = exportGraph('cyclonedx', {
+      ...base,
+      deps: [...deps].reverse(),
+      models: [...models].reverse(),
+    });
     expect(second).toBe(first);
-    const bom = JSON.parse(first) as { components: Array<{ name: string; type: string }> };
-    expect(bom.components.map((c) => c.name)).toEqual(['foo bar', 'chalk', 'requests', 'alpha', 'zeta']);
-    const spdxFirst = exportGraph('spdx', { ...base, deps: [chalk, spaced, requests] });
-    const spdxSecond = exportGraph('spdx', { ...base, deps: [requests, chalk, spaced] });
+    const bom = JSON.parse(first) as { components: Array<{ name: string; purl?: string }> };
+    expect(bom.components.map((c) => c.name)).toEqual(['aaa-model', 'foo bar', 'llama3:latest', 'aaa', 'zzz', 'requests']);
+    expect(bom.components.find((c) => c.name === 'aaa')?.purl).toBe('pkg:npm/aaa@2.0.0');
+    expect(bom.components.find((c) => c.name === 'foo bar')?.purl).toBeUndefined();
+
+    const spdxFirst = exportGraph('spdx', { ...base, deps });
+    const spdxSecond = exportGraph('spdx', { ...base, deps: [...deps].reverse() });
     expect(spdxSecond).toBe(spdxFirst);
-    const doc = JSON.parse(spdxFirst) as { packages: Array<{ name: string }> };
-    expect(doc.packages.map((p) => p.name)).toEqual(['foo bar', 'chalk', 'requests']);
+    const spdx = JSON.parse(spdxFirst) as { packages: Array<{ name: string; SPDXID: string }> };
+    expect(spdx.packages.map((p) => p.name)).toEqual(['foo bar', 'aaa', 'zzz', 'requests']);
+    expect(spdx.packages.find((p) => p.name === 'aaa')?.SPDXID).toBe('SPDXRef-Package-aaa');
+    expect(spdx.packages.find((p) => p.name === 'zzz')?.SPDXID).toBe('SPDXRef-Package-zzz');
   });
 });

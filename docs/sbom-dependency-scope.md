@@ -78,7 +78,7 @@ scope-fixture
     └── dev-optional-pkg@1.2.3          lockfile flags dev, optional, and devOptional
 ```
 
-Component order is the Package URL when one is written, otherwise the package name, then the version, then the ecosystem. Every row in this fixture has a purl, so the list is that purl order. It is not the scan's dependency array, and lockfile-only rows are not a second group after the direct rows.
+Component order is the Package URL, then the version. Every row in this tree has a purl, so the names sort alphabetically and then by version. CycloneDX `dependencies` still starts with `vibgrate-root`.
 
 | Package | `vibgrate:scope` | CycloneDX component `scope` | Root `dependsOn` | SPDX annotation | SPDX relationship |
 | --- | --- | --- | --- | --- | --- |
