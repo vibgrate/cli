@@ -595,12 +595,13 @@ Copy-paste CI templates live in `examples/github-actions/`. When the job fails, 
 
 ## Version-correct library docs
 
-`vg lib` fetches usage docs pinned to the **exact version in your lockfile** — never a newer API your code can't call yet:
+`vg lib` prints usage docs for the exact version in your lockfile, then the installed tree, then the declared range. Local files come first. A thin or missing local page asks the hosted catalog unless you pass `--offline` or `--local`.
 
 ```bash
-vg lib react                    # React docs at your installed version
-vg lib express --fn middleware  # specific function reference
+vg lib react
 ```
+
+Lockfiles, the pin order, and the failure text are in [DOCS.md](./DOCS.md#vg-lib).
 
 AI assistants connected via MCP use `vg lib` automatically when answering questions about library APIs in your project.
 
@@ -722,7 +723,7 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 | `vg guide <file>` | Cited standards / practices for a node (free pack) |
 | `vg impact <file>` | What breaks if you change it — and the tests to run |
 | `vg install` / `vg uninstall` | Wire (or remove) **Vibgrate AI Context** + skill in your AI assistant (`--detect`, `--all`, `--list`) |
-| `vg lib <package>` | Version-correct, drift-annotated library docs |
+| `vg lib <package>` | Version-correct, drift-annotated library docs pinned to the lockfile ([DOCS.md](./DOCS.md#vg-lib)) |
 | `vg locale` | Manage your app's translations — locale projects, keys, and translations in Vibgrate Cloud (`push` / `pull` / `status`; `vg localize` is an alias) |
 | `vg map` / `vg hubs` / `vg areas` / `vg oddities` | Map insights: overview, most-depended-on code, natural groupings, cross-area smells |
 | `vg models` | Code Modes (Spark / Flow / Forge) + local fleet (Ollama / LM Studio / gguf); `install` / `pull` by default (`--dry-run` to preview) |

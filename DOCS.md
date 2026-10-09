@@ -3545,21 +3545,88 @@ Run `vg install --list` for the live support matrix (ids can grow over time) —
 
 ### vg lib
 
-Version-correct library docs — from the hosted catalog or local ingestion.
+Version-correct library docs, local files first. The page comes from a catalog you ingested with `vg lib add`, or from the package installed in this project. For an installed package, the version in the header is the lockfile pin when the lockfile names that package. A catalog entry prints the version stored with that entry. A thin or missing local page is the only case that asks the hosted catalog, and only when the network is allowed.
 
 ```bash
-vg lib                  # List the catalog
-vg lib <name>           # Show docs for a library (pinned to your lockfile version)
-vg lib add <source>     # Ingest docs from a local source
-vg lib publish <name>   # Upload private library docs to the hosted catalog
-vg lib resolve <name>   # Resolve name → catalog id + version
-vg lib refresh          # Re-ingest all local sources
+vg lib                        # List the catalog
+vg lib react                  # Docs for react at the lockfile pin
+vg lib express --budget 2000  # Same lookup, trimmed to about 2000 tokens
+vg lib add <source>           # Ingest docs from a local source
+vg lib publish <name>         # Upload private library docs to the hosted catalog
+vg lib resolve <name>         # Resolve name → catalog id + version
+vg lib refresh                # Re-ingest all local sources
 ```
+
+`vg lib react` is the local-first lookup. Run it from the project that depends on React. No extra flag is required.
+
+**Which version.** The version is chosen in this order. An empty step leaves that slot empty:
+
+1. **Lockfile** — the exact version recorded for that package.
+2. **Installed** — the copy on disk when the lockfile has no entry for the name. npm reads `node_modules`. Python reads a `.dist-info` directory under `.venv`, `venv`, `env`, or `.tox`. PHP reads `vendor/composer/installed.json`.
+3. **Declared** — the range written in the project manifest when there is no pin and no install.
+4. **unknown** — none of the three. No version number is filled in.
+
+**Lockfiles read.** Files in this table are read from the working directory (`-C` / `--cwd`, otherwise the directory you ran `vg` from). Inside one ecosystem the first file that contains the package supplies the pin.
+
+| Ecosystem | Lockfiles, in order |
+|-----------|---------------------|
+| npm | `package-lock.json`, then `pnpm-lock.yaml`, then `yarn.lock` |
+| Python | `poetry.lock`, then `uv.lock`, then `Pipfile.lock` |
+| Rust | `Cargo.lock` |
+| PHP | `composer.lock` |
+| Ruby | `Gemfile.lock` |
+| .NET | `packages.lock.json` |
+| Swift | `Package.resolved` |
+| Dart | `pubspec.lock` |
+| Java | `gradle.lockfile` |
+
+**Go (`go.sum`).** `go.sum` is read from that same directory. A kept line is `module version hash`. A line whose version ends in `/go.mod` is the manifest hash and is skipped. That file is the resolved module list. The version `vg lib` prints for a Go module comes from the installed tree, then the `go.mod` `require` line, then unknown.
+
+**Missing lockfile entry.** The package is not pinned. The command continues with the next step: installed, then declared, then unknown. Generate the lockfile with your package manager and commit it when the header should stay on one exact version.
+
+**Lockfile and installed tree disagree.** Both versions were readable and they differ. A leading run of `v`, `^`, `~`, `>`, `=`, `<`, and whitespace is ignored before the comparison. The header stays on the lockfile pin, and the command prints:
+
+```
+⚠ lockfile pins 18.2.0 but the installed tree has 18.3.1 — your install is out of sync with the lockfile (re-install or commit the lock)
+```
+
+`vg lib react --json` puts the same object on `version_mismatch` (`lockfile`, `installed`, and `note`). When the versions agree, the warning is absent and `version_mismatch` is `null`. The page body is the files on disk, so re-install from the lockfile, or commit the lock that matches what is installed, before treating the page as the pin.
+
+**Offline and `--local`.** Asking the hosted catalog is on by default, and only after local docs are missing or thin. When the catalog answers, that page is what you see: `✔ local docs were thin — served richer docs from the hosted catalog`. `--offline` skips that request. `--local` implies `--offline`, so it skips the request too. Thin local docs stay on screen:
+
+```
+⚠ local docs look thin (no code example) — run without --local for the hosted catalog
+```
+
+The text in parentheses lists why the local page was thin. Several reasons are comma-separated. With no local docs at all the process exits non-zero:
+
+```
+no library docs for "react" — add with `vg lib add <path|url> --name react` or install the package (or retry with --online for the hosted catalog)
+```
+
+`--online` is deprecated on `vg lib` (network is already the default for `add` and `refresh`). It leaves `--offline` and `--local` in force. Drop those flags and run the command again to allow the hosted miss.
+
+**Registry fetch failed.** A timeout, a failed request, or a response that contains no docs is dropped. The text you see names the library and the next command. It leaves out credentials, a DSN, and the response body. When local docs exist they are still printed:
+
+```
+⚠ local docs look thin (no code example) — hosted catalog had nothing better
+```
+
+With no local docs, the process exits non-zero:
+
+```
+no library docs for "react" — add with `vg lib add <path|url> --name react` or install the package
+```
+
+Install the package, or ingest a local source with `vg lib add <path> --name react`, and run `vg lib react` again.
+
+Global `--json` applies here. `--offline` and `--local` are the switches that keep this command on the machine.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--name <name>` | — | Library name (for `add`) |
 | `--version <v>` | — | Pin the doc version (for `add`/`publish`) |
+| `--online` | — | Deprecated. Network is already on for `add`/`refresh`. `--offline` and `--local` stay in force |
 | `-b, --budget <n>` | — | Trim docs to ~N tokens |
 | `--readme <path>` | `./README.md` | README path (for `publish`) |
 | `--dts <path>` | — | TypeScript declaration path (for `publish`) |
