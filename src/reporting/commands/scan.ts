@@ -18,6 +18,7 @@ import {
   loadConfig,
   findConfigFile,
 } from '../../core-open/index.js';
+import { formatWarningLine, WARNING_CODES, type CodedWarning } from '../../core-open/warnings.js';
 import { writeScanSummary } from '../scan-summary.js';
 import { compareDriftBudget, evaluateConfigDriftBudget } from '../drift-budget-gate.js';
 import {
@@ -694,6 +695,9 @@ export const scanCommand = new Command('scan')
     // Retained by the postScan hook so the reachability query below can run
     // against the freshly built map without a second (memory-heavy) build.
     let builtGraph: VgGraph | null = null;
+    // Parse failures from the code-map walk. Printed after the scan report so
+    // the progress renderer cannot overwrite them, and before any gate exit.
+    let parseFailureWarnings: CodedWarning[] = [];
     // Outcome of the infrastructure pack run (`--iac`). `null` means it never
     // ran: no code map, or the map build failed before it. Only an `ok` run
     // puts `extended.security` on the artifact — the section is never
@@ -708,6 +712,7 @@ export const scanCommand = new Command('scan')
           exclude: opts.exclude,
           onParseProgress: (done, total) => report(done, total, 'parsing'),
         });
+        parseFailureWarnings = result.codedWarnings.filter((warning) => warning.code === WARNING_CODES.PARSE_FAILED);
         builtGraph = result.graph;
         const written = writeArtifacts(result.graph, { root: rootDir });
         if (written.architecturePolicyError) console.error(chalk.red(`\narchitecture policy: ${written.architecturePolicyError}`));
@@ -761,6 +766,12 @@ export const scanCommand = new Command('scan')
     // open build, so the scan runs entirely on the open base engine.
     const advanced = await loadAdvancedScanHook();
     const artifact = await runCoreScan(rootDir, scanOpts, advanced);
+
+    // The map walk degrades per file. Surface the same stable line `vg build`
+    // prints so a scan does not omit a supported-language parse failure.
+    for (const warning of parseFailureWarnings) {
+      console.error(chalk.yellow(formatWarningLine(warning)));
+    }
 
     // The scan just built a code map (its `postScan` step). Start the local
     // runtime if it is not up and hand it that map, so the very first `vg` in a

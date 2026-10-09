@@ -133,7 +133,10 @@ asserts stable output.
 
 1. **build** discovers files, parses them via the worker pool using bundled
    tree-sitter WASM grammars, resolves symbols/imports into typed relations,
-   runs analysis, and writes a stable `graph.json`.
+   runs analysis, and writes a stable `graph.json`. A registered-language file
+   whose parse throws, returns no tree, or recovers as only ERROR nodes with
+   no definitions emits `VG_WARN_PARSE_FAILED` (path, language, recovery
+   hint). `vg scan` prints that same warning when it builds the map.
 2. **query** commands and the **MCP server** both load `graph.json` and answer
    questions against it — they do not re-parse the source.
 3. **drift reporting** runs on top of `@vibgrate/core-open` and the resolved

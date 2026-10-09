@@ -1,5 +1,6 @@
 import { Query, type Node, type Language } from 'web-tree-sitter';
-import { parserFor, loadLanguage } from './grammars.js';
+import { parserFor, loadLanguage, resetParser } from './grammars.js';
+import { parseFailedWarning } from './parse-failure.js';
 import { langById } from './languages.js';
 import { queriesFor, type DefRule } from './queries.js';
 import { extractEmbeddedScript } from './sfc.js';
@@ -287,8 +288,17 @@ export async function parseSource(
 
   const language = await loadLanguage(effLangId);
   const parser = await parserFor(def);
-  const tree = parser.parse(text);
-  if (!tree) return result;
+  let tree;
+  try {
+    tree = parser.parse(text);
+  } catch {
+    // An external scanner can throw (wasm) and leave the reused parser
+    // mid-state. Drop it so the next file of this language starts clean.
+    // The warning is stable: the exception text is not part of the line.
+    resetParser(effLangId);
+    return markParseFailed(result);
+  }
+  if (!tree) return markParseFailed(result);
   const root = tree.rootNode;
 
   // --- definitions ---
@@ -467,7 +477,33 @@ export async function parseSource(
   const roles = extractAstRolesFromTree(rel, effLangId, language, root, text);
   if (roles) result.roles = roles;
 
+  // Decide before delete(): the node is invalid afterwards. A file whose root
+  // contains only ERROR nodes, and no definitions, used to disappear with no
+  // notice. A nested ERROR next to a real construct is not this case — some
+  // grammars set hasError on a reused parser for valid sources that simply
+  // declare nothing (Lua `return 1`), and warning there would be a false alarm.
+  const unrecovered = result.defs.length === 0 && unrecoveredTree(root);
   tree.delete();
+  if (unrecovered) return markParseFailed(result);
+  return result;
+}
+
+/** True when the parse recovered nothing but ERROR nodes at the root. */
+function unrecoveredTree(root: Node): boolean {
+  if (!root.hasError) return false;
+  if (root.isError || root.type === 'ERROR') return true;
+  let real = 0;
+  let error = 0;
+  for (const kid of root.namedChildren) {
+    if (!kid) continue;
+    if (kid.isError || kid.type === 'ERROR') error += 1;
+    else real += 1;
+  }
+  return error > 0 && real === 0;
+}
+
+function markParseFailed(result: FileParse): FileParse {
+  result.warnings = [parseFailedWarning(result.rel, result.lang)];
   return result;
 }
 

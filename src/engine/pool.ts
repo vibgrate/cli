@@ -7,7 +7,7 @@ import { setGrammarsOverride, resetParser } from './grammars.js';
 import { checkMemoryBudget, envJobs, envWorkerHeapMb, ResourceLimitError } from './limits.js';
 import type { DiscoveredFile } from './discover.js';
 import type { FileParse } from './types.js';
-import { stampWarning, WARNING_CODES } from '../core-open/warnings.js';
+import { parseFailedWarning } from './parse-failure.js';
 import type { ParseTask } from './parse-worker.js';
 
 /**
@@ -78,11 +78,11 @@ async function parseInline(files: DiscoveredFile[], options: ParseOptions): Prom
     try {
       const source = fs.readFileSync(file.abs, 'utf8');
       out.push(await parseSource(file.rel, file.lang.id, source));
-    } catch (err) {
+    } catch {
       // A wasm-level parse crash can leave the language's reused parser
       // mid-state; drop it so the failure stays contained to this file.
       resetParser(file.lang.id);
-      out.push(emptyParse(file, stampWarning(WARNING_CODES.PARSE_FAILED, `parse failed: ${(err as Error).message}`)));
+      out.push(emptyParse(file, parseFailedWarning(file.rel, file.lang.id)));
     }
     onProgress?.(out.length, files.length);
     if (out.length % MEM_CHECK_EVERY === 0) checkMemoryBudget('parse', memoryBudgetMb);
