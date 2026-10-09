@@ -78,16 +78,16 @@ scope-fixture
     └── dev-optional-pkg@1.2.3          lockfile flags dev, optional, and devOptional
 ```
 
-Component order follows the scan's dependency array (drift, then package name) and then lockfile-only rows (package name, then version). With every row at drift `unknown`, the names sort alphabetically inside each group.
+Component order is the Package URL, then the version. Every row in this tree has a purl, so the names sort alphabetically and then by version. CycloneDX `dependencies` still starts with `vibgrate-root`.
 
 | Package | `vibgrate:scope` | CycloneDX component `scope` | Root `dependsOn` | SPDX annotation | SPDX relationship |
 | --- | --- | --- | --- | --- | --- |
-| `fsevents@2.3.3` | `direct` | omitted | yes (`pkg:npm/fsevents@2.3.3`) | `scope=direct` on `SPDXRef-Package-1` | `DEPENDS_ON` from `SPDXRef-DOCUMENT` |
-| `left-pad@1.3.0` | `direct` | omitted | yes | `scope=direct` on `SPDXRef-Package-2` | `DEPENDS_ON` from `SPDXRef-DOCUMENT`. This package `DEPENDS_ON` `SPDXRef-Package-6` (`nested-prod`) |
-| `typescript@5.4.5` | `direct` | omitted | no | `scope=direct` on `SPDXRef-Package-3` | No document relationship. This package `DEPENDS_ON` `SPDXRef-Package-5` (`nested-dev`) |
-| `dev-optional-pkg@1.2.3` | `transitive` | omitted | no | `scope=transitive` on `SPDXRef-Package-4` | none |
-| `nested-dev@1.0.0` | `transitive` | omitted | no | `scope=transitive` on `SPDXRef-Package-5` | target of `typescript` only |
-| `nested-prod@1.0.0` | `transitive` | omitted | no | `scope=transitive` on `SPDXRef-Package-6` | target of `left-pad` only |
+| `dev-optional-pkg@1.2.3` | `transitive` | omitted | no | `scope=transitive` on `SPDXRef-Package-1` | none |
+| `fsevents@2.3.3` | `direct` | omitted | yes (`pkg:npm/fsevents@2.3.3`) | `scope=direct` on `SPDXRef-Package-2` | `DEPENDS_ON` from `SPDXRef-DOCUMENT` |
+| `left-pad@1.3.0` | `direct` | omitted | yes | `scope=direct` on `SPDXRef-Package-3` | `DEPENDS_ON` from `SPDXRef-DOCUMENT`. This package `DEPENDS_ON` `SPDXRef-Package-5` (`nested-prod`) |
+| `nested-dev@1.0.0` | `transitive` | omitted | no | `scope=transitive` on `SPDXRef-Package-4` | target of `typescript` only |
+| `nested-prod@1.0.0` | `transitive` | omitted | no | `scope=transitive` on `SPDXRef-Package-5` | target of `left-pad` only |
+| `typescript@5.4.5` | `direct` | omitted | no | `scope=direct` on `SPDXRef-Package-6` | No document relationship. This package `DEPENDS_ON` `SPDXRef-Package-4` (`nested-dev`) |
 
 A CycloneDX component for `typescript` has `type`, `bom-ref`, `name`, `version`, `purl`, and `properties`. The component `scope` member is absent. `properties` includes `vibgrate:scope` = `direct`. The root `dependencies` entry (`bom-ref` `vibgrate-root`) lists `fsevents` and `left-pad`. `typescript` has its own `dependsOn` entry pointing at `nested-dev`.
 

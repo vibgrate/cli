@@ -113,9 +113,9 @@ describe('sbom export: multi-project lockfile merge', () => {
     };
     expect(cdx.components.map((c) => `${c.purl}`)).toEqual([
       'pkg:npm/left-pad@1.3.0',
-      'pkg:npm/widget@1.0.0',
       'pkg:npm/once@1.3.0',
       'pkg:npm/once@1.4.0',
+      'pkg:npm/widget@1.0.0',
       'pkg:npm/widget@2.0.0',
     ]);
     expect(new Set(cdx.components.map((c) => c['bom-ref'])).size).toBe(cdx.components.length);
@@ -141,9 +141,9 @@ describe('sbom export: multi-project lockfile merge', () => {
     expect(cdx.dependencies).toEqual([
       { ref: 'vibgrate-root', dependsOn: ['pkg:npm/left-pad@1.3.0', 'pkg:npm/widget@2.0.0'] },
       { ref: 'pkg:npm/left-pad@1.3.0', dependsOn: ['pkg:npm/once@1.3.0'] },
-      { ref: 'pkg:npm/widget@1.0.0', dependsOn: [] },
       { ref: 'pkg:npm/once@1.3.0', dependsOn: [] },
       { ref: 'pkg:npm/once@1.4.0', dependsOn: [] },
+      { ref: 'pkg:npm/widget@1.0.0', dependsOn: [] },
       { ref: 'pkg:npm/widget@2.0.0', dependsOn: [] },
     ]);
 
@@ -161,7 +161,7 @@ describe('sbom export: multi-project lockfile merge', () => {
     expect(spdx.relationships).toEqual([
       { spdxElementId: 'SPDXRef-DOCUMENT', relatedSpdxElementId: 'SPDXRef-Package-1', relationshipType: 'DEPENDS_ON' },
       { spdxElementId: 'SPDXRef-DOCUMENT', relatedSpdxElementId: 'SPDXRef-Package-5', relationshipType: 'DEPENDS_ON' },
-      { spdxElementId: 'SPDXRef-Package-1', relatedSpdxElementId: 'SPDXRef-Package-3', relationshipType: 'DEPENDS_ON' },
+      { spdxElementId: 'SPDXRef-Package-1', relatedSpdxElementId: 'SPDXRef-Package-2', relationshipType: 'DEPENDS_ON' },
     ]);
     expect(collectMergeWarnings(scan, graph)).toEqual([LOSSY_EDGE_WARNING]);
   });
@@ -330,5 +330,41 @@ describe('sbom export: multi-project lockfile merge', () => {
     expect(stdout[0]).toContain('"bomFormat": "CycloneDX"');
     expect(stderr.join('\n')).toContain(`warning [VG_WARN_SBOM_LOSSY_EDGES]: ${LOSSY_EDGE_WARNING}`);
     expect(stderr.join('\n')).not.toContain('http');
+  });
+
+  it('two runs on a fixture emit the same component and dependency order', () => {
+    const base = scanned();
+    const graph = collectLockfileGraph(base, root);
+    expect(graph?.edges).toBeDefined();
+    const place = (where: 'start' | 'end') => {
+      const scan = scanned();
+      const row = dep('foo bar', '1.0.0');
+      const deps = scan.projects[0]!.dependencies;
+      if (where === 'start') deps.unshift(row);
+      else deps.push(row);
+      return scan;
+    };
+    const reversed = {
+      components: [...graph!.components].reverse(),
+      edges: new Map([...graph!.edges!.entries()].reverse()),
+      rootDependsOn: [...graph!.rootDependsOn].reverse(),
+      ecosystem: graph!.ecosystem,
+    };
+    const first = toCycloneDx(place('start'), graph);
+    const second = toCycloneDx(place('end'), reversed);
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+    const doc = first as {
+      serialNumber: string;
+      components: Array<{ name: string; purl?: string; 'bom-ref': string }>;
+      dependencies: Array<{ ref: string }>;
+    };
+    const rerun = toCycloneDx(place('start'), collectLockfileGraph(base, root)) as { serialNumber: string };
+    expect(rerun.serialNumber).toBe(doc.serialNumber);
+    expect(doc.serialNumber).toMatch(/^urn:uuid:/);
+    expect(doc.components.map((c) => c.name)).toEqual(['foo bar', 'left-pad', 'once', 'once', 'widget', 'widget']);
+    expect(doc.components[0]!.purl).toBeUndefined();
+    expect(doc.dependencies[0]!.ref).toBe('vibgrate-root');
+    expect(doc.dependencies.slice(1).map((d) => d.ref)).toEqual(doc.components.map((c) => c['bom-ref']));
+    expect(JSON.stringify(toSpdx(place('start'), graph))).toBe(JSON.stringify(toSpdx(place('end'), reversed)));
   });
 });

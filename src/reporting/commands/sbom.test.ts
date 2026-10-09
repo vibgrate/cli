@@ -90,12 +90,12 @@ describe('sbom helpers', () => {
     expect(cdx.metadata.component.type).toBe('application');
     expect(cdx.metadata.component.version).toBeUndefined();
     expect(cdx.components.map((c) => ({ type: c.type, name: c.name }))).toEqual([
-      { type: 'library', name: 'chalk' },
       { type: 'library', name: 'library/alpine' },
+      { type: 'library', name: 'chalk' },
     ]);
 
     const spdx = toSpdx(artifact) as { packages: Array<Record<string, unknown>> };
-    expect(spdx.packages.map((pkg) => pkg.name)).toEqual(['chalk', 'library/alpine']);
+    expect(spdx.packages.map((pkg) => pkg.name)).toEqual(['library/alpine', 'chalk']);
     for (const pkg of spdx.packages) {
       expect(pkg).not.toHaveProperty('primaryPackagePurpose');
     }
@@ -122,7 +122,7 @@ describe('sbom helpers', () => {
     const sbom = toSpdx(makeArtifact('5.3.0', 90), componentsOnlyGraph([{ package: 'ansi-styles', version: '6.2.1' }])) as {
       packages: Array<{ name: string }>;
     };
-    expect(sbom.packages.map((p) => p.name)).toEqual(['chalk', 'ansi-styles']);
+    expect(sbom.packages.map((p) => p.name)).toEqual(['ansi-styles', 'chalk']);
   });
 
   it('gives every CycloneDX component and the root a purl-based bom-ref, and a matching purl field', () => {
@@ -158,8 +158,8 @@ describe('sbom helpers', () => {
     };
     expect(sbom.dependencies).toEqual([
       { ref: 'vibgrate-root', dependsOn: ['pkg:npm/chalk@5.3.0'] },
-      { ref: 'pkg:npm/chalk@5.3.0', dependsOn: ['pkg:npm/ansi-styles@6.2.1'] },
       { ref: 'pkg:npm/ansi-styles@6.2.1', dependsOn: [] },
+      { ref: 'pkg:npm/chalk@5.3.0', dependsOn: ['pkg:npm/ansi-styles@6.2.1'] },
     ]);
   });
 
@@ -176,8 +176,8 @@ describe('sbom helpers', () => {
       relationships: Array<{ spdxElementId: string; relatedSpdxElementId: string; relationshipType: string }>;
     };
     expect(sbom.relationships).toEqual([
-      { spdxElementId: 'SPDXRef-DOCUMENT', relatedSpdxElementId: 'SPDXRef-Package-1', relationshipType: 'DEPENDS_ON' },
-      { spdxElementId: 'SPDXRef-Package-1', relatedSpdxElementId: 'SPDXRef-Package-2', relationshipType: 'DEPENDS_ON' },
+      { spdxElementId: 'SPDXRef-DOCUMENT', relatedSpdxElementId: 'SPDXRef-Package-2', relationshipType: 'DEPENDS_ON' },
+      { spdxElementId: 'SPDXRef-Package-2', relatedSpdxElementId: 'SPDXRef-Package-1', relationshipType: 'DEPENDS_ON' },
     ]);
   });
 
@@ -306,8 +306,8 @@ describe('sbom helpers', () => {
     expect(again).not.toContain('%40scope/');
     expect(again).not.toContain('%C3%A9');
 
-    expect(cyclone.components.map((c) => c.name)).toEqual(['chalk', 'foo bar', '@scope/', 'café']);
-    expect(cyclone.components[0]!.purl).toBe('pkg:npm/chalk@5.3.0');
+    expect(cyclone.components.map((c) => c.name)).toEqual(['@scope/', 'café', 'foo bar', 'chalk']);
+    expect(cyclone.components.find((c) => c.name === 'chalk')!.purl).toBe('pkg:npm/chalk@5.3.0');
 
     for (const name of ['foo bar', '@scope/', 'café']) {
       const row = cyclone.components.find((c) => c.name === name)!;
@@ -324,12 +324,12 @@ describe('sbom helpers', () => {
 
     const warnings = collectPurlWarnings(artifact);
     expect(warnings).toEqual([
-      describeUnavailablePurl('npm', 'foo bar', '1.0.0'),
       describeUnavailablePurl('npm', '@scope/', '2.0.0'),
       describeUnavailablePurl('npm', 'café', '3.0.0'),
+      describeUnavailablePurl('npm', 'foo bar', '1.0.0'),
     ]);
-    expect(warnings[0]).toContain('whitespace or a non-ASCII character');
-    expect(warnings[1]).toContain('empty path segment');
+    expect(warnings[0]).toContain('empty path segment');
+    expect(warnings[1]).toContain('whitespace or a non-ASCII character');
 
     const spdx = toSpdx(artifact) as {
       packages: Array<{
@@ -342,7 +342,7 @@ describe('sbom helpers', () => {
     const bad = spdx.packages.find((p) => p.name === 'foo bar')!;
     expect(bad.externalRefs).toBeUndefined();
     expect(bad.annotations[0]!.comment).toContain('purlStatus=unavailable');
-    expect(bad.annotations[1]!.comment).toBe(warnings[0]);
+    expect(bad.annotations[1]!.comment).toBe(describeUnavailablePurl('npm', 'foo bar', '1.0.0'));
     expect(spdx.packages.find((p) => p.name === 'chalk')!.externalRefs?.[0]?.referenceLocator).toBe('pkg:npm/chalk@5.3.0');
   });
 
@@ -366,8 +366,8 @@ describe('sbom helpers', () => {
     expect(badRef).toBe('vibgrate:npm:foo bar@1.0.0');
     expect(sbom.dependencies).toEqual([
       { ref: 'vibgrate-root', dependsOn: ['pkg:npm/chalk@5.3.0', badRef] },
-      { ref: 'pkg:npm/chalk@5.3.0', dependsOn: [badRef] },
       { ref: badRef, dependsOn: [] },
+      { ref: 'pkg:npm/chalk@5.3.0', dependsOn: [badRef] },
     ]);
     expect(JSON.stringify(sbom.dependencies)).not.toContain('pkg:npm/foo');
   });
