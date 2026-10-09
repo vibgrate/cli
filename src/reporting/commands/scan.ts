@@ -841,7 +841,6 @@ export const scanCommand = new Command('scan')
           findings: artifact.findings,
           driftGate: failOn.legacy === 'warn' || failOn.legacy === 'error' ? failOn.legacy : undefined,
           extraSuites: junitSuites,
-          root: rootDir,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -865,7 +864,7 @@ export const scanCommand = new Command('scan')
           if (found === null) {
             junitSuites.push(architectureGateSuite({ status: 'blocked', message: ARCHITECTURE_NOT_CLASSIFIED }));
           } else if (found.rows.length > 0) {
-            junitSuites.push(architectureGateSuite({ status: 'failed', rows: found.rows }, rootDir));
+            junitSuites.push(architectureGateSuite({ status: 'failed', rows: found.rows }));
           } else {
             junitSuites.push(architectureGateSuite({ status: 'clean' }));
           }
@@ -889,7 +888,7 @@ export const scanCommand = new Command('scan')
                 status: 'evaluated',
                 findings: section.findings,
                 failingIds: outcome.matched.map((f) => f.id),
-              }, rootDir));
+              }));
             }
           }
         }

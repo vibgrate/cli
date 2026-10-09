@@ -1,3 +1,4 @@
+import { portableValue } from '../core-open/utils/portable-path.js';
 import type { VgGraph } from '../schema.js';
 
 /**
@@ -5,7 +6,8 @@ import type { VgGraph } from '../schema.js';
  * `generatedAt`, the report is byte-stable. Numbers are derived purely from the
  * graph, so the report can be regenerated from a committed `graph.json`.
  */
-export function renderReport(graph: VgGraph): string {
+export function renderReport(graph: VgGraph, root?: string): string {
+  graph = portableValue(graph, root);
   const { meta, provenance, nodes, edges } = graph;
   const lines: string[] = [];
 

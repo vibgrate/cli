@@ -4571,7 +4571,7 @@ vg doctor --local
 
 | Flag | Description |
 |------|-------------|
-| `--json` | Machine-readable JSON on stdout. The scanned directory is `.`. Other paths follow the [JSON artifact](#json-artifact) relative and `~/` rules. |
+| `--json` | Machine-readable JSON on stdout |
 | `--offline` | Skip the hosted reachability probe |
 | `-C, --cwd <dir>` | Run as if started in that directory |
 
@@ -4770,15 +4770,11 @@ The default output. A coloured, human-readable report showing:
 
 The full scan artifact in JSON format. Contains all raw data, scores, findings, and VCS metadata. Stable schema (`schemaVersion: "1.0"`). This is the same artifact saved to `.vibgrate/scan_result.json`.
 
-Paths in this artifact are relative to the scanned directory. A path inside that directory has no leading slash (`package.json`, or `.` for the directory itself). A path outside it whose absolute form is under `/home/<user>`, `/Users/<user>`, or `<drive>:/Users/<user>` is written as `~/…`. The same tree produces the same relative strings on every machine. `vg build --json` and `vg doctor --json` use the same rule for paths they emit (`artifacts`, `cas.dir`, `root`, and any other absolute home path in that document). Terminal text is left as recorded, so a local debugging session still shows a path you can open.
-
 Dependency identity in this file is `projects[].type` plus `dependencies[].package` and `resolvedVersion`. An advisory match is `extended.vulnerabilities.packages[]` (`ecosystem`, `package`, `version`). `vg sbom export` writes those coordinates as a package URL. The file has no CPE field. See [Component identity](#component-identity). A dependency row has no package digest. `projects[].projectId` and `solutions[].solutionId` identify the project and the solution. See [Package digests](#package-digests).
 
 ### SARIF
 
 [Static Analysis Results Interchange Format](https://sarifweb.azurewebsites.net/) (SARIF) 2.1.0. GitHub code scanning and Azure DevOps read this file. It contains findings only. The DriftScore and the other metrics stay in the JSON artifact. Drift findings come first. Vulnerability findings follow when the scan ran with `--vulns`.
-
-`artifactLocation.uri` uses the same relative paths as the JSON artifact. A finding id (`vg/finding-id/v1`) is computed from that relative location, so two machines scanning the same tree agree on the id.
 
 Every result includes `partialFingerprints`. Code scanning uses that object to recognize the same finding on a later run, so an unchanged finding stays one alert. The scan time, the result order, and the artifact timestamp are not part of the value. The message text is left as the scanner wrote it.
 
@@ -4876,7 +4872,7 @@ A clean Markdown report suitable for PRs, wikis, or documentation.
 
 ### JUnit
 
-`--junit <file>` writes a JUnit XML report next to whatever `--format` you selected (`text`, `json`, `sarif`, or `md`). GitLab (`artifacts:reports:junit`), Azure DevOps, and Jenkins can publish it without a second scan. The file is local: rule ids, locations, messages, and gate results only — no DSN, repository URL, or scan clock. Locations follow the same relative and `~/` rules as the JSON artifact.
+`--junit <file>` writes a JUnit XML report next to whatever `--format` you selected (`text`, `json`, `sarif`, or `md`). GitLab (`artifacts:reports:junit`), Azure DevOps, and Jenkins can publish it without a second scan. The file is local: rule ids, locations, messages, and gate results only — no DSN, repository URL, or scan clock.
 
 The same findings and gates always produce the same bytes. Case order is fixed, `time` is `0`, and the optional JUnit `timestamp` attribute is omitted.
 

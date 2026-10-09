@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import type { HailePolicy } from './haile/types.js';
 import * as path from 'node:path';
+import { portableValue } from '../core-open/utils/portable-path.js';
 import { serializeGraph } from './serialize.js';
 import { mapFileExists, snapshotPathFor, writeGraphSnapshot } from './snapshot.js';
 import { renderReport } from './report.js';
@@ -228,6 +229,7 @@ export function companionArtifactDir(root: string, graphPath: string, env: NodeJ
 }
 
 export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenArtifacts {
+  graph = portableValue(graph, options.root);
   const graphPath = options.graphPath ?? defaultGraphPath(options.root);
   const companions = companionArtifactDir(options.root, graphPath);
   const inRepo = isPathInside(companions, options.root) || isPathInside(graphPath, options.root);
@@ -276,7 +278,7 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
     // never expose a half-written file to a concurrent reader.
     const tmp = `${graphPath}.${process.pid}.tmp`;
     try {
-      fs.writeFileSync(tmp, serializeGraph(graph));
+      fs.writeFileSync(tmp, serializeGraph(graph, { root: options.root }));
       fs.renameSync(tmp, graphPath);
     } catch (err) {
       fs.rmSync(tmp, { force: true });
@@ -292,13 +294,13 @@ export function writeArtifacts(graph: VgGraph, options: WriteOptions): WrittenAr
 
   if (options.report !== false) {
     const reportPath = path.join(companions, 'GRAPH_REPORT.md');
-    fs.writeFileSync(reportPath, renderReport(graph));
+    fs.writeFileSync(reportPath, renderReport(graph, options.root));
     written.reportPath = reportPath;
   }
 
   if (options.html !== false) {
     const htmlPath = path.join(companions, 'graph.html');
-    fs.writeFileSync(htmlPath, renderHtml(graph));
+    fs.writeFileSync(htmlPath, renderHtml(graph, options.root));
     written.htmlPath = htmlPath;
   }
 

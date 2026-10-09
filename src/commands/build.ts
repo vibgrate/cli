@@ -27,7 +27,6 @@ import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { resolveSelfJsEntry } from '../util/cli-invocation.js';
 import { c, info, out, json } from '../util/output.js';
 import { formatWarningLine } from '../core-open/warnings.js';
-import { redactHomePaths } from '../core-open/utils/shareable-path.js';
 import { printLogo } from '../util/logo.js';
 import { ProgressBar } from '../util/progress.js';
 import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.js';
@@ -262,7 +261,7 @@ export async function runBuild(
   }
 
   if (global.json) {
-    json(redactHomePaths({
+    json({
       ok: true,
       counts: result.graph.meta.counts,
       languages: result.graph.meta.languages,
@@ -285,7 +284,7 @@ export async function runBuild(
       warnings: result.warnings,
       ...(result.codedWarnings.length > 0 ? { codedWarnings: result.codedWarnings } : {}),
       activity: activity.toJSON(),
-    }, root));
+    });
     return;
   }
 

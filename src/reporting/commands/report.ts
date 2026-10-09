@@ -2,11 +2,11 @@ import * as path from 'node:path';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { usageError } from '../../util/exit.js';
-import { redactHomePaths, scanRootFromArtifactFile } from '../../core-open/utils/shareable-path.js';
 import { pathExists, readJsonFile } from '../utils/fs.js';
 import { formatText } from '../formatters/text.js';
 import { formatMarkdown } from '../formatters/markdown.js';
 import { formatHtmlReport } from '../formatters/html.js';
+import { portableValue } from '../../core-open/utils/portable-path.js';
 import type { ReportFormat, ScanArtifact } from '../types.js';
 
 /** Formats `vg report` accepts. `text` is the default. */
@@ -33,25 +33,20 @@ export const reportCommand = new Command('report')
       process.exit(1);
     }
 
-    const artifact = await readJsonFile<ScanArtifact>(artifactPath);
-    // Only a result written under `.vibgrate/` has a known scan root. A file
-    // passed in from elsewhere keeps its paths unless they are home prefixes,
-    // which still collapse to `~/…` inside the formatters.
-    const shareRoot = scanRootFromArtifactFile(artifactPath);
-    const shareable = redactHomePaths(artifact, shareRoot);
+    const artifact = portableValue(await readJsonFile<ScanArtifact>(artifactPath));
 
     switch (opts.format) {
       case 'md':
-        console.log(formatMarkdown(shareable, shareRoot));
+        console.log(formatMarkdown(artifact));
         break;
       case 'json':
-        console.log(JSON.stringify(shareable, null, 2));
+        console.log(JSON.stringify(artifact, null, 2));
         break;
       case 'text':
         console.log(formatText(artifact));
         break;
       case 'html':
-        console.log(formatHtmlReport(shareable, shareRoot));
+        console.log(formatHtmlReport(artifact));
         break;
     }
   });

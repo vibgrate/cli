@@ -41,6 +41,7 @@ export function registerExport(program: Command): void {
         generatedAt: graph.generatedAt,
         compact: opts.compact === true ? true : opts.compact === false ? false : undefined,
         slim: opts.slim === true,
+        root,
       });
 
       if (file === '-') {
