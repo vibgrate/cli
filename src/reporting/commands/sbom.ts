@@ -413,6 +413,42 @@ function sortedUnique(names: Iterable<string>): string[] {
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
 }
 
+/** Identity fields used to order SBOM components. `purl` is null when the row has none. */
+export interface SbomComponentOrderKey {
+  purl: string | null;
+  name: string;
+  version: string;
+  ecosystem: string;
+}
+
+/**
+ * Order for emitted components: Package URL when one is present, otherwise
+ * the package name, then version, then ecosystem. Comparison is UTF-16 code
+ * unit order so the result does not depend on locale, scan order, or the
+ * order a directory walk returned files.
+ */
+export function compareSbomComponentOrder(a: SbomComponentOrderKey, b: SbomComponentOrderKey): number {
+  return (
+    cmpCodePoint(a.purl ?? a.name, b.purl ?? b.name) ||
+    cmpCodePoint(a.name, b.name) ||
+    cmpCodePoint(a.version, b.version) ||
+    cmpCodePoint(a.ecosystem, b.ecosystem)
+  );
+}
+
+function cmpCodePoint(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+function compareFlattenedDependency(a: FlattenedDependency, b: FlattenedDependency): number {
+  return compareSbomComponentOrder(
+    { purl: purlFor(a.ecosystem, a.package, a.version), name: a.package, version: a.version, ecosystem: a.ecosystem },
+    { purl: purlFor(b.ecosystem, b.package, b.version), name: b.package, version: b.version, ecosystem: b.ecosystem },
+  );
+}
+
 function addProjects(row: FlattenedDependency, names: Iterable<string>): void {
   row.projects = sortedUnique([...row.projects, ...names]);
 }
@@ -526,6 +562,10 @@ interface MergedLockfileComponent extends LockfileComponent {
  * first and win over a lockfile row. The same identity from another project
  * stays one component; every contributing project is recorded. Differing
  * manifest metadata is dropped with a warning, not silently.
+ *
+ * The returned list is the emit order. It is sorted by Package URL when one
+ * can be built, otherwise by package name, then version, then ecosystem.
+ * Direct rows are not left in scan order ahead of the lockfile-only rows.
  */
 export function flattenDependencies(
   artifact: ScanArtifact,
@@ -608,10 +648,7 @@ export function flattenDependencies(
     index.set(key, row);
     lockfileOnly.push(row);
   }
-  lockfileOnly.sort(
-    (a, b) => a.package.localeCompare(b.package) || a.version.localeCompare(b.version) || a.ecosystem.localeCompare(b.ecosystem),
-  );
-  return [...rows, ...lockfileOnly];
+  return [...rows, ...lockfileOnly].sort(compareFlattenedDependency);
 }
 
 interface LockfileMergeEntry {

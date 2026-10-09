@@ -1,7 +1,8 @@
 /**
  * Pins the documented `vg sbom export` contract for several resolved versions
  * of one package: identity, dedup, scope, order, and the known limitations
- * (artifact order, last lockfile path wins the edges, PyPI purl folding).
+ * (kept-project attribution follows the scan artifact, last lockfile path
+ * wins the edges, PyPI purl folding). Component order follows the purl sort.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -145,12 +146,12 @@ describe('sbom export: several versions of one package', () => {
       project: scopeOf(c.properties, 'vibgrate:project'),
     }));
     expect(rows).toEqual([
-      { name: 'left-pad', version: '1.3.0', bom: 'pkg:npm/left-pad@1.3.0', purl: 'pkg:npm/left-pad@1.3.0', scope: 'direct', project: 'shared-root' },
-      { name: 'widget', version: '1.0.0', bom: 'pkg:npm/widget@1.0.0', purl: 'pkg:npm/widget@1.0.0', scope: 'direct', project: 'shared-root' },
-      { name: 'once', version: '1.4.0', bom: 'pkg:npm/once@1.4.0', purl: 'pkg:npm/once@1.4.0', scope: 'direct', project: 'shared-extra' },
       { name: 'left-pad', version: '1.2.0', bom: 'pkg:npm/left-pad@1.2.0', purl: 'pkg:npm/left-pad@1.2.0', scope: 'transitive', project: 'shared-root' },
+      { name: 'left-pad', version: '1.3.0', bom: 'pkg:npm/left-pad@1.3.0', purl: 'pkg:npm/left-pad@1.3.0', scope: 'direct', project: 'shared-root' },
       { name: 'ms', version: '2.1.3', bom: 'pkg:npm/ms@2.1.3', purl: 'pkg:npm/ms@2.1.3', scope: 'transitive', project: 'shared-extra' },
       { name: 'once', version: '1.3.0', bom: 'pkg:npm/once@1.3.0', purl: 'pkg:npm/once@1.3.0', scope: 'transitive', project: 'shared-root' },
+      { name: 'once', version: '1.4.0', bom: 'pkg:npm/once@1.4.0', purl: 'pkg:npm/once@1.4.0', scope: 'direct', project: 'shared-extra' },
+      { name: 'widget', version: '1.0.0', bom: 'pkg:npm/widget@1.0.0', purl: 'pkg:npm/widget@1.0.0', scope: 'direct', project: 'shared-root' },
     ]);
     expect(new Set(rows.map((r) => r.bom)).size).toBe(rows.length);
 
@@ -158,12 +159,12 @@ describe('sbom export: several versions of one package', () => {
     // ms exists only in the nested lockfile, so the root graph leaves it with no edges.
     expect(cdx.dependencies).toEqual([
       { ref: 'vibgrate-root', dependsOn: ['pkg:npm/left-pad@1.3.0', 'pkg:npm/widget@1.0.0'] },
-      { ref: 'pkg:npm/left-pad@1.3.0', dependsOn: [] },
-      { ref: 'pkg:npm/widget@1.0.0', dependsOn: ['pkg:npm/left-pad@1.2.0'] },
-      { ref: 'pkg:npm/once@1.4.0', dependsOn: [] },
       { ref: 'pkg:npm/left-pad@1.2.0', dependsOn: ['pkg:npm/once@1.3.0'] },
+      { ref: 'pkg:npm/left-pad@1.3.0', dependsOn: [] },
       { ref: 'pkg:npm/ms@2.1.3', dependsOn: [] },
       { ref: 'pkg:npm/once@1.3.0', dependsOn: [] },
+      { ref: 'pkg:npm/once@1.4.0', dependsOn: [] },
+      { ref: 'pkg:npm/widget@1.0.0', dependsOn: ['pkg:npm/left-pad@1.2.0'] },
     ]);
 
     const spdx = toSpdx(scan, graph) as {
@@ -177,20 +178,20 @@ describe('sbom export: several versions of one package', () => {
       relationships: Array<{ spdxElementId: string; relatedSpdxElementId: string; relationshipType: string }>;
     };
     expect(spdx.packages.map((p) => [p.SPDXID, p.name, p.versionInfo, p.externalRefs[0]!.referenceLocator])).toEqual([
-      ['SPDXRef-Package-1', 'left-pad', '1.3.0', 'pkg:npm/left-pad@1.3.0'],
-      ['SPDXRef-Package-2', 'widget', '1.0.0', 'pkg:npm/widget@1.0.0'],
-      ['SPDXRef-Package-3', 'once', '1.4.0', 'pkg:npm/once@1.4.0'],
-      ['SPDXRef-Package-4', 'left-pad', '1.2.0', 'pkg:npm/left-pad@1.2.0'],
-      ['SPDXRef-Package-5', 'ms', '2.1.3', 'pkg:npm/ms@2.1.3'],
-      ['SPDXRef-Package-6', 'once', '1.3.0', 'pkg:npm/once@1.3.0'],
+      ['SPDXRef-Package-1', 'left-pad', '1.2.0', 'pkg:npm/left-pad@1.2.0'],
+      ['SPDXRef-Package-2', 'left-pad', '1.3.0', 'pkg:npm/left-pad@1.3.0'],
+      ['SPDXRef-Package-3', 'ms', '2.1.3', 'pkg:npm/ms@2.1.3'],
+      ['SPDXRef-Package-4', 'once', '1.3.0', 'pkg:npm/once@1.3.0'],
+      ['SPDXRef-Package-5', 'once', '1.4.0', 'pkg:npm/once@1.4.0'],
+      ['SPDXRef-Package-6', 'widget', '1.0.0', 'pkg:npm/widget@1.0.0'],
     ]);
-    expect(spdx.packages[0]!.annotations[0]!.comment).toContain('scope=direct');
-    expect(spdx.packages[3]!.annotations[0]!.comment).toContain('scope=transitive');
+    expect(spdx.packages[1]!.annotations[0]!.comment).toContain('scope=direct');
+    expect(spdx.packages[0]!.annotations[0]!.comment).toContain('scope=transitive');
     expect(spdx.relationships).toEqual([
-      { spdxElementId: 'SPDXRef-DOCUMENT', relatedSpdxElementId: 'SPDXRef-Package-1', relationshipType: 'DEPENDS_ON' },
       { spdxElementId: 'SPDXRef-DOCUMENT', relatedSpdxElementId: 'SPDXRef-Package-2', relationshipType: 'DEPENDS_ON' },
-      { spdxElementId: 'SPDXRef-Package-2', relatedSpdxElementId: 'SPDXRef-Package-4', relationshipType: 'DEPENDS_ON' },
-      { spdxElementId: 'SPDXRef-Package-4', relatedSpdxElementId: 'SPDXRef-Package-6', relationshipType: 'DEPENDS_ON' },
+      { spdxElementId: 'SPDXRef-DOCUMENT', relatedSpdxElementId: 'SPDXRef-Package-6', relationshipType: 'DEPENDS_ON' },
+      { spdxElementId: 'SPDXRef-Package-1', relatedSpdxElementId: 'SPDXRef-Package-4', relationshipType: 'DEPENDS_ON' },
+      { spdxElementId: 'SPDXRef-Package-6', relatedSpdxElementId: 'SPDXRef-Package-1', relationshipType: 'DEPENDS_ON' },
     ]);
   });
 
@@ -212,7 +213,7 @@ describe('sbom export: several versions of one package', () => {
     expect(second.serialNumber).not.toBe(first.serialNumber);
   });
 
-  it('follows artifact project order for attribution and SPDX IDs, and keeps purls', () => {
+  it('keeps attribution on the first scanned project and assigns SPDX IDs from purl order', () => {
     writeRootLock('other-last');
     const forward = scanned();
     const reversed = artifact([...forward.projects].reverse());
@@ -229,10 +230,13 @@ describe('sbom export: several versions of one package', () => {
     expect(scopeOf(left(b).properties, 'vibgrate:project')).toBe('shared-extra');
     expect(b.serialNumber).not.toBe(a.serialNumber);
 
+    expect(a.components.map((c) => c.purl)).toEqual(b.components.map((c) => c.purl));
+
     const spdxA = toSpdx(forward, graph) as { packages: Array<{ SPDXID: string; name: string }> };
     const spdxB = toSpdx(reversed, graph) as { packages: Array<{ SPDXID: string; name: string }> };
-    expect(spdxA.packages.find((p) => p.name === 'widget')!.SPDXID).toBe('SPDXRef-Package-2');
-    expect(spdxB.packages.find((p) => p.name === 'widget')!.SPDXID).toBe('SPDXRef-Package-3');
+    expect(spdxA.packages.map((p) => p.SPDXID)).toEqual(spdxB.packages.map((p) => p.SPDXID));
+    expect(spdxA.packages.find((p) => p.name === 'widget')!.SPDXID).toBe('SPDXRef-Package-6');
+    expect(spdxB.packages.find((p) => p.name === 'widget')!.SPDXID).toBe('SPDXRef-Package-6');
   });
 
   it('omits lockfile-only versions when the lockfile graph is absent (--no-transitive)', () => {
@@ -241,11 +245,11 @@ describe('sbom export: several versions of one package', () => {
       components: Array<{ name: string; version: string; properties: Array<{ name: string; value: string }> }>;
       dependencies?: unknown;
     };
-    expect(cdx.components.map((c) => `${c.name}@${c.version}`)).toEqual(['left-pad@1.3.0', 'widget@1.0.0', 'once@1.4.0']);
+    expect(cdx.components.map((c) => `${c.name}@${c.version}`)).toEqual(['left-pad@1.3.0', 'once@1.4.0', 'widget@1.0.0']);
     expect(cdx.components.map((c) => scopeOf(c.properties, 'vibgrate:scope'))).toEqual(['direct', 'direct', 'direct']);
     expect(cdx.dependencies).toBeUndefined();
     const spdx = toSpdx(scan) as { packages: Array<{ name: string; versionInfo: string }>; relationships?: unknown };
-    expect(spdx.packages.map((p) => `${p.name}@${p.versionInfo}`)).toEqual(['left-pad@1.3.0', 'widget@1.0.0', 'once@1.4.0']);
+    expect(spdx.packages.map((p) => `${p.name}@${p.versionInfo}`)).toEqual(['left-pad@1.3.0', 'once@1.4.0', 'widget@1.0.0']);
     expect(spdx.relationships).toBeUndefined();
   });
 
@@ -259,6 +263,8 @@ describe('sbom export: several versions of one package', () => {
     expect(cdx.components.map((c) => c.name)).toEqual(['Flask', 'flask']);
     expect(cdx.components.map((c) => c.purl)).toEqual(['pkg:pypi/flask@3.0.0', 'pkg:pypi/flask@3.0.0']);
     expect(cdx.components.map((c) => c['bom-ref'])).toEqual(['pkg:pypi/flask@3.0.0', 'pkg:pypi/flask@3.0.0']);
+    const reversed = artifact([py('b'), py('a')]);
+    expect((toCycloneDx(reversed) as typeof cdx).components.map((c) => c.name)).toEqual(['Flask', 'flask']);
     const spdx = toSpdx(scan) as {
       packages: Array<{ SPDXID: string; externalRefs: Array<{ referenceLocator: string }> }>;
     };

@@ -1761,9 +1761,9 @@ Two other strings in the same file are easy to misread as package digests. `vcs.
 | `uv.lock` | `hash` |
 | `go.sum` | `h1:` |
 
-**Several digests, one component.** A lockfile can list more than one digest for one package. The export still writes one component for that ecosystem, name, and version. It does not add a row per digest. `hashes` and `checksums` are omitted, so there is no digest array and no digest order to keep stable. Component order stays the order in [Several versions of one package](#several-versions-of-one-package): direct rows follow the scan artifact, then lockfile-only rows sorted by package name, then version, then ecosystem. Digest text is not part of that sort, and it is not part of the document id. Exporting the same scan artifact again, after a lockfile edit that changes only those digest strings and leaves names, versions, and edges alone, writes the same JSON, including `serialNumber` and `documentNamespace`.
+**Several digests, one component.** A lockfile can list more than one digest for one package. The export still writes one component for that ecosystem, name, and version. It does not add a row per digest. `hashes` and `checksums` are omitted, so there is no digest array and no digest order to keep stable. Component order stays the order in [Several versions of one package](#several-versions-of-one-package): the Package URL when one is written, otherwise the package name, then the version, then the ecosystem. Digest text is not part of that sort, and it is not part of the document id. Exporting the same scan artifact again, after a lockfile edit that changes only those digest strings and leaves names, versions, and edges alone, writes the same JSON, including `serialNumber` and `documentNamespace`.
 
-`go.sum` lists a module twice: `<module> <version> h1:…` and `<module> <version>/go.mod h1:…`. The `/go.mod` line is not a second component. Both `h1:` values are dropped. A `uv.lock` package block can carry more than one `hash`. Those values are dropped, and the block stays one component, sorted with the others by name and version. An npm `integrity` string and a pnpm `resolution.integrity` string are not read, including when the string names more than one algorithm.
+`go.sum` lists a module twice: `<module> <version> h1:…` and `<module> <version>/go.mod h1:…`. The `/go.mod` line is not a second component. Both `h1:` values are dropped. A `uv.lock` package block can carry more than one `hash`. Those values are dropped, and the block stays one component, placed with the others by the order in [Several versions of one package](#several-versions-of-one-package). An npm `integrity` string and a pnpm `resolution.integrity` string are not read, including when the string names more than one algorithm.
 
 ```bash
 vg scan --offline --no-graph --format json --out scan.json
@@ -1880,12 +1880,15 @@ absent, and so is the dependency graph. A consumer that filters to
 `vibgrate:scope=direct` sees the same gap: other installed versions of that
 package are still in the full document, marked `transitive`.
 
-**Order.** Direct rows follow `projects` on the scan artifact, and within a
-project they follow that project's `dependencies` array. The npm scanner sorts
-each project's array by drift, then by package name, before it writes the
-artifact. Lockfile-only rows are appended after the direct rows, sorted by
-package name, then by version, then by ecosystem. That combined list is the order of CycloneDX
-`components`, CycloneDX `dependencies`, and SPDX `packages`. `dependsOn` entries
+**Order.** Before the JSON is written, every component is sorted by its
+Package URL when one is written, otherwise by package name, then by version,
+then by ecosystem. The comparison is UTF-16 code unit order, so it does not
+follow the locale, the order of `projects` on the scan artifact, the order of
+a project's `dependencies` array, or the order a directory walk returned
+those files. Direct rows and lockfile-only rows are one list. That list is
+the order of CycloneDX `components`, the component entries of CycloneDX
+`dependencies` (the first entry stays `vibgrate-root`), and SPDX `packages`.
+`SPDXRef-Package-1` is the first package in that list. `dependsOn` entries
 and the names inside one lockfile edge are sorted on their own.
 
 **Same inputs, same document.** For one scan artifact and the lockfiles under
@@ -1901,13 +1904,14 @@ are in [Package digests](#package-digests).
 
 **Known limitations:**
 
-- Direct-row order, and which project's metadata is kept for a shared
-  identity, follow the scan artifact. Reordering projects changes
-  `vibgrate:project` on that row, reassigns SPDX `SPDXID` values to match the
-  new positions, retargets SPDX `DEPENDS_ON` relationships (they point at
-  SPDX IDs), and changes the document serial number and namespace. CycloneDX `bom-ref` stays on the purl,
-  so a scanner that stored the purl still matches. `vibgrate:projects` stays
-  the sorted set of contributing projects.
+- Which project's metadata is kept for a shared identity follows the scan
+  artifact. Reordering projects changes `vibgrate:project` on that row and
+  changes the document serial number and namespace, because the kept project
+  is part of the document id. Component order does not follow that project
+  order. SPDX `SPDXID` values and the `DEPENDS_ON` relationships that point
+  at them stay with the purl sort above. CycloneDX `bom-ref` stays on the
+  purl, so a scanner that stored the purl still matches. `vibgrate:projects`
+  stays the sorted set of contributing projects.
 - npm `package-lock.json` v2/v3 collapses two install paths of the same
   `name@version` into one component. When those paths declare different
   dependencies, the edge list is the path that appears last in the lockfile

@@ -148,4 +148,23 @@ describe('cyclonedx export purl', () => {
     // Non-npm rows still carry no guessed npm purl.
     expect(bom.components.find((c) => c.name === 'requests')?.purl).toBeUndefined();
   });
+
+  it('sorts components by purl, then name, version, and ecosystem, independent of input order', () => {
+    const base = ctx(makeGraph(false));
+    const chalk = { name: 'chalk', ecosystem: 'npm' as const, declared: '^5.0.0', installed: '5.3.0' };
+    const spaced = { name: 'foo bar', ecosystem: 'npm' as const, declared: '1.0.0', installed: '1.0.0' };
+    const requests = { name: 'requests', ecosystem: 'pypi' as const, declared: '2.31.0', installed: '2.31.0' };
+    const alpha = { runtime: 'ollama' as const, name: 'alpha', path: '/a' };
+    const zeta = { runtime: 'gguf' as const, name: 'zeta', path: '/z' };
+    const first = exportGraph('cyclonedx', { ...base, deps: [chalk, spaced, requests], models: [zeta, alpha] });
+    const second = exportGraph('cyclonedx', { ...base, deps: [requests, spaced, chalk], models: [alpha, zeta] });
+    expect(second).toBe(first);
+    const bom = JSON.parse(first) as { components: Array<{ name: string; type: string }> };
+    expect(bom.components.map((c) => c.name)).toEqual(['foo bar', 'chalk', 'requests', 'alpha', 'zeta']);
+    const spdxFirst = exportGraph('spdx', { ...base, deps: [chalk, spaced, requests] });
+    const spdxSecond = exportGraph('spdx', { ...base, deps: [requests, chalk, spaced] });
+    expect(spdxSecond).toBe(spdxFirst);
+    const doc = JSON.parse(spdxFirst) as { packages: Array<{ name: string }> };
+    expect(doc.packages.map((p) => p.name)).toEqual(['foo bar', 'chalk', 'requests']);
+  });
 });

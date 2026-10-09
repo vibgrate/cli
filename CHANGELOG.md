@@ -35,6 +35,8 @@ backward compatible.
 
 ### Fixed
 
+- **SBOM component order no longer follows scan or filesystem order.** `vg sbom export` and CycloneDX/SPDX graph export sort components by Package URL when one is written, otherwise by name, then version, then ecosystem, before the JSON is serialized. CycloneDX `dependencies` (after the root entry) and SPDX `packages` use that order, and `SPDXRef-Package-N` follows it. The same scan still produces the same document on every run. Reordering projects still changes which project's metadata is kept, and therefore the document id, but it does not change component order.
+
 - **`vg report --format` rejects values other than `md`, `text`, and `json`.**
   An unknown value, including `html`, exits `5` with a usage error that names
   the value and lists the valid ones. Stdout is empty. `text` stays the
