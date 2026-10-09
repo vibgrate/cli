@@ -1671,9 +1671,14 @@ Every component also carries a [purl](https://github.com/package-url/purl-spec)
 (`pkg:npm/<name>@<version>`, scoped names as their own namespace segment) — as the
 CycloneDX `purl` field and `bom-ref`, and as the SPDX `externalRefs` PACKAGE-MANAGER
 reference — so a vulnerability scanner can match components without re-deriving an
-identifier. When a package name cannot be a Package URL (a space, a non-ASCII
+identifier. A resolved version with SemVer build metadata (`1.2.3+build.4`)
+is written unchanged on the component `version` (CycloneDX) and `versionInfo`
+(SPDX), and on scan JSON `resolvedVersion`. The purl version percent-encodes
+`+` as `%2B` (`pkg:npm/name@1.2.3%2Bbuild.4`); a canonical purl does not contain
+a raw `+`. When a package name cannot be a Package URL (a space, a non-ASCII
 character, an empty path segment, or a slash or colon that is not an npm scope
-separator), that component stays in the document and
+separator), or the version cannot be percent-encoded, that component stays in
+the document and
 the purl is omitted. CycloneDX sets `vibgrate:purlStatus` to `unavailable` and
 records the reason on `vibgrate:purlWarning`. SPDX omits the purl externalRef,
 records `purlStatus=unavailable` on the package annotation, and repeats the
@@ -2327,7 +2332,7 @@ Go modules pin an untagged commit as a pseudo-version (`v0.0.0-20191109021931-da
 The scan reads direct `require` lines in `go.mod`.
 
 - A concrete `v` version that is valid semver after the leading `v` is removed is the recorded version. `v1.2.3` is recorded as `1.2.3`.
-- Build metadata is dropped. `v2.0.0+incompatible` is recorded as `2.0.0`. The major stays 2.
+- Build metadata stays on the recorded version. `v2.0.0+incompatible` is recorded as `2.0.0+incompatible`. The leading `v` is still removed. The major stays 2. Range checks drop the `+…` suffix and compare `2.0.0`.
 - A pseudo-version keeps its pre-release suffix. `v0.0.0-20191109021931-daa7c04131f5` is recorded as `0.0.0-20191109021931-daa7c04131f5`.
 - A bare module path, a range such as `>=1.4.0`, a line marked `// indirect`, and a token that is not a full semver (`v1.2`) are not matched against advisories.
 - `go.sum` is not the version source for this match.
@@ -2347,11 +2352,11 @@ In Go's own order, `v1.2.4-0.<timestamp>-<commit>` is a commit after `v1.2.3` an
 
 An explicit list entry of `v0.0.0-20191109021931-daa7c04131f5` does not match the open finding. The entry `0.0.0-20191109021931-daa7c04131f5` does. The entry `0.0.0` does not: the list is exact, and the recorded string still has the pre-release suffix.
 
-Exposure windows replay the `require` token as written in `go.mod`, including the leading `v` and a `+incompatible` suffix. Range checks reduce that token to the same `major.minor.patch` as the open finding. An explicit `versions` list matches the string it is given, so `v2.0.0+incompatible` can match a history replay and miss the open finding (`2.0.0`), or the other way around.
+Exposure windows replay the `require` token as written in `go.mod`, including the leading `v` and a `+incompatible` suffix. Range checks reduce that token to the same `major.minor.patch` as the open finding. An explicit `versions` list matches the recorded string, so `v2.0.0+incompatible` can match a history replay and miss the open finding (`2.0.0+incompatible`), or the other way around.
 
 ##### `+incompatible`
 
-The suffix is dropped before the comparison. `v2.0.0+incompatible` matches a range from `2.0.0` up to `2.1.0`. It does not match a range that only covers `1.x`. An explicit list entry of `v2.0.0+incompatible` does not match the open finding. The entry `2.0.0` does.
+The suffix stays on the recorded version and is dropped before the range comparison. `v2.0.0+incompatible` matches a range from `2.0.0` up to `2.1.0`. It does not match a range that only covers `1.x`. An explicit list entry of `v2.0.0+incompatible` does not match the open finding. The entry `2.0.0` does not either. The entry `2.0.0+incompatible` does.
 
 ##### `replace` and `exclude`
 
@@ -2503,7 +2508,7 @@ vg scan --vulns --offline --package-manifest package-versions.json --format json
 | `example.com/pseudo-base` | `GHSA-example-pseudo-base` | reported (compared as `0.0.0`) |
 | `example.com/pseudo-base` | `GHSA-example-pseudo-explicit-v` | absent (the list has the leading `v`) |
 | `example.com/pseudo-base` | `GHSA-example-pseudo-explicit-clean` | reported |
-| `example.com/oldmajor` | `GHSA-example-incompatible-range` | reported (`2.0.0`) |
+| `example.com/oldmajor` | `GHSA-example-incompatible-range` | reported (recorded `2.0.0+incompatible`, compared as `2.0.0`) |
 | `example.com/oldmajor` | `GHSA-example-incompatible-v1` | absent (that range is `1.x`) |
 | `example.com/oldmajor` | `GHSA-example-incompatible-explicit` | absent (the list is `v2.0.0+incompatible`) |
 | `example.com/replaced-mod` | `GHSA-example-replaced` | reported (the `require` version; the `replace` is ignored) |

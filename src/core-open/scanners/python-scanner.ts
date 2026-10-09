@@ -3,6 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as semver from 'semver';
+import { semverKeepingBuild } from '../utils/semver-build.js';
 import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
 import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { loadPythonLockIndex, type PythonLockIndex } from './python-lockfile.js';
@@ -181,6 +182,10 @@ function extractPinnedVersion(spec: string): string | null {
  * Convert a PEP 440 version to semver where possible (best-effort).
  */
 function pep440ToSemver(ver: string): string | null {
+  // PEP 440 local versions and semver build metadata share the `+` suffix.
+  // Keep that token; the dot-split below would discard it.
+  const kept = semverKeepingBuild(ver);
+  if (kept?.includes('+')) return kept;
   let v = ver.replace(/^[vV]/, '').trim();
   if (/(?:a\d|b\d|rc\d|alpha|beta|dev|post)/i.test(v)) return null;
   const parts = v.split('.');

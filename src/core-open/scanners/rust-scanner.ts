@@ -3,6 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as semver from 'semver';
+import { semverKeepingBuild } from '../utils/semver-build.js';
 import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
 import { withTimeout } from '../utils/timeout.js';
 import { CargoCache } from './cargo-cache.js';
@@ -291,7 +292,12 @@ async function scanOneRustProject(
   for (const { dep, meta } of resolved) {
     // Prefer the lockfile's exact version; otherwise coerce the declared spec (e.g. "1.0" → 1.0.0).
     const locked = lockIndex?.resolve(dep.name, dep.version) ?? null;
-    const resolvedVersion = (locked && semver.valid(locked)) ? locked : semver.valid(semver.coerce(dep.version));
+    // The lockfile token is kept as written, including `+build`. A declared
+    // spec with build metadata must not fall through to `semver.coerce`,
+    // which returns only `major.minor.patch`.
+    const resolvedVersion = (locked && semver.valid(locked))
+      ? locked
+      : (semverKeepingBuild(dep.version) ?? semver.valid(semver.coerce(dep.version)));
     const latestStable = meta.latestStableOverall;
 
     let majorsBehind: number | null = null;

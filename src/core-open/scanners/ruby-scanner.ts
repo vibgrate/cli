@@ -3,6 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as semver from 'semver';
+import { semverKeepingBuild } from '../utils/semver-build.js';
 import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
 import { withTimeout } from '../utils/timeout.js';
 import { RubyGemsCache } from './rubygems-cache.js';
@@ -208,6 +209,8 @@ function extractGemVersion(spec: string): string | null {
  * Convert a Ruby gem version string to semver.
  */
 function rubyVersionToSemver(ver: string): string | null {
+  const kept = semverKeepingBuild(ver);
+  if (kept?.includes('+')) return kept;
   const v = ver.trim();
   if (/(?:\.pre|\.rc|\.beta|\.alpha|\.dev)/i.test(v)) return null;
 

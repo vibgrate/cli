@@ -3,6 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as semver from 'semver';
+import { semverKeepingBuild } from '../utils/semver-build.js';
 import { readTextFile, FileCache } from '../utils/fs.js';
 import { withTimeout } from '../utils/timeout.js';
 import { GoCache } from './go-cache.js';
@@ -297,7 +298,7 @@ async function scanOneGoProject(
   const resolved = await Promise.all(metaPromises);
 
   for (const { dep, meta } of resolved) {
-    const resolvedVersion = dep.version ? semver.valid(semver.clean(dep.version)) : null;
+    const resolvedVersion = dep.version ? semverKeepingBuild(dep.version) : null;
     const latestStable = meta.latestStableOverall;
 
     let majorsBehind: number | null = null;

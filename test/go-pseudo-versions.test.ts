@@ -38,7 +38,7 @@ describe('Go pseudo-versions and +incompatible (vg scan --vulns, offline)', () =
     const [project] = await scanGoProjects(fixtureDir, new GoCache(new Semaphore(1), undefined, true));
     const resolved = Object.fromEntries(project.dependencies.map((d) => [d.package, d.resolvedVersion]));
     expect(resolved).toEqual({
-      'example.com/oldmajor': '2.0.0',
+      'example.com/oldmajor': '2.0.0+incompatible',
       'example.com/pseudo-base': '0.0.0-20191109021931-daa7c04131f5',
       'example.com/pseudo-next': '1.2.4-0.20210101120000-abcdefabcdef',
       'example.com/replaced-mod': '1.0.0',
@@ -55,7 +55,7 @@ describe('Go pseudo-versions and +incompatible (vg scan --vulns, offline)', () =
     expect(ids).toEqual(REPORTED);
     for (const id of ABSENT) expect(ids).not.toContain(id);
     expect(result.packages.map((p) => p.version)).toEqual([
-      '2.0.0',
+      '2.0.0+incompatible',
       '0.0.0-20191109021931-daa7c04131f5',
       '1.0.0',
       '1.2.3',

@@ -4,6 +4,7 @@
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { XMLParser } from 'fast-xml-parser';
+import { semverKeepingBuild } from '../utils/semver-build.js';
 import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
 import { withTimeout } from '../utils/timeout.js';
 import { MavenCache } from './maven-cache.js';
@@ -336,6 +337,11 @@ function parseGradleBuild(content: string, filePath: string): GradleData {
  * Convert a Maven version string to semver where possible.
  */
 function mavenToSemver(ver: string): string | null {
+  // A real semver build suffix (`1.2.3+build.4`) is the version. The
+  // dot-split below would fold `+build` into a numeric part and `semver.valid`
+  // would then drop it.
+  const kept = semverKeepingBuild(ver);
+  if (kept?.includes('+')) return kept;
   let v = ver.trim();
   if (!v || v.includes('$')) return null;
   // Maven pre-release markers — both hyphen (-alpha, -rc) and dot (.Beta1, .RC1) forms
