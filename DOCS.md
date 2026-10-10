@@ -1982,6 +1982,29 @@ writes that metadata component and an empty `components` array. SPDX `packages`
 is empty in that case, and `primaryPackagePurpose` is still absent because there
 is still no package.
 
+#### Root package.json without a name or version
+
+A root `package.json` may omit `name`, `version`, or both. `vg build`, `vg scan`, and `vg sbom export` continue. They do not throw. They do not build a Package URL for the root component. A Package URL whose name is empty is what makes other SBOM tools fail with `PURL name is required`.
+
+The fallback is one rule:
+
+| Field | When the field is a non-empty string | Otherwise |
+| --- | --- | --- |
+| `name` | That string, trimmed | The directory basename: the last path segment only. This is never an absolute path, a home directory, or a host name. An empty basename, `.`, or `..` becomes `unnamed`. |
+| `version` | That string, trimmed. `vg scan` records it on `repository.version`. | Omitted. No version is invented. The CycloneDX root component has no `version` and no `purl`. |
+
+When `name` is omitted, that basename is the root component name. `vg build` stores it as the root `package` node's qualified name. `vg scan` stores it as the project name and, unless `--repository-name` overrides it, as `repository.name`. CycloneDX `metadata.component.name` is the scan root's basename, which is the same string. Dependencies declared in the manifest are still resolved from the lockfile and from `node_modules`.
+
+One warning is printed, code `VG_WARN_ROOT_PACKAGE_IDENTITY`. The same inputs produce the same sentence. The sentence names the fallback and does not contain an absolute path.
+
+| Missing | Warning |
+| --- | --- |
+| `name` | `Root package.json has no name. The root component name is "<name>".` |
+| `version` | `Root package.json has no version. No version was invented for the root component.` |
+| both | `Root package.json has no name or version. The root component name is "<name>". No version was invented.` |
+
+`<name>` is the fallback from the table. CycloneDX repeats the sentence on `metadata.properties` as `vibgrate:rootIdentityWarning`, with `vibgrate:warningCode` set to `VG_WARN_ROOT_PACKAGE_IDENTITY`. SPDX repeats it as two document annotations. The second annotation is `warningCode=VG_WARN_ROOT_PACKAGE_IDENTITY`.
+
 **Gaps.** These are holes in the inventory, labeled as holes.
 
 - The metadata label `application` is fixed. A library package, a Dockerfile, a

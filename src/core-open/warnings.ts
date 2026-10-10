@@ -62,6 +62,12 @@ export const WARNING_CODES = {
   SBOM_UNKNOWN_ECOSYSTEM: 'VG_WARN_SBOM_UNKNOWN_ECOSYSTEM',
   /** A lockfile format does not record dependency edges. */
   SBOM_UNTRACKED_EDGES: 'VG_WARN_SBOM_UNTRACKED_EDGES',
+  /**
+   * The root package.json omitted name, version, or both. The root component
+   * keeps a directory-basename name and an omitted version. Dependencies are
+   * still resolved. One warning, not a crash.
+   */
+  ROOT_PACKAGE_IDENTITY: 'VG_WARN_ROOT_PACKAGE_IDENTITY',
 } as const;
 
 export type WarningCode = (typeof WARNING_CODES)[keyof typeof WARNING_CODES];

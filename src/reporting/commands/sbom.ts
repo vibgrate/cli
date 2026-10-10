@@ -16,6 +16,7 @@ import {
   type CodedWarning,
   type WarningCode,
 } from '../../core-open/warnings.js';
+import { portableRootComponentName, readRootPackageIdentity } from '../../core-open/utils/root-package-identity.js';
 
 export { describeUnrepresentableLicense } from './sbom-license.js';
 
@@ -432,6 +433,7 @@ function sbomWarningCode(message: string): WarningCode | undefined {
   if (message.startsWith('Dropped differing manifest metadata')) return WARNING_CODES.SBOM_LOSSY_MANIFEST;
   if (message.startsWith('Ecosystem unknown')) return WARNING_CODES.SBOM_UNKNOWN_ECOSYSTEM;
   if (message.startsWith('Dependency edges are not recorded')) return WARNING_CODES.SBOM_UNTRACKED_EDGES;
+  if (message.startsWith('Root package.json has no')) return WARNING_CODES.ROOT_PACKAGE_IDENTITY;
   return undefined;
 }
 
@@ -460,7 +462,13 @@ function manifestMetadataDiffers(row: FlattenedDependency, dep: DependencyRow): 
 }
 
 /** Stable seed for the document id: format + root + the ordered dependency set + any dependency graph. */
-function sbomSerialSeed(format: string, artifact: ScanArtifact, deps: FlattenedDependency[], graph?: LockfileGraph): string {
+function sbomSerialSeed(
+  format: string,
+  artifact: ScanArtifact,
+  deps: FlattenedDependency[],
+  graph?: LockfileGraph,
+  rootIdentityWarning?: string,
+): string {
   const edgeLines = graph?.edges
     ? [...graph.edges.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
@@ -478,7 +486,16 @@ function sbomSerialSeed(format: string, artifact: ScanArtifact, deps: FlattenedD
     ...(graph?.rootDependsOn.length ? [`root>${uniqSorted(graph.rootDependsOn).join(',')}`] : []),
     ...edgeLines,
     ...licenseParseFindings(artifact).map((f) => `license-parse|${f.location}|${f.message}`),
+    ...(rootIdentityWarning ? [`root-identity|${rootIdentityWarning}`] : []),
   ].join('\n');
+}
+
+function rootIdentityProperties(warning: CodedWarning | null | undefined): Array<{ name: string; value: string }> {
+  if (!warning) return [];
+  return [
+    { name: 'vibgrate:rootIdentityWarning', value: warning.message },
+    { name: WARNING_CODE_PROPERTY, value: warning.code },
+  ];
 }
 
 /**
@@ -796,14 +813,28 @@ function licenseFor(dep: FlattenedDependency): ComponentLicense {
   return componentLicense(dep.ecosystem, dep.package, dep.version, dep.license);
 }
 
-export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Record<string, unknown> {
+export function toCycloneDx(
+  artifact: ScanArtifact,
+  graph?: LockfileGraph,
+  rootIdentityWarning?: CodedWarning | null,
+): Record<string, unknown> {
   const dependencies = flattenDependencies(artifact, graph?.components ?? [], graph?.ecosystem);
   const dependencyGraph = cycloneDxDependencyGraph(dependencies, graph);
   const licenseNotes = licenseParseFindings(artifact);
+  const metadataProperties = [
+    ...rootIdentityProperties(rootIdentityWarning),
+    ...licenseNotes.flatMap((f) => [
+      {
+        name: LICENSE_PARSE_FAILED,
+        value: `${f.location}: ${f.message}`,
+      },
+      { name: WARNING_CODE_PROPERTY, value: WARNING_CODES.LICENSE_UNPARSEABLE },
+    ]),
+  ];
   return {
     bomFormat: 'CycloneDX',
     specVersion: '1.5',
-    serialNumber: `urn:uuid:${deterministicUuid(sbomSerialSeed('cyclonedx', artifact, dependencies, graph))}`,
+    serialNumber: `urn:uuid:${deterministicUuid(sbomSerialSeed('cyclonedx', artifact, dependencies, graph, rootIdentityWarning?.message))}`,
     version: 1,
     metadata: {
       timestamp: artifact.timestamp,
@@ -817,19 +848,9 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
       component: {
         type: 'application',
         'bom-ref': ROOT_BOM_REF,
-        name: artifact.rootPath,
+        name: portableRootComponentName(artifact.rootPath),
       },
-      ...(licenseNotes.length
-        ? {
-            properties: licenseNotes.flatMap((f) => [
-              {
-                name: LICENSE_PARSE_FAILED,
-                value: `${f.location}: ${f.message}`,
-              },
-              { name: WARNING_CODE_PROPERTY, value: WARNING_CODES.LICENSE_UNPARSEABLE },
-            ]),
-          }
-        : {}),
+      ...(metadataProperties.length ? { properties: metadataProperties } : {}),
     },
     components: dependencies.map((dep) => {
       const { purl, warning } = resolvePurl(dep.ecosystem, dep.package, dep.version);
@@ -874,18 +895,55 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
   };
 }
 
-export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<string, unknown> {
+export function toSpdx(
+  artifact: ScanArtifact,
+  graph?: LockfileGraph,
+  rootIdentityWarning?: CodedWarning | null,
+): Record<string, unknown> {
   const dependencies = flattenDependencies(artifact, graph?.components ?? [], graph?.ecosystem);
   const relationships = spdxRelationships(dependencies, graph);
   const licenseNotes = licenseParseFindings(artifact);
   const licenses = dependencies.map((dep) => licenseFor(dep));
   const extracted = extractedLicensingInfos(licenses.flatMap((license) => license.licenseRefs));
+  const rootName = portableRootComponentName(artifact.rootPath);
+  const documentAnnotations = [
+    ...(rootIdentityWarning
+      ? [
+          {
+            annotationType: 'OTHER',
+            annotator: 'Tool: @vibgrate/cli',
+            annotationDate: artifact.timestamp,
+            comment: rootIdentityWarning.message,
+          },
+          {
+            annotationType: 'OTHER',
+            annotator: 'Tool: @vibgrate/cli',
+            annotationDate: artifact.timestamp,
+            comment: `warningCode=${rootIdentityWarning.code}`,
+          },
+        ]
+      : []),
+    ...licenseNotes.flatMap((f) => [
+      {
+        annotationType: 'OTHER',
+        annotator: 'Tool: @vibgrate/cli',
+        annotationDate: artifact.timestamp,
+        comment: `${f.ruleId}: ${f.message}`,
+      },
+      {
+        annotationType: 'OTHER',
+        annotator: 'Tool: @vibgrate/cli',
+        annotationDate: artifact.timestamp,
+        comment: `warningCode=${WARNING_CODES.LICENSE_UNPARSEABLE}`,
+      },
+    ]),
+  ];
   return {
     spdxVersion: 'SPDX-2.3',
     dataLicense: 'CC0-1.0',
     SPDXID: 'SPDXRef-DOCUMENT',
-    name: `${artifact.rootPath}-sbom`,
-    documentNamespace: `https://vibgrate.com/spdx/${artifact.rootPath}/${deterministicUuid(sbomSerialSeed('spdx', artifact, dependencies, graph))}`,
+    name: `${rootName}-sbom`,
+    documentNamespace: `https://vibgrate.com/spdx/${rootName}/${deterministicUuid(sbomSerialSeed('spdx', artifact, dependencies, graph, rootIdentityWarning?.message))}`,
     creationInfo: {
       created: artifact.timestamp,
       creators: [`Tool: @vibgrate/cli-${artifact.vibgrateVersion}`],
@@ -947,24 +1005,7 @@ export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<st
     }),
     ...(extracted.length ? { hasExtractedLicensingInfos: extracted } : {}),
     ...(relationships ? { relationships } : {}),
-    ...(licenseNotes.length
-      ? {
-          annotations: licenseNotes.flatMap((f) => [
-            {
-              annotationType: 'OTHER',
-              annotator: 'Tool: @vibgrate/cli',
-              annotationDate: artifact.timestamp,
-              comment: `${f.ruleId}: ${f.message}`,
-            },
-            {
-              annotationType: 'OTHER',
-              annotator: 'Tool: @vibgrate/cli',
-              annotationDate: artifact.timestamp,
-              comment: `warningCode=${WARNING_CODES.LICENSE_UNPARSEABLE}`,
-            },
-          ]),
-        }
-      : {}),
+    ...(documentAnnotations.length ? { annotations: documentAnnotations } : {}),
   };
 }
 
@@ -1079,6 +1120,9 @@ const exportCommand = new Command('export')
       process.exit(1);
     }
 
+    const rootIdentity = await readRootPackageIdentity(path.resolve(opts.root));
+    const rootIdentityWarning = rootIdentity?.warning ?? null;
+
     // Manifest scanning only sees what's declared in package.json (by design —
     // see engine/manifests.ts), which is a fraction of what's actually
     // installed. Pull the full resolved tree — merged across every scanned
@@ -1087,8 +1131,9 @@ const exportCommand = new Command('export')
     // reflects real supply-chain exposure, not just direct dependencies.
     const lockfileGraph = opts.transitive ? collectLockfileGraph(artifact, path.resolve(opts.root)) : undefined;
 
-    const sbom = format === 'cyclonedx' ? toCycloneDx(artifact, lockfileGraph) : toSpdx(artifact, lockfileGraph);
+    const sbom = format === 'cyclonedx' ? toCycloneDx(artifact, lockfileGraph, rootIdentityWarning) : toSpdx(artifact, lockfileGraph, rootIdentityWarning);
     const coded: CodedWarning[] = [];
+    if (rootIdentityWarning) coded.push(rootIdentityWarning);
     const plain: string[] = [];
     for (const warning of [
       ...collectPurlWarnings(artifact, lockfileGraph),

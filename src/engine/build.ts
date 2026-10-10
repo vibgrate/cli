@@ -340,6 +340,9 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     exclude,
     paths: options.paths,
   });
+  if (manifests.rootIdentityWarning) {
+    warnings.push(stampWarning(manifests.rootIdentityWarning.code, manifests.rootIdentityWarning.message));
+  }
   if (manifests.files > 0) {
     const byId = new Map(resolved.nodes.map((n) => [n.id, n]));
     for (const n of manifests.nodes) {

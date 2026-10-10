@@ -12,6 +12,7 @@ import { withTimeout } from '../utils/timeout.js';
 import { NpmCache, isSemverSpec } from './npm-cache.js';
 import { classifyNpmVersionLag } from './npm-latest.js';
 import { buildDependencyLicense, normalizeLicenseSourcePath } from '../licenses/dependency-license.js';
+import { directoryBaseName, manifestField } from '../utils/root-package-identity.js';
 import { ageDaysBetween, daysToLibyears, aggregateLibyears } from '../scoring/libyear.js';
 import { latestLts, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
@@ -473,7 +474,7 @@ async function scanOnePackageJson(
   return {
     type: 'node',
     path: projectPath,
-    name: pj.name ?? path.basename(absProjectPath),
+    name: manifestField(pj.name) ?? directoryBaseName(absProjectPath),
     runtime: nodeEngine,
     runtimeLatest,
     runtimeMajorsBehind,
