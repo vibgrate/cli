@@ -26,7 +26,7 @@ import { UnsafeRootError } from '../core-open/utils/root-safety.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { resolveSelfJsEntry } from '../util/cli-invocation.js';
 import { c, info, out, json } from '../util/output.js';
-import { formatWarningLine } from '../core-open/warnings.js';
+import { formatWarningLine, WARNING_CODES } from '../core-open/warnings.js';
 import { printLogo } from '../util/logo.js';
 import { ProgressBar } from '../util/progress.js';
 import { applyGlobalOptions, readGlobal, type GlobalOpts } from '../cli-options.js';
@@ -340,15 +340,24 @@ export async function runBuild(
     .map((p) => path.relative(root, p as string))
     .join('  ');
   info(`  → ${artifactList}`);
-  if (result.warnings.length) {
+  // Discovery already wrote VG_WARN_SYMLINK_SKIPPED to stderr. Reprinting it
+  // here would be a second copy of the one coalesced notice.
+  const symlinkStamps = new Set(
+    result.codedWarnings
+      .filter((warning) => warning.code === WARNING_CODES.SYMLINK_SKIPPED)
+      .map((warning) => `${warning.message} [${warning.code}]`),
+  );
+  const summaryWarnings = result.warnings.filter((line) => !symlinkStamps.has(line));
+  if (summaryWarnings.length) {
     for (const warning of result.codedWarnings) {
+      if (symlinkStamps.has(`${warning.message} [${warning.code}]`)) continue;
       info(c.yellow(`  ${formatWarningLine(warning)}`));
     }
     const stamped = new Set(result.codedWarnings.map((warning) => `${warning.message} [${warning.code}]`));
-    for (const line of result.warnings) {
+    for (const line of summaryWarnings) {
       if (!stamped.has(line)) info(c.yellow(`  warning: ${line}`));
     }
-    info(c.yellow(`  ${result.warnings.length} parse warning(s) — run with --json for detail`));
+    info(c.yellow(`  ${summaryWarnings.length} parse warning(s) — run with --json for detail`));
   }
   if (attestation) {
     for (const n of attestNotices) info(c.yellow(`  ${n}`));

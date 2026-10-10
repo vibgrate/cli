@@ -164,12 +164,16 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   // instead of reading a filesystem root or an enormous unpack first.
   const limits = resolveLimits(options.limits);
   timer.start('discover');
+  const symlinkSkips: CodedWarning[] = [];
   const files = discover({
     root,
     only: options.only,
     exclude,
     paths: options.paths,
     maxEntries: limits.maxFiles,
+    onSymlinkSkip: (warning) => {
+      symlinkSkips.push(warning);
+    },
   });
   timer.end('discover');
 
@@ -323,7 +327,11 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0,
   );
 
-  const warnings = [...buildWarnings, ...parses.flatMap((p) => p.warnings ?? [])];
+  const warnings = [
+    ...symlinkSkips.map((warning) => stampWarning(warning.code, warning.message)),
+    ...buildWarnings,
+    ...parses.flatMap((p) => p.warnings ?? []),
+  ];
 
   // Resolve → nodes/edges. The module resolver follows relative imports plus
   // tsconfig path aliases and workspace-package names (so monorepo cross-package

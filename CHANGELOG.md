@@ -24,9 +24,10 @@ backward compatible.
 - **`vg build` and `vg scan` do not follow symlinks, and they say so.** A
   directory symlink is not entered, so a link to its parent cannot hang the
   walk, and a file symlink is not read. When any are skipped, one stderr
-  notice lists the count and the first few root-relative paths. Nothing is
-  printed when there are none. Output files, the exit code, and JSON on
-  stdout stay the same.
+  warning `VG_WARN_SYMLINK_SKIPPED` lists the count and the first few
+  root-relative paths. The same warning is `codedWarnings` on
+  `vg build --json` and `degradations` on `vg scan`. Nothing is printed when
+  there are none. Output files and the exit code stay the same.
 
 ### Added
 

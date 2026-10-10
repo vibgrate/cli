@@ -2136,7 +2136,7 @@ Switches (flags that take no value, such as `--vulns`, `--offline` or `--no-grap
 
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
-`vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once on stderr. See [Symlinks](#symlinks).
+`vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once on stderr as `VG_WARN_SYMLINK_SKIPPED`. See [Symlinks](#symlinks).
 
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
 
@@ -2728,7 +2728,7 @@ Maps source code into a graph artifact, enabling all downstream queries (`vg sho
 | `--attestation <file>` | `.vibgrate/attestation.intoto.jsonl` | Where `--attest` writes, and where `--verify` reads |
 | `--pub <path>` | — | Public key PEM that pins the signer for `--verify` |
 
-`vg build` does not follow symlinks while it discovers files. A skipped link is named once on stderr. See [Symlinks](#symlinks). `.gitignore` and `--exclude` still apply.
+`vg build` does not follow symlinks while it discovers files. A skipped link is named once on stderr as `VG_WARN_SYMLINK_SKIPPED`. See [Symlinks](#symlinks). `.gitignore` and `--exclude` still apply.
 
 **Local by default — no git churn.** The first time vg writes into `.vibgrate/` it also creates `.vibgrate/.gitignore`, keeping the graph artifacts (`graph.json`, `graph.html`, `GRAPH_REPORT.md`, `facts.jsonl`, `mcp-navigation.json`) and the cache out of git — so builds, auto-refreshes, and MCP use never leave your branch dirty. Run `vg share` when you want the map committed for your team (it rewrites that ignore file). vg never touches an existing `.vibgrate/.gitignore`, so edit it (or leave it empty) to manage the ignores yourself.
 
@@ -5120,16 +5120,20 @@ link points at, point the root at that target, or pass a narrower directory
 that already contains them. To leave a link out without a notice, list it in
 `.gitignore` or pass `--exclude`.
 
-When a walk skips one or more symlinks, vg prints one notice on stderr and
-nothing when there are none. The notice is the count, then the first few
-root-relative paths in sorted order (at most five; further links are a
-`+N more` count). Paths are relative to the root you passed. Absolute paths
-are not printed. The line goes to stderr, so `--format json` and
-`vg build --json` keep a JSON document on stdout. `--quiet` hides promotional
-text only; it does not hide this notice.
+When a walk skips one or more symlinks, vg prints one warning on stderr and
+nothing when there are none. The warning is `VG_WARN_SYMLINK_SKIPPED`: the
+count, then the first few root-relative paths in sorted order (at most five;
+further links are a `+N more` count). Paths are relative to the root you
+passed. Absolute paths are not printed, and the link target is not printed.
+The same tree produces the same code and the same message. The line goes to
+stderr, so `--format json` and `vg build --json` keep a JSON document on
+stdout. `vg build --json` also lists the warning in `codedWarnings` (and the
+matching string in `warnings`). `vg scan --format json` lists it in
+`degradations`. `--quiet` hides promotional text only; it does not hide this
+warning.
 
 ```text
-notice: skipped 3 symlinks (alias.ts, nested/cycle, via). vg does not follow symlinks. Point the root at the link target, or pass --exclude or a narrower root.
+warning [VG_WARN_SYMLINK_SKIPPED]: skipped 3 symlinks (alias.ts, nested/cycle, via). vg does not follow symlinks. Point the root at the link target, or pass --exclude or a narrower root.
 ```
 
 ---
@@ -5745,7 +5749,7 @@ Stderr lines look like `warning [VG_WARN_PARSE_FAILED]: …`. The code is the to
 
 `vg build --json` keeps `warnings` as strings and adds `codedWarnings`: an array of `{ code, message }` in that same order. Each string in `warnings` ends with ` [CODE]`. `codedWarnings` is left out when there are no warnings.
 
-`vg scan --format json` adds `degradations` when a path was skipped or a baseline file could not be read. The field is left out when there are none. `vg report` prints those same rows.
+`vg scan --format json` adds `degradations` when a path was skipped, a symlink was not followed, or a baseline file could not be read. The field is left out when there are none. `vg report` prints those same rows.
 
 `vg sbom export` prints the code on stderr. CycloneDX adds a `vibgrate:warningCode` property next to the existing warning property. SPDX adds an annotation whose comment is `warningCode=VG_WARN_…`. The warning sentences already stored on the document stay as they are.
 
@@ -5769,6 +5773,7 @@ A truncated or invalid lockfile stops the command. Warning codes cover condition
 | `VG_WARN_WORKFLOW_STEP_CAP` | `vg build` | A workflow job listed more steps than the extractor enumerates. |
 | `VG_WARN_SCAN_PATH_SKIPPED` | `vg scan` | A scan path timed out and was skipped. |
 | `VG_WARN_SCAN_FILE_OVERSIZE` | `vg scan` | A scan file exceeded the size cap and was skipped. |
+| `VG_WARN_SYMLINK_SKIPPED` | `vg build`, `vg scan` | A walk skipped one or more symlinks. The walk does not follow them. |
 | `VG_WARN_BASELINE_UNREADABLE` | `vg scan` | A baseline file could not be read. The scan continues without a comparison. |
 | `VG_WARN_LICENSE_UNPARSEABLE` | `vg scan`, `vg sbom` | A declared license string could not be resolved to SPDX. |
 | `VG_WARN_LICENSE_UNREPRESENTABLE` | `vg sbom` | A declared license cannot be represented in an SBOM. |

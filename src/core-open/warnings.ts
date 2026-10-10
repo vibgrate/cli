@@ -44,6 +44,8 @@ export const WARNING_CODES = {
   SCAN_PATH_SKIPPED: 'VG_WARN_SCAN_PATH_SKIPPED',
   /** A scan file exceeded the size cap and was skipped. */
   SCAN_FILE_OVERSIZE: 'VG_WARN_SCAN_FILE_OVERSIZE',
+  /** A build or scan walk skipped one or more symlinks and did not follow them. */
+  SYMLINK_SKIPPED: 'VG_WARN_SYMLINK_SKIPPED',
   /** A baseline file could not be read. The scan continues without a comparison. */
   BASELINE_UNREADABLE: 'VG_WARN_BASELINE_UNREADABLE',
   /** A declared license string could not be resolved to SPDX. */
