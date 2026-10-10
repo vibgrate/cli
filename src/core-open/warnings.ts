@@ -1,8 +1,6 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
-import { compareCodeUnit } from './utils/compare.js';
-
 /**
  * Stable codes for degrade-and-continue warnings on `vg build`, `vg scan`,
  * `vg report`, and `vg sbom`.
@@ -16,6 +14,8 @@ import { compareCodeUnit } from './utils/compare.js';
  * A later warn-and-continue lockfile condition adds one entry to this
  * object and one emit site.
  */
+
+import { compareCodeUnits } from './utils/code-unit.js';
 
 export const WARNING_CODES = {
   /** A source file failed to parse. The build continues without its symbols. */
@@ -118,11 +118,12 @@ export function splitStampedWarning(stored: string): CodedWarning | undefined {
 }
 
 /**
- * Order by code, then by message, in code-unit order (not the process locale).
- * Equal pairs keep their input order (the runtime sort is stable).
+ * Order by code, then by message, in UTF-16 code units. Equal pairs keep
+ * their input order (the runtime sort is stable). The process locale does
+ * not change the order.
  */
 export function sortCodedWarnings(warnings: readonly CodedWarning[]): CodedWarning[] {
-  return [...warnings].sort((a, b) => compareCodeUnit(a.code, b.code) || compareCodeUnit(a.message, b.message));
+  return [...warnings].sort((a, b) => compareCodeUnits(a.code, b.code) || compareCodeUnits(a.message, b.message));
 }
 
 /**

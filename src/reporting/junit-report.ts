@@ -20,8 +20,8 @@
  */
 import * as path from 'node:path';
 import { compareDriftBudget, type DriftBudgetGateResult } from './drift-budget-gate.js';
+import { compareCodeUnits } from '../core-open/utils/code-unit.js';
 import { writeTextFile } from './utils/fs.js';
-import { compareCodeUnit as cmp } from '../util/compare.js';
 
 export const JUNIT_FINDINGS_CLASS = 'vg.findings';
 export const JUNIT_GATES_CLASS = 'vg.gates';
@@ -94,6 +94,11 @@ export interface SecurityJUnitFinding {
   line?: number;
   severity: string;
   message: string;
+}
+
+/** Code-unit order. Locale-independent, unlike `localeCompare`. */
+function cmp(a: string, b: string): number {
+  return compareCodeUnits(a, b);
 }
 
 const LEVEL_RANK: Record<JUnitFinding['level'], number> = { error: 0, warning: 1, note: 2 };

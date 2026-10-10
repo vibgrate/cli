@@ -1,6 +1,5 @@
 import { fixAvailableHint } from '../../core-open/formatters/fix-hint.js';
 import { redactForDisplay } from '../../core-open/utils/redact.js';
-import { compareCodeUnit as cmpStr } from '../../util/compare.js';
 import type { SecurityFinding } from '../../core-open/types.js';
 import type { Finding, ScanArtifact } from '../types.js';
 
@@ -320,6 +319,12 @@ function sortWithIndex<T>(items: T[], cmp: (a: T, b: T) => number): T[] {
     .map((item, index) => ({ item, index }))
     .sort((a, b) => cmp(a.item, b.item) || a.index - b.index)
     .map((row) => row.item);
+}
+
+function cmpStr(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
 }
 
 function cellText(value: string): string {

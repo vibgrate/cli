@@ -48,7 +48,6 @@ import { parseDsn } from './utils/dsn.js';
 import { loadPackageVersionManifest } from './package-version-manifest.js';
 import { generateWorkspaceRelationshipMermaid, generateProjectRelationshipMermaid, generateSolutionRelationshipMermaid } from './utils/mermaid.js';
 import { classifyProject, summarizeBilling } from './scanners/project-classification.js';
-import { compareCodeUnit } from './utils/compare.js';
 import { collectVulnTargets, scanVulnerabilities, generateVulnerabilityFindings } from './scanners/vulnerability-scanner.js';
 import { attributeVulnerabilities } from './scoring/vuln-attribution.js';
 import { gitHistoryAvailable, workingTreeDirty } from './utils/git-history.js';
@@ -66,6 +65,7 @@ import {
   type CodedWarning,
 } from './warnings.js';
 import type { RuntimeCatalog } from './runtimes/types.js';
+import { compareCodeUnits } from './utils/code-unit.js';
 
 /**
  * Shared context handed to the advanced-analysis hook (see {@link AdvancedScanHook}).
@@ -773,8 +773,8 @@ export async function runCoreScan(
   progress.finish();
 
   const degradations: CodedWarning[] = [];
-  const stuckPaths = [...fileCache.stuckPaths].sort(compareCodeUnit);
-  const skippedLarge = [...fileCache.skippedLargeFiles].sort(compareCodeUnit);
+  const stuckPaths = [...fileCache.stuckPaths].sort(compareCodeUnits);
+  const skippedLarge = [...fileCache.skippedLargeFiles].sort(compareCodeUnits);
   const timeoutSeconds = Math.round(projectScanTimeoutMs / 1000);
 
   if (stuckPaths.length > 0) {

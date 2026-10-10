@@ -7,6 +7,9 @@
  * file? Source never leaves the machine — only the tier verdicts and the
  * module-import evidence are attached to the scan artifact.
  *
+ * String keys in the emitted arrays use code-unit order so the JSON does
+ * not follow LANG or LC_ALL.
+ *
  * Tier semantics (kept deliberately conservative — precision only ever
  * resolves UP toward "reachable", never down):
  *   - reachable              — the package is imported AND a vulnerable symbol is
@@ -23,7 +26,6 @@
  */
 
 import * as path from 'node:path';
-import { compareCodeUnit } from '../util/compare.js';
 import * as fs from 'node:fs/promises';
 import type {
   ScanReachabilityResult,
@@ -35,6 +37,7 @@ import type {
 } from '../core-open/index.js';
 import type { VgGraph, GraphNode } from '../schema.js';
 import { indexFor } from '../engine/relations.js';
+import { compareCodeUnits } from '../core-open/utils/code-unit.js';
 
 export const REACHABILITY_ANALYZER_VERSION = 'vg-reach-1.0';
 
@@ -267,7 +270,7 @@ export async function analyzeReachability(
     }
   }
   importedModules.sort(
-    (a, b) => compareCodeUnit(a.ecosystem, b.ecosystem) || compareCodeUnit(a.package, b.package),
+    (a, b) => compareCodeUnits(a.ecosystem, b.ecosystem) || compareCodeUnits(a.package, b.package),
   );
 
   const findings: ScanReachabilityFinding[] = [];
@@ -378,10 +381,10 @@ export async function analyzeReachability(
 
   findings.sort(
     (a, b) =>
-      compareCodeUnit(a.ecosystem, b.ecosystem) ||
-      compareCodeUnit(a.package, b.package) ||
-      compareCodeUnit(a.advisoryId, b.advisoryId) ||
-      compareCodeUnit(a.symbol ?? '', b.symbol ?? ''),
+      compareCodeUnits(a.ecosystem, b.ecosystem) ||
+      compareCodeUnits(a.package, b.package) ||
+      compareCodeUnits(a.advisoryId, b.advisoryId) ||
+      compareCodeUnits(a.symbol ?? '', b.symbol ?? ''),
   );
 
   return {
@@ -420,9 +423,9 @@ export function collectPreflightDependencies(
   }
   return [...deduped.values()].sort(
     (a, b) =>
-      compareCodeUnit(a.ecosystem, b.ecosystem) ||
-      compareCodeUnit(a.package, b.package) ||
-      compareCodeUnit(a.version, b.version),
+      compareCodeUnits(a.ecosystem, b.ecosystem) ||
+      compareCodeUnits(a.package, b.package) ||
+      compareCodeUnits(a.version, b.version),
   );
 }
 

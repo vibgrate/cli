@@ -22,7 +22,6 @@ import {
   type TomlLockKind,
 } from '../core-open/utils/lockfile-unknown.js';
 import type { DepRecord } from './drift.js';
-import { compareCodeUnit } from '../util/compare.js';
 
 /**
  * Read a lockfile that may be absent. A missing file is `undefined` (the
@@ -309,7 +308,7 @@ function componentsOnly(components: LockfileComponent[] | undefined, ecosystem?:
 }
 
 function sortComponents(map: Map<string, LockfileComponent>): LockfileComponent[] {
-  return [...map.values()].sort((a, b) => compareCodeUnit(a.package, b.package) || compareCodeUnit(a.version, b.version));
+  return [...map.values()].sort((a, b) => a.package.localeCompare(b.package) || a.version.localeCompare(b.version));
 }
 
 function uniqSorted(keys: string[]): string[] {

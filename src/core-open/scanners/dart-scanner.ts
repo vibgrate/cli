@@ -1,7 +1,6 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
-import { compareCodeUnit } from '../utils/compare.js';
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, FileCache } from '../utils/fs.js';
@@ -10,6 +9,7 @@ import { lockfileWarningPath, notePubspecLockText, withLockfileNotes } from '../
 import { withTimeout } from '../utils/timeout.js';
 import { PubCache } from './pub-cache.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
+import { compareCodeUnits } from '../utils/code-unit.js';
 
 /** Well-known Dart/Flutter frameworks / libraries to track */
 const KNOWN_DART_FRAMEWORKS: Record<string, string> = {
@@ -407,7 +407,7 @@ async function scanOneDartProject(
     const order = { 'major-behind': 0, 'minor-behind': 1, 'current': 2, 'unknown': 3 };
     const diff = (order[a.drift] ?? 9) - (order[b.drift] ?? 9);
     if (diff !== 0) return diff;
-    return compareCodeUnit(a.package, b.package);
+    return compareCodeUnits(a.package, b.package);
   });
 
   // Count files
