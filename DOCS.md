@@ -337,6 +337,8 @@ A `--from` file that is truncated, not valid JSON, or a CycloneDX or SPDX docume
 
 If a command cannot serialize or write a JSON or JSONL file — permission denied, a missing parent directory, a path that is a directory, a full disk, or a value that cannot be serialized — that is an operational error. The command exits `1`. The message names the file. Check the path and permissions, or choose another `--out` or `--bundle`.
 
+`vg evidence verify` reads the bundle before it reports `verified`, `unverified`, or `failed`. A missing bundle exits `3`. A bundle whose envelope or `result.json` is truncated, is not valid JSON, or is not an evidence document this version can read exits `1`. The message names the envelope or the result and tells you to restore the bundle or re-create it with `vg evidence exposure --bundle`. It does not print the file's contents or a stack trace. A readable bundle that was signed and then edited still reports `failed`.
+
 No language model touches any figure in the evidence path, and every determination carries an evidence-not-compliance disclaimer. Vibgrate Evidence produces evidence to support your obligations under a regime; it does not determine compliance and is not legal advice.
 
 ---
