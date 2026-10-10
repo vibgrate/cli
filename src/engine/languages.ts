@@ -84,8 +84,8 @@ export const LANGUAGES: LanguageDef[] = [
   { id: 'ex', label: 'Elixir', extensions: ['.ex', '.exs'], grammarFile: 'tree-sitter-elixir' },
   // Known limitation: the bundled bash grammar's external scanner throws under
   // web-tree-sitter 0.25.10 on `case`/heredoc constructs. Such files degrade
-  // gracefully (per-file empty parse + a surfaced warning, never a build crash);
-  // functions in case/heredoc-free scripts extract normally.
+  // gracefully (per-file empty parse + a warning that names the file, never a
+  // build crash); functions in case/heredoc-free scripts extract normally.
   { id: 'sh', label: 'Shell', extensions: ['.sh', '.bash'], grammarFile: 'tree-sitter-bash' },
   { id: 'zig', label: 'Zig', extensions: ['.zig'], grammarFile: 'tree-sitter-zig' },
   { id: 'c', label: 'C', extensions: ['.c'], grammarFile: 'tree-sitter-c' },

@@ -5755,7 +5755,7 @@ A truncated or invalid lockfile stops the command. Warning codes cover condition
 
 | Code | Command | Meaning |
 | --- | --- | --- |
-| `VG_WARN_PARSE_FAILED` | `vg build`, `vg scan` | A supported-language file failed tree-sitter parse. The warning names the file and the language, and tells you to fix the syntax or exclude the path with `--exclude`. The map continues without that file's definitions. The parser's own exception text is not the warning. |
+| `VG_WARN_PARSE_FAILED` | `vg build`, `vg scan` | A supported-language source file failed to parse. The message names the file and the language. The map continues without that file's symbols. Correct the file or exclude the path with `--exclude`. |
 | `VG_WARN_BUILD_FILE_OVERSIZE` | `vg build` | A file exceeded the per-file size cap and was left out of the map. |
 | `VG_WARN_TSC_RESOLVER_SKIPPED` | `vg build` | The TypeScript resolver was skipped because the corpus exceeded its file cap. |
 | `VG_WARN_YAML_PARSE_FAILED` | `vg build` | YAML for an infrastructure file failed to parse. |

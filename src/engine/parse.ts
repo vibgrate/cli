@@ -1,6 +1,5 @@
 import { Query, type Node, type Language } from 'web-tree-sitter';
-import { parserFor, loadLanguage, resetParser } from './grammars.js';
-import { parseFailedWarning } from './parse-failure.js';
+import { parserFor, loadLanguage } from './grammars.js';
 import { langById } from './languages.js';
 import { queriesFor, type DefRule } from './queries.js';
 import { extractEmbeddedScript } from './sfc.js';
@@ -15,6 +14,7 @@ function effectsRegexEnabled(): boolean {
   return !(v === '0' || v === 'false');
 }
 import { extractDutiesWithCandidates, fileBindings, type Bindings } from './duties.js';
+import { parseFailureWarning } from './parse-warning.js';
 import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport, RawTypeRef } from './types.js';
 
 /**
@@ -288,17 +288,11 @@ export async function parseSource(
 
   const language = await loadLanguage(effLangId);
   const parser = await parserFor(def);
-  let tree;
-  try {
-    tree = parser.parse(text);
-  } catch {
-    // An external scanner can throw (wasm) and leave the reused parser
-    // mid-state. Drop it so the next file of this language starts clean.
-    // The warning is stable: the exception text is not part of the line.
-    resetParser(effLangId);
-    return markParseFailed(result);
+  const tree = parser.parse(text);
+  if (!tree) {
+    result.warnings = [parseFailureWarning(rel, langId)];
+    return result;
   }
-  if (!tree) return markParseFailed(result);
   const root = tree.rootNode;
 
   // --- definitions ---
@@ -477,34 +471,42 @@ export async function parseSource(
   const roles = extractAstRolesFromTree(rel, effLangId, language, root, text);
   if (roles) result.roles = roles;
 
-  // Decide before delete(): the node is invalid afterwards. A file whose root
-  // contains only ERROR nodes, and no definitions, used to disappear with no
-  // notice. A nested ERROR next to a real construct is not this case — some
-  // grammars set hasError on a reused parser for valid sources that simply
-  // declare nothing (Lua `return 1`), and warning there would be a false alarm.
-  const unrecovered = result.defs.length === 0 && unrecoveredTree(root);
-  tree.delete();
-  if (unrecovered) return markParseFailed(result);
-  return result;
-}
-
-/** True when the parse recovered nothing but ERROR nodes at the root. */
-function unrecoveredTree(root: Node): boolean {
-  if (!root.hasError) return false;
-  if (root.isError || root.type === 'ERROR') return true;
-  let real = 0;
-  let error = 0;
-  for (const kid of root.namedChildren) {
-    if (!kid) continue;
-    if (kid.isError || kid.type === 'ERROR') error += 1;
-    else real += 1;
+  // Tree-sitter returns a tree for broken syntax instead of throwing. When
+  // that tree is only ERROR nodes and nothing was extracted, the file was
+  // skipped. `hasError` alone is not that signal: some grammars set it on
+  // valid nodes, and a reused parser can set it on a later file that parsed
+  // cleanly on its own (Lua `return 1`).
+  if (treeIsOnlyErrors(root) && parseYieldedNothing(result)) {
+    result.warnings = [...(result.warnings ?? []), parseFailureWarning(rel, langId)];
   }
-  return error > 0 && real === 0;
+
+  tree.delete();
+  return result;
 }
 
-function markParseFailed(result: FileParse): FileParse {
-  result.warnings = [parseFailedWarning(result.rel, result.lang)];
-  return result;
+function treeIsOnlyErrors(root: Node): boolean {
+  if (!root.hasError) return false;
+  if (root.type === 'ERROR') return true;
+  const count = root.namedChildCount;
+  if (count === 0) return false;
+  for (let i = 0; i < count; i++) {
+    const child = root.namedChild(i);
+    if (!child || child.type !== 'ERROR') return false;
+  }
+  return true;
+}
+
+function parseYieldedNothing(result: FileParse): boolean {
+  return (
+    result.defs.length === 0 &&
+    result.calls.length === 0 &&
+    result.imports.length === 0 &&
+    result.heritage.length === 0 &&
+    (result.typeRefs?.length ?? 0) === 0 &&
+    (result.guards?.length ?? 0) === 0 &&
+    (result.namespaces?.length ?? 0) === 0 &&
+    (result.roles?.length ?? 0) === 0
+  );
 }
 
 /**

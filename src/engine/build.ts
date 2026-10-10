@@ -51,7 +51,7 @@ import type { ResolveResult } from './resolve.js';
 import { fileRolesFromParses } from './ast-roles.js';
 import type { AstRoleHit } from '../core-open/scanners/architecture/ast-roles.js';
 import { stampWarning, WARNING_CODES, type CodedWarning } from '../core-open/warnings.js';
-import { isParseFailedWarning } from './parse-failure.js';
+import { isParseFailureWarning } from './parse-warning.js';
 import { assembleEngineWarnings } from './warning-codes.js';
 
 export interface BuildOptions {
@@ -309,11 +309,8 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     // Never persist a failed parse: a transient parse-runtime crash (e.g. a
     // corrupted wasm heap) would otherwise poison the cache for that content
     // hash and every later build would reuse the empty parse instead of
-    // re-parsing the file. A syntax error that yielded no definitions is the
-    // same shape — re-parse it next time so a grammar fix is picked up, and
-    // so the warning is produced again from the file rather than from a
-    // cached empty table.
-    if (p.defs.length === 0 && p.warnings?.some((w) => isParseFailedWarning(w))) continue;
+    // re-parsing the file.
+    if (p.defs.length === 0 && p.warnings?.some((w) => isParseFailureWarning(w))) continue;
     const st = fileStats.find((f) => f.rel === p.rel);
     cache.set(p.rel, p, st ? { mtimeMs: st.mtimeMs, size: st.size } : undefined);
   }

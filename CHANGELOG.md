@@ -42,7 +42,7 @@ backward compatible.
 
 ### Fixed
 
-- **A supported-language file that fails tree-sitter parse warns with `VG_WARN_PARSE_FAILED`.** `vg build` and `vg scan` name the file path and the language, and tell you to fix the syntax or exclude the path with `--exclude`. The same file always produces the same warning. The map continues without that file's definitions. A parser crash is reported as that warning, not as a stack trace. (#289)
+- **`vg build` and `vg scan` name a file when its parse fails.** A supported-language file the parser cannot read produces a warning with the file path, the language, and what to do next: correct the file or exclude the path. The map continues without that file's symbols. The same tree prints the same warning. The warning does not include a stack trace. (#289)
 
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its

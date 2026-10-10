@@ -96,9 +96,9 @@ for (const lang of buildableLangs) {
 
         // (c) no parse failures. `BuildResult.warnings` is the engine's only
         // per-file failure signal (parse/query problems surface as
-        // VG_WARN_PARSE_FAILED); it must be empty.
+        // VG_WARN_PARSE_FAILED warnings); it must be empty.
         expect(first.warnings).toEqual([]);
-        expect(first.warnings.filter((w) => /query|VG_WARN_PARSE_FAILED|parse failed/i.test(w))).toEqual([]);
+        expect(first.warnings.filter((w) => /query|parse failed/i.test(w))).toEqual([]);
 
         // (d) determinism: rebuilding serializes byte-identically via the same
         // serializer the CLI writes graph.json with. For known re-parse-unstable
