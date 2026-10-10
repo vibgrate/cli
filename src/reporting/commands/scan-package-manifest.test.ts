@@ -8,6 +8,10 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CliError, ExitCode } from '../../util/exit.js';
+import {
+  ZIP_MANIFEST_MAX_ENTRIES,
+  archiveLimitMessage,
+} from '../../core-open/utils/zip-manifest.js';
 import { scanCommand } from './scan.js';
 
 const BODY_SENTINEL = 'manifest-body-sentinel-9f3a2c';
@@ -101,6 +105,19 @@ describe('scan --package-manifest fail closed', () => {
     assertClosed((error as Error).message);
   });
 
+  it('exits with an actionable error when a ZIP manifest exceeds the entry limit', async () => {
+    const zipPath = path.join(dir, 'package-versions.zip');
+    fs.writeFileSync(zipPath, overEntryZip(Buffer.from(BODY_SENTINEL)));
+    const expected = archiveLimitMessage(zipPath, 'entries', ZIP_MANIFEST_MAX_ENTRIES, ZIP_MANIFEST_MAX_ENTRIES + 1);
+
+    const error = await run(['--package-manifest', zipPath]).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(CliError);
+    expect(error).toMatchObject({ code: ExitCode.ERROR, message: expected });
+    assertClosed((error as Error).message);
+    expect((error as Error).message).toContain(`${ZIP_MANIFEST_MAX_ENTRIES}-entry limit`);
+    expect((error as Error).message).toContain(zipPath);
+  });
+
   it('still scans when the manifest is a usable JSON file', async () => {
     const manifest = path.join(dir, 'package-versions.json');
     const out = path.join(dir, 'scan.json');
@@ -154,4 +171,75 @@ describe('scan --package-manifest process exit', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it('prints the entry-limit error and exits non-zero for an over-limit ZIP', () => {
+    const dir = fs.mkdtempSync(path.join(tmpdir(), 'vg-manifest-zip-'));
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 't', version: '1.0.0' }));
+    fs.writeFileSync(path.join(dir, '.env'), `TOKEN=${NEARBY_SENTINEL}\n`);
+    const zipPath = path.join(dir, 'package-versions.zip');
+    fs.writeFileSync(zipPath, overEntryZip(Buffer.from(BODY_SENTINEL)));
+    const tsx = createRequire(import.meta.url).resolve('tsx/cli');
+
+    try {
+      const res = spawnSync(
+        process.execPath,
+        [tsx, path.join(PACKAGE_ROOT, 'src/cli.ts'), 'scan', dir, '--offline', '--no-daemon', '--no-graph', '--quiet', '--vulns', '--package-manifest', zipPath],
+        {
+          cwd: dir,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            NO_COLOR: '1',
+            VIBGRATE_DSN: '',
+            VIBGRATE_NO_KERNEL: '1',
+            VIBGRATE_MANIFEST_SENTINEL: ENV_SENTINEL,
+          },
+        },
+      );
+
+      expect(res.status).toBe(ExitCode.ERROR);
+      const stderr = res.stderr ?? '';
+      // cwd is the project, so the archive path in the message is relative.
+      expect(stderr).toContain(
+        `error: Package manifest is not usable: package-versions.zip. The archive exceeds the ${ZIP_MANIFEST_MAX_ENTRIES}-entry limit (${ZIP_MANIFEST_MAX_ENTRIES + 1} entries). Pass a JSON package-version manifest to --package-manifest.`,
+      );
+      expect(stderr).not.toContain(BODY_SENTINEL);
+      expect(stderr).not.toContain(NEARBY_SENTINEL);
+      expect(stderr).not.toContain(ENV_SENTINEL);
+      expect(stderr).not.toMatch(/\n\s+at /);
+      expect(fs.existsSync(path.join(dir, '.vibgrate'))).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
+
+/** Tiny ZIP whose central directory claims one more entry than the manifest bound. */
+function overEntryZip(body: Buffer): Buffer {
+  const name = Buffer.from('package-versions.json');
+  const u16 = (n: number) => {
+    const b = Buffer.alloc(2);
+    b.writeUInt16LE(n);
+    return b;
+  };
+  const u32 = (n: number) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32LE(n);
+    return b;
+  };
+  const local = Buffer.concat([
+    u32(0x04034b50), u16(20), u16(0), u16(0), u16(0), u16(0), u32(0),
+    u32(body.length), u32(body.length), u16(name.length), u16(0), name, body,
+  ]);
+  const central = Buffer.concat([
+    u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(0), u16(0), u32(0),
+    u32(body.length), u32(body.length), u16(name.length), u16(0), u16(0),
+    u16(0), u16(0), u32(0), u32(0), name,
+  ]);
+  const count = ZIP_MANIFEST_MAX_ENTRIES + 1;
+  const eocd = Buffer.concat([
+    u32(0x06054b50), u16(0), u16(0), u16(count), u16(count),
+    u32(central.length), u32(local.length), u16(0),
+  ]);
+  return Buffer.concat([local, central, eocd]);
+}

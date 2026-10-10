@@ -190,7 +190,8 @@ const SKIP_EXTENSIONS = new Set([
   '.mp4', '.webm', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.m4v', '.mpg', '.mpeg', '.3gp', '.ogv',
   // Audio
   '.mp3', '.wav', '.ogg', '.flac', '.aac', '.wma', '.m4a', '.opus', '.aiff', '.mid', '.midi',
-  // Archives
+  // Archives — skipped, never opened. The only inflate path is a ZIP
+  // package-version manifest, bounded in `utils/zip-manifest.ts`.
   '.zip', '.tar', '.gz', '.bz2', '.7z', '.rar',
   // Compiled / binary
   '.exe', '.dll', '.so', '.dylib', '.o', '.a', '.class', '.pyc', '.pdb',
