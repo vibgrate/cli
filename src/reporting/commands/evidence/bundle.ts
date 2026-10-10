@@ -161,18 +161,18 @@ export function verifyEvidenceEnvelope(
   };
 }
 
-const EVIDENCE_RESULT_SCHEMA = 'evidence-1';
-const RESTORE_BUNDLE =
-  'Restore the original bundle, or write a new one with `vg evidence exposure --bundle <dir>`.';
+const RESULT_SCHEMA = 'evidence-1';
+const RECREATE = 'Restore the bundle, or re-create it with `vg evidence exposure --bundle`.';
 
 /**
- * An evidence bundle on disk cannot be loaded for `vg evidence verify`.
+ * An evidence bundle on disk cannot be loaded.
  *
- * This is a read failure: the file is truncated, not JSON, or not a schema
- * this version can read. It is not a failure to serialize or write a bundle.
- * The message names what failed and how to restore the bundle. It never
- * includes file contents, environment values, or other secret material.
- * `code` is {@link ExitCode.ERROR} so the command exits non-zero.
+ * The message is the operator-facing error: what failed, and how to restore
+ * the bundle. It never includes file contents, parser excerpts, environment
+ * values, or any other bytes from the artifact (those can carry credentials).
+ * `code` is {@link ExitCode.ERROR} so `vg evidence verify` exits non-zero.
+ * This is a read failure, distinct from a signature or digest mismatch on a
+ * bundle that loaded.
  */
 export class EvidenceBundleLoadError extends CliError {
   readonly isEvidenceBundleLoadError = true;
@@ -186,161 +186,193 @@ export class EvidenceBundleLoadError extends CliError {
 }
 
 export interface LoadedEvidenceBundle {
-  /** Absolute path of the DSSE envelope that was read. */
   envelopePath: string;
   envelope: DsseEnvelope;
-  /** Present when a sibling result.json was read and accepted. */
   result?: ExposureResult;
+  /** Present when result.json loaded and timestamp.tsr is on disk. */
+  timestampToken?: Buffer;
 }
 
-/**
- * Load the envelope (and result.json, when it sits beside the envelope) for
- * `vg evidence verify`.
- *
- * `bundlePath` may be a bundle directory or the envelope file itself. A
- * missing bundle is {@link CliError} with {@link ExitCode.NOT_FOUND}. A
- * present file that cannot be read, is truncated or not JSON, or is not a
- * schema this version can read throws {@link EvidenceBundleLoadError}.
- * The same bytes always produce the same error.
- */
-export function loadEvidenceBundle(bundlePath: string): LoadedEvidenceBundle {
-  const abs = path.resolve(bundlePath);
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(abs);
-  } catch (err) {
-    if (nodeCode(err) === 'ENOENT') {
-      throw new CliError(`no evidence.intoto.jsonl at ${bundlePath}`, ExitCode.NOT_FOUND);
-    }
-    throw new EvidenceBundleLoadError(unreadableMessage('bundle'), 'corrupt');
-  }
-
-  const envelopePath = stat.isDirectory() ? path.join(abs, 'evidence.intoto.jsonl') : abs;
-  if (!fs.existsSync(envelopePath)) {
-    throw new CliError(`no evidence.intoto.jsonl at ${bundlePath}`, ExitCode.NOT_FOUND);
-  }
-
-  const envelope = assertEnvelope(parseBundleJson(readUtf8(envelopePath, 'envelope'), 'envelope'));
-  const resultPath = path.join(path.dirname(envelopePath), 'result.json');
-  const result = fs.existsSync(resultPath)
-    ? assertResult(parseBundleJson(readUtf8(resultPath, 'result'), 'result'))
-    : undefined;
-  return { envelopePath, envelope, result };
+function corruptJsonMessage(which: 'envelope' | 'result'): string {
+  const noun = which === 'envelope' ? 'evidence envelope' : 'evidence result';
+  return `The ${noun} is truncated or not valid JSON. ${RECREATE}`;
 }
 
-function nodeCode(cause: unknown): string {
-  if (typeof cause === 'object' && cause !== null && 'code' in cause) {
-    const code = (cause as { code?: unknown }).code;
-    if (typeof code === 'string') return code;
-  }
-  return '';
+function unreadableMessage(): string {
+  return `The evidence bundle could not be read. ${RECREATE}`;
 }
 
-function readUtf8(file: string, which: 'envelope' | 'result'): string {
-  try {
-    return fs.readFileSync(file, 'utf8');
-  } catch {
-    throw new EvidenceBundleLoadError(unreadableMessage(which), 'corrupt');
-  }
+function shapeMessage(which: 'envelope' | 'result'): string {
+  const noun = which === 'envelope' ? 'evidence envelope' : 'evidence result';
+  return `The ${noun} is not a readable evidence bundle. ${RECREATE}`;
 }
 
-/** Envelope files are JSONL: only the first record is the DSSE document. */
-function firstJsonLine(text: string): string {
-  const trimmed = text.trim();
-  const newline = trimmed.indexOf('\n');
-  const line = newline === -1 ? trimmed : trimmed.slice(0, newline);
-  return line.trim();
-}
-
-function parseBundleJson(text: string, which: 'envelope' | 'result'): unknown {
-  const body = which === 'envelope' ? firstJsonLine(text) : text.trim();
-  if (!body) throw new EvidenceBundleLoadError(corruptMessage(which), 'corrupt');
-  try {
-    return JSON.parse(body);
-  } catch {
-    throw new EvidenceBundleLoadError(corruptMessage(which), 'corrupt');
-  }
+function schemaMessage(which: 'envelope' | 'result', version: unknown): string {
+  const echoed = which === 'result' ? echoableResultSchema(version) : echoableAttestation(version);
+  const noun = which === 'result' ? 'evidence result' : 'evidence envelope';
+  const got = echoed ? `schema \`${echoed}\`` : 'a schema this version of vg cannot read';
+  const reads = which === 'result' ? `result schema \`${RESULT_SCHEMA}\`` : `predicate \`${EVIDENCE_PREDICATE_TYPE}\``;
+  return `The ${noun} uses ${got} (this version reads ${reads}). ${RECREATE}`;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** A schema token we are willing to echo. Anything else stays out of the message. */
-function echoableEvidenceSchema(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length > 16) return null;
+/** A result schema token we are willing to echo. Anything else stays out of the message. */
+function echoableResultSchema(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > 32) return null;
   return /^evidence-\d{1,4}$/.test(value) ? value : null;
 }
 
-function assertEnvelope(value: unknown): DsseEnvelope {
-  if (
-    !isPlainObject(value) ||
-    value.payloadType !== DSSE_PAYLOAD_TYPE ||
-    typeof value.payload !== 'string' ||
-    value.payload.length === 0 ||
-    !isSignatureList(value.signatures)
-  ) {
-    throw new EvidenceBundleLoadError(envelopeShapeMessage(), 'schema');
+/**
+ * An attestation token we are willing to echo: a DSSE payload type or a
+ * Vibgrate predicate URL. Arbitrary strings stay out of the message.
+ */
+function echoableAttestation(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > 96) return null;
+  if (/^application\/vnd\.[a-z0-9.+-]{1,40}$/.test(value)) return value;
+  if (/^https:\/\/vibgrate\.com\/attestation\/[a-z0-9-]{1,48}\/v\d{1,4}$/.test(value)) return value;
+  if (/^https:\/\/in-toto\.io\/Statement\/v\d{1,4}$/.test(value)) return value;
+  return null;
+}
+
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function errnoCode(err: unknown): string {
+  if (typeof err === 'object' && err !== null && 'code' in err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string') return code;
+  }
+  return '';
+}
+
+function readBundleText(file: string): string {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (errnoCode(err) === 'ENOENT') {
+      throw new CliError(`no evidence.intoto.jsonl at ${file}`, ExitCode.NOT_FOUND);
+    }
+    throw new EvidenceBundleLoadError(unreadableMessage(), 'corrupt');
+  }
+}
+
+function readBundleBytes(file: string): Buffer {
+  try {
+    return fs.readFileSync(file);
+  } catch {
+    throw new EvidenceBundleLoadError(unreadableMessage(), 'corrupt');
+  }
+}
+
+function parseJsonOrCorrupt(text: string, which: 'envelope' | 'result'): unknown {
+  const body = stripBom(text).trim();
+  if (!body) throw new EvidenceBundleLoadError(corruptJsonMessage(which), 'corrupt');
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new EvidenceBundleLoadError(corruptJsonMessage(which), 'corrupt');
+  }
+}
+
+/** First non-empty JSONL record. The envelope file is one JSON object per line. */
+function firstJsonlRecord(text: string): string {
+  const line = stripBom(text).split('\n').find((entry) => entry.trim().length > 0);
+  return line?.trim() ?? '';
+}
+
+const PREDICATE_STRINGS = ['evidenceId', 'regime', 'advisoryId', 'overallStatus', 'resultDigest'] as const;
+
+function assertEvidenceEnvelope(value: unknown): DsseEnvelope {
+  if (!isPlainObject(value) || typeof value.payload !== 'string' || !Array.isArray(value.signatures)) {
+    throw new EvidenceBundleLoadError(shapeMessage('envelope'), 'corrupt');
+  }
+  if (value.payloadType !== DSSE_PAYLOAD_TYPE) {
+    throw new EvidenceBundleLoadError(schemaMessage('envelope', value.payloadType), 'schema');
+  }
+  let statement: unknown;
+  try {
+    statement = JSON.parse(Buffer.from(value.payload, 'base64').toString('utf8'));
+  } catch {
+    throw new EvidenceBundleLoadError(corruptJsonMessage('envelope'), 'corrupt');
+  }
+  if (!isPlainObject(statement)) {
+    throw new EvidenceBundleLoadError(shapeMessage('envelope'), 'corrupt');
+  }
+  if (statement._type !== IN_TOTO_STATEMENT_TYPE) {
+    throw new EvidenceBundleLoadError(schemaMessage('envelope', statement._type), 'schema');
+  }
+  if (statement.predicateType !== EVIDENCE_PREDICATE_TYPE) {
+    throw new EvidenceBundleLoadError(schemaMessage('envelope', statement.predicateType), 'schema');
+  }
+  const predicate = statement.predicate;
+  if (!isPlainObject(predicate) || !PREDICATE_STRINGS.every((key) => typeof predicate[key] === 'string')) {
+    throw new EvidenceBundleLoadError(shapeMessage('envelope'), 'corrupt');
   }
   return value as unknown as DsseEnvelope;
 }
 
-function isSignatureList(value: unknown): boolean {
-  if (!Array.isArray(value)) return false;
-  for (const sig of value) {
-    if (!isPlainObject(sig)) return false;
-    if (typeof sig.keyid !== 'string' || typeof sig.sig !== 'string') return false;
-    if (sig.publicKey !== undefined && typeof sig.publicKey !== 'string') return false;
+function assertEvidenceResult(value: unknown): ExposureResult {
+  if (!isPlainObject(value)) throw new EvidenceBundleLoadError(shapeMessage('result'), 'corrupt');
+  if (value.schemaVersion !== RESULT_SCHEMA) {
+    throw new EvidenceBundleLoadError(schemaMessage('result', value.schemaVersion), 'schema');
   }
-  return true;
-}
-
-function assertResult(value: unknown): ExposureResult {
-  if (!isPlainObject(value)) {
-    throw new EvidenceBundleLoadError(resultShapeMessage(), 'schema');
-  }
-  if (value.schemaVersion !== EVIDENCE_RESULT_SCHEMA) {
-    throw new EvidenceBundleLoadError(resultSchemaMessage(value.schemaVersion), 'schema');
-  }
-  if (!isReadableResult(value)) {
-    throw new EvidenceBundleLoadError(resultShapeMessage(), 'schema');
-  }
+  const advisory = value.advisory;
+  const meta = value.meta;
+  const readable =
+    typeof value.overallStatus === 'string' &&
+    isPlainObject(advisory) &&
+    typeof advisory.id === 'string' &&
+    Array.isArray(value.products) &&
+    isPlainObject(meta) &&
+    typeof meta.evidenceId === 'string';
+  if (!readable) throw new EvidenceBundleLoadError(shapeMessage('result'), 'corrupt');
   return value as unknown as ExposureResult;
 }
 
-function isReadableResult(value: Record<string, unknown>): boolean {
-  return (
-    typeof value.regime === 'string' &&
-    isPlainObject(value.advisory) &&
-    typeof value.overallStatus === 'string' &&
-    Array.isArray(value.products) &&
-    isPlainObject(value.meta)
+function resolveEnvelopePath(bundlePath: string): string {
+  const abs = path.resolve(bundlePath);
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch (err) {
+    if (errnoCode(err) === 'ENOENT' || errnoCode(err) === 'ENOTDIR') {
+      throw new CliError(`no evidence.intoto.jsonl at ${bundlePath}`, ExitCode.NOT_FOUND);
+    }
+    throw new EvidenceBundleLoadError(unreadableMessage(), 'corrupt');
+  }
+  const envPath = st.isDirectory() ? path.join(abs, 'evidence.intoto.jsonl') : abs;
+  if (!fs.existsSync(envPath)) {
+    throw new CliError(`no evidence.intoto.jsonl at ${bundlePath}`, ExitCode.NOT_FOUND);
+  }
+  return envPath;
+}
+
+/**
+ * Load an evidence bundle for offline verification.
+ *
+ * Throws {@link EvidenceBundleLoadError} when the envelope or `result.json`
+ * is truncated, not JSON, or not a schema this version of vg can read.
+ * A missing bundle is a not-found {@link CliError}. The message names the
+ * failure and how to restore the bundle; it does not include the document.
+ */
+export function loadEvidenceBundle(bundlePath: string): LoadedEvidenceBundle {
+  const envelopePath = resolveEnvelopePath(bundlePath);
+  const envelope = assertEvidenceEnvelope(
+    parseJsonOrCorrupt(firstJsonlRecord(readBundleText(envelopePath)), 'envelope'),
   );
-}
-
-function corruptMessage(which: 'envelope' | 'result'): string {
-  const subject = which === 'envelope' ? 'evidence envelope' : 'evidence result';
-  return `The ${subject} is truncated or not valid JSON. ${RESTORE_BUNDLE}`;
-}
-
-function unreadableMessage(which: 'bundle' | 'envelope' | 'result'): string {
-  const subject =
-    which === 'bundle' ? 'evidence bundle' : which === 'envelope' ? 'evidence envelope' : 'evidence result';
-  return `The ${subject} could not be read. ${RESTORE_BUNDLE}`;
-}
-
-function envelopeShapeMessage(): string {
-  return `The evidence envelope is not a readable DSSE envelope. ${RESTORE_BUNDLE}`;
-}
-
-function resultShapeMessage(): string {
-  return `The evidence result is not a readable evidence result. ${RESTORE_BUNDLE}`;
-}
-
-function resultSchemaMessage(version: unknown): string {
-  const echoed = echoableEvidenceSchema(version);
-  const got = echoed ? `schema \`${echoed}\`` : 'a schema this version of vg cannot read';
-  return `The evidence result uses ${got} (this version reads ${EVIDENCE_RESULT_SCHEMA}). ${RESTORE_BUNDLE}`;
+  const resultPath = path.join(path.dirname(envelopePath), 'result.json');
+  let result: ExposureResult | undefined;
+  if (fs.existsSync(resultPath)) {
+    result = assertEvidenceResult(parseJsonOrCorrupt(readBundleText(resultPath), 'result'));
+  }
+  let timestampToken: Buffer | undefined;
+  const tsrPath = path.join(path.dirname(envelopePath), 'timestamp.tsr');
+  if (result && fs.existsSync(tsrPath)) timestampToken = readBundleBytes(tsrPath);
+  return { envelopePath, envelope, result, timestampToken };
 }
 
 const DEFAULT_KEY = 'attest-key.pem';
@@ -464,6 +496,8 @@ function verifyDoc(input: WriteBundleInput): string {
     '- `unverified` — cryptographically intact but the signer is not pinned, or the',
     '  bundle is unsigned. We never fabricate a pass.',
     '- `failed` — the signature is bad or `result.json` no longer matches its digest.',
+    '- A truncated, invalid, or unreadable bundle is an error, not `failed`.',
+    '  Restore the original files, or re-create the bundle.',
     '',
     input.timestampToken
       ? `Timestamp: an RFC 3161 token is included as \`timestamp.tsr\` (trusted time\n${input.result.meta.timestamp.value}). Verify it fully with your TSA's CA:\n\`\`\`\nopenssl ts -verify -in timestamp.tsr -data result.json -CAfile <tsa-ca.pem>\n\`\`\`\n\`vg evidence verify\` confirms the token's imprint binds to result.json and\nsurfaces the trusted time; it does not re-verify the TSA signature chain.`
