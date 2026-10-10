@@ -1899,6 +1899,12 @@ inside one lockfile edge are sorted on their own. SPDX `SPDXID` values are
 `SPDXRef-Package-N` for that order, so they stay put when only discovery order
 changes. The document id stays a content-derived UUID.
 
+String keys in that order — purls, package names, versions, and the project
+names in `vibgrate:projects` — compare by UTF-16 code unit. `LANG` and
+`LC_ALL` do not change the document. Lockfiles are visited in that same
+code-unit order of project path, and the first path wins when two lockfiles
+repeat one identity.
+
 **Same inputs, same document.** For one scan artifact and the lockfiles under
 `--root`, `vg sbom export` writes the same JSON on every run, including the
 CycloneDX `serialNumber` and the SPDX `documentNamespace`. Those values are
@@ -2241,6 +2247,8 @@ The fail-closed path is covered by `src/reporting/commands/scan-package-manifest
 #### Determinism
 
 The same tree and the same manifest produce the same findings order and the same advisory ids. Vulnerability findings are ordered by ecosystem, then package name, then installed version. Advisories on one package are ordered by severity — critical, high, moderate, low, unknown — and then by advisory id. That id is the `id` from the manifest. JSON records it as `details.advisoryId`. The order of keys in the manifest file does not change the result. `timestamp` and `durationMs` on the scan artifact still change between runs. In a git checkout, an exposure window's day count follows the scan date. The advisory id and the finding order stay the same.
+
+Those string keys, and the package-name tie-break on dependency rows inside a project, compare by UTF-16 code unit. SARIF results follow that finding order. Degrade-and-continue warnings are ordered by code, then message, the same way. `LANG` and `LC_ALL` do not change the JSON or the SARIF.
 
 Registry, sign-in, and upload failures — the message `vg` prints and the next command — are in [Troubleshooting: registry, auth, and network](#troubleshooting-registry-auth-and-network).
 

@@ -24,6 +24,7 @@ import type {
   DetectedFramework,
   ProjectReference,
 } from '../types.js';
+import { compareCodeUnits } from '../utils/code-unit.js';
 
 const MS_PER_DAY = 86_400_000;
 /** A package whose latest release is older than this is "abandoned" (no pulse) —
@@ -457,7 +458,7 @@ async function scanOnePackageJson(
     const order = { 'major-behind': 0, 'minor-behind': 1, 'current': 2, 'unknown': 3 };
     const diff = (order[a.drift] ?? 9) - (order[b.drift] ?? 9);
     if (diff !== 0) return diff;
-    return a.package.localeCompare(b.package);
+    return compareCodeUnits(a.package, b.package);
   });
 
   // Count files in project directory (use cached walk to avoid redundant I/O)

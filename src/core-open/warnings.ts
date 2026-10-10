@@ -15,6 +15,8 @@
  * object and one emit site.
  */
 
+import { compareCodeUnits } from './utils/code-unit.js';
+
 export const WARNING_CODES = {
   /** A source file failed to parse. The build continues without its symbols. */
   PARSE_FAILED: 'VG_WARN_PARSE_FAILED',
@@ -116,11 +118,12 @@ export function splitStampedWarning(stored: string): CodedWarning | undefined {
 }
 
 /**
- * Order by code, then by message. Equal pairs keep their input order
- * (the runtime sort is stable).
+ * Order by code, then by message, in UTF-16 code units. Equal pairs keep
+ * their input order (the runtime sort is stable). The process locale does
+ * not change the order.
  */
 export function sortCodedWarnings(warnings: readonly CodedWarning[]): CodedWarning[] {
-  return [...warnings].sort((a, b) => a.code.localeCompare(b.code) || a.message.localeCompare(b.message));
+  return [...warnings].sort((a, b) => compareCodeUnits(a.code, b.code) || compareCodeUnits(a.message, b.message));
 }
 
 /**

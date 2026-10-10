@@ -13,6 +13,7 @@ import { latestStable, runtimeEolStatus, extractCycle, eolDate } from '../runtim
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
 import type { RuntimeCatalog } from '../runtimes/types.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
+import { compareCodeUnits } from '../utils/code-unit.js';
 
 /** Well-known Python frameworks / libraries to track */
 const KNOWN_PYTHON_FRAMEWORKS: Record<string, string> = {
@@ -548,7 +549,7 @@ async function scanOnePythonProject(
     const order = { 'major-behind': 0, 'minor-behind': 1, 'current': 2, 'unknown': 3 };
     const diff = (order[a.drift] ?? 9) - (order[b.drift] ?? 9);
     if (diff !== 0) return diff;
-    return a.package.localeCompare(b.package);
+    return compareCodeUnits(a.package, b.package);
   });
 
   // Count files (use cached walk to avoid redundant I/O)

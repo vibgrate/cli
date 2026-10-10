@@ -9,6 +9,7 @@ import {
   withLockfileNotes,
 } from '../../core-open/utils/lockfile-unknown.js';
 import type { PackageJson, DependencyGraphResult, DuplicatedPackage, PhantomDependency } from '../../core-open/index.js';
+import { compareCodeUnits } from '../../core-open/utils/code-unit.js';
 
 interface LockEntry {
   name: string;
@@ -159,7 +160,7 @@ export async function scanDependencyGraph(rootDir: string, cache?: FileCache): P
       });
     }
   }
-  duplicated.sort((a, b) => b.versions.length - a.versions.length || a.name.localeCompare(b.name));
+  duplicated.sort((a, b) => b.versions.length - a.versions.length || compareCodeUnits(a.name, b.name));
   result.duplicatedPackages = duplicated;
 
   // Detect phantom dependencies:
@@ -190,7 +191,7 @@ export async function scanDependencyGraph(rootDir: string, cache?: FileCache): P
     } catch { /* skip */ }
   }
   result.phantomDependencies = [...phantoms].sort();
-  result.phantomDependencyDetails = phantomDetails.sort((a, b) => a.sourcePath.localeCompare(b.sourcePath) || a.package.localeCompare(b.package));
+  result.phantomDependencyDetails = phantomDetails.sort((a, b) => compareCodeUnits(a.sourcePath, b.sourcePath) || compareCodeUnits(a.package, b.package));
 
   return result;
 }

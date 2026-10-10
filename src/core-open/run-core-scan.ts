@@ -65,6 +65,7 @@ import {
   type CodedWarning,
 } from './warnings.js';
 import type { RuntimeCatalog } from './runtimes/types.js';
+import { compareCodeUnits } from './utils/code-unit.js';
 
 /**
  * Shared context handed to the advanced-analysis hook (see {@link AdvancedScanHook}).
@@ -772,8 +773,8 @@ export async function runCoreScan(
   progress.finish();
 
   const degradations: CodedWarning[] = [];
-  const stuckPaths = [...fileCache.stuckPaths].sort((a, b) => a.localeCompare(b));
-  const skippedLarge = [...fileCache.skippedLargeFiles].sort((a, b) => a.localeCompare(b));
+  const stuckPaths = [...fileCache.stuckPaths].sort(compareCodeUnits);
+  const skippedLarge = [...fileCache.skippedLargeFiles].sort(compareCodeUnits);
   const timeoutSeconds = Math.round(projectScanTimeoutMs / 1000);
 
   if (stuckPaths.length > 0) {

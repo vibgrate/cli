@@ -4,6 +4,7 @@ import {
   stampWarning,
   type CodedWarning,
 } from '../core-open/warnings.js';
+import { compareCodeUnits } from '../core-open/utils/code-unit.js';
 
 /**
  * Turn stored warning strings into the human list and the coded list.
@@ -25,7 +26,7 @@ export function assembleEngineWarnings(stored: readonly string[]): {
     else plain.push(line);
   }
   const sorted = sortCodedWarnings(coded);
-  const plainSorted = [...plain].sort((a, b) => a.localeCompare(b));
+  const plainSorted = [...plain].sort(compareCodeUnits);
   return {
     warnings: [...sorted.map((warning) => stampWarning(warning.code, warning.message)), ...plainSorted],
     codedWarnings: sorted,

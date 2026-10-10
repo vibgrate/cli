@@ -10,6 +10,7 @@ import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { loadCargoLockIndex, type CargoLockIndex } from './cargo-lockfile.js';
 import type { LockfileIo } from './npm-lockfile.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
+import { compareCodeUnits } from '../utils/code-unit.js';
 
 /** Well-known Rust frameworks / libraries to track */
 const KNOWN_RUST_FRAMEWORKS: Record<string, string> = {
@@ -345,7 +346,7 @@ async function scanOneRustProject(
     const order = { 'major-behind': 0, 'minor-behind': 1, 'current': 2, 'unknown': 3 };
     const diff = (order[a.drift] ?? 9) - (order[b.drift] ?? 9);
     if (diff !== 0) return diff;
-    return a.package.localeCompare(b.package);
+    return compareCodeUnits(a.package, b.package);
   });
 
   // Count files

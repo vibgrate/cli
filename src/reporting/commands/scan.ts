@@ -18,6 +18,7 @@ import {
   loadConfig,
   findConfigFile,
 } from '../../core-open/index.js';
+import { compareCodeUnits } from '../../core-open/utils/code-unit.js';
 import { writeScanSummary } from '../scan-summary.js';
 import { compareDriftBudget, evaluateConfigDriftBudget } from '../drift-budget-gate.js';
 import {
@@ -383,7 +384,7 @@ function architectureFindings(rootDir: string, hardOnly: boolean): { policy: str
       out.push({ file: s.file_path, ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}), symbol: s.qualified_name || s.name, severity: f.severity, message: f.message, rule: f.rule, policy });
     }
   }
-  out.sort((a, b) => a.file.localeCompare(b.file) || (a.line ?? 0) - (b.line ?? 0) || a.symbol.localeCompare(b.symbol));
+  out.sort((a, b) => compareCodeUnits(a.file, b.file) || (a.line ?? 0) - (b.line ?? 0) || compareCodeUnits(a.symbol, b.symbol));
   return { policy, rows: out };
 }
 

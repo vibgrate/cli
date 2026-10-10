@@ -11,6 +11,7 @@ import { latestStable, runtimeEolStatus, extractCycle, eolDate } from '../runtim
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
 import type { RuntimeCatalog } from '../runtimes/types.js';
 import type { ProjectScan, DependencyRow, DetectedFramework, ProjectReference } from '../types.js';
+import { compareCodeUnits } from '../utils/code-unit.js';
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -620,7 +621,7 @@ async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nug
     const order = { 'major-behind': 0, 'minor-behind': 1, 'current': 2, 'unknown': 3 };
     const diff = (order[a.drift] ?? 9) - (order[b.drift] ?? 9);
     if (diff !== 0) return diff;
-    return a.package.localeCompare(b.package);
+    return compareCodeUnits(a.package, b.package);
   });
 
   const buckets = bucketsMut;
