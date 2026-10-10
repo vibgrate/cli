@@ -31,6 +31,7 @@
  * so this module runs even where `semver` is not installed).
  */
 import type { DependencyRow } from '../types.js';
+import { compareCodeUnit } from '../utils/compare.js';
 
 /** Methodology tag for the v3 dependency component + aggregation. */
 export const DRIFT_SCORE_V3_METHODOLOGY_VERSION = 'driftscore-3.0';
@@ -259,7 +260,7 @@ export interface DependencyDriftAggregate {
   excluded: number;
   /** Fraction (0–1) of scored deps with Verified (time) data — coverage. */
   coverage: number;
-  /** Worst offenders, ranked by drift, for explainability. */
+  /** Worst offenders, ranked by drift then package name, for explainability. */
   top: DependencyDriftResult[];
 }
 
@@ -302,7 +303,7 @@ export function aggregateDependencyDrift(
     scored: results.length,
     excluded,
     coverage: Math.round((verified / results.length) * 100) / 100,
-    top: [...results].sort((a, b) => b.drift - a.drift).slice(0, 10),
+    top: [...results].sort((a, b) => b.drift - a.drift || compareCodeUnit(a.package, b.package)).slice(0, 10),
   };
 }
 

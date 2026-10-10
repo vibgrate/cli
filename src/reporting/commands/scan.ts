@@ -38,6 +38,7 @@ import {
 } from '../junit-report.js';
 import type { ScanOptions, ScanArtifact } from '../../core-open/index.js';
 import { analyzeReachability, collectPreflightDependencies } from '../reachability.js';
+import { compareCodeUnit } from '../../util/compare.js';
 import type { VgGraph } from '../../schema.js';
 import { inventory } from '../../engine/drift.js';
 import { loadStandards, checkStandards } from '../../engine/standards.js';
@@ -383,7 +384,7 @@ function architectureFindings(rootDir: string, hardOnly: boolean): { policy: str
       out.push({ file: s.file_path, ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}), symbol: s.qualified_name || s.name, severity: f.severity, message: f.message, rule: f.rule, policy });
     }
   }
-  out.sort((a, b) => a.file.localeCompare(b.file) || (a.line ?? 0) - (b.line ?? 0) || a.symbol.localeCompare(b.symbol));
+  out.sort((a, b) => compareCodeUnit(a.file, b.file) || (a.line ?? 0) - (b.line ?? 0) || compareCodeUnit(a.symbol, b.symbol));
   return { policy, rows: out };
 }
 

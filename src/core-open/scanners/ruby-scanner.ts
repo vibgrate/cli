@@ -1,6 +1,7 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
+import { compareCodeUnit } from '../utils/compare.js';
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
@@ -529,7 +530,7 @@ async function scanOneRubyProject(
     const order = { 'major-behind': 0, 'minor-behind': 1, 'current': 2, 'unknown': 3 };
     const diff = (order[a.drift] ?? 9) - (order[b.drift] ?? 9);
     if (diff !== 0) return diff;
-    return a.package.localeCompare(b.package);
+    return compareCodeUnit(a.package, b.package);
   });
 
   // Count files (use cached walk to avoid redundant I/O)

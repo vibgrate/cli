@@ -102,7 +102,10 @@ meaningful.
   addresses, or wall-clock time.
 - **Stable sort everywhere** — files, nodes, edges, and report rows are sorted by
   stable keys before serialization (`engine/serialize.ts`). Never serialize
-  unordered `Map`/`Set` iteration directly.
+  unordered `Map`/`Set` iteration directly. Sorts that shape machine-readable
+  output (`vg scan` JSON/SARIF, `vg sbom`, coded warnings) use code-unit order
+  (`compareCodeUnit` in `src/util/compare.ts`), not bare `localeCompare`, so
+  `LANG` / `LC_ALL` cannot reorder the same names.
 - **No ambient nondeterminism** — no `Date.now()`, no unseeded `Math.random()`
   (use `engine/rng.ts`), and no reliance on filesystem enumeration order
   (`engine/discover.ts` sorts).

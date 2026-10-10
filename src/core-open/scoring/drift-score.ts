@@ -7,6 +7,7 @@ import { licenseParseDiagnostic } from '../licenses/diagnostic.js';
 import { WARNING_CODES } from '../warnings.js';
 import { normalizeLicenseSourcePath } from '../licenses/dependency-license.js';
 import { aggregateDependencyDrift } from './dependency-drift-v3.js';
+import { compareCodeUnit } from '../utils/compare.js';
 
 /**
  * Version of the drift-score methodology (weighting + formula). Bump this ONLY
@@ -394,10 +395,10 @@ export function generateFindings(
     const licenseFindings: Finding[] = [];
     const licenseDeps = [...project.dependencies].sort(
       (a, b) =>
-        a.package.localeCompare(b.package) ||
-        (a.license?.raw ?? '').localeCompare(b.license?.raw ?? '') ||
-        a.section.localeCompare(b.section) ||
-        (a.license?.sourcePath ?? '').localeCompare(b.license?.sourcePath ?? ''),
+        compareCodeUnit(a.package, b.package) ||
+        compareCodeUnit(a.license?.raw ?? '', b.license?.raw ?? '') ||
+        compareCodeUnit(a.section, b.section) ||
+        compareCodeUnit(a.license?.sourcePath ?? '', b.license?.sourcePath ?? ''),
     );
     for (const dep of licenseDeps) {
       // Location is the manifest path the scanner recorded, when it recorded one.

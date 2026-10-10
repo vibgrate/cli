@@ -23,6 +23,7 @@
  */
 
 import * as path from 'node:path';
+import { compareCodeUnit } from '../util/compare.js';
 import * as fs from 'node:fs/promises';
 import type {
   ScanReachabilityResult,
@@ -266,7 +267,7 @@ export async function analyzeReachability(
     }
   }
   importedModules.sort(
-    (a, b) => a.ecosystem.localeCompare(b.ecosystem) || a.package.localeCompare(b.package),
+    (a, b) => compareCodeUnit(a.ecosystem, b.ecosystem) || compareCodeUnit(a.package, b.package),
   );
 
   const findings: ScanReachabilityFinding[] = [];
@@ -377,10 +378,10 @@ export async function analyzeReachability(
 
   findings.sort(
     (a, b) =>
-      a.ecosystem.localeCompare(b.ecosystem) ||
-      a.package.localeCompare(b.package) ||
-      a.advisoryId.localeCompare(b.advisoryId) ||
-      (a.symbol ?? '').localeCompare(b.symbol ?? ''),
+      compareCodeUnit(a.ecosystem, b.ecosystem) ||
+      compareCodeUnit(a.package, b.package) ||
+      compareCodeUnit(a.advisoryId, b.advisoryId) ||
+      compareCodeUnit(a.symbol ?? '', b.symbol ?? ''),
   );
 
   return {
@@ -419,9 +420,9 @@ export function collectPreflightDependencies(
   }
   return [...deduped.values()].sort(
     (a, b) =>
-      a.ecosystem.localeCompare(b.ecosystem) ||
-      a.package.localeCompare(b.package) ||
-      a.version.localeCompare(b.version),
+      compareCodeUnit(a.ecosystem, b.ecosystem) ||
+      compareCodeUnit(a.package, b.package) ||
+      compareCodeUnit(a.version, b.version),
   );
 }
 

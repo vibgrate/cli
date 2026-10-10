@@ -48,6 +48,7 @@ import { parseDsn } from './utils/dsn.js';
 import { loadPackageVersionManifest } from './package-version-manifest.js';
 import { generateWorkspaceRelationshipMermaid, generateProjectRelationshipMermaid, generateSolutionRelationshipMermaid } from './utils/mermaid.js';
 import { classifyProject, summarizeBilling } from './scanners/project-classification.js';
+import { compareCodeUnit } from './utils/compare.js';
 import { collectVulnTargets, scanVulnerabilities, generateVulnerabilityFindings } from './scanners/vulnerability-scanner.js';
 import { attributeVulnerabilities } from './scoring/vuln-attribution.js';
 import { gitHistoryAvailable, workingTreeDirty } from './utils/git-history.js';
@@ -772,8 +773,8 @@ export async function runCoreScan(
   progress.finish();
 
   const degradations: CodedWarning[] = [];
-  const stuckPaths = [...fileCache.stuckPaths].sort((a, b) => a.localeCompare(b));
-  const skippedLarge = [...fileCache.skippedLargeFiles].sort((a, b) => a.localeCompare(b));
+  const stuckPaths = [...fileCache.stuckPaths].sort(compareCodeUnit);
+  const skippedLarge = [...fileCache.skippedLargeFiles].sort(compareCodeUnit);
   const timeoutSeconds = Math.round(projectScanTimeoutMs / 1000);
 
   if (stuckPaths.length > 0) {

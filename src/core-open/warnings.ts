@@ -1,6 +1,8 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
+import { compareCodeUnit } from './utils/compare.js';
+
 /**
  * Stable codes for degrade-and-continue warnings on `vg build`, `vg scan`,
  * `vg report`, and `vg sbom`.
@@ -116,11 +118,11 @@ export function splitStampedWarning(stored: string): CodedWarning | undefined {
 }
 
 /**
- * Order by code, then by message. Equal pairs keep their input order
- * (the runtime sort is stable).
+ * Order by code, then by message, in code-unit order (not the process locale).
+ * Equal pairs keep their input order (the runtime sort is stable).
  */
 export function sortCodedWarnings(warnings: readonly CodedWarning[]): CodedWarning[] {
-  return [...warnings].sort((a, b) => a.code.localeCompare(b.code) || a.message.localeCompare(b.message));
+  return [...warnings].sort((a, b) => compareCodeUnit(a.code, b.code) || compareCodeUnit(a.message, b.message));
 }
 
 /**

@@ -16,6 +16,7 @@ import {
   type CodedWarning,
   type WarningCode,
 } from '../../core-open/warnings.js';
+import { compareCodeUnit as cmpText } from '../../util/compare.js';
 
 export { describeUnrepresentableLicense } from './sbom-license.js';
 
@@ -303,13 +304,6 @@ function componentBomRef(ecosystem: Ecosystem, name: string, version: string): s
   return purlFor(ecosystem, name, version) ?? `vibgrate:${ecosystem}:${name}@${version}`;
 }
 
-/** Code-unit order, so the result does not depend on the process locale. */
-function cmpText(a: string, b: string): number {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
-}
-
 /**
  * Order for SBOM component and dependency rows. Primary key is the Package URL
  * when one was emitted, otherwise the package name. Version is next. The name
@@ -355,7 +349,7 @@ function licenseParseFindings(artifact: ScanArtifact): Finding[] {
   return artifact.findings
     .filter((f) => f.ruleId === LICENSE_PARSE_FAILED)
     .slice()
-    .sort((a, b) => a.location.localeCompare(b.location) || a.message.localeCompare(b.message));
+    .sort((a, b) => cmpText(a.location, b.location) || cmpText(a.message, b.message));
 }
 
 /** Identity of one installed package: ecosystem, name, and version. */
@@ -403,7 +397,7 @@ function sameEdges(a: string[], b: string[]): boolean {
 }
 
 function projectPhrase(names: string[]): string {
-  const unique = [...new Set(names)].filter((name) => name.length > 0).sort((a, b) => a.localeCompare(b));
+  const unique = [...new Set(names)].filter((name) => name.length > 0).sort(cmpText);
   const label = unique.length === 1 ? 'project' : 'projects';
   return `${label} ${unique.map((name) => `"${name}"`).join(', ')}`;
 }
@@ -441,7 +435,7 @@ function pushWarningCode(properties: Array<{ name: string; value: string }>, mes
 }
 
 function sortedUnique(names: Iterable<string>): string[] {
-  return [...new Set(names)].sort((a, b) => a.localeCompare(b));
+  return [...new Set(names)].sort(cmpText);
 }
 
 function addProjects(row: FlattenedDependency, names: Iterable<string>): void {
@@ -463,7 +457,7 @@ function manifestMetadataDiffers(row: FlattenedDependency, dep: DependencyRow): 
 function sbomSerialSeed(format: string, artifact: ScanArtifact, deps: FlattenedDependency[], graph?: LockfileGraph): string {
   const edgeLines = graph?.edges
     ? [...graph.edges.entries()]
-        .sort(([a], [b]) => a.localeCompare(b))
+        .sort(([a], [b]) => cmpText(a, b))
         .map(([from, to]) => `${from}>${uniqSorted(to).join(',')}`)
     : [];
   return [
@@ -688,7 +682,7 @@ export function collectLockfileGraph(artifact: ScanArtifact, root: string): Lock
     projectsByPath.set(project.path, list);
   }
   const entries: LockfileMergeEntry[] = [];
-  for (const projectPath of [...projectsByPath.keys()].sort((a, b) => a.localeCompare(b))) {
+  for (const projectPath of [...projectsByPath.keys()].sort(cmpText)) {
     const graph = fullDependencyGraph(path.resolve(root, projectPath));
     if (!graph) continue;
     entries.push({ path: projectPath, graph, projects: projectsByPath.get(projectPath) ?? [] });
@@ -758,7 +752,7 @@ export function collectLockfileGraph(artifact: ScanArtifact, root: string): Lock
       mergeWarnings: acc.mergeWarnings,
     }))
     .sort(
-      (a, b) => a.package.localeCompare(b.package) || a.version.localeCompare(b.version) || a.ecosystem.localeCompare(b.ecosystem),
+      (a, b) => cmpText(a.package, b.package) || cmpText(a.version, b.version) || cmpText(a.ecosystem, b.ecosystem),
     );
 
   const edges = anyEdges ? new Map<string, string[]>() : undefined;
