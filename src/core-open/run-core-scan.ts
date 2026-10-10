@@ -38,6 +38,7 @@ import { formatMarkdown } from './formatters/markdown.js';
 import { loadConfig, appendExcludePatterns } from './config.js';
 import { pathExists, readJsonFile, writeJsonFile, writeTextFile, ensureDir, FileCache, quickTreeCount } from './utils/fs.js';
 import { portableValue } from './utils/portable-path.js';
+import { orderArtifactFindings } from './findings-order.js';
 import { assertSafeWalkRoot } from './utils/root-safety.js';
 import { detectVcs } from './utils/vcs.js';
 import { isCiEnvironment, hasVibgrateWorkflow } from './utils/ci-env.js';
@@ -878,6 +879,9 @@ export async function runCoreScan(
   // JSON, SARIF, and the report share this copy. Home-directory prefixes are
   // gone; paths inside the scan root are relative to it.
   artifact = portableValue(artifact, rootDir);
+  // One order for JSON and SARIF. Filesystem walk order must not leak into
+  // findings arrays. The text report still prints errors, then warnings, then notes.
+  orderArtifactFindings(artifact);
 
   if (!opts.noLocalArtifacts && !maxPrivacyMode) {
     const vibgrateDir = path.join(rootDir, '.vibgrate');
