@@ -42,14 +42,11 @@ backward compatible.
 
 ### Fixed
 
-- **Machine-readable output no longer follows the process locale (#410).**
-  String keys in scan JSON, SARIF, and SBOM — purls, package names, versions,
-  and the project names in `vibgrate:projects` — compare by UTF-16 code unit.
-  `LANG` and `LC_ALL` do not change those documents. Lockfiles are visited in
-  that same order of project path, and the first path wins when two lockfiles
-  repeat one identity. The package-name tie-break on dependency rows inside a
-  project uses the same comparison. SARIF results follow that finding order.
-  Degrade-and-continue warnings are ordered by code, then message.
+- **A key or value `vg` does not accept in `driftBudget` or `review` stops the command.**
+  A misspelt key, a value of the wrong type, or a `driftBudget` that sets no
+  limit exits with an error. The error names the file and, when the file makes
+  it clear, the line and the key. The value is not printed.
+  `.vibgrate/review.toml` still skips keys it does not recognise. (#316)
 
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
