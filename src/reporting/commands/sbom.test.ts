@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -8,6 +9,7 @@ import { buildDependencyLicense } from '../../core-open/licenses/dependency-lice
 import { componentLicense, EXTRACTED_LICENSE_TEXT } from './sbom-license.js';
 import type { DependencyRow, ProjectScan, ScanArtifact } from '../types.js';
 import type { LockfileGraph } from '../../engine/lockfile.js';
+import type { PackageDigest } from '../../engine/package-digest.js';
 
 /** A graph with no resolved edges — same shape `fullDependencyGraph` returns for pnpm/yarn. */
 function componentsOnlyGraph(components: LockfileGraph['components']): LockfileGraph {
@@ -628,5 +630,105 @@ describe('sbom helpers', () => {
     const text = formatDeltaText(base, current);
     expect(text).toContain('DriftScore delta: -4.00 points');
     expect(text).toContain('Changed dependencies (1)');
+  });
+
+  it('emits multi-digest components in the same order for the same digests', () => {
+    const sha256 = createHash('sha256').update('alpha').digest();
+    const sha512 = createHash('sha512').update('beta').digest();
+    const other = createHash('sha256').update('gamma').digest();
+    const hex256 = sha256.toString('hex');
+    const hexOther = other.toString('hex');
+    const smaller = hex256 < hexOther ? hex256 : hexOther;
+    const larger = hex256 < hexOther ? hexOther : hex256;
+    expect(smaller < larger).toBe(true);
+
+    const reversed: PackageDigest[] = [
+      { alg: 'SHA-512', content: sha512.toString('hex') },
+      { alg: 'SHA-256', content: larger },
+      { alg: 'SHA-256', content: smaller },
+      { alg: 'SHA-256', content: smaller },
+    ];
+    const forward: PackageDigest[] = [...reversed].reverse();
+    const graphOf = (hashes: PackageDigest[]): LockfileGraph => ({
+      components: [
+        { package: 'ansi-styles', version: '6.2.1' },
+        { package: 'chalk', version: '5.3.0', hashes },
+      ],
+      edges: undefined,
+      rootDependsOn: [],
+    });
+
+    const artifact = makeArtifact('5.3.0', 90);
+    const cycloneA = toCycloneDx(artifact, graphOf(reversed)) as {
+      serialNumber: string;
+      metadata: { component: Record<string, unknown> };
+      components: Array<{ name: string; hashes?: PackageDigest[] }>;
+    };
+    const cycloneB = toCycloneDx(artifact, graphOf(forward)) as { serialNumber: string; components: unknown[] };
+    expect(JSON.stringify(cycloneA)).toBe(JSON.stringify(cycloneB));
+    expect(cycloneA.serialNumber).toBe(cycloneB.serialNumber);
+    expect(cycloneA.metadata.component.hashes).toBeUndefined();
+    expect(cycloneA.components.map((c) => c.name)).toEqual(['ansi-styles', 'chalk']);
+    expect(cycloneA.components[0]!.hashes).toBeUndefined();
+    expect(cycloneA.components[1]!.hashes).toEqual([
+      { alg: 'SHA-256', content: smaller },
+      { alg: 'SHA-256', content: larger },
+      { alg: 'SHA-512', content: sha512.toString('hex') },
+    ]);
+
+    const spdx = toSpdx(artifact, graphOf(reversed)) as {
+      packages: Array<{ name: string; filesAnalyzed: boolean; checksums?: Array<{ algorithm: string; checksumValue: string }> }>;
+    };
+    expect(spdx.packages.find((p) => p.name === 'chalk')!.filesAnalyzed).toBe(false);
+    expect(spdx.packages.find((p) => p.name === 'chalk')!.checksums).toEqual([
+      { algorithm: 'SHA256', checksumValue: smaller },
+      { algorithm: 'SHA256', checksumValue: larger },
+      { algorithm: 'SHA512', checksumValue: sha512.toString('hex') },
+    ]);
+    expect(spdx.packages.find((p) => p.name === 'ansi-styles')).not.toHaveProperty('checksums');
+
+    const changed = graphOf([{ alg: 'SHA-256', content: smaller }]);
+    expect((toCycloneDx(artifact, changed) as { serialNumber: string }).serialNumber).not.toBe(cycloneA.serialNumber);
+  });
+
+  it('copies lockfile digests onto the direct component, in the same order when the integrity string is reversed', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-sbom-digest-'));
+    try {
+      const sha256 = createHash('sha256').update('alpha').digest();
+      const sha512 = createHash('sha512').update('beta').digest();
+      const sri = (alg: 'sha256' | 'sha512', buf: Buffer): string => `${alg}-${buf.toString('base64')}`;
+      const writeLock = (integrity: string): void => {
+        fs.writeFileSync(
+          path.join(root, 'package-lock.json'),
+          JSON.stringify({
+            packages: {
+              '': {},
+              'node_modules/chalk': { version: '5.3.0', integrity },
+            },
+          }),
+        );
+      };
+      const artifact = makeArtifact('5.3.0', 90);
+      writeLock(`${sri('sha512', sha512)} ${sri('sha256', sha256)}`);
+      const first = toCycloneDx(artifact, collectLockfileGraph(artifact, root)) as {
+        serialNumber: string;
+        components: Array<{ name: string; properties: Array<{ name: string; value: string }>; hashes?: PackageDigest[] }>;
+      };
+      writeLock(`${sri('sha256', sha256)} ${sri('sha512', sha512)}`);
+      const second = toCycloneDx(artifact, collectLockfileGraph(artifact, root)) as {
+        serialNumber: string;
+        components: Array<{ hashes?: PackageDigest[] }>;
+      };
+      expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+      expect(first.serialNumber).toBe(second.serialNumber);
+      const chalk = first.components.find((c) => c.name === 'chalk')!;
+      expect(chalk.properties.find((p) => p.name === 'vibgrate:scope')?.value).toBe('direct');
+      expect(chalk.hashes).toEqual([
+        { alg: 'SHA-256', content: sha256.toString('hex') },
+        { alg: 'SHA-512', content: sha512.toString('hex') },
+      ]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

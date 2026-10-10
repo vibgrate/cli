@@ -124,8 +124,9 @@ export function withLockfileNotes<T>(
 
 // ── Known keys ──────────────────────────────────────────────────────────────
 // A key in these sets is part of the documented lockfile shape. It is not an
-// "unknown" field, even when this reader does not copy the value (integrity,
-// checksum, and similar). Missing a real key here would warn on every project.
+// "unknown" field. Integrity, checksum, and hash are known keys; SBOM export
+// copies the ones it can decode. Missing a real key here would warn on every
+// project.
 
 export const NPM_LOCK_TOP: ReadonlySet<string> = new Set([
   'name', 'version', 'lockfileVersion', 'requires', 'packages', 'dependencies',
