@@ -42,7 +42,11 @@ backward compatible.
 
 ### Fixed
 
-- **`vg build` and `vg scan` skip binary and non-UTF-8 files instead of crashing.** A file with a NUL byte, or bytes that are not UTF-8, is left out of the map and out of text parsers. One warning names the count, the first few paths, and how to ignore the files with a `.gitignore` entry or `--exclude`. The warning does not include file contents. A lockfile that is binary or not UTF-8 still stops the command, and that message does not include the file's bytes either.
+- **A key or value `vg` does not accept in `driftBudget` or `review` stops the command.**
+  A misspelt key, a value of the wrong type, or a `driftBudget` that sets no
+  limit exits with an error. The error names the file and, when the file makes
+  it clear, the line and the key. The value is not printed.
+  `.vibgrate/review.toml` still skips keys it does not recognise. (#316)
 
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its

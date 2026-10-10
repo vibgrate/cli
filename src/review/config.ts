@@ -85,8 +85,9 @@ function str<T extends string>(value: unknown, allowed: readonly T[], fallback: 
 
 /**
  * Map the `review` block of the project config (camelCase keys) onto the
- * policy. Unknown keys are ignored, never fatal — the same contract as
- * `review.toml`.
+ * policy. YAML and JSON reject an unknown key or a wrong type in
+ * {@link parseDataConfig} before this runs. A `review.toml` document still
+ * ignores unknown keys.
  */
 export function reviewConfigFromBlock(
   block: unknown,
