@@ -42,12 +42,11 @@ backward compatible.
 
 ### Fixed
 
-- **`vg evidence verify` reports a truncated or unreadable bundle as an error.**
-  A bundle whose envelope or `result.json` is cut off, is not JSON, or is not
-  an evidence document this version can read exits 1. The message says what
-  failed and how to restore the bundle. It does not print a stack or the
-  file's contents. A readable bundle still reports `verified`, `unverified`,
-  or `failed`.
+- **A key or value `vg` does not accept in `driftBudget` or `review` stops the command.**
+  A misspelt key, a value of the wrong type, or a `driftBudget` that sets no
+  limit exits with an error. The error names the file and, when the file makes
+  it clear, the line and the key. The value is not printed.
+  `.vibgrate/review.toml` still skips keys it does not recognise. (#316)
 
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
