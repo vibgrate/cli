@@ -103,6 +103,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
 - [Output Formats](#output-formats)
   - [Text](#text)
   - [JSON Artifact](#json-artifact)
+    - [Score fields in the JSON artifact](#score-fields-in-the-json-artifact)
   - [SARIF](#sarif)
     - [Result fingerprints](#result-fingerprints)
     - [Advisories with several ids](#advisories-with-several-ids)
@@ -4841,6 +4842,89 @@ The default output. A coloured, human-readable report showing:
 The full scan artifact in JSON format. Contains all raw data, scores, findings, and VCS metadata. Stable schema (`schemaVersion: "1.0"`). This is the same artifact saved to `.vibgrate/scan_result.json`.
 
 Dependency identity in this file is `projects[].type` plus `dependencies[].package` and `resolvedVersion`. An advisory match is `extended.vulnerabilities.packages[]` (`ecosystem`, `package`, `version`). `vg sbom export` writes those coordinates as a package URL. The file has no CPE field. See [Component identity](#component-identity). A dependency row has no package digest. `projects[].projectId` and `solutions[].solutionId` identify the project and the solution. See [Package digests](#package-digests).
+
+#### Score fields in the JSON artifact
+
+Every score `vg scan` computes locally lives under the top-level `drift` object. Read `drift.score`; the other fields explain it.
+
+| Field | Range | Present when |
+| --- | --- | --- |
+| `drift.score` | `0`-`100`, lower is better, or `null` | Always. `null` means nothing was measured |
+| `drift.riskLevel` | `low` (0-30), `moderate` (31-60), `high` (61-100), or `null` | Always. `null` when `score` is `null` |
+| `drift.components.runtimeScore` | `0`-`100` drift, or `null` | Always. `null` when the component had no input |
+| `drift.components.frameworkScore` | `0`-`100` drift, or `null` | Always |
+| `drift.components.dependencyScore` | `0`-`100` drift, or `null` | Always |
+| `drift.components.eolScore` | `0`-`100` drift, or `null` | Always |
+| `drift.measured` | Array of `runtime`, `framework`, `dependency`, `eol`, `freshness` | Always. Empty when nothing was measured |
+| `drift.methodologyVersion` | For example `driftscore-3.0` | Always on current CLIs |
+| `drift.confidence` | `0`-`1` | When at least one dependency row was classified |
+| `drift.mode` | `verified` or `estimated` | When there were scoreable dependencies |
+| `drift.dependencyDrift` | `p95`, `unsupportedShare`, `coverage`, `top[]` | When there were scoreable dependencies |
+| `delta` | Score change against `--baseline`, positive is worse | When `--baseline` names a readable file **and** this scan's `drift.score` and the baseline's `drift.score` are both numbers. Omitted otherwise, never `0` or `null` |
+
+Component scores are drift too: `0` is current, `100` is maximum drift, the same direction as `drift.score`.
+
+**An absent score stays absent.** `drift.score` is `null` when no component had data, and an individual component is `null` when only that pillar was unmeasurable. Neither is ever written as `0`. A `null` and a measured `0` are different results: `0` says the stack was measured and is current, `null` says nothing was measured. `--drift-budget` and `--drift-worsening` skip a `null` score rather than comparing it, and the JUnit XML reports it as a skipped case. The same rule applies to the summary file: an unmeasured `driftScore` is `null`, and `delta` and `baselineScore` are `null` without a `--baseline` comparison.
+
+**RiskScore and the combined DriftRisk Index are not in this file.** A local scan computes the DriftScore only. `riskScore` and `driftRisk` are not fields of the scan artifact, and they are not written as `0` or as an empty object: they are absent. RiskScore comes from Vibgrate Cloud on a Team plan or above, and the combined DriftRisk Index is the blend of the two axes, so both land in the dashboard rather than in free, offline CLI output. `drift.riskLevel` is the DriftScore band, not RiskScore. A `maxRiskScore` or `maxRiskWorseningPercent` limit in `driftBudget` is reported as not evaluated on a local scan, never as a silent pass; see [Drift budget](#drift-budget). The formulas, bands, and methodology tags for all three numbers are published in the [public scoring specification](./docs/public/SCORING-METHODOLOGY-PUBLIC.md), with the design rationale and limitations in the [risk modelling whitepaper](./docs/public/RISK-MODELLING-WHITEPAPER.md).
+
+CI example. A step that reads the score from a scan, with `--summary-out` written before any gate can fail the run:
+
+```yaml
+- name: Drift gate
+  run: vg scan --baseline .vibgrate/baseline.json --drift-budget 40 --summary-out drift-summary.json
+
+- name: Publish the measured score
+  if: always()
+  run: cat drift-summary.json >> "$GITHUB_STEP_SUMMARY"
+```
+
+```bash
+# Fail a build on an unmeasured score, and print the measured one either way.
+drift=$(jq -r '.driftScore' drift-summary.json)
+if [ "$drift" = "null" ]; then
+  echo "DriftScore was not measured; see drift.measured in scan_result.json."
+  exit 1
+fi
+echo "DriftScore $drift/100 ($(jq -r '.riskLevel' drift-summary.json))"
+```
+
+The values below are illustrative: every key and shape is copied from a real `--format json` run, but the numbers come from an offline scan of a two-dependency fixture, so your paths, versions, and counts will differ.
+
+```json
+{
+  "schemaVersion": "1.0",
+  "timestamp": "2026-10-10T07:09:12.481Z",
+  "vibgrateVersion": "2026.1007.1",
+  "rootPath": "/path/to/your/repo",
+  "drift": {
+    "score": 0,
+    "riskLevel": "low",
+    "components": {
+      "runtimeScore": null,
+      "frameworkScore": null,
+      "dependencyScore": 0,
+      "eolScore": null
+    },
+    "measured": ["dependency"],
+    "methodologyVersion": "driftscore-3.0",
+    "confidence": 0,
+    "mode": "estimated",
+    "dependencyDrift": {
+      "p95": 0,
+      "unsupportedShare": 0,
+      "coverage": 0,
+      "top": [
+        { "package": "lodash", "drift": 0, "mode": "estimated", "unsupported": false, "flags": [] }
+      ]
+    }
+  }
+}
+```
+
+Without `--baseline` there is no `delta` key at all: the field is left out, not written as `null`. `--baseline` alone does not add it either. `delta` appears only when the baseline file is readable and both this scan's DriftScore and the baseline's DriftScore are measured numbers; if either side is `null`, or the file is missing or unreadable, `delta` is still absent. Read it with a presence check, not a bare `jq .delta`.
+
+`confidence: 0` with `mode: "estimated"` is what an offline scan without a `--package-manifest` looks like: no release-date data was available, so only version-only estimates were possible. Supply a manifest to measure real drift offline; see [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
 
 ### SARIF
 
