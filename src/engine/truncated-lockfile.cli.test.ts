@@ -58,7 +58,7 @@ describe('truncated lockfile CLI', () => {
     expect(res.signal).toBeNull();
     expect(res.status).toBe(1);
     expect(res.stderr).toContain('package-lock.json');
-    expect(res.stderr).toContain('truncated or invalid JSON');
+    expect(res.stderr).toContain('truncated or not valid syntax');
     expect(res.stderr).toContain('package manager');
     expect(res.stderr).not.toContain(secret);
     expect(res.stderr).not.toContain('left-pad');
@@ -72,7 +72,7 @@ describe('truncated lockfile CLI', () => {
     expect(res.signal).toBeNull();
     expect(res.status).toBe(1);
     expect(res.stderr).toContain('package-lock.json');
-    expect(res.stderr).toContain('truncated or invalid JSON');
+    expect(res.stderr).toContain('truncated or not valid syntax');
     expect(res.stderr).not.toContain(secret);
   }, 60_000);
 });
