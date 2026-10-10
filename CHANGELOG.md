@@ -42,6 +42,11 @@ backward compatible.
 
 ### Fixed
 
+- **Interrupted or failed `vg build` and `vg scan` stop their parse workers.**
+  Ctrl-C, a worker failure, and a normal finish all shut the parse pool down,
+  so Node workers are not left running afterwards. A worker that fails still
+  prints what happened and how to re-run (`--jobs 1` or `--exclude`).
+
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
   Package URL when one is written, otherwise by package name, then by version.

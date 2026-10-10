@@ -108,9 +108,7 @@ meaningful.
   (`engine/discover.ts` sorts).
 - **Parallel but ordered** — the worker pool (`engine/pool.ts` +
   `engine/parse-worker.ts`) parses files concurrently for speed, then results are
-  re-ordered deterministically before they enter the graph. The pool stops its
-  workers when parsing finishes, when parsing fails, and on SIGINT/SIGTERM, so
-  a build or scan does not leave parse workers behind.
+  re-ordered deterministically before they enter the graph.
 
 If you touch anything that ends up in `graph.json` or a report, add a test that
 asserts stable output.

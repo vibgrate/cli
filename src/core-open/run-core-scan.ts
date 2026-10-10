@@ -764,12 +764,8 @@ export async function runCoreScan(
         { projects: allProjects, solutions, extended },
       );
       progress.completeStep('map', detail || 'done');
-    } catch (err) {
-      // One line, no stack: a worker crash or resource limit should say what
-      // failed and what to do, then the scan continues without the map.
-      const line = (err instanceof Error ? err.message : String(err)).split('\n')[0]?.trim() || 'map build failed';
-      const detail = line.length > 240 ? `${line.slice(0, 237)}...` : line;
-      progress.completeStep('map', `skipped (${detail})`);
+    } catch {
+      progress.completeStep('map', 'skipped (map build failed)');
     }
   }
 

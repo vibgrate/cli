@@ -5101,14 +5101,6 @@ and `0` always means "disabled".
 | `VG_JOBS`             | CPU cores − 1               | Default parse worker count when `--jobs` isn't passed. Fewer workers = lower peak memory (each worker loads its own grammar set).       |
 | `VG_WORKER_HEAP_MB`   | platform default            | Per-worker old-generation heap cap, so one runaway parse can't take the whole machine.                                                  |
 
-If a parse worker crashes, runs out of memory, or the command is interrupted
-(Ctrl+C or SIGTERM), `vg` stops the workers before it exits. The failure is one
-line on stderr — what failed, and whether to re-run with `--jobs 1`, exclude
-files, or raise `VG_WORKER_HEAP_MB` — not a stack trace. A finished build stops
-its workers the same way. Check with a process list (`ps`) filtered for this
-command's pid: after `vg build` or `vg scan` returns, no parse worker should
-still be running. Graph output is unchanged.
-
 Skips are deterministic functions of the input (file size, file count) — never
 of observed memory — so identical input still produces an identical
 `graph.json`. To give the build more room instead of limiting it, raise the
