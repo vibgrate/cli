@@ -156,8 +156,6 @@ The full table — finding gates, budget flags, `warn` / `enforce` / `shadow`, p
 
 `--drift-budget` and `--drift-worsening` always exit 2 on a breach, and they ignore `driftBudget` in the project config. A score equal to the budget passes. A DriftScore that was not measured does not fail either flag (it is absent, not 0). `--drift-worsening` without `--baseline` exits 2 when a score was measured. The same worsening key in config, with no baseline, is not evaluated and does not fail.
 
-A `driftBudget` or `review` block with an unknown key, a bad mode, or a value of the wrong type exits 1 before the scan. The error names the file and the key, and the line when it can, and it does not print the value.
-
 Do not set `continue-on-error` on the gate step. Exit 2 is what blocks the merge. Upload SARIF or the JSON report with `if: always()` — the file is already written when the gate exits.
 
 ```bash

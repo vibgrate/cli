@@ -104,7 +104,7 @@ Two different knobs both use the word "warn". They do not mean the same thing.
 | `driftBudget.mode: warn` (default) and a breach | 0 | Pass. The breach is printed. The log says to set `enforce` to fail the scan. |
 | `driftBudget.mode: shadow` and a breach | 0 | Pass. The breach is printed. Nothing is gated. |
 | `driftBudget.mode: enforce` and a breach | 2 | Fail. |
-| `driftBudget` the CLI cannot parse (unknown key, bad mode, wrong type) | 1 | Fail. The error names the file and the key. The scan does not run. |
+| `driftBudget` the CLI cannot parse (unknown key, bad mode) | 0 | Pass. The problem is printed and the budget is not applied. |
 | `maxRiskScore` or `maxRiskWorseningPercent` on a local scan | 0 | Pass. The limit is printed as not evaluated. The GitHub App computes RiskScore on a Team plan or above. |
 | Unknown `--fail-on` value | 5 | Fail before the scan. This is a usage error, not a gate result. |
 | Architecture or infrastructure gate requested, but the tree was not evaluated | 2 | Fail. An unevaluated gate is not a pass. |

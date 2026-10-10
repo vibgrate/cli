@@ -1550,13 +1550,14 @@ review:
     validatedTaint: true
 ```
 
-A wrong type or an unknown key in `review` stops the command (exit 1). The
-error names the file and the key, and the line when it can, and it does not
-print the value. Fix that key and run the command again.
-
 Read from the **trusted base branch** when `--base` is given, so a pull request
 cannot weaken the policy applied to itself. It is read as data: a `review` block
 in a `.ts`/`.js` config is never run, so keep it in YAML or JSON.
+
+A key `vg` does not recognise, or a value of the wrong type, stops the command.
+The error names the file and, when the file makes it clear, the line and the
+key. The value is not printed. `.vibgrate/review.toml` still skips keys it does
+not recognise.
 
 The first `vg review` in a repository with no policy writes an advisory starter
 policy: a new `.vibgrate/config.yml` when there is no config, or a `review` block
@@ -5065,10 +5066,9 @@ driftBudget:
   opened the pull request.
 - `--drift-budget` / `--drift-worsening` still work; passing either uses the flags
   and ignores `driftBudget`.
-- A misspelt key, a bad `mode`, or a value of the wrong type stops the command
-  before the scan (exit 1). The error names the config file and the key, and
-  the line when it can. It does not print the value, and the scan does not
-  continue on a default budget.
+- A misspelt key, a wrong type, or a `driftBudget` that sets no limit stops the
+  command. The error names the file and, when the file makes it clear, the line
+  and the key. The value is not printed.
 
 The GitHub App reads `driftBudget` and `review` from the pull request's base
 branch, so a change cannot loosen the limits it is checked against. It reads

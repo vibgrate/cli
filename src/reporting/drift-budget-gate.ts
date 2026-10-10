@@ -8,10 +8,6 @@
  *
  * `vg scan` cannot tell who authored a change, so `agents.maxWorseningPercent`
  * is enforced by the GitHub App check only.
- *
- * A `.vibgrate/config.yml` or `vibgrate.config.json` budget that does not
- * parse is rejected by `parseDataConfig` before a command runs. The warning
- * below is for a raw value that did not come from that parser.
  */
 import { evaluateDriftBudget, LOCAL_SCAN_RISK_NOTE, parseDriftBudget, type DriftBudgetVerdict } from '../core-open/index.js';
 

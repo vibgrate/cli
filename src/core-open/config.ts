@@ -6,8 +6,8 @@ import * as fs from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import type * as TsModule from 'typescript';
 import { parseDocument } from 'yaml';
-import { parseDriftBudget } from './drift-budget.js';
 import type { VibgrateConfig } from './types.js';
+import { parseDriftBudget } from './drift-budget.js';
 import { pathExists, readTextFile } from './utils/fs.js';
 import { redactSecrets } from './utils/redact.js';
 
@@ -61,8 +61,8 @@ export function isConfigFileError(err: unknown): err is ConfigFileError {
  * Parse a data config (YAML or JSON) into a plain object. Throws
  * {@link ConfigFileError} naming the file (and the line or key when the
  * parser can say) when the text is not a valid mapping, or when `driftBudget`
- * or `review` names an unknown key or a value of the wrong type. The message
- * does not include the value.
+ * or `review` is present but does not match its schema. The message never
+ * includes a config value.
  */
 export function parseDataConfig(text: string, file: string): Record<string, unknown> {
   const parsed = /\.ya?ml$/.test(file) ? parseYamlConfig(text, file) : parseJsonConfig(text, file);
@@ -97,6 +97,10 @@ export interface DataConfigRead {
   config: Record<string, unknown> | null;
   /** Why `config` is null despite a file existing. */
   error?: string;
+  /** Line from {@link ConfigFileError}, when the failure named one. */
+  line?: number;
+  /** Key from {@link ConfigFileError}, when the failure named one. */
+  key?: string;
 }
 
 /**
@@ -113,6 +117,9 @@ export function readDataConfigSync(rootDir: string): DataConfigRead {
   try {
     return { file, config: parseDataConfig(readFileSync(path.join(rootDir, file), 'utf8'), file) };
   } catch (err) {
+    if (isConfigFileError(err)) {
+      return { file, config: null, error: err.message, line: err.line, key: err.key };
+    }
     const message = err instanceof Error ? err.message.split('\n')[0] : 'unreadable';
     return { file, config: null, error: redactSecrets(message || 'unreadable') };
   }
@@ -126,7 +133,7 @@ export function readDataConfigSync(rootDir: string): DataConfigRead {
 export function requireDataConfig(rootDir: string): DataConfigRead {
   const read = readDataConfigSync(rootDir);
   if (read.error && read.file && isDataConfigFile(read.file)) {
-    throw new ConfigFileError(read.error, { file: read.file });
+    throw new ConfigFileError(read.error, { file: read.file, line: read.line, key: read.key });
   }
   return read;
 }
@@ -301,33 +308,17 @@ function assertKnownShapes(parsed: Record<string, unknown>, text: string, file: 
       { file, line, key: check.key },
     );
   }
-  // A mapping still has to name known keys and the right types, so a typo
-  // stops the command instead of scanning or reviewing under defaults.
-  if (isRecord(parsed.driftBudget)) assertDriftBudgetShape(parsed.driftBudget, text, file);
-  if (isRecord(parsed.review)) assertReviewBlock(parsed.review, text, file);
+  assertDriftBudgetSchema(parsed, text, file);
+  assertReviewSchema(parsed, text, file);
 }
 
-function throwKeyProblem(file: string, text: string, key: string, problem: string): never {
-  const line = lineOfPath(text, file, key.split('.'));
-  const at = line !== undefined ? ` (line ${line})` : '';
-  throw configFileError(
-    `${file}: \`${key}\` ${problem}${at}. Fix that key and run the command again.`,
-    { file, line, key },
-  );
+interface SchemaProblem {
+  key: string;
+  path: readonly string[];
+  text: string;
 }
 
-/** First `parseDriftBudget` failure, as a config error. Same input, same message. */
-function assertDriftBudgetShape(value: unknown, text: string, file: string): void {
-  const parsed = parseDriftBudget(value);
-  if (!parsed || parsed.ok) return;
-  const error = parsed.errors[0] ?? 'driftBudget is not valid.';
-  const match = /^(driftBudget(?:\.[^ ]+)*)\s+([\s\S]+)$/.exec(error);
-  const key = match?.[1] ?? 'driftBudget';
-  const problem = (match?.[2] ?? error).replace(/\.$/, '');
-  throwKeyProblem(file, text, key, problem);
-}
-
-const REVIEW_KEYS = [
+const REVIEW_KEY_ORDER = [
   'enforcement',
   'failOn',
   'targetPattern',
@@ -339,9 +330,7 @@ const REVIEW_KEYS = [
   'minSeverity',
 ] as const;
 
-const REVIEW_KEY_SET: ReadonlySet<string> = new Set(REVIEW_KEYS);
-
-const REVIEW_ENUMS: Record<string, readonly string[]> = {
+const REVIEW_ENUMS: Readonly<Record<string, readonly string[]>> = {
   enforcement: ['advisory', 'enforced'],
   failOn: ['none', 'fail', 'needs_review'],
   highSeverityDecision: ['fail', 'needs_review'],
@@ -350,128 +339,239 @@ const REVIEW_ENUMS: Record<string, readonly string[]> = {
 };
 
 const PROTECTED_KEYS = ['unguardedEntrypoint', 'knownVulnerableDependency', 'validatedTaint'] as const;
-const PROTECTED_KEY_SET: ReadonlySet<string> = new Set(PROTECTED_KEYS);
 
-function joinWords(values: readonly string[]): string {
-  if (values.length <= 1) return values[0] ?? '';
-  if (values.length === 2) return `${values[0]} or ${values[1]}`;
-  return `${values.slice(0, -1).join(', ')}, or ${values[values.length - 1]}`;
+function schemaProblem(path: readonly string[], text: string): SchemaProblem {
+  return { key: path.join('.'), path, text };
 }
 
-function joinQuoted(values: readonly string[]): string {
-  return joinWords(values.map((value) => `"${value}"`));
+function orList(allowed: readonly string[]): string {
+  const quoted = allowed.map((value) => `"${value}"`);
+  if (quoted.length <= 1) return quoted[0] ?? '';
+  if (quoted.length === 2) return `${quoted[0]} or ${quoted[1]}`;
+  return `${quoted.slice(0, -1).join(', ')}, or ${quoted[quoted.length - 1]}`;
 }
 
-/**
- * Known `review` keys with the wrong type, and unknown keys, are errors.
- * A misspelt policy key must not silently keep the default (often a weaker
- * gate). Absent keys are fine — those keep their defaults later.
- */
-function assertReviewBlock(block: Record<string, unknown>, text: string, file: string): void {
-  for (const key of Object.keys(block)) {
-    const path = `review.${key}`;
-    if (!REVIEW_KEY_SET.has(key)) {
-      throwKeyProblem(file, text, path, `is not a known setting. Use ${joinWords(REVIEW_KEYS)}`);
-    }
-    const problem = reviewFieldProblem(key, block[key]);
-    if (problem) throwKeyProblem(file, text, problem.key, problem.problem);
+function driftProblem(error: string): SchemaProblem {
+  const noDot = error.replace(/\.$/, '');
+  const nested = /^driftBudget\.([A-Za-z0-9_.]+) ([\s\S]+)$/.exec(noDot);
+  if (nested?.[1] && nested[2]) {
+    return schemaProblem(['driftBudget', ...nested[1].split('.')], `\`driftBudget.${nested[1]}\` ${nested[2]}`);
   }
+  const top = /^driftBudget ([\s\S]+)$/.exec(noDot);
+  if (top?.[1]) return schemaProblem(['driftBudget'], `\`driftBudget\` ${top[1]}`);
+  return schemaProblem(['driftBudget'], noDot);
 }
 
-function reviewFieldProblem(key: string, value: unknown): { key: string; problem: string } | null {
-  const path = `review.${key}`;
-  const allowed = REVIEW_ENUMS[key];
-  if (allowed) {
-    if (typeof value === 'string' && allowed.includes(value)) return null;
-    return { key: path, problem: `must be ${joinQuoted(allowed)}` };
-  }
-  if (key === 'targetPattern') {
-    return typeof value === 'string' ? null : { key: path, problem: 'must be a string' };
-  }
-  if (key === 'approvedExceptions') {
-    return isStringList(value)
-      ? null
-      : { key: path, problem: 'must be a list of strings, for example approvedExceptions: ["ui/api"]' };
-  }
-  if (key === 'highConfidenceThreshold') {
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1) return null;
-    return { key: path, problem: 'must be a number from 0 to 1' };
-  }
-  if (key === 'protected') return protectedProblem(value);
-  return { key: path, problem: 'is not a supported setting' };
-}
-
-function protectedProblem(value: unknown): { key: string; problem: string } | null {
+function protectedProblems(value: unknown): SchemaProblem[] {
   if (!isRecord(value)) {
-    return { key: 'review.protected', problem: 'must be a mapping of true or false settings' };
+    return [schemaProblem(['review', 'protected'], '`review.protected` must be a mapping of true or false settings')];
   }
-  for (const key of Object.keys(value)) {
-    const path = `review.protected.${key}`;
-    if (!PROTECTED_KEY_SET.has(key)) {
-      return { key: path, problem: `is not a known setting. Use ${joinWords(PROTECTED_KEYS)}` };
+  const problems: SchemaProblem[] = [];
+  const known = new Set<string>(PROTECTED_KEYS);
+  for (const key of PROTECTED_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    if (typeof value[key] !== 'boolean') {
+      problems.push(schemaProblem(['review', 'protected', key], `\`review.protected.${key}\` must be true or false`));
     }
-    if (typeof value[key] !== 'boolean') return { key: path, problem: 'must be true or false' };
   }
-  return null;
-}
-
-function lineOfPath(text: string, file: string, parts: readonly string[]): number | undefined {
-  if (parts.length === 0) return undefined;
-  return /\.json$/.test(file) ? lineOfJsonPath(text, parts) : lineOfYamlPath(text, parts);
-}
-
-function lineOfJsonPath(text: string, parts: readonly string[]): number | undefined {
-  let from = 0;
-  let found: number | undefined;
-  for (const part of parts) {
-    const match = jsonKeyRe(part).exec(text.slice(from));
-    if (!match) return found;
-    const index = from + match.index;
-    found = text.slice(0, index).split(/\r?\n/).length;
-    from = index + match[0].length;
+  for (const key of Object.keys(value).filter((item) => !known.has(item)).sort()) {
+    problems.push(schemaProblem(['review', 'protected', key], `\`review.protected.${key}\` is not a known setting`));
   }
-  return found;
+  return problems;
 }
 
-function jsonKeyRe(key: string): RegExp {
-  return new RegExp(`"${escapeRegExp(key)}"\\s*:`);
-}
-
-function lineOfYamlPath(text: string, parts: readonly string[]): number | undefined {
-  const lines = text.split(/\r?\n/);
-  let lineIndex = 0;
-  let minIndent = 0;
-  let found: number | undefined;
-  for (let depth = 0; depth < parts.length; depth++) {
-    const re = yamlKeyRe(parts[depth] ?? '');
-    let hit: number | undefined;
-    let indent = 0;
-    for (let i = lineIndex; i < lines.length; i++) {
-      const line = lines[i] ?? '';
-      const trimmed = line.trim();
-      if (trimmed === '' || trimmed.startsWith('#')) continue;
-      const indentNow = leadingSpaces(line);
-      if (depth > 0 && indentNow < minIndent) return found;
-      if (!re.test(line)) continue;
-      indent = indentNow;
-      hit = i;
-      break;
+function reviewProblems(review: Record<string, unknown>): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  const known = new Set<string>(REVIEW_KEY_ORDER);
+  for (const key of REVIEW_KEY_ORDER) {
+    if (!Object.prototype.hasOwnProperty.call(review, key)) continue;
+    const value = review[key];
+    if (key === 'protected') {
+      problems.push(...protectedProblems(value));
+      continue;
     }
-    if (hit === undefined) return found;
-    found = hit + 1;
-    lineIndex = hit + 1;
-    minIndent = indent + 1;
+    if (key === 'targetPattern') {
+      if (typeof value !== 'string') problems.push(schemaProblem(['review', key], '`review.targetPattern` must be a string'));
+      continue;
+    }
+    if (key === 'approvedExceptions') {
+      if (!isStringList(value)) problems.push(schemaProblem(['review', key], '`review.approvedExceptions` must be a list of strings'));
+      continue;
+    }
+    if (key === 'highConfidenceThreshold') {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+        problems.push(schemaProblem(['review', key], '`review.highConfidenceThreshold` must be a number from 0 to 1'));
+      }
+      continue;
+    }
+    const allowed = REVIEW_ENUMS[key];
+    if (allowed && (typeof value !== 'string' || !allowed.includes(value))) {
+      problems.push(schemaProblem(['review', key], `\`review.${key}\` must be ${orList(allowed)}`));
+    }
   }
-  return found;
+  for (const key of Object.keys(review).filter((item) => !known.has(item)).sort()) {
+    problems.push(schemaProblem(['review', key], `\`review.${key}\` is not a known setting`));
+  }
+  return problems;
 }
 
-function yamlKeyRe(key: string): RegExp {
+function assertDriftBudgetSchema(parsed: Record<string, unknown>, text: string, file: string): void {
+  if (!Object.prototype.hasOwnProperty.call(parsed, 'driftBudget')) return;
+  const budget = parseDriftBudget(parsed.driftBudget);
+  if (!budget || budget.ok) return;
+  throwSchemaProblems(file, text, budget.errors.map(driftProblem));
+}
+
+function assertReviewSchema(parsed: Record<string, unknown>, text: string, file: string): void {
+  if (!Object.prototype.hasOwnProperty.call(parsed, 'review') || !isRecord(parsed.review)) return;
+  throwSchemaProblems(file, text, reviewProblems(parsed.review));
+}
+
+function throwSchemaProblems(file: string, text: string, problems: readonly SchemaProblem[]): void {
+  if (problems.length === 0) return;
+  const rendered = problems.map((problem) => {
+    const line = lineOfPath(text, file, problem.path);
+    return { ...problem, line, text: line !== undefined ? `${problem.text} (line ${line})` : problem.text };
+  });
+  const first = rendered[0];
+  if (!first) return;
+  throw configFileError(
+    `${file}: ${rendered.map((problem) => problem.text).join('; ')}. Fix that key and run the command again.`,
+    { file, line: first.line, key: first.key },
+  );
+}
+
+function lineOfPath(text: string, file: string, keys: readonly string[]): number | undefined {
+  if (keys.length === 0) return undefined;
+  return /\.json$/.test(file) ? lineOfJsonPath(text, keys) : lineOfYamlPath(text, keys);
+}
+
+function yamlKeyAtStart(trimmed: string, key: string): boolean {
   const escaped = escapeRegExp(key);
-  return new RegExp(`^\\s*(?:${escaped}|"${escaped}"|'${escaped}')\\s*:`);
+  return new RegExp(`^(?:"${escaped}"|'${escaped}'|${escaped})\\s*:`).test(trimmed);
 }
 
-function leadingSpaces(line: string): number {
-  return /^ */.exec(line)?.[0].length ?? 0;
+function yamlKeyInline(fragment: string, key: string): boolean {
+  const escaped = escapeRegExp(key);
+  return new RegExp(`(?:^|[{,]\\s*)(?:"${escaped}"|'${escaped}'|${escaped})\\s*:`).test(fragment);
+}
+
+/** Drop an unquoted `#` comment so a commented key is not reported as the line. */
+function stripYamlComment(line: string): string {
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '#') return line.slice(0, i);
+  }
+  return line;
+}
+
+function lineOfYamlPath(text: string, keys: readonly string[]): number | undefined {
+  const lines = text.split(/\r?\n/);
+  let start = 0;
+  let minIndent = 0;
+  for (let depth = 0; depth < keys.length; depth++) {
+    const key = keys[depth];
+    if (!key) return undefined;
+    const child = keys[depth + 1];
+    if (depth > 0 && start > 0) {
+      const previous = stripYamlComment(lines[start - 1] ?? '');
+      const colon = previous.indexOf(':');
+      const rest = colon >= 0 ? previous.slice(colon + 1) : '';
+      if (yamlKeyInline(rest, key)) {
+        if (!child) return start;
+        continue;
+      }
+    }
+    let found = -1;
+    let indent = 0;
+    for (let i = start; i < lines.length; i++) {
+      const raw = lines[i] ?? '';
+      const trimmed = stripYamlComment(raw).trim();
+      if (!trimmed) continue;
+      const lineIndent = raw.length - raw.trimStart().length;
+      if (depth > 0 && lineIndent < minIndent) break;
+      if (yamlKeyAtStart(trimmed, key) && lineIndent >= minIndent) {
+        found = i;
+        indent = lineIndent;
+        break;
+      }
+    }
+    if (found < 0) return undefined;
+    if (!child) return found + 1;
+    minIndent = indent + 1;
+    start = found + 1;
+  }
+  return undefined;
+}
+
+function lineOfJsonPath(text: string, keys: readonly string[]): number | undefined {
+  let from = 0;
+  let line = 1;
+  for (const key of keys) {
+    const found = findJsonKey(text, key, from, line);
+    if (!found) return undefined;
+    from = found.index;
+    line = found.line;
+  }
+  return line;
+}
+
+/** The next `"key":` at or after `from`. Strings are skipped, so a value cannot impersonate a key. */
+function findJsonKey(
+  text: string,
+  key: string,
+  from: number,
+  line: number,
+): { index: number; line: number } | undefined {
+  let i = from;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\n') {
+      line++;
+      i++;
+      continue;
+    }
+    if (ch !== '"') {
+      i++;
+      continue;
+    }
+    const startLine = line;
+    i++;
+    let value = '';
+    let closed = false;
+    while (i < text.length) {
+      const current = text[i];
+      if (current === '\n') line++;
+      if (current === '\\') {
+        i++;
+        if (text[i] === '\n') line++;
+        value += text[i] ?? '';
+        i++;
+        continue;
+      }
+      if (current === '"') {
+        closed = true;
+        i++;
+        break;
+      }
+      value += current ?? '';
+      i++;
+    }
+    if (!closed || value !== key) continue;
+    let j = i;
+    while (j < text.length && /\s/.test(text[j] ?? '')) j++;
+    if (text[j] === ':') return { index: j + 1, line: startLine };
+  }
+  return undefined;
 }
 
 function escapeRegExp(value: string): string {
