@@ -42,10 +42,11 @@ backward compatible.
 
 ### Fixed
 
-- **Interrupted or failed `vg build` and `vg scan` stop their parse workers.**
-  Ctrl-C, a worker failure, and a normal finish all shut the parse pool down,
-  so Node workers are not left running afterwards. A worker that fails still
-  prints what happened and how to re-run (`--jobs 1` or `--exclude`).
+- **A key or value `vg` does not accept in `driftBudget` or `review` stops the command.**
+  A misspelt key, a value of the wrong type, or a `driftBudget` that sets no
+  limit exits with an error. The error names the file and, when the file makes
+  it clear, the line and the key. The value is not printed.
+  `.vibgrate/review.toml` still skips keys it does not recognise. (#316)
 
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
