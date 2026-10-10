@@ -1,0 +1,7 @@
+{
+  "name": "build-meta-demo",
+  "version": "1.0.0",
+  "dependencies": {
+    "example-build-meta": "1.2.3+build.7"
+  }
+}

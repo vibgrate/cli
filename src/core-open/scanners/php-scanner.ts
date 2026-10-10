@@ -3,8 +3,8 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as semver from 'semver';
-import { semverKeepingBuild } from '../utils/semver-build.js';
 import { FileCache, readJsonFile } from '../utils/fs.js';
+import { recordedSemver } from '../utils/recorded-semver.js';
 import { LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { lockfileWarningPath, noteComposerLock, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
@@ -300,7 +300,7 @@ async function scanOnePhpProject(
   for (const { dep, meta } of resolved) {
     // Use resolved version if available
     const resolvedVersionStr = resolvedVersions.get(dep.name);
-    const resolvedVersion = resolvedVersionStr ? semverKeepingBuild(resolvedVersionStr) : null;
+    const resolvedVersion = resolvedVersionStr ? recordedSemver(resolvedVersionStr) : null;
     const latestStable = meta.latestStableOverall;
 
     let majorsBehind: number | null = null;

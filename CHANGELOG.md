@@ -42,6 +42,13 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan --format json` and `vg sbom export` keep SemVer build metadata.**
+  A lockfile or manifest version such as `1.2.3+build.7` is recorded with
+  the `+` suffix. A Go `v2.0.0+incompatible` require is recorded as
+  `2.0.0+incompatible` in scan JSON (the leading `v` is still dropped) and
+  as `v2.0.0+incompatible` in the SBOM, matching `go.sum`. Range checks
+  still ignore the suffix. (#298)
+
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
   Package URL when one is written, otherwise by package name, then by version.

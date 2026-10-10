@@ -1,0 +1,13 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    example-build-meta (1.2.3+build.7)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  example-build-meta
+
+BUNDLED WITH
+  2.5.0

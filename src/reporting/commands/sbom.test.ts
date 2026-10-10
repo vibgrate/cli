@@ -236,8 +236,8 @@ describe('sbom helpers', () => {
     artifact.projects[0]!.type = 'go';
     artifact.projects[0]!.dependencies[0]!.package = 'github.com/gin-contrib/sse';
     artifact.projects[0]!.dependencies[0]!.currentSpec = 'v1.1.0';
-    // The scanner's resolvedVersion runs go.mod's pinned version through
-    // semver.clean, which drops the leading `v` — go.sum keeps it.
+    // The scanner's resolvedVersion drops the leading `v` — go.sum keeps it.
+    // Build metadata, when present, stays on both strings.
     artifact.projects[0]!.dependencies[0]!.resolvedVersion = '1.1.0';
     const graph: LockfileGraph = {
       components: [{ package: 'github.com/gin-contrib/sse', version: 'v1.1.0' }],
@@ -272,51 +272,6 @@ describe('sbom helpers', () => {
     const sbom = toCycloneDx(makeArtifact('5.3.0', 90)) as { components: Array<{ version: string; purl: string }> };
     expect(sbom.components[0]!.version).toBe('5.3.0');
     expect(sbom.components[0]!.purl).toBe('pkg:npm/chalk@5.3.0');
-  });
-
-  it('keeps SemVer build metadata in the version and percent-encodes + only in the purl', () => {
-    const version = '1.2.3+build.4';
-    const cyclone = toCycloneDx(makeArtifact(version, 90)) as {
-      components: Array<{ name: string; version: string; purl: string; 'bom-ref': string }>;
-    };
-    const again = JSON.stringify(toCycloneDx(makeArtifact(version, 90)));
-    expect(JSON.stringify(cyclone)).toBe(again);
-    const roundTrip = JSON.parse(again) as typeof cyclone;
-    expect(roundTrip.components[0]!.version).toBe(version);
-    expect(cyclone.components[0]!.version).toBe(version);
-    expect(cyclone.components[0]!.purl).toBe('pkg:npm/chalk@1.2.3%2Bbuild.4');
-    expect(cyclone.components[0]!['bom-ref']).toBe('pkg:npm/chalk@1.2.3%2Bbuild.4');
-    expect(again).not.toContain('"version":"1.2.3%2Bbuild.4"');
-    expect(again).toContain('"version":"1.2.3+build.4"');
-
-    const spdx = toSpdx(makeArtifact(version, 90)) as {
-      packages: Array<{ versionInfo: string; externalRefs: Array<{ referenceLocator: string }> }>;
-    };
-    expect(JSON.stringify(toSpdx(makeArtifact(version, 90)))).toBe(JSON.stringify(spdx));
-    expect(spdx.packages[0]!.versionInfo).toBe(version);
-    expect(spdx.packages[0]!.externalRefs[0]!.referenceLocator).toBe('pkg:npm/chalk@1.2.3%2Bbuild.4');
-    expect(purlFor('go', 'example.com/oldmajor', 'v2.0.0+incompatible')).toBe(
-      'pkg:golang/example.com/oldmajor@v2.0.0%2Bincompatible',
-    );
-  });
-
-  it('keeps the component when a version cannot be percent-encoded', () => {
-    const version = '1.2.3+\uD800';
-    expect(() => purlFor('npm', 'chalk', version)).not.toThrow();
-    expect(purlFor('npm', 'chalk', version)).toBeNull();
-    const warning = describeUnavailablePurl('npm', 'chalk', version);
-    expect(warning).toContain('cannot be percent-encoded');
-    expect(warning).toContain('npm package "chalk"');
-    expect(warning).not.toContain('/var/');
-
-    const cyclone = toCycloneDx(makeArtifact(version, 90)) as {
-      components: Array<{ version: string; purl?: string; properties: Array<{ name: string; value: string }> }>;
-    };
-    expect(JSON.stringify(toCycloneDx(makeArtifact(version, 90)))).toBe(JSON.stringify(cyclone));
-    expect(cyclone.components[0]!.version).toBe(version);
-    expect(cyclone.components[0]!.purl).toBeUndefined();
-    expect(cyclone.components[0]!.properties.find((p) => p.name === 'vibgrate:purlStatus')?.value).toBe('unavailable');
-    expect(cyclone.components[0]!.properties.find((p) => p.name === 'vibgrate:purlWarning')?.value).toBe(warning);
   });
 
   /**

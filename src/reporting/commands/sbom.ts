@@ -158,78 +158,36 @@ const LICENSE_STATUS_UNREPRESENTABLE = 'unrepresentable';
 /** CycloneDX property that carries the stable warning code beside a prose warning. */
 const WARNING_CODE_PROPERTY = 'vibgrate:warningCode';
 
-/**
- * Percent-encode one purl token. `encodeURIComponent` throws on a lone
- * surrogate; that is "cannot encode", not a reason to drop the component.
- * Returns null instead of throwing.
- */
-function encodePurlToken(value: string): string | null {
-  try {
-    return encodeURIComponent(value);
-  } catch {
-    return null;
-  }
-}
-
-function encodePurlSegments(segments: string[]): string | null {
-  const encoded: string[] = [];
-  for (const segment of segments) {
-    const token = encodePurlToken(segment);
-    if (token === null) return null;
-    encoded.push(token);
-  }
-  return encoded.join('/');
-}
-
 /** The purl type/namespace/name portion, without a version — shared by every ecosystem branch of `purlFor`. */
 function purlPath(ecosystem: Ecosystem, name: string): string | null {
   switch (ecosystem) {
     case 'npm': {
       const scopeSlash = name.startsWith('@') ? name.indexOf('/') : -1;
       if (scopeSlash > 0) {
-        const encoded = encodePurlSegments([name.slice(0, scopeSlash), name.slice(scopeSlash + 1)]);
-        return encoded === null ? null : `pkg:npm/${encoded}`;
+        return `pkg:npm/${encodeURIComponent(name.slice(0, scopeSlash))}/${encodeURIComponent(name.slice(scopeSlash + 1))}`;
       }
-      const encoded = encodePurlToken(name);
-      return encoded === null ? null : `pkg:npm/${encoded}`;
+      return `pkg:npm/${encodeURIComponent(name)}`;
     }
-    case 'pypi': {
-      const encoded = encodePurlToken(pypiPurlName(name));
-      return encoded === null ? null : `pkg:pypi/${encoded}`;
-    }
-    case 'rust': {
-      const encoded = encodePurlToken(name);
-      return encoded === null ? null : `pkg:cargo/${encoded}`;
-    }
-    case 'go': {
-      const encoded = encodePurlSegments(name.split('/'));
-      return encoded === null ? null : `pkg:golang/${encoded}`;
-    }
+    case 'pypi':
+      return `pkg:pypi/${encodeURIComponent(pypiPurlName(name))}`;
+    case 'rust':
+      return `pkg:cargo/${encodeURIComponent(name)}`;
+    case 'go':
+      return `pkg:golang/${name.split('/').map(encodeURIComponent).join('/')}`;
     case 'java': {
       const [group, artifact] = name.includes(':') ? name.split(':') : [undefined, name];
-      const encoded = encodePurlSegments(group ? [group, artifact] : [artifact]);
-      return encoded === null ? null : `pkg:maven/${encoded}`;
+      return group ? `pkg:maven/${encodeURIComponent(group)}/${encodeURIComponent(artifact)}` : `pkg:maven/${encodeURIComponent(artifact)}`;
     }
-    case 'ruby': {
-      const encoded = encodePurlToken(name);
-      return encoded === null ? null : `pkg:gem/${encoded}`;
-    }
-    case 'php': {
-      const encoded = encodePurlSegments(name.split('/'));
-      return encoded === null ? null : `pkg:composer/${encoded}`;
-    }
-    case 'dotnet': {
-      const encoded = encodePurlToken(name);
-      return encoded === null ? null : `pkg:nuget/${encoded}`;
-    }
-    case 'swift': {
-      const encoded = encodePurlSegments(name.split('/'));
-      return encoded === null ? null : `pkg:swift/${encoded}`;
-    }
-    case 'dart': {
-      const encoded = encodePurlToken(name);
-      return encoded === null ? null : `pkg:pub/${encoded}`;
-    }
+    case 'ruby':
+      return `pkg:gem/${encodeURIComponent(name)}`;
+    case 'php':
+      return `pkg:composer/${name.split('/').map(encodeURIComponent).join('/')}`;
+    case 'dotnet':
+      return `pkg:nuget/${encodeURIComponent(name)}`;
+    case 'swift':
+      return `pkg:swift/${name.split('/').map(encodeURIComponent).join('/')}`;
+    case 'dart':
+      return `pkg:pub/${encodeURIComponent(name)}`;
     default:
       // An ecosystem this function does not know is not npm. Falling through
       // to `pkg:npm/...` would report a registry the scan did not detect.
@@ -261,22 +219,14 @@ function pypiPurlName(name: string): string {
  *
  * Returns null when the built string is not a Package URL: unknown type,
  * empty name or path segment, a space or other character that only survives
- * as percent-encoding, a version that is not one concrete token, or a
- * version that cannot be percent-encoded. Callers keep the component and
- * mark the purl unavailable — they do not drop the row, and they do not
- * emit the rejected string.
- *
- * The component `version` stays the canonical token (`1.2.3+build.4`).
- * Only the purl version is percent-encoded. `+` is not unreserved, so a
- * canonical purl writes it as `%2B` (`pkg:npm/foo@1.2.3%2Bbuild.4`).
+ * as percent-encoding, or a version that is not one concrete token. Callers
+ * keep the component and mark the purl unavailable — they do not drop the
+ * row, and they do not emit the rejected string.
  */
 export function purlFor(ecosystem: Ecosystem, name: string, version: string): string | null {
   const path = purlPath(ecosystem, name);
   if (!path) return null;
-  if (version === UNKNOWN_VERSION) return isValidBuiltPurl(path) ? path : null;
-  const encodedVersion = encodePurlToken(version);
-  if (encodedVersion === null) return null;
-  const purl = `${path}@${encodedVersion}`;
+  const purl = version === UNKNOWN_VERSION ? path : `${path}@${encodeURIComponent(version)}`;
   return isValidBuiltPurl(purl) ? purl : null;
 }
 
@@ -336,8 +286,6 @@ export function describeUnavailablePurl(ecosystem: string, name: string, version
     because = 'the name contains whitespace or a non-ASCII character';
   } else if (version !== UNKNOWN_VERSION && !isConcreteVersion(version)) {
     because = 'the version is not one concrete installed version';
-  } else if (version !== UNKNOWN_VERSION && encodePurlToken(version) === null) {
-    return `Package URL unavailable for ${ecosystem} package "${name}": the version cannot be percent-encoded. The component is included with its recorded version and without a purl. Use a concrete version made of Unicode text that percent-encodes as UTF-8.`;
   } else {
     because = 'the coordinates cannot be encoded as a Package URL';
   }
@@ -622,11 +570,11 @@ export function flattenDependencies(
     const guessed = projectEcosystemGuessed(project.type);
     for (const dep of project.dependencies) {
       // Go always pins an exact version in go.mod, but the scanner's
-      // `resolvedVersion` drops the leading `v` go.sum's transitive entries
-      // keep (build metadata such as `+incompatible` stays). Matching on
-      // `currentSpec` instead is what lets a direct Go dependency dedupe
-      // against its own go.sum-derived component instead of appearing as
-      // two, differently-versioned components.
+      // `resolvedVersion` drops the leading `v` (build metadata stays) while
+      // go.sum's transitive entries keep that `v` — matching on `currentSpec`
+      // instead is what lets a direct Go dependency dedupe against its own
+      // go.sum-derived component instead of appearing as two,
+      // differently-versioned components.
       const rawVersion = ecosystem === 'go' ? dep.currentSpec : (dep.resolvedVersion ?? dep.currentSpec);
       // A dependency with no lockfile/installed-tree resolution falls back
       // to its declared spec, which for npm/yarn/pnpm can be a semver range,

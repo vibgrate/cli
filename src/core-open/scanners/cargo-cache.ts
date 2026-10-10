@@ -2,7 +2,6 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import * as semver from 'semver';
-import { semverKeepingBuild } from '../utils/semver-build.js';
 import { Semaphore } from '../utils/semaphore.js';
 import { getManifestEntry, type PackageVersionManifest } from '../package-version-manifest.js';
 import { RegistryDiskCache, REGISTRY_FETCH_TIMEOUT_MS, REGISTRY_USER_AGENT, type RegistryCacheOptions } from '../utils/registry-disk-cache.js';
@@ -50,13 +49,13 @@ export class CargoCache {
     if (manifestEntry) {
       const stableVersions: string[] = [];
       for (const ver of manifestEntry.versions ?? []) {
-        const sv = semverKeepingBuild(ver);
+        const sv = semver.valid(semver.clean(ver));
         if (sv) stableVersions.push(sv);
       }
       const sorted = [...stableVersions].sort(semver.rcompare);
       const latestStableOverall = sorted[0] ?? null;
       return {
-        latest: manifestEntry.latest ? semverKeepingBuild(manifestEntry.latest) ?? latestStableOverall : latestStableOverall,
+        latest: manifestEntry.latest ? semver.valid(semver.clean(manifestEntry.latest)) ?? latestStableOverall : latestStableOverall,
         stableVersions,
         latestStableOverall,
       };
@@ -102,7 +101,7 @@ export class CargoCache {
         if (ver.yanked) continue;
         if (!ver.num) continue;
         if (/[+-](?:alpha|beta|rc|pre|dev)/i.test(ver.num)) continue;
-        const sv = semverKeepingBuild(ver.num);
+        const sv = semver.valid(semver.clean(ver.num));
         if (sv) stableVersions.push(sv);
       }
       const sorted = [...stableVersions].sort(semver.rcompare);

@@ -11,7 +11,6 @@ import { Semaphore } from '../utils/semaphore.js';
 import { withTimeout } from '../utils/timeout.js';
 import { NpmCache, isSemverSpec } from './npm-cache.js';
 import { classifyNpmVersionLag } from './npm-latest.js';
-import { semverKeepingBuild } from '../utils/semver-build.js';
 import { buildDependencyLicense, normalizeLicenseSourcePath } from '../licenses/dependency-license.js';
 import { ageDaysBetween, daysToLibyears, aggregateLibyears } from '../scoring/libyear.js';
 import { latestLts, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
@@ -380,17 +379,7 @@ async function scanOnePackageJson(
       !!lockedVersion &&
       !!semver.valid(lockedVersion) &&
       (!range || semver.satisfies(lockedVersion, range, { includePrerelease: true }));
-    let resolvedVersion = lockUsable ? lockedVersion : latestSatisfying;
-    // An exact manifest pin with build metadata (`1.2.3+build.4`) is a
-    // concrete version. `semver.validRange` drops the `+` suffix, so the
-    // registry match can come back as `1.2.3`. Keep the pin when nothing
-    // newer (and no lockfile) replaced it.
-    if (!lockUsable) {
-      const pinned = semverKeepingBuild(spec);
-      if (pinned?.includes('+') && (resolvedVersion == null || semver.eq(resolvedVersion, pinned))) {
-        resolvedVersion = pinned;
-      }
-    }
+    const resolvedVersion = lockUsable ? lockedVersion : latestSatisfying;
 
     const lag = classifyNpmVersionLag(resolvedVersion, meta.latestStableOverall);
     const latestStable = lag.reportedLatest;

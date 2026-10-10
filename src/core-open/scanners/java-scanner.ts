@@ -4,8 +4,8 @@
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { XMLParser } from 'fast-xml-parser';
-import { semverKeepingBuild } from '../utils/semver-build.js';
 import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
+import { recordedSemver, splitBuildMetadata } from '../utils/recorded-semver.js';
 import { withTimeout } from '../utils/timeout.js';
 import { MavenCache } from './maven-cache.js';
 import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
@@ -337,20 +337,18 @@ function parseGradleBuild(content: string, filePath: string): GradleData {
  * Convert a Maven version string to semver where possible.
  */
 function mavenToSemver(ver: string): string | null {
-  // A real semver build suffix (`1.2.3+build.4`) is the version. The
-  // dot-split below would fold `+build` into a numeric part and `semver.valid`
-  // would then drop it.
-  const kept = semverKeepingBuild(ver);
-  if (kept?.includes('+')) return kept;
-  let v = ver.trim();
-  if (!v || v.includes('$')) return null;
+  const trimmed = ver.trim();
+  if (!trimmed || trimmed.includes('$')) return null;
+  // Peel `+build` before splitting on `.`, or a dotted build id (`+build.7`) is
+  // treated as extra numeric components and then dropped by `semver.valid`.
+  const { core, build } = splitBuildMetadata(trimmed);
   // Maven pre-release markers — both hyphen (-alpha, -rc) and dot (.Beta1, .RC1) forms
-  if (/(?:[-.](?:SNAPSHOT|alpha|beta|rc|M\d+|CR\d+))/i.test(v)) return null;
-  v = v.replace(/\.(?:RELEASE|Final|GA)$/i, '');
+  if (/(?:[-.](?:SNAPSHOT|alpha|beta|rc|M\d+|CR\d+))/i.test(core)) return null;
+  let v = core.replace(/\.(?:RELEASE|Final|GA)$/i, '');
   const parts = v.split('.');
   while (parts.length < 3) parts.push('0');
   v = parts.slice(0, 3).join('.');
-  return semver.valid(v);
+  return recordedSemver(build ? `${v}${build}` : v);
 }
 
 // ── Main scanner ──

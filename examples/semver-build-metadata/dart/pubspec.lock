@@ -1,0 +1,10 @@
+packages:
+  example_build_meta:
+    dependency: "direct main"
+    description:
+      name: example_build_meta
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.3+build.7"
+sdks:
+  dart: ">=3.0.0 <4.0.0"
