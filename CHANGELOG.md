@@ -42,7 +42,11 @@ backward compatible.
 
 ### Fixed
 
-- **A root `package.json` with no `name`, no `version`, or neither no longer stops `vg build`, `vg scan`, or `vg sbom export`.** The root component name falls back to the directory name. A missing version is omitted. Each command prints one `VG_WARN_ROOT_PACKAGE_IDENTITY` warning, and dependencies are still resolved. The fallback does not use an absolute path. (#359)
+- **A key or value `vg` does not accept in `driftBudget` or `review` stops the command.**
+  A misspelt key, a value of the wrong type, or a `driftBudget` that sets no
+  limit exits with an error. The error names the file and, when the file makes
+  it clear, the line and the key. The value is not printed.
+  `.vibgrate/review.toml` still skips keys it does not recognise. (#316)
 
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
