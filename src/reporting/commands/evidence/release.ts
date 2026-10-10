@@ -7,7 +7,7 @@
 // reference and provenance straight from what BuildKit wrote — or from a local
 // image — instead of values typed in by hand.
 
-import { readJsonFile, pathExists } from '../../utils/fs.js';
+import { readJsonFile, readTextFile, pathExists } from '../../utils/fs.js';
 import { CliError, ExitCode } from '../../../util/exit.js';
 import type { ProjectType, ScanArtifact } from '../../types.js';
 import type { FrozenComponent, Release, ReleaseBuild } from './types.js';
@@ -17,7 +17,6 @@ import {
   inspectImage,
   isProvenancePredicateType,
   isSbomPredicateType,
-  isSpdxDocument,
   looksLikeProvenancePredicate,
   parseBuildxMetadata,
   summarizeProvenance,
@@ -26,6 +25,7 @@ import {
   type ProvenanceSummary,
   type SpdxDocument,
 } from './buildkit.js';
+import { assertExternalSbom, displaySbomPath, parseExternalSbomJson, SbomInputError } from './sbom-input.js';
 
 /** Map a Vibgrate project type to the OSV ecosystem used for advisory matching. */
 export function ecosystemForProjectType(type: ProjectType): string | undefined {
@@ -88,11 +88,30 @@ interface CycloneDxComponent {
   version?: string;
   purl?: string;
 }
-export function componentsFromCycloneDx(doc: { components?: CycloneDxComponent[] }): FrozenComponent[] {
+/**
+ * CycloneDX `components[]` → frozen components. A component with no `version`
+ * is schema-valid (the field is optional) and is not frozen, because a
+ * manifest needs a concrete version. A component that is not an object, or
+ * that has no name, is a schema failure — it is not dropped.
+ */
+export function componentsFromCycloneDx(doc: { components?: unknown }, label = 'SBOM'): FrozenComponent[] {
+  if (doc.components !== undefined && !Array.isArray(doc.components)) {
+    throw new SbomInputError(label, 'CycloneDX', 'components must be an array');
+  }
   const out: FrozenComponent[] = [];
-  for (const c of doc.components ?? []) {
-    if (!c.name || !c.version) continue;
-    out.push({ name: c.name, version: c.version, purl: c.purl, ecosystem: c.purl ? ecosystemForPurl(c.purl) : undefined });
+  const components = Array.isArray(doc.components) ? doc.components : [];
+  for (let i = 0; i < components.length; i++) {
+    const c: unknown = components[i];
+    if (c === null || typeof c !== 'object' || Array.isArray(c)) {
+      throw new SbomInputError(label, 'CycloneDX', `components[${i}] must be an object`);
+    }
+    const entry = c as CycloneDxComponent;
+    if (typeof entry.name !== 'string' || entry.name.trim() === '') {
+      throw new SbomInputError(label, 'CycloneDX', `components[${i}] is missing required field "name"`);
+    }
+    if (typeof entry.version !== 'string' || entry.version.trim() === '') continue;
+    const purl = typeof entry.purl === 'string' ? entry.purl : undefined;
+    out.push({ name: entry.name, version: entry.version, purl, ecosystem: purl ? ecosystemForPurl(purl) : undefined });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
 }
@@ -133,11 +152,12 @@ interface CycloneDxDocument {
  * `imagetools inspect` exports).
  */
 export function componentsFromSource(data: unknown, label: string): { components: FrozenComponent[]; attested: boolean } {
+  const shown = displaySbomPath(label);
   const statement = unwrapStatement(data);
   if (statement) {
     if (!isSbomPredicateType(statement.predicateType)) {
       const hint = isProvenancePredicateType(statement.predicateType) ? ' — that is a provenance attestation; pass it with --provenance' : '';
-      throw new CliError(`${label} is an attestation of type ${statement.predicateType}, not an SBOM${hint}`, ExitCode.USAGE_ERROR);
+      throw new CliError(`${shown} is an attestation of type ${statement.predicateType}, not an SBOM${hint}`, ExitCode.USAGE_ERROR);
     }
     return { components: componentsFromSbom(statement.predicate, label), attested: true };
   }
@@ -148,15 +168,23 @@ export function componentsFromSource(data: unknown, label: string): { components
 }
 
 function componentsFromSbom(data: unknown, label: string): FrozenComponent[] {
-  const doc = data as CycloneDxDocument | SpdxDocument | null;
-  if (doc && (('bomFormat' in doc && doc.bomFormat === 'CycloneDX') || Array.isArray((doc as CycloneDxDocument).components))) {
-    return componentsFromCycloneDx(doc as CycloneDxDocument);
-  }
-  if (isSpdxDocument(doc)) return componentsFromSpdx(doc);
+  const kind = assertExternalSbom(data, label);
+  if (kind === 'cyclonedx') return componentsFromCycloneDx(data as CycloneDxDocument, label);
+  if (kind === 'spdx') return componentsFromSpdx(data as SpdxDocument, label);
   throw new CliError(
-    `unrecognised source format in ${label} — expected a Vibgrate scan artifact, a CycloneDX or SPDX SBOM, or an SBOM attestation`,
+    `${displaySbomPath(label)}: unrecognised source format — expected a Vibgrate scan artifact, a CycloneDX or SPDX SBOM, or an SBOM attestation. Pass one of those to --from, then re-run the command.`,
     ExitCode.USAGE_ERROR,
   );
+}
+
+async function readSbomFile(file: string): Promise<unknown> {
+  let text: string;
+  try {
+    text = await readTextFile(file);
+  } catch {
+    throw new SbomInputError(file, 'SBOM', 'the file could not be read');
+  }
+  return parseExternalSbomJson(text, file);
 }
 
 async function readSource(file: string, what: string): Promise<unknown> {
@@ -212,7 +240,7 @@ export async function buildRelease(input: FreezeInput): Promise<Release> {
     build.sourceRevision ??= inspection.labels['org.opencontainers.image.revision'];
     if (inspection.sbom && !input.fromExplicit) {
       build.sources.push('sbom-attestation');
-      components = componentsFromSpdx(inspection.sbom);
+      components = componentsFromSbom(inspection.sbom, `SBOM attestation on image ${input.image}`);
     }
   }
 
@@ -254,14 +282,15 @@ export async function buildRelease(input: FreezeInput): Promise<Release> {
       const hint = input.image
         ? `image ${input.image} carries no SBOM attestation (build with --sbom=true) and `
         : '';
-      throw new CliError(`${hint}source not found: ${input.from} — point --from at a scan artifact or SBOM`, ExitCode.NOT_FOUND);
+      throw new CliError(`${hint}source not found: ${displaySbomPath(input.from)} — point --from at a scan artifact or SBOM`, ExitCode.NOT_FOUND);
     }
-    const parsed = componentsFromSource(await readJsonFile<unknown>(input.from), input.from);
+    const parsed = componentsFromSource(await readSbomFile(input.from), input.from);
     components = parsed.components;
     if (parsed.attested) build.sources.push('sbom-attestation');
   }
   if (components.length === 0) {
-    throw new CliError(`no components found in ${input.image && !input.fromExplicit ? `the SBOM of ${input.image}` : input.from} — cannot freeze an empty manifest`, ExitCode.USAGE_ERROR);
+    const shown = input.image && !input.fromExplicit ? `the SBOM of ${input.image}` : displaySbomPath(input.from);
+    throw new CliError(`no components found in ${shown} — cannot freeze an empty manifest`, ExitCode.USAGE_ERROR);
   }
 
   return {
