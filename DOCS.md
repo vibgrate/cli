@@ -23,6 +23,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg sbom](#vg-sbom)
     - [Choosing CycloneDX or SPDX](#choosing-cyclonedx-or-spdx)
     - [Component identity](#component-identity)
+    - [Input components with no purl and no CPE](#input-components-with-no-purl-and-no-cpe)
     - [Package digests](#package-digests)
     - [CycloneDX type and SPDX primaryPackagePurpose](#cyclonedx-type-and-spdx-primarypackagepurpose)
     - [Production, development, and optional scope](./docs/sbom-dependency-scope.md)
@@ -323,7 +324,7 @@ vg evidence export [--out <dir>] [--regime <id>]
 | `vg evidence push` | Push the product registry, every frozen release manifest, and an optional signed exposure bundle to Vibgrate Cloud, which verifies the signature |
 | `vg evidence export` | Air-gap bundle of all evidence state |
 
-`release` freezes the manifest from a Vibgrate scan artifact or an SBOM — CycloneDX, SPDX, or either one wrapped in an in-toto / DSSE **SBOM attestation**. Where the artefact is a container image, it can also take the facts straight from what BuildKit wrote instead of values typed in by hand: `--buildkit-metadata` reads the `docker buildx build --metadata-file` output for the image digest and build reference; `--provenance` reads a SLSA provenance attestation for the source repository, commit, and base images; and `--image <ref>` asks Docker for the image's digest, `org.opencontainers.image.*` labels, and any attached provenance and SBOM attestations (an attached SBOM becomes the manifest when `--from` is not given). `--image` runs `docker image inspect` and `docker buildx imagetools inspect`; the second contacts the image's registry when the reference is not present locally. Those facts are stored under `build` in the frozen manifest. A typed `--digest` that disagrees with what the build wrote is an error, never a silent preference, and attestation signatures are recorded as unverified — verify them with `cosign`.
+`release` freezes the manifest from a Vibgrate scan artifact or an SBOM — CycloneDX, SPDX, or either one wrapped in an in-toto / DSSE **SBOM attestation**. Components in that document that have neither a purl nor a CPE are kept. The rules, the order, and the single warning for a component that cannot be identified are in [Input components with no purl and no CPE](#input-components-with-no-purl-and-no-cpe). Where the artefact is a container image, it can also take the facts straight from what BuildKit wrote instead of values typed in by hand: `--buildkit-metadata` reads the `docker buildx build --metadata-file` output for the image digest and build reference; `--provenance` reads a SLSA provenance attestation for the source repository, commit, and base images; and `--image <ref>` asks Docker for the image's digest, `org.opencontainers.image.*` labels, and any attached provenance and SBOM attestations (an attached SBOM becomes the manifest when `--from` is not given). `--image` runs `docker image inspect` and `docker buildx imagetools inspect`; the second contacts the image's registry when the reference is not present locally. Those facts are stored under `build` in the frozen manifest. A typed `--digest` that disagrees with what the build wrote is an error, never a silent preference, and attestation signatures are recorded as unverified — verify them with `cosign`.
 
 `push` sends the product registry, every frozen release manifest (components, artefact digest, and the build facts read from BuildKit), and — when `--result` points at a bundle directory — the exposure result with its DSSE envelope and RFC 3161 token. Vibgrate Cloud verifies the signature itself and records the outcome as `intact`, `failed` or `absent`; it never takes a flag's word for it (the old `--signed` flag is accepted and ignored). Bodies above the 10 MB limit drop component lists from the oldest releases first and say so; `--no-releases` omits the manifests entirely. In Vibgrate Cloud → Govern ▸ Evidence the frozen releases appear with their chain of custody, every component is searchable across releases, and each ledger entry offers its archived bundle for download.
 
@@ -1694,7 +1695,7 @@ Match a component on its [package URL](https://github.com/package-url/purl-spec)
 
 `projects[].type` is the project kind (`java`, `node`, `python`). The vulnerability block uses the advisory ecosystem (`maven`, `npm`, `pypi`). `vg sbom export` turns those coordinates into the purl type (`pkg:maven`, `pkg:npm`, `pkg:pypi`).
 
-These documents have no CPE field. The CLI does not write one, including when a name has several segments (a Maven `group:artifact`, an npm scope, a Go module path). A missing CPE is the normal record. Leave it missing. If a file from another cataloger carries a `cpe` property, keep the purl as the identity you match. A CPE does not replace a purl, rank above it, or stand in for a purl that was omitted.
+These documents have no CPE field. The CLI does not write one, including when a name has several segments (a Maven `group:artifact`, an npm scope, a Go module path). A missing CPE is the normal record. Leave it missing. If a file from another cataloger carries a `cpe` property, keep the purl as the identity you match. A CPE does not replace a purl, rank above it, or stand in for a purl that was omitted. Reading a CycloneDX or SPDX document that already lists components is a different case: [Input components with no purl and no CPE](#input-components-with-no-purl-and-no-cpe).
 
 When a name cannot be a package URL, the component stays in the SBOM and `purl` is omitted. CycloneDX sets `vibgrate:purlStatus` to `unavailable`. That row still has no CPE.
 
@@ -1729,6 +1730,42 @@ For `com.google.code.gson:gson` at `2.11.0` in a Java project, read these fields
 ```
 
 Key the join on `pkg:maven/com.google.code.gson/gson@2.11.0`, or on `maven` + `com.google.code.gson:gson` + `2.11.0`. The group `com.google.code.gson` is the purl namespace. SPDX stores the same purl on `externalRefs[].referenceLocator`.
+
+#### Input components with no purl and no CPE
+
+`vg evidence release --from <file>` reads a CycloneDX or SPDX document as the shipped component list. The read is local. The command does not fetch the document, the packages, or the identifiers.
+
+A component in that document may have neither a [package URL](https://github.com/package-url/purl-spec) nor a CPE and still be valid. Vendored files, firmware, and machine-learning models are often recorded that way. Those components are kept. They are not dropped, and the command does not exit because of them.
+
+The identity of a kept component is chosen in this order:
+
+| Present on the component | Identity stored on the frozen component |
+| --- | --- |
+| A purl | `purl`. A CPE on the same component is not stored. `type` is not stored. |
+| No purl, and a CPE | `cpe`. CycloneDX reads the `cpe` field. SPDX reads the first `externalRefs` entry whose `referenceType` is `cpe22Type` or `cpe23Type` (`cpe22`, `cpe23`, and `cpe` are accepted too). |
+| Neither | `name`, `version`, and `type`. CycloneDX `type` and SPDX `primaryPackagePurpose` are the type, kept as written. `version` is `""` when the document omitted it. `type` is omitted when the document omitted it. |
+
+The name is required for that last row. When the name is missing and a purl or a CPE is present, the name written on the frozen component is that purl or CPE. The same identity from two places in the document, including a nested copy, is one row.
+
+Nested CycloneDX `components` arrays are included. That includes components nested under `metadata.component`. The walk visits each component object once, in array order, and does not follow `bom-ref` links, so a cycle cannot loop. A component that has no name of its own still contributes the components nested under it. SPDX components are the `packages` array. SPDX has no nested component list.
+
+Order in the frozen manifest is the name, then the version, then the type, then the purl, then the CPE, compared in English. The same document produces the same list on every run.
+
+Two omissions are deliberate and are not the identifier-less case. An SPDX package with `primaryPackagePurpose` `CONTAINER`, or a `pkg:oci/` purl, is the image itself and is not a release component. A component with no name, no purl, and no CPE has no identity. Those are skipped. `vg evidence release` prints one warning for that file:
+
+```text
+warning [VG_WARN_SBOM_COMPONENT_SKIPPED]: Skipped 2 components in sbom.cdx.json because they have no name, no purl, and no CPE. Add a name, and a version and a type when the component has them, or add a purl or a CPE to include them.
+```
+
+The warning names the file, the count, and what to add. It does not print one line per component. A document that also exceeds 100000 components adds a second sentence to that same warning telling you to split the file. The release is still written when any component was kept.
+
+```bash
+vg evidence product add acme
+vg evidence release acme 1.0.0 --from sbom.cdx.json
+vg evidence release acme 1.0.1 --from sbom.spdx.json
+```
+
+Both commands read and write local files only.
 
 #### Package digests
 
