@@ -41,7 +41,7 @@ import { portableValue } from './utils/portable-path.js';
 import { assertSafeWalkRoot } from './utils/root-safety.js';
 import { detectVcs } from './utils/vcs.js';
 import { isCiEnvironment, hasVibgrateWorkflow } from './utils/ci-env.js';
-import { resolveRepositoryName } from './utils/repository-name.js';
+import { readRootPackageIdentity, rootPackageIdentityMessage } from './utils/root-package-identity.js';
 import { ScanProgress } from './ui/progress.js';
 import { loadScanHistory, saveScanHistory, estimateTotalDuration, estimateStepDurations } from './ui/scan-history.js';
 import { parseDsn } from './utils/dsn.js';
@@ -772,6 +772,10 @@ export async function runCoreScan(
   progress.finish();
 
   const degradations: CodedWarning[] = [];
+  const rootIdentityWarning = rootPackageIdentityMessage(readRootPackageIdentity(rootDir));
+  if (rootIdentityWarning) {
+    degradations.push(codedWarning(WARNING_CODES.ROOT_PACKAGE_IDENTITY, rootIdentityWarning));
+  }
   const stuckPaths = [...fileCache.stuckPaths].sort((a, b) => a.localeCompare(b));
   const skippedLarge = [...fileCache.skippedLargeFiles].sort((a, b) => a.localeCompare(b));
   const timeoutSeconds = Math.round(projectScanTimeoutMs / 1000);
@@ -812,7 +816,7 @@ export async function runCoreScan(
   }
 
   const durationMs = Date.now() - scanStart;
-  const repository = await buildRepositoryInfo(rootDir, vcs.remoteUrl, extended.buildDeploy?.ci, opts.repositoryName);
+  const repository = buildRepositoryInfo(rootDir, vcs.remoteUrl, extended.buildDeploy?.ci, opts.repositoryName);
   // Project size rollup (micro/small/standard → billable count). Open: it is
   // categorisation, not pricing — the commercial rates live server-side.
   const billing = summarizeBilling(allProjects);
@@ -999,21 +1003,10 @@ export async function runCoreScan(
   return artifact;
 }
 
-async function buildRepositoryInfo(rootDir: string, remoteUrl: string | undefined, ciSystems: string[] | undefined, nameOverride?: string): Promise<RepositoryInfo> {
-  const name = nameOverride?.trim() ? nameOverride.trim() : await resolveRepositoryName(rootDir);
-  let version: string | undefined;
-
-  const packageJsonPath = path.join(rootDir, 'package.json');
-  if (await pathExists(packageJsonPath)) {
-    try {
-      const packageJson = await readJsonFile<{ version?: string }>(packageJsonPath);
-      if (typeof packageJson.version === 'string' && packageJson.version.trim()) {
-        version = packageJson.version.trim();
-      }
-    } catch {
-      // ignore
-    }
-  }
+function buildRepositoryInfo(rootDir: string, remoteUrl: string | undefined, ciSystems: string[] | undefined, nameOverride?: string): RepositoryInfo {
+  const identity = readRootPackageIdentity(rootDir);
+  const name = nameOverride?.trim() ? nameOverride.trim() : identity.name;
+  const version = identity.version ?? undefined;
 
   return {
     name,

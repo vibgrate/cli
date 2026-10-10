@@ -1987,6 +1987,30 @@ writes that metadata component and an empty `components` array. SPDX `packages`
 is empty in that case, and `primaryPackagePurpose` is still absent because there
 is still no package.
 
+#### Root package.json without a name or version
+
+A root `package.json` may omit `name`, `version`, or both. A missing field is
+one that is absent, blank, or not a string. `vg build`, `vg scan`, and
+`vg sbom export` keep going. Each prints one warning,
+`warning [VG_WARN_ROOT_PACKAGE_IDENTITY]`. Dependencies declared in that file,
+and the versions the lockfile resolves, are still reported.
+
+The fallback name is the last segment of the directory you passed to the
+command. It is not an absolute path, so the same tree produces the same name
+on every machine. A missing version is omitted. The command does not write
+`0.0.0` in its place.
+
+| Field | When `package.json` has the field | When it does not |
+| --- | --- | --- |
+| Code-map package node, scan project `name`, and `repository.name` | the `name` string | the directory name |
+| `repository.version` | the `version` string | the field is omitted |
+| CycloneDX `metadata.component.name` | the directory name (`rootPath`) | the directory name (`rootPath`) |
+| CycloneDX `metadata.component.version` | omitted | omitted |
+| SPDX document `name` | `<rootPath>-sbom` | `<rootPath>-sbom` |
+
+The code map does not name that package `.`. `vg sbom export` still writes the
+root component and the dependency rows.
+
 **Gaps.** These are holes in the inventory, labeled as holes.
 
 - The metadata label `application` is fixed. A library package, a Dockerfile, a
@@ -5752,7 +5776,7 @@ Stderr lines look like `warning [VG_WARN_PARSE_FAILED]: …`. The code is the to
 
 `vg build --json` keeps `warnings` as strings and adds `codedWarnings`: an array of `{ code, message }` in that same order. Each string in `warnings` ends with ` [CODE]`. `codedWarnings` is left out when there are no warnings.
 
-`vg scan --format json` adds `degradations` when a path was skipped or a baseline file could not be read. The field is left out when there are none. `vg report` prints those same rows.
+`vg scan --format json` adds `degradations` when a path was skipped, a baseline file could not be read, or the root `package.json` omitted `name` or `version`. The field is left out when there are none. `vg report` prints those same rows.
 
 `vg sbom export` prints the code on stderr. CycloneDX adds a `vibgrate:warningCode` property next to the existing warning property. SPDX adds an annotation whose comment is `warningCode=VG_WARN_…`. The warning sentences already stored on the document stay as they are.
 
@@ -5781,6 +5805,7 @@ A truncated or invalid lockfile stops the command. Warning codes cover condition
 | `VG_WARN_LICENSE_UNREPRESENTABLE` | `vg sbom` | A declared license cannot be represented in an SBOM. |
 | `VG_WARN_CVSS_UNPARSEABLE` | `vg scan` | A CVSS vector was present and could not be parsed. |
 | `VG_WARN_PURL_UNAVAILABLE` | `vg sbom` | A package URL could not be formed. The component is included without a purl. |
+| `VG_WARN_ROOT_PACKAGE_IDENTITY` | `vg build`, `vg scan`, `vg sbom` | The root `package.json` omitted `name`, `version`, or both. The root component uses the directory name when `name` is missing, and omits `version` when that field is missing. Dependencies are still resolved. |
 | `VG_WARN_SBOM_LOSSY_EDGES` | `vg sbom` | Merge dropped a different dependency list for one package. |
 | `VG_WARN_SBOM_LOSSY_MANIFEST` | `vg sbom` | Merge dropped differing manifest metadata for one package. |
 | `VG_WARN_SBOM_UNKNOWN_ECOSYSTEM` | `vg sbom` | Merge recorded an unknown ecosystem as npm. |

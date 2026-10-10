@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { findPackageJsonFiles, readJsonFile, readTextFile, pathExists, FileCache } from '../utils/fs.js';
+import { directoryFallbackName, nonEmptyManifestString } from '../utils/root-package-identity.js';
 import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { loadNpmLockIndex, type NpmLockIndex, type LockfileIo } from './npm-lockfile.js';
 import { Semaphore } from '../utils/semaphore.js';
@@ -473,7 +474,7 @@ async function scanOnePackageJson(
   return {
     type: 'node',
     path: projectPath,
-    name: pj.name ?? path.basename(absProjectPath),
+    name: nonEmptyManifestString(pj.name) ?? directoryFallbackName(absProjectPath),
     runtime: nodeEngine,
     runtimeLatest,
     runtimeMajorsBehind,

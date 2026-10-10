@@ -35,6 +35,7 @@ import { writeGraphIndex } from './index-db.js';
 import { StageTimer, type StageTimings } from './timing.js';
 import { buildSummaries } from './summaries.js';
 import { extractManifests } from './manifests.js';
+import { readRootPackageIdentity, rootPackageIdentityMessage } from '../core-open/utils/root-package-identity.js';
 import { hashFilesParallel } from './hash-files.js';
 import { VERSION } from '../version.js';
 import {
@@ -340,6 +341,10 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
     exclude,
     paths: options.paths,
   });
+  const rootIdentityWarning = rootPackageIdentityMessage(readRootPackageIdentity(root));
+  if (rootIdentityWarning) {
+    warnings.push(stampWarning(WARNING_CODES.ROOT_PACKAGE_IDENTITY, rootIdentityWarning));
+  }
   if (manifests.files > 0) {
     const byId = new Map(resolved.nodes.map((n) => [n.id, n]));
     for (const n of manifests.nodes) {

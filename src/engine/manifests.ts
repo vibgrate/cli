@@ -24,6 +24,7 @@ import type { Ignore } from 'ignore';
 import { XMLParser } from 'fast-xml-parser';
 import { nodeId, edgeId } from './ids.js';
 import { isSkippedDirName, loadRootIgnore } from './discover.js';
+import { directoryFallbackName, nonEmptyManifestString } from '../core-open/utils/root-package-identity.js';
 import { parseToml } from '../core-open/utils/toml.js';
 import type { GraphEdge, GraphNode } from '../schema.js';
 
@@ -78,13 +79,14 @@ export function extractManifests(
   const nodes = new Map<string, GraphNode>();
   const edges = new Map<string, GraphEdge>();
   let deps = 0;
+  const rootBase = directoryFallbackName(absRoot);
 
   for (const rel of [...found.keys()].sort()) {
     const abs = found.get(rel)!;
     const base = path.posix.basename(rel);
     try {
       if (base === 'package.json') {
-        deps += ingestPackageJson(rel, abs, nodes, edges);
+        deps += ingestPackageJson(rel, abs, nodes, edges, rootBase);
       } else if (base === 'go.mod') {
         deps += ingestGoMod(rel, abs, nodes, edges);
       } else if (base === 'pom.xml') {
@@ -155,6 +157,7 @@ function ingestPackageJson(
   abs: string,
   nodes: Map<string, GraphNode>,
   edges: Map<string, GraphEdge>,
+  rootBase: string,
 ): number {
   const raw = JSON.parse(fs.readFileSync(abs, 'utf8')) as {
     name?: string;
@@ -162,7 +165,11 @@ function ingestPackageJson(
     peerDependencies?: Record<string, string>;
     optionalDependencies?: Record<string, string>;
   };
-  const pkgName = (raw.name && String(raw.name).trim()) || path.posix.dirname(rel) || '.';
+  const declared = nonEmptyManifestString(raw.name);
+  const dir = path.posix.dirname(rel);
+  // The root manifest has no directory segment. `.` is not an identity.
+  const fallback = dir === '.' ? rootBase : dir || rootBase;
+  const pkgName = declared || fallback || 'unnamed';
   const localId = makePackageNode(nodes, edges, {
     rel,
     qualifiedName: pkgName,

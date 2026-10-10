@@ -16,6 +16,7 @@ import {
   type CodedWarning,
   type WarningCode,
 } from '../../core-open/warnings.js';
+import { readRootPackageIdentity, rootPackageIdentityMessage } from '../../core-open/utils/root-package-identity.js';
 
 export { describeUnrepresentableLicense } from './sbom-license.js';
 
@@ -1090,6 +1091,10 @@ const exportCommand = new Command('export')
     const sbom = format === 'cyclonedx' ? toCycloneDx(artifact, lockfileGraph) : toSpdx(artifact, lockfileGraph);
     const coded: CodedWarning[] = [];
     const plain: string[] = [];
+    const rootIdentityWarning = rootPackageIdentityMessage(readRootPackageIdentity(path.resolve(opts.root)));
+    if (rootIdentityWarning) {
+      coded.push(codedWarning(WARNING_CODES.ROOT_PACKAGE_IDENTITY, rootIdentityWarning));
+    }
     for (const warning of [
       ...collectPurlWarnings(artifact, lockfileGraph),
       ...collectLicenseWarnings(artifact, lockfileGraph),

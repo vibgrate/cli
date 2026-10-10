@@ -54,6 +54,8 @@ export const WARNING_CODES = {
   CVSS_UNPARSEABLE: 'VG_WARN_CVSS_UNPARSEABLE',
   /** A package URL could not be formed. The component is included without a purl. */
   PURL_UNAVAILABLE: 'VG_WARN_PURL_UNAVAILABLE',
+  /** Root package.json omitted name, version, or both. The root component keeps a directory-name fallback. */
+  ROOT_PACKAGE_IDENTITY: 'VG_WARN_ROOT_PACKAGE_IDENTITY',
   /** SBOM merge dropped a different dependency list for one package. */
   SBOM_LOSSY_EDGES: 'VG_WARN_SBOM_LOSSY_EDGES',
   /** SBOM merge dropped differing manifest metadata for one package. */
