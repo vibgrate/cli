@@ -627,7 +627,7 @@ vg vex                          # generate an OpenVEX document for attestation
 
 Match a component on its package URL (`purl` in CycloneDX, the `purl` externalRef in SPDX). Scan JSON uses the same coordinates (`projects[].type`, `dependencies[].package`, `resolvedVersion`, and `extended.vulnerabilities.packages[]`) and does not repeat the purl string. These files have no CPE field. The CLI does not invent one, and a CPE from another cataloger does not replace the purl. Fields and a local example: [DOCS.md](./DOCS.md#component-identity).
 
-CycloneDX `hashes` and SPDX `checksums` are omitted, and a scan dependency has no digest field. `serialNumber`, `documentNamespace`, `projectId`, and `solutionId` are identifiers. Lockfile integrity values are not copied into the document. Fields and a local example: [DOCS.md](./DOCS.md#package-digests).
+`vg sbom export` copies well-formed lockfile digests onto each component. CycloneDX `hashes` and SPDX `checksums` are sorted by algorithm name, then by hex value, so the same digests always appear in the same order. A scan dependency has no digest field. `serialNumber`, `documentNamespace`, `projectId`, and `solutionId` are identifiers. Fields and a local example: [DOCS.md](./DOCS.md#package-digests).
 
 `--format` is `cyclonedx` (the default) or `spdx`. How the same scan differs between those files — purl placement, the dependency graph, licenses, tool metadata, and the document id — is in [Choosing CycloneDX or SPDX](./DOCS.md#choosing-cyclonedx-or-spdx).
 

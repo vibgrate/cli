@@ -5,6 +5,7 @@ import { pathExists, readJsonFile, writeTextFile } from '../utils/fs.js';
 import type { DependencyRow, Finding, ProjectScan, ScanArtifact } from '../types.js';
 import { LICENSE_PARSE_FAILED } from '../../core-open/licenses/diagnostic.js';
 import { fullDependencyGraph, type LockfileComponent, type LockfileGraph } from '../../engine/lockfile.js';
+import { mergePackageDigests, spdxAlgorithm, type PackageDigest } from '../../engine/package-digest.js';
 import { ECOSYSTEMS, type Ecosystem } from '../../engine/drift.js';
 import { componentLicense, extractedLicensingInfos, type ComponentLicense } from './sbom-license.js';
 import { vexCommand } from './vex.js';
@@ -39,6 +40,11 @@ interface FlattenedDependency {
   license?: DependencyRow['license'];
   /** Facts that were dropped or guessed. Empty when the merge kept everything it was given. */
   mergeWarnings: string[];
+  /**
+   * Lockfile digests for this component, sorted by CycloneDX algorithm name
+   * then lowercase hex. Absent when the lockfile recorded none.
+   */
+  hashes?: PackageDigest[];
 }
 
 /**
@@ -459,7 +465,12 @@ function manifestMetadataDiffers(row: FlattenedDependency, dep: DependencyRow): 
   return `${row.license?.raw ?? ''}|${row.license?.spdxId ?? ''}` !== `${dep.license?.raw ?? ''}|${dep.license?.spdxId ?? ''}`;
 }
 
-/** Stable seed for the document id: format + root + the ordered dependency set + any dependency graph. */
+/**
+ * Stable seed for the document id: format + root + the ordered dependency set
+ * + any dependency graph. When a component has digests, their sorted
+ * algorithm:hex pairs are extra lines. A document with no digests keeps the
+ * seed it had before digests were emitted.
+ */
 function sbomSerialSeed(format: string, artifact: ScanArtifact, deps: FlattenedDependency[], graph?: LockfileGraph): string {
   const edgeLines = graph?.edges
     ? [...graph.edges.entries()]
@@ -475,6 +486,11 @@ function sbomSerialSeed(format: string, artifact: ScanArtifact, deps: FlattenedD
       (d) =>
         `${d.ecosystem}|${d.package}|${d.version}|${d.currentSpec}|${d.project}|${d.projects.join(',')}|${d.drift}|${d.majorsBehind ?? ''}|${d.scope}|${d.license?.raw ?? ''}|${d.license?.spdxId ?? ''}|${d.mergeWarnings.join(',')}`,
     ),
+    // Present only when a component has digests, so a document with none keeps
+    // the previous seed. Each line is the sorted algorithm:hex list.
+    ...deps
+      .filter((d) => d.hashes?.length)
+      .map((d) => `digest|${d.ecosystem}|${d.package}|${d.version}|${(d.hashes ?? []).map((h) => `${h.alg}:${h.content}`).join(',')}`),
     ...(graph?.rootDependsOn.length ? [`root>${uniqSorted(graph.rootDependsOn).join(',')}`] : []),
     ...edgeLines,
     ...licenseParseFindings(artifact).map((f) => `license-parse|${f.location}|${f.message}`),
@@ -620,6 +636,7 @@ export function flattenDependencies(
     if (existing) {
       if (dep.projects?.length) addProjects(existing, dep.projects);
       if (dep.mergeWarnings?.length) addMergeWarnings(existing, dep.mergeWarnings);
+      existing.hashes = mergePackageDigests(existing.hashes, dep.hashes);
       continue;
     }
     const projects = dep.projects?.length ? sortedUnique(dep.projects) : [artifact.rootPath];
@@ -634,6 +651,7 @@ export function flattenDependencies(
       scope: 'transitive',
       ecosystem,
       mergeWarnings: [],
+      hashes: mergePackageDigests(dep.hashes),
     };
     if (dep.mergeWarnings?.length) addMergeWarnings(row, dep.mergeWarnings);
     index.set(key, row);
@@ -713,7 +731,7 @@ export function collectLockfileGraph(artifact: ScanArtifact, root: string): Lock
           mergeWarnings.push(describeUnknownEcosystem(project.type, project.name, component.package, component.version));
         }
         byIdentity.set(key, {
-          component,
+          component: { ...component, hashes: mergePackageDigests(component.hashes) },
           ecosystem,
           projects: new Set(names),
           winningProject: names[0] || artifact.rootPath,
@@ -723,6 +741,10 @@ export function collectLockfileGraph(artifact: ScanArtifact, root: string): Lock
         });
         continue;
       }
+      existing.component = {
+        ...existing.component,
+        hashes: mergePackageDigests(existing.component.hashes, component.hashes),
+      };
       for (const name of names) existing.projects.add(name);
       for (const project of guessedProjects) {
         const warning = describeUnknownEcosystem(project.type, project.name, component.package, component.version);
@@ -756,6 +778,7 @@ export function collectLockfileGraph(artifact: ScanArtifact, root: string): Lock
       projects: sortedUnique(acc.projects),
       winningProject: acc.winningProject,
       mergeWarnings: acc.mergeWarnings,
+      ...(acc.component.hashes?.length ? { hashes: acc.component.hashes } : {}),
     }))
     .sort(
       (a, b) => a.package.localeCompare(b.package) || a.version.localeCompare(b.version) || a.ecosystem.localeCompare(b.ecosystem),
@@ -860,12 +883,14 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
         properties.push({ name: 'vibgrate:mergeWarning', value: mergeWarning });
         pushWarningCode(properties, mergeWarning);
       }
+      const hashes = mergePackageDigests(dep.hashes);
       return {
         type: 'library',
         'bom-ref': purl ?? componentBomRef(dep.ecosystem, dep.package, dep.version),
         name: dep.package,
         version: dep.version,
         ...(purl ? { purl } : {}),
+        ...(hashes ? { hashes: hashes.map((h) => ({ alg: h.alg, content: h.content })) } : {}),
         ...(license.cycloneLicenses ? { licenses: license.cycloneLicenses } : {}),
         properties,
       };
@@ -923,12 +948,17 @@ export function toSpdx(artifact: ScanArtifact, graph?: LockfileGraph): Record<st
       if (warning) pushSpdxWarning(warning);
       if (license.warning) pushSpdxWarning(license.warning);
       for (const mergeWarning of dep.mergeWarnings) pushSpdxWarning(mergeWarning);
+      const checksums = mergePackageDigests(dep.hashes)?.map((h) => ({
+        algorithm: spdxAlgorithm(h.alg),
+        checksumValue: h.content,
+      }));
       return {
         name: dep.package,
         SPDXID: `SPDXRef-Package-${i + 1}`,
         versionInfo: dep.version,
         downloadLocation: 'NOASSERTION',
         filesAnalyzed: false,
+        ...(checksums ? { checksums } : {}),
         licenseConcluded: 'NOASSERTION',
         licenseDeclared: license.licenseDeclared,
         ...(purl
