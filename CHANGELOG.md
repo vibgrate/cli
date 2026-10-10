@@ -12,6 +12,10 @@ backward compatible.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A truncated lockfile fails `vg scan` and `vg build`.** A `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, or peer lockfile cut off mid-file exits non-zero. The error names that file and the format, and tells you to regenerate it with your package manager. It does not include the file's contents. `vg scan` checks before scoring drift or starting parse workers, including `--no-graph` and a lockfile nested in a subdirectory. A nested lockfile used to be reported as "no lockfile", or the code map was skipped, and the command exited 0. When several lockfiles are invalid, the error names the path that sorts first.
+
 ### Changed
 
 - **Machine-readable output drops absolute home-directory paths (#282).**

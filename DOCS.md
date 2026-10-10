@@ -2152,7 +2152,7 @@ pnpm-lock.yaml: unknown optional lockfile field "futureOptional"; continuing wit
 
 The path is relative to the directory you ran the command from, when the lockfile is under that directory. Otherwise the warning uses the file name only. The warning names the field. It does not print the field's value, an environment value, or an authorization header. A field name that is not a plain identifier is reported as `(name omitted)`.
 
-A lockfile that is truncated, empty, or missing the structure its format requires still fails the command. The error names the file and the format, tells you to regenerate the file with your package manager, and the process exits non-zero. The error does not include the file's contents.
+A lockfile that is truncated, empty, or missing the structure its format requires still fails the command. The error names the file and the format, tells you to regenerate the file with your package manager, and the process exits non-zero. The error does not include the file's contents. `vg scan` performs this check before it scores drift or starts parse workers, including with `--no-graph`, and including a lockfile in a subdirectory. `vg build` checks during discovery, before the parse pool starts. When more than one lockfile is invalid, the error names the path that sorts first.
 
 `vg scan` and `vg sbom export` follow this for npm, pnpm, yarn, poetry, uv, pdm, Pipfile, Cargo, Composer, NuGet, Swift package pins, and pub. A Gradle lock line, a Gemfile spec, and a `go.sum` line do not have optional field names. A line that does not match that format is invalid, and the command fails.
 
