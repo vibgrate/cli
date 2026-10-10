@@ -2138,6 +2138,8 @@ By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifa
 
 `vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once on stderr. See [Symlinks](#symlinks).
 
+`vg scan` does not open archives it finds in the tree. `.zip`, `.tar`, `.gz`, `.bz2`, `.7z`, and `.rar` files are skipped and are not extracted. Nothing in the walk inflates archive contents into the scan.
+
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
 
 ### Unknown lockfile fields
@@ -2162,7 +2164,17 @@ A lockfile that is truncated, empty, or missing the structure its format require
 
 #### Manifest input
 
-The file is JSON, or a ZIP whose root contains `package-versions.json`, `manifest.json`, or `index.json`. A ZIP is unpacked with the `unzip` command. The JSON is one object. These keys are the package ecosystems, and `runtimes` is an optional catalog of runtime versions:
+The file is JSON, or a ZIP whose root contains `package-versions.json`, `manifest.json`, or `index.json`. `vg` reads that ZIP itself. It does not run `unzip`, and it does not write the archive's other members to disk. Before it inflates anything, it reads the central directory and refuses the file when any of these bounds is exceeded:
+
+| Bound | Limit |
+| --- | --- |
+| Entries in the archive | 10000 |
+| Declared uncompressed size (one member, or the sum) | 268435456 bytes (256 MiB) |
+| Size of the ZIP file on disk | 268435456 bytes (256 MiB) |
+
+There is no setting to raise those bounds. Pass a JSON package-version manifest instead, or a smaller ZIP. The same ZIP bytes always produce the same manifest or the same error.
+
+Only `package-versions.json`, `manifest.json`, or `index.json` at the archive root is inflated, and only up to the uncompressed size limit. The JSON is one object. These keys are the package ecosystems, and `runtimes` is an optional catalog of runtime versions:
 
 `npm`, `nuget`, `pypi`, `maven`, `rubygems`, `swift`, `go`, `cargo`, `composer`, `pub`, `hex`, `docker`, `helm`, `terraform`, `runtimes`
 
@@ -2226,6 +2238,18 @@ error: Package manifest is not usable: /abs/path/bad.json. Expected a JSON objec
 ```
 
 The path in the message is the resolved path you passed. A ZIP that does not contain one of those three names at its root says `The ZIP must contain package-versions.json, manifest.json, or index.json.` A file this process cannot read says `Package manifest is not readable: <path>. Check permissions and pass a readable JSON or ZIP package-version manifest to --package-manifest.`
+
+A ZIP past an archive bound stops the command the same way (exit code `1`, no scan artifact). The message names the path and which limit fired. When the ZIP is inside the working directory the path is relative; otherwise it is the resolved absolute path. Nothing from the archive is unpacked, and the message does not include archive contents.
+
+```text
+error: Package manifest is not usable: /abs/path/package-versions.zip. The archive exceeds the 10000-entry limit (10001 entries). Pass a JSON package-version manifest to --package-manifest.
+```
+
+```text
+error: Package manifest is not usable: /abs/path/package-versions.zip. The archive exceeds the 268435456-byte uncompressed size limit (268435457 bytes). Pass a JSON package-version manifest to --package-manifest.
+```
+
+If inflation itself runs past the declared size, the parenthetical byte count is left off. The limit in the message stays `268435456-byte uncompressed size limit`.
 
 The fail-closed path is covered by `src/reporting/commands/scan-package-manifest.test.ts`.
 
@@ -2729,6 +2753,8 @@ Maps source code into a graph artifact, enabling all downstream queries (`vg sho
 | `--pub <path>` | — | Public key PEM that pins the signer for `--verify` |
 
 `vg build` does not follow symlinks while it discovers files. A skipped link is named once on stderr. See [Symlinks](#symlinks). `.gitignore` and `--exclude` still apply.
+
+`vg build` does not open archives it finds in the tree. A `.zip`, `.tar`, `.gz`, `.bz2`, `.7z`, or `.rar` file is not unpacked into the code map.
 
 **Local by default — no git churn.** The first time vg writes into `.vibgrate/` it also creates `.vibgrate/.gitignore`, keeping the graph artifacts (`graph.json`, `graph.html`, `GRAPH_REPORT.md`, `facts.jsonl`, `mcp-navigation.json`) and the cache out of git — so builds, auto-refreshes, and MCP use never leave your branch dirty. Run `vg share` when you want the map committed for your team (it rewrites that ignore file). vg never touches an existing `.vibgrate/.gitignore`, so edit it (or leave it empty) to manage the ignores yourself.
 
@@ -5490,7 +5516,7 @@ Without `--package-manifest`, latest versions are not looked up. Dependency drif
 vg scan --offline --package-manifest <file>
 ```
 
-`<file>` is JSON, or a ZIP that contains `package-versions.json`, `manifest.json`, or `index.json`. One published bundle is `https://github.com/vibgrate/manifests/latest-packages.zip`.
+`<file>` is JSON, or a ZIP that contains `package-versions.json`, `manifest.json`, or `index.json`. One published bundle is `https://github.com/vibgrate/manifests/latest-packages.zip`. A ZIP is read in process, with the entry and size bounds in [Manifest input](#manifest-input). `unzip` is not required.
 
 A bad manifest stops the command (exit code 1) before the scan. The message names the path and what to pass:
 
@@ -5501,7 +5527,9 @@ A bad manifest stops the command (exit code 1) before the scan. The message name
 | A directory | `Package manifest is not a file: <path>. Pass a JSON or ZIP package-version manifest to --package-manifest.` |
 | Not a manifest | `Package manifest is not usable: <path>. Expected a JSON object of package versions, or a ZIP containing package-versions.json, manifest.json, or index.json.` |
 | ZIP has none of those files | `Package manifest is not usable: <path>. The ZIP must contain package-versions.json, manifest.json, or index.json.` |
-| ZIP and `unzip` is missing | `Package manifest is not readable: <path>. Reading a ZIP manifest needs the unzip command. Pass a JSON package-version manifest to --package-manifest, or install unzip.` |
+| ZIP has too many entries | `Package manifest is not usable: <path>. The archive exceeds the 10000-entry limit (<count> entries). Pass a JSON package-version manifest to --package-manifest.` |
+| ZIP declares too many uncompressed bytes | `Package manifest is not usable: <path>. The archive exceeds the 268435456-byte uncompressed size limit (<bytes> bytes). Pass a JSON package-version manifest to --package-manifest.` |
+| ZIP file is too large on disk | `Package manifest is not usable: <path>. The archive exceeds the 268435456-byte size limit (<bytes> bytes). Pass a JSON package-version manifest to --package-manifest.` |
 
 ### npm registry check
 
