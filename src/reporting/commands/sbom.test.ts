@@ -236,8 +236,8 @@ describe('sbom helpers', () => {
     artifact.projects[0]!.type = 'go';
     artifact.projects[0]!.dependencies[0]!.package = 'github.com/gin-contrib/sse';
     artifact.projects[0]!.dependencies[0]!.currentSpec = 'v1.1.0';
-    // The scanner's resolvedVersion runs go.mod's pinned version through
-    // semver.clean, which drops the leading `v` — go.sum keeps it.
+    // The scanner's resolvedVersion drops the leading `v` — go.sum keeps it.
+    // Build metadata, when present, stays on both strings.
     artifact.projects[0]!.dependencies[0]!.resolvedVersion = '1.1.0';
     const graph: LockfileGraph = {
       components: [{ package: 'github.com/gin-contrib/sse', version: 'v1.1.0' }],

@@ -1,0 +1,7 @@
+{
+  "name": "example/demo",
+  "require": {
+    "php": ">=8.2",
+    "example/build-meta": "v1.2.3+build.7"
+  }
+}

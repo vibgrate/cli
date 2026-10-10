@@ -4,6 +4,7 @@
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, FileCache } from '../utils/fs.js';
+import { recordedSemver } from '../utils/recorded-semver.js';
 import { parseLockfileJson, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { lockfileWarningPath, notePackageResolved, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
@@ -274,7 +275,7 @@ async function scanOneSwiftProject(
     // Use resolved version if available, otherwise use specified version
     const resolvedVersionStr = resolvedVersions.get(dep.name.toLowerCase()) ?? 
                               (dep.type === 'exact' ? dep.version : null);
-    const resolvedVersion = resolvedVersionStr ? semver.valid(semver.clean(resolvedVersionStr)) : null;
+    const resolvedVersion = resolvedVersionStr ? recordedSemver(resolvedVersionStr) : null;
     const latestStable = meta.latestStableOverall;
 
     let majorsBehind: number | null = null;

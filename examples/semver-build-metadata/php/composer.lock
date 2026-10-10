@@ -1,0 +1,8 @@
+{
+  "packages": [
+    {
+      "name": "example/build-meta",
+      "version": "v1.2.3+build.7"
+    }
+  ]
+}

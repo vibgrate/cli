@@ -4,6 +4,7 @@
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, FileCache } from '../utils/fs.js';
+import { recordedSemver } from '../utils/recorded-semver.js';
 import { assertLockfileText, LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { lockfileWarningPath, notePubspecLockText, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
@@ -352,7 +353,7 @@ async function scanOneDartProject(
   for (const { dep, meta } of resolved) {
     // Use resolved version if available
     const resolvedVersionStr = resolvedVersions.get(dep.name);
-    const resolvedVersion = resolvedVersionStr ? semver.valid(semver.clean(resolvedVersionStr)) : null;
+    const resolvedVersion = resolvedVersionStr ? recordedSemver(resolvedVersionStr) : null;
     const latestStable = meta.latestStableOverall;
 
     let majorsBehind: number | null = null;

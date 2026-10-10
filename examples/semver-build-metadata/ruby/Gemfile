@@ -1,0 +1,3 @@
+source 'https://rubygems.org'
+
+gem 'example-build-meta', '1.2.3+build.7'

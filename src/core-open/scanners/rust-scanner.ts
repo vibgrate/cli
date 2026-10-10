@@ -4,6 +4,7 @@
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
+import { recordedSemver } from '../utils/recorded-semver.js';
 import { withTimeout } from '../utils/timeout.js';
 import { CargoCache } from './cargo-cache.js';
 import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
@@ -291,7 +292,9 @@ async function scanOneRustProject(
   for (const { dep, meta } of resolved) {
     // Prefer the lockfile's exact version; otherwise coerce the declared spec (e.g. "1.0" → 1.0.0).
     const locked = lockIndex?.resolve(dep.name, dep.version) ?? null;
-    const resolvedVersion = (locked && semver.valid(locked)) ? locked : semver.valid(semver.coerce(dep.version));
+    const resolvedVersion = locked && recordedSemver(locked)
+      ? locked
+      : recordedSemver(dep.version) ?? semver.valid(semver.coerce(dep.version));
     const latestStable = meta.latestStableOverall;
 
     let majorsBehind: number | null = null;

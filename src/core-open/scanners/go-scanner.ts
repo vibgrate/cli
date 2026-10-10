@@ -4,6 +4,7 @@
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, FileCache } from '../utils/fs.js';
+import { recordedSemver } from '../utils/recorded-semver.js';
 import { withTimeout } from '../utils/timeout.js';
 import { GoCache } from './go-cache.js';
 import { latestStable, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
@@ -297,7 +298,7 @@ async function scanOneGoProject(
   const resolved = await Promise.all(metaPromises);
 
   for (const { dep, meta } of resolved) {
-    const resolvedVersion = dep.version ? semver.valid(semver.clean(dep.version)) : null;
+    const resolvedVersion = dep.version ? recordedSemver(dep.version) : null;
     const latestStable = meta.latestStableOverall;
 
     let majorsBehind: number | null = null;

@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "pins": [
+    {
+      "identity": "build-meta",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/example/build-meta.git",
+      "state": {
+        "version": "1.2.3+build.7"
+      }
+    }
+  ]
+}

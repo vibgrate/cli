@@ -1,0 +1,13 @@
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      example-build-meta:
+        specifier: 1.2.3+build.7
+        version: 1.2.3+build.7
+
+packages:
+  example-build-meta@1.2.3+build.7:
+    resolution:
+      integrity: sha512-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

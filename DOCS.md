@@ -1699,6 +1699,8 @@ Match a component on its [package URL](https://github.com/package-url/purl-spec)
 
 `projects[].type` is the project kind (`java`, `node`, `python`). The vulnerability block uses the advisory ecosystem (`maven`, `npm`, `pypi`). `vg sbom export` turns those coordinates into the purl type (`pkg:maven`, `pkg:npm`, `pkg:pypi`).
 
+Build metadata stays on that recorded version. `1.2.3+build.7` is written as `1.2.3+build.7` in scan JSON (`resolvedVersion`) and as the SBOM component version. The package URL encodes `+` as `%2B` (`pkg:npm/example-build-meta@1.2.3%2Bbuild.7`). Range checks ignore the suffix. A Go scan drops a leading `v` and keeps the suffix, so `v1.2.3+build.7` is recorded as `1.2.3+build.7`. `vg sbom export` for Go uses the require token, which keeps the leading `v` and matches `go.sum`. The same shape is checked in at `examples/semver-build-metadata/`.
+
 These documents have no CPE field. The CLI does not write one, including when a name has several segments (a Maven `group:artifact`, an npm scope, a Go module path). A missing CPE is the normal record. Leave it missing. If a file from another cataloger carries a `cpe` property, keep the purl as the identity you match. A CPE does not replace a purl, rank above it, or stand in for a purl that was omitted.
 
 When a name cannot be a package URL, the component stays in the SBOM and `purl` is omitted. CycloneDX sets `vibgrate:purlStatus` to `unavailable`. That row still has no CPE.
@@ -2332,12 +2334,12 @@ Go modules pin an untagged commit as a pseudo-version (`v0.0.0-20191109021931-da
 The scan reads direct `require` lines in `go.mod`.
 
 - A concrete `v` version that is valid semver after the leading `v` is removed is the recorded version. `v1.2.3` is recorded as `1.2.3`.
-- Build metadata is dropped. `v2.0.0+incompatible` is recorded as `2.0.0`. The major stays 2.
+- Build metadata stays. `v2.0.0+incompatible` is recorded as `2.0.0+incompatible`. The major stays 2. Range checks ignore the suffix.
 - A pseudo-version keeps its pre-release suffix. `v0.0.0-20191109021931-daa7c04131f5` is recorded as `0.0.0-20191109021931-daa7c04131f5`.
 - A bare module path, a range such as `>=1.4.0`, a line marked `// indirect`, and a token that is not a full semver (`v1.2`) are not matched against advisories.
 - `go.sum` is not the version source for this match.
 
-A range is half-open: the version matches from `introduced` up to, and not including, `fixed`. `introduced` of `0` means from the beginning. Before that check, the recorded version is reduced to `major.minor.patch`. The pre-release suffix is not ordered against the tag. An explicit `versions` list matches the recorded string exactly, so the list entry still has the pre-release suffix and has no leading `v`.
+A range is half-open: the version matches from `introduced` up to, and not including, `fixed`. `introduced` of `0` means from the beginning. Before that check, the recorded version is reduced to `major.minor.patch`. The pre-release suffix and any build metadata are not ordered against the tag. An explicit `versions` list matches the recorded string exactly, so the list entry still has the pre-release suffix and any build metadata, and has no leading `v`.
 
 ##### Pseudo-versions and tagged releases
 
@@ -2352,11 +2354,11 @@ In Go's own order, `v1.2.4-0.<timestamp>-<commit>` is a commit after `v1.2.3` an
 
 An explicit list entry of `v0.0.0-20191109021931-daa7c04131f5` does not match the open finding. The entry `0.0.0-20191109021931-daa7c04131f5` does. The entry `0.0.0` does not: the list is exact, and the recorded string still has the pre-release suffix.
 
-Exposure windows replay the `require` token as written in `go.mod`, including the leading `v` and a `+incompatible` suffix. Range checks reduce that token to the same `major.minor.patch` as the open finding. An explicit `versions` list matches the string it is given, so `v2.0.0+incompatible` can match a history replay and miss the open finding (`2.0.0`), or the other way around.
+Exposure windows replay the `require` token as written in `go.mod`, including the leading `v` and a `+incompatible` suffix. Range checks reduce that token to the same `major.minor.patch` as the open finding. An explicit `versions` list matches the string it is given, so `v2.0.0+incompatible` can match a history replay and miss the open finding (`2.0.0+incompatible`), or the other way around.
 
 ##### `+incompatible`
 
-The suffix is dropped before the comparison. `v2.0.0+incompatible` matches a range from `2.0.0` up to `2.1.0`. It does not match a range that only covers `1.x`. An explicit list entry of `v2.0.0+incompatible` does not match the open finding. The entry `2.0.0` does.
+The suffix stays on the recorded version. `v2.0.0+incompatible` matches a range from `2.0.0` up to `2.1.0`, because the range check ignores the suffix. It does not match a range that only covers `1.x`. An explicit list entry of `v2.0.0+incompatible` does not match the open finding. The entry `2.0.0+incompatible` does. The entry `2.0.0` does not.
 
 ##### `replace` and `exclude`
 
@@ -2508,7 +2510,7 @@ vg scan --vulns --offline --package-manifest package-versions.json --format json
 | `example.com/pseudo-base` | `GHSA-example-pseudo-base` | reported (compared as `0.0.0`) |
 | `example.com/pseudo-base` | `GHSA-example-pseudo-explicit-v` | absent (the list has the leading `v`) |
 | `example.com/pseudo-base` | `GHSA-example-pseudo-explicit-clean` | reported |
-| `example.com/oldmajor` | `GHSA-example-incompatible-range` | reported (`2.0.0`) |
+| `example.com/oldmajor` | `GHSA-example-incompatible-range` | reported (compared as `2.0.0`; recorded `2.0.0+incompatible`) |
 | `example.com/oldmajor` | `GHSA-example-incompatible-v1` | absent (that range is `1.x`) |
 | `example.com/oldmajor` | `GHSA-example-incompatible-explicit` | absent (the list is `v2.0.0+incompatible`) |
 | `example.com/replaced-mod` | `GHSA-example-replaced` | reported (the `require` version; the `replace` is ignored) |
@@ -2906,7 +2908,7 @@ A code-map `import` edge runs from the POM's `package` node to an `external` nod
 
 A scan row has `package` (`groupId:artifactId`), `section`, `currentSpec`, `resolvedVersion`, `latestStable`, `majorsBehind`, and `drift`. `section` is `dependencies` for every Java row, including `<scope>test</scope>` and `testImplementation`. Scope and the Gradle configuration name are not fields. A missing resolved version is `null`, and a missing major lag is `null`.
 
-`resolvedVersion` is the declared version when that string converts to a semantic version, with a missing patch padded (`1.2` becomes `1.2.0`). `32.1.3-jre` is kept. `1.2.3-SNAPSHOT` and a Maven range such as `[1.0,2.0)` stay in `currentSpec` and set `resolvedVersion` to `null`. With `--offline`, `latestStable` is `null` and `drift` is `unknown`. A run that can reach Maven Central fills `latestStable` and `drift` from that registry.
+`resolvedVersion` is the declared version when that string converts to a semantic version, with a missing patch padded (`1.2` becomes `1.2.0`). `32.1.3-jre` is kept. `1.2.3+build.7` stays `1.2.3+build.7`. `1.2.3-SNAPSHOT` and a Maven range such as `[1.0,2.0)` stay in `currentSpec` and set `resolvedVersion` to `null`. With `--offline`, `latestStable` is `null` and `drift` is `unknown`. A run that can reach Maven Central fills `latestStable` and `drift` from that registry.
 
 #### Maven
 

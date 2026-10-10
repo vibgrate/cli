@@ -4,6 +4,7 @@
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
+import { recordedSemver, splitBuildMetadata } from '../utils/recorded-semver.js';
 import { withTimeout } from '../utils/timeout.js';
 import { RubyGemsCache } from './rubygems-cache.js';
 import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
@@ -197,8 +198,8 @@ function parseGemfileLine(line: string): { name: string; spec: string } | null {
 function extractGemVersion(spec: string): string | null {
   if (spec === '*') return null;
 
-  // Match version number after optional operator
-  const match = spec.match(/(?:~>|>=|>|=|<=|<)?\s*(\d+(?:\.\d+)*)/);
+  // Match version number after optional operator, including a `+build` suffix.
+  const match = spec.match(/(?:~>|>=|>|=|<=|<)?\s*(\d+(?:\.\d+)*(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)/);
   if (!match) return null;
 
   return match[1]!;
@@ -208,14 +209,14 @@ function extractGemVersion(spec: string): string | null {
  * Convert a Ruby gem version string to semver.
  */
 function rubyVersionToSemver(ver: string): string | null {
-  const v = ver.trim();
-  if (/(?:\.pre|\.rc|\.beta|\.alpha|\.dev)/i.test(v)) return null;
+  const { core, build } = splitBuildMetadata(ver.trim());
+  if (/(?:\.pre|\.rc|\.beta|\.alpha|\.dev)/i.test(core)) return null;
 
-  const parts = v.split('.');
+  const parts = core.split('.');
   if (parts.length < 2) return null;
   while (parts.length < 3) parts.push('0');
   const semverStr = parts.slice(0, 3).join('.');
-  return semver.valid(semverStr);
+  return recordedSemver(build ? `${semverStr}${build}` : semverStr);
 }
 
 /**
