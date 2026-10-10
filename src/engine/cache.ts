@@ -29,7 +29,9 @@ import type { FileParse } from './types.js';
 // /6: RawCall carries `awaited`; /5 parses lack it.
 // /7: Prisma model-delegate writes (`prisma.post.update`) now yield `persist`
 // duties, so /6 parses of such files differ.
-const CACHE_VERSION = 'vg-parse-cache/7';
+// /8: binary and non-UTF-8 files are no longer parsed. A cached parse of
+// those bytes must not be reused via the stat fast path.
+const CACHE_VERSION = 'vg-parse-cache/8';
 
 interface CacheEntry {
   hash: string;

@@ -37,6 +37,7 @@ import { formatSarif } from './formatters/sarif.js';
 import { formatMarkdown } from './formatters/markdown.js';
 import { loadConfig, appendExcludePatterns } from './config.js';
 import { pathExists, readJsonFile, writeJsonFile, writeTextFile, ensureDir, FileCache, quickTreeCount } from './utils/fs.js';
+import { formatNonTextWarning } from './utils/text-bytes.js';
 import { portableValue } from './utils/portable-path.js';
 import { assertSafeWalkRoot } from './utils/root-safety.js';
 import { detectVcs } from './utils/vcs.js';
@@ -803,6 +804,11 @@ export async function runCoreScan(
         ),
       );
     }
+  }
+
+  const nonTextMessage = formatNonTextWarning(fileCache.skippedNonTextFiles);
+  if (nonTextMessage) {
+    degradations.push(codedWarning(WARNING_CODES.NON_TEXT_FILE, nonTextMessage));
   }
 
   fileCache.clear();

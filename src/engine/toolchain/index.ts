@@ -10,6 +10,7 @@ import { terraformExtractor } from './terraform.js';
 import { githubActionsExtractor, gitlabCiExtractor } from './workflows.js';
 import { linkToolchain } from './link.js';
 import { safeDoc, TOOLCHAIN_FILE_MAX_BYTES, toPosix } from './util.js';
+import { inspectUtf8 } from '../../core-open/utils/text-bytes.js';
 import { stampWarning, WARNING_CODES } from '../../core-open/warnings.js';
 import type {
   ToolchainExtraction,
@@ -136,10 +137,16 @@ async function readExtractions(docs: DiscoveredDoc[]): Promise<{ files: FileExtr
   for (const doc of ordered) {
     let source: string;
     let head: string;
+    const rel = toPosix(doc.rel);
     try {
       const stat = fs.statSync(doc.abs);
       if (stat.size > TOOLCHAIN_FILE_MAX_BYTES) continue;
-      source = fs.readFileSync(doc.abs, 'utf8');
+      const inspected = inspectUtf8(fs.readFileSync(doc.abs));
+      if (!inspected.ok) {
+        warnings.push(stampWarning(WARNING_CODES.NON_TEXT_FILE, rel));
+        continue;
+      }
+      source = inspected.text;
       head = source.slice(0, HEAD_BYTES);
     } catch {
       continue; // unreadable — docs-ingest already tolerates this
@@ -148,7 +155,6 @@ async function readExtractions(docs: DiscoveredDoc[]): Promise<{ files: FileExtr
     const extractor = extractorFor(doc, head);
     if (!extractor) continue;
 
-    const rel = toPosix(doc.rel);
     try {
       files.push({ rel, format: extractor.format, extraction: await extractor.extract(rel, source) });
     } catch (err) {

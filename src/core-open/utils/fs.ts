@@ -18,6 +18,9 @@ import {
   type WalkBudgetState,
 } from './root-safety.js';
 import { emitSkippedSymlinkNotice, rememberSkippedSymlink } from './skipped-symlinks.js';
+import { inspectUtf8, NonTextFileError } from './text-bytes.js';
+import { lockfileKind, LockfileParseError } from './lockfile-parse.js';
+import { warningPathLabel } from '../warnings.js';
 
 
 const execFileAsync = promisify(execFile);
@@ -40,10 +43,20 @@ interface GitignoreLevel {
  * appended. Returns `levels` unchanged (no allocation) when the directory has
  * no `.gitignore`, which is the common case.
  */
-async function extendGitignoreLevels(dir: string, levels: GitignoreLevel[]): Promise<GitignoreLevel[]> {
+async function extendGitignoreLevels(
+  dir: string,
+  levels: GitignoreLevel[],
+  onNonText?: (absPath: string) => void,
+): Promise<GitignoreLevel[]> {
+  const abs = path.join(dir, '.gitignore');
   try {
-    const txt = await fs.readFile(path.join(dir, '.gitignore'), 'utf8');
-    const rules = gitignoreWithoutBlankLines(txt);
+    const buf = await fs.readFile(abs);
+    const inspected = inspectUtf8(buf);
+    if (!inspected.ok) {
+      onNonText?.(abs);
+      return levels;
+    }
+    const rules = gitignoreWithoutBlankLines(inspected.text);
     if (!rules) return levels;
     return [...levels, { dir, ig: ignore().add(rules) }];
   } catch {
@@ -320,6 +333,10 @@ export class FileCache {
   private _stuckPaths: string[] = [];
   /** Files skipped because they exceed maxFileSizeToScan */
   private _skippedLargeFiles: string[] = [];
+  /** Absolute paths already recorded as binary or non-UTF-8. */
+  private _nonTextAbs = new Set<string>();
+  /** Root-relative labels for those files, de-duplicated. */
+  private _skippedNonTextFiles: string[] = [];
   /** Maximum file size (bytes) we will read. 0 = unlimited. */
   private _maxFileSize = 0;
   /** Per-project / per-directory scan timeout in ms. */
@@ -397,6 +414,25 @@ export class FileCache {
   /** Get files that were skipped because they exceeded maxFileSizeToScan */
   get skippedLargeFiles(): readonly string[] {
     return this._skippedLargeFiles;
+  }
+
+  /** Files skipped because they are binary or not UTF-8. Labels only, never bytes. */
+  get skippedNonTextFiles(): readonly string[] {
+    return this._skippedNonTextFiles;
+  }
+
+  private noteNonText(absPath: string): void {
+    const abs = path.resolve(absPath);
+    if (this._nonTextAbs.has(abs)) return;
+    this._nonTextAbs.add(abs);
+    const root = this._rootDir;
+    const rel = root ? path.relative(root, abs) : path.basename(abs);
+    const posix = rel.split(path.sep).join('/');
+    const label = warningPathLabel(posix);
+    // `warningPathLabel` uses "path" when the input is empty or escapes the
+    // root. A file whose name is actually `path` still has that basename.
+    if (!label || (label === 'path' && !/(^|\/)path$/.test(posix))) return;
+    this._skippedNonTextFiles.push(label);
   }
 
   // ── Directory walking ──
@@ -495,6 +531,9 @@ export class FileCache {
     // link to a parent cannot re-enter this walk. One notice is printed after
     // the walk finishes. The prelude count stays quiet so a scan says it once.
     const skippedSymlinks: string[] = [];
+    const noteNonText = (abs: string): void => {
+      this.noteNonText(abs);
+    };
 
     async function walk(dir: string, gitignoreLevels: GitignoreLevel[]) {
       if (budgetError) return;
@@ -509,7 +548,7 @@ export class FileCache {
       // Extend the .gitignore chain with this directory's own file (if any)
       // BEFORE reading entries, so its rules apply to its own children —
       // matching git's precedence (deepest applicable .gitignore wins).
-      const levels = await extendGitignoreLevels(dir, gitignoreLevels);
+      const levels = await extendGitignoreLevels(dir, gitignoreLevels, noteNonText);
 
       // Acquire the semaphore ONLY for the readdir I/O, then release
       // immediately so parent dirs don't hold slots while awaiting children.
@@ -770,7 +809,17 @@ export class FileCache {
         }
       }
 
-      const content = await fs.readFile(abs, 'utf8');
+      const buf = await fs.readFile(abs);
+      const inspected = inspectUtf8(buf);
+      if (!inspected.ok) {
+        this.noteNonText(abs);
+        this.textCache.delete(abs);
+        // A binary lockfile fails closed. Other files are skipped as empty
+        // text so a parser cannot quote their bytes.
+        if (lockfileKind(path.basename(abs))) throw new LockfileParseError(abs, 'binary');
+        return '';
+      }
+      const content = inspected.text;
       if (content.length > TEXT_CACHE_MAX_BYTES) {
         // Too large for cache — evict so we don't hold it
         this.textCache.delete(abs);
@@ -796,6 +845,7 @@ export class FileCache {
     const promise = this.readTextFile(abs).then((txt) => {
       // Evict raw text — we now have the parsed object
       this.textCache.delete(abs);
+      if (this._nonTextAbs.has(abs)) throw new NonTextFileError(abs);
       return JSON.parse(stripBom(txt)) as T;
     });
     this.jsonCache.set(abs, promise);
@@ -1135,12 +1185,23 @@ export function stripBom(text: string): string {
 }
 
 export async function readJsonFile<T>(filePath: string): Promise<T> {
-  const txt = await fs.readFile(filePath, 'utf8');
-  return JSON.parse(stripBom(txt)) as T;
+  const buf = await fs.readFile(filePath);
+  const inspected = inspectUtf8(buf);
+  if (!inspected.ok) {
+    if (lockfileKind(path.basename(filePath))) throw new LockfileParseError(filePath, 'binary');
+    throw new NonTextFileError(filePath);
+  }
+  return JSON.parse(stripBom(inspected.text)) as T;
 }
 
 export async function readTextFile(filePath: string): Promise<string> {
-  return fs.readFile(filePath, 'utf8');
+  const buf = await fs.readFile(filePath);
+  const inspected = inspectUtf8(buf);
+  if (!inspected.ok) {
+    if (lockfileKind(path.basename(filePath))) throw new LockfileParseError(filePath, 'binary');
+    return '';
+  }
+  return inspected.text;
 }
 
 export async function pathExists(p: string): Promise<boolean> {

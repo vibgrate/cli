@@ -5,6 +5,7 @@ import { langForExtension, langById, type LanguageDef } from './languages.js';
 import { requireDataConfig } from '../core-open/config.js';
 import { dropBlankPatterns, gitignoreWithoutBlankLines } from '../core-open/utils/glob.js';
 import { assertLockfileFile, lockfileKind } from '../core-open/utils/lockfile-parse.js';
+import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
 import { assertSafeWalkRoot, createWalkBudget, noteWalkEntry } from '../core-open/utils/root-safety.js';
 import { emitSkippedSymlinkNotice } from '../core-open/utils/skipped-symlinks.js';
 
@@ -215,8 +216,11 @@ export function loadRootIgnore(root: string, exclude: string[]): Ignore {
   const gitignorePath = path.join(root, '.gitignore');
   try {
     if (fs.existsSync(gitignorePath)) {
-      const rules = gitignoreWithoutBlankLines(fs.readFileSync(gitignorePath, 'utf8'));
-      if (rules) ig.add(rules);
+      const inspected = inspectUtf8(fs.readFileSync(gitignorePath));
+      if (inspected.ok) {
+        const rules = gitignoreWithoutBlankLines(inspected.text);
+        if (rules) ig.add(rules);
+      }
     }
   } catch {
     // Unreadable .gitignore: walk the tree rather than fail the build.

@@ -5,6 +5,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
+import { inspectUtf8, type NonTextReason } from '../core-open/utils/text-bytes.js';
 import { hashBytes } from './hash.js';
 
 export interface HashJob {
@@ -17,6 +18,8 @@ export interface HashResult {
   hash: string;
   /** False if the file could not be read. */
   ok: boolean;
+  /** Set when the bytes are binary or not valid UTF-8. Absent for text. */
+  nonText?: NonTextReason;
 }
 
 /**
@@ -43,7 +46,13 @@ export async function hashFilesParallel(
       const job = jobs[i];
       try {
         const buf = await fs.readFile(job.abs);
-        out[i] = { rel: job.rel, hash: hashBytes(buf), ok: true };
+        const inspected = inspectUtf8(buf);
+        out[i] = {
+          rel: job.rel,
+          hash: hashBytes(buf),
+          ok: true,
+          ...(inspected.ok ? {} : { nonText: inspected.reason }),
+        };
       } catch {
         out[i] = { rel: job.rel, hash: '', ok: false };
       }

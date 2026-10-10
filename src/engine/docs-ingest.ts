@@ -21,6 +21,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { redactSecrets } from '../core-open/utils/redact.js';
+import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
 import { nodeId } from './ids.js';
 import { isSkippedDirName, loadRootIgnore, SKIP_FILES } from './discover.js';
 import { assertSafeWalkRoot, createWalkBudget, noteWalkEntry, UnsafeRootError } from '../core-open/utils/root-safety.js';
@@ -498,12 +499,17 @@ function summarizePackageJson(raw: string): string {
 /**
  * Build `document` graph nodes from discovered project-context files.
  */
-export function documentNodesFromDocs(docs: DiscoveredDoc[]): GraphNode[] {
+export function documentNodesFromDocs(docs: DiscoveredDoc[], skippedNonText?: string[]): GraphNode[] {
   const nodes: GraphNode[] = [];
   for (const d of docs) {
     let raw = '';
     try {
-      raw = fs.readFileSync(d.abs, 'utf8');
+      const inspected = inspectUtf8(fs.readFileSync(d.abs));
+      if (!inspected.ok) {
+        skippedNonText?.push(d.rel.replace(/\\/g, '/'));
+        continue;
+      }
+      raw = inspected.text;
     } catch {
       continue;
     }

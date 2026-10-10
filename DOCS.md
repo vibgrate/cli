@@ -5139,6 +5139,18 @@ text only; it does not hide this notice.
 notice: skipped 3 symlinks (alias.ts, nested/cycle, via). vg does not follow symlinks. Point the root at the link target, or pass --exclude or a narrower root.
 ```
 
+### Binary and non-UTF-8 files
+
+`vg build` and `vg scan` read project files as text. A file that contains a NUL byte, or bytes that are not valid UTF-8, is not text. That includes a binary blob saved with a source or manifest extension, and UTF-16 saved as `.md` or `.json`.
+
+Those files are left out. The build does not parse them and does not put their bytes in the map. The scan does not feed them to text parsers. One warning names the count and the first few root-relative paths, in sorted order (at most five; further files are a `+N more` count). It tells you to leave the files out with a `.gitignore` entry, or to pass `--exclude`. The warning does not include the file's bytes.
+
+A lockfile that is binary or not UTF-8 still stops the command. That message names the file and tells you to leave it out the same way, or to replace it with a text lockfile. It does not include the file's bytes.
+
+```text
+warning [VG_WARN_NON_TEXT_FILE]: skipped 2 files that are binary or not UTF-8 (blob.ts, notes.md). Leave them out with a .gitignore entry, or pass --exclude.
+```
+
 ---
 
 ## Extended Scanners
