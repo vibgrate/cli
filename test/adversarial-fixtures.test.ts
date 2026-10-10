@@ -96,7 +96,7 @@ for (const lang of buildableLangs) {
 
         // (c) no parse failures. `BuildResult.warnings` is the engine's only
         // per-file failure signal (parse/query problems surface as
-        // "parse failed: ..." warnings from the worker); it must be empty.
+        // VG_WARN_PARSE_FAILED warnings); it must be empty.
         expect(first.warnings).toEqual([]);
         expect(first.warnings.filter((w) => /query|parse failed/i.test(w))).toEqual([]);
 

@@ -14,6 +14,7 @@ function effectsRegexEnabled(): boolean {
   return !(v === '0' || v === 'false');
 }
 import { extractDutiesWithCandidates, fileBindings, type Bindings } from './duties.js';
+import { parseFailureWarning } from './parse-warning.js';
 import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport, RawTypeRef } from './types.js';
 
 /**
@@ -288,7 +289,10 @@ export async function parseSource(
   const language = await loadLanguage(effLangId);
   const parser = await parserFor(def);
   const tree = parser.parse(text);
-  if (!tree) return result;
+  if (!tree) {
+    result.warnings = [parseFailureWarning(rel, langId)];
+    return result;
+  }
   const root = tree.rootNode;
 
   // --- definitions ---
@@ -467,8 +471,42 @@ export async function parseSource(
   const roles = extractAstRolesFromTree(rel, effLangId, language, root, text);
   if (roles) result.roles = roles;
 
+  // Tree-sitter returns a tree for broken syntax instead of throwing. When
+  // that tree is only ERROR nodes and nothing was extracted, the file was
+  // skipped. `hasError` alone is not that signal: some grammars set it on
+  // valid nodes, and a reused parser can set it on a later file that parsed
+  // cleanly on its own (Lua `return 1`).
+  if (treeIsOnlyErrors(root) && parseYieldedNothing(result)) {
+    result.warnings = [...(result.warnings ?? []), parseFailureWarning(rel, langId)];
+  }
+
   tree.delete();
   return result;
+}
+
+function treeIsOnlyErrors(root: Node): boolean {
+  if (!root.hasError) return false;
+  if (root.type === 'ERROR') return true;
+  const count = root.namedChildCount;
+  if (count === 0) return false;
+  for (let i = 0; i < count; i++) {
+    const child = root.namedChild(i);
+    if (!child || child.type !== 'ERROR') return false;
+  }
+  return true;
+}
+
+function parseYieldedNothing(result: FileParse): boolean {
+  return (
+    result.defs.length === 0 &&
+    result.calls.length === 0 &&
+    result.imports.length === 0 &&
+    result.heritage.length === 0 &&
+    (result.typeRefs?.length ?? 0) === 0 &&
+    (result.guards?.length ?? 0) === 0 &&
+    (result.namespaces?.length ?? 0) === 0 &&
+    (result.roles?.length ?? 0) === 0
+  );
 }
 
 /**

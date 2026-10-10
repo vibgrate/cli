@@ -52,6 +52,7 @@ import { emitIngestIdLine, emitDriftScoreLine } from '../utils/ingest-id-output.
 import { formatUploadHttpFailure, uploadScanArtifact } from '../utils/upload.js';
 import { redactForDisplay } from '../../core-open/utils/redact.js';
 import { buildGraph } from '../../engine/build.js';
+import { parseFailureWarningLines } from '../../engine/parse-warning.js';
 import { writeArtifacts, resolveGraphPath } from '../../engine/artifacts.js';
 import { readHaileSidecar } from '../../engine/haile/sidecar.js';
 import { isUsableHaileSymbol } from '../../engine/haile/format.js';
@@ -708,6 +709,11 @@ export const scanCommand = new Command('scan')
           exclude: opts.exclude,
           onParseProgress: (done, total) => report(done, total, 'parsing'),
         });
+        // Same coded warning `vg build` prints. Stderr only, so scan JSON
+        // on stdout stays the artifact. One line per file, already sorted.
+        for (const line of parseFailureWarningLines(result.codedWarnings)) {
+          console.error(chalk.yellow(line));
+        }
         builtGraph = result.graph;
         const written = writeArtifacts(result.graph, { root: rootDir });
         if (written.architecturePolicyError) console.error(chalk.red(`\narchitecture policy: ${written.architecturePolicyError}`));

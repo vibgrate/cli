@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import { parseSource } from './parse.js';
 import { setGrammarsOverride, resetParser } from './grammars.js';
 import type { FileParse } from './types.js';
-import { stampWarning, WARNING_CODES } from '../core-open/warnings.js';
+import { parseFailureWarning } from './parse-warning.js';
 
 /**
  * tinypool worker entry. Receives a chunk of files, reads and parses each, and
@@ -32,9 +32,11 @@ export default async function run(payload: ParsePayload): Promise<FileParse[]> {
     try {
       const source = fs.readFileSync(task.abs, 'utf8');
       out.push(await parseSource(task.rel, task.lang, source));
-    } catch (err) {
+    } catch {
       // A wasm-level parse crash can leave the language's reused parser
       // mid-state; drop it so the failure stays contained to this file.
+      // The exception text is intentionally dropped: it can be a wasm stack
+      // or a snippet of source. The warning names the file instead.
       resetParser(task.lang);
       out.push({
         rel: task.rel,
@@ -47,7 +49,7 @@ export default async function run(payload: ParsePayload): Promise<FileParse[]> {
         heritage: [],
         typeRefs: [],
         guards: [],
-        warnings: [stampWarning(WARNING_CODES.PARSE_FAILED, `parse failed: ${(err as Error).message}`)],
+        warnings: [parseFailureWarning(task.rel, task.lang)],
       });
     }
   }
