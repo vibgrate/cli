@@ -109,10 +109,18 @@ export interface FrozenComponent {
   name: string;
   /** The exact shipped/resolved version (never a range). */
   version: string;
-  /** package-url, when derivable. */
+  /** package-url, when the input component had one. This is the identity when set. */
   purl?: string;
-  /** Ecosystem, e.g. npm / PyPI / Maven — drives OSV matching. */
+  /** Ecosystem, e.g. npm / PyPI / Maven — drives OSV matching. Derived from `purl`. */
   ecosystem?: string;
+  /**
+   * CycloneDX `type` or SPDX `primaryPackagePurpose`, recorded when the
+   * component has neither a purl nor a CPE. With `name` and `version`, this
+   * is the fallback identity.
+   */
+  type?: string;
+  /** CPE, recorded when the component has no purl. This is the identity when set and `purl` is absent. */
+  cpe?: string;
 }
 
 /**

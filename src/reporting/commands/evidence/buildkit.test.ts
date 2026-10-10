@@ -130,11 +130,14 @@ describe('summarizeProvenance', () => {
 });
 
 describe('componentsFromSpdx', () => {
-  it('skips the image package and unversioned entries, de-duplicates, and maps ecosystems', () => {
-    expect(componentsFromSpdx(spdx)).toEqual([
-      { name: 'left-pad', version: '1.3.0', purl: 'pkg:npm/left-pad@1.3.0', ecosystem: 'npm' },
-      { name: 'musl', version: '1.2.4-r2', purl: 'pkg:apk/alpine/musl@1.2.4-r2', ecosystem: 'Alpine' },
-    ]);
+  it('skips the image package, keeps an unversioned package, de-duplicates, and maps ecosystems', () => {
+    expect(componentsFromSpdx(spdx)).toEqual({
+      components: [
+        { name: 'left-pad', version: '1.3.0', purl: 'pkg:npm/left-pad@1.3.0', ecosystem: 'npm' },
+        { name: 'musl', version: '1.2.4-r2', purl: 'pkg:apk/alpine/musl@1.2.4-r2', ecosystem: 'Alpine' },
+        { name: 'no-version', version: '' },
+      ],
+    });
   });
 });
 

@@ -26,6 +26,7 @@ import {
   type ProvenanceSummary,
   type SpdxDocument,
 } from './buildkit.js';
+import { ingestCycloneDx, type SbomIngest } from './sbom-ingest.js';
 
 /** Map a Vibgrate project type to the OSV ecosystem used for advisory matching. */
 export function ecosystemForProjectType(type: ProjectType): string | undefined {
@@ -60,13 +61,6 @@ export function ecosystemForProjectType(type: ProjectType): string | undefined {
   }
 }
 
-function ecosystemForPurl(purl: string): string | undefined {
-  const m = /^pkg:([^/]+)\//.exec(purl);
-  if (!m) return undefined;
-  const map: Record<string, string> = { npm: 'npm', pypi: 'PyPI', maven: 'Maven', nuget: 'NuGet', golang: 'Go', cargo: 'crates.io', gem: 'RubyGems', composer: 'Packagist', pub: 'Pub', hex: 'Hex' };
-  return map[m[1].toLowerCase()];
-}
-
 export function componentsFromArtifact(artifact: ScanArtifact): FrozenComponent[] {
   const out: FrozenComponent[] = [];
   const seen = new Set<string>();
@@ -83,18 +77,9 @@ export function componentsFromArtifact(artifact: ScanArtifact): FrozenComponent[
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
 }
 
-interface CycloneDxComponent {
-  name?: string;
-  version?: string;
-  purl?: string;
-}
-export function componentsFromCycloneDx(doc: { components?: CycloneDxComponent[] }): FrozenComponent[] {
-  const out: FrozenComponent[] = [];
-  for (const c of doc.components ?? []) {
-    if (!c.name || !c.version) continue;
-    out.push({ name: c.name, version: c.version, purl: c.purl, ecosystem: c.purl ? ecosystemForPurl(c.purl) : undefined });
-  }
-  return out.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
+/** CycloneDX components, including nested ones and rows with no purl and no CPE. */
+export function componentsFromCycloneDx(doc: unknown, sourceLabel = 'sbom'): SbomIngest {
+  return ingestCycloneDx(doc, sourceLabel);
 }
 
 export interface FreezeInput {
@@ -119,11 +104,13 @@ export interface FreezeInput {
   image?: string;
   /** Process runner for `--image`; injectable for tests. */
   exec?: Exec;
+  /** Called once when this input skipped components. The release is still frozen. */
+  onWarning?: (warning: string) => void;
 }
 
 interface CycloneDxDocument {
   bomFormat?: string;
-  components?: CycloneDxComponent[];
+  components?: unknown[];
 }
 
 /**
@@ -132,27 +119,27 @@ interface CycloneDxDocument {
  * DSSE envelope (what `docker buildx build --sbom=true` attaches to an image and
  * `imagetools inspect` exports).
  */
-export function componentsFromSource(data: unknown, label: string): { components: FrozenComponent[]; attested: boolean } {
+export function componentsFromSource(data: unknown, label: string): { components: FrozenComponent[]; attested: boolean; warning?: string } {
   const statement = unwrapStatement(data);
   if (statement) {
     if (!isSbomPredicateType(statement.predicateType)) {
       const hint = isProvenancePredicateType(statement.predicateType) ? ' — that is a provenance attestation; pass it with --provenance' : '';
       throw new CliError(`${label} is an attestation of type ${statement.predicateType}, not an SBOM${hint}`, ExitCode.USAGE_ERROR);
     }
-    return { components: componentsFromSbom(statement.predicate, label), attested: true };
+    return { ...componentsFromSbom(statement.predicate, label), attested: true };
   }
   if (data && typeof data === 'object' && Array.isArray((data as ScanArtifact).projects)) {
     return { components: componentsFromArtifact(data as ScanArtifact), attested: false };
   }
-  return { components: componentsFromSbom(data, label), attested: false };
+  return { ...componentsFromSbom(data, label), attested: false };
 }
 
-function componentsFromSbom(data: unknown, label: string): FrozenComponent[] {
-  const doc = data as CycloneDxDocument | SpdxDocument | null;
-  if (doc && (('bomFormat' in doc && doc.bomFormat === 'CycloneDX') || Array.isArray((doc as CycloneDxDocument).components))) {
-    return componentsFromCycloneDx(doc as CycloneDxDocument);
+function componentsFromSbom(data: unknown, label: string): SbomIngest {
+  if (data && typeof data === 'object') {
+    const doc = data as CycloneDxDocument & SpdxDocument;
+    if (doc.bomFormat === 'CycloneDX' || Array.isArray(doc.components)) return componentsFromCycloneDx(doc, label);
+    if (isSpdxDocument(doc)) return componentsFromSpdx(doc, label);
   }
-  if (isSpdxDocument(doc)) return componentsFromSpdx(doc);
   throw new CliError(
     `unrecognised source format in ${label} — expected a Vibgrate scan artifact, a CycloneDX or SPDX SBOM, or an SBOM attestation`,
     ExitCode.USAGE_ERROR,
@@ -193,6 +180,7 @@ export async function buildRelease(input: FreezeInput): Promise<Release> {
   let artefactDigest = input.artefactDigest;
   let buildId = input.buildId;
   let components: FrozenComponent[] | undefined;
+  let ingestWarning: string | undefined;
 
   if (input.image) {
     const inspection = await inspectImage(input.image, input.exec);
@@ -212,7 +200,9 @@ export async function buildRelease(input: FreezeInput): Promise<Release> {
     build.sourceRevision ??= inspection.labels['org.opencontainers.image.revision'];
     if (inspection.sbom && !input.fromExplicit) {
       build.sources.push('sbom-attestation');
-      components = componentsFromSpdx(inspection.sbom);
+      const ingested = componentsFromSpdx(inspection.sbom, `SBOM of ${input.image}`);
+      components = ingested.components;
+      ingestWarning = ingested.warning;
     }
   }
 
@@ -258,8 +248,10 @@ export async function buildRelease(input: FreezeInput): Promise<Release> {
     }
     const parsed = componentsFromSource(await readJsonFile<unknown>(input.from), input.from);
     components = parsed.components;
+    ingestWarning = parsed.warning;
     if (parsed.attested) build.sources.push('sbom-attestation');
   }
+  if (ingestWarning) input.onWarning?.(ingestWarning);
   if (components.length === 0) {
     throw new CliError(`no components found in ${input.image && !input.fromExplicit ? `the SBOM of ${input.image}` : input.from} — cannot freeze an empty manifest`, ExitCode.USAGE_ERROR);
   }

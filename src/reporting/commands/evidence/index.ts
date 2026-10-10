@@ -10,6 +10,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { VERSION } from '../../../version.js';
 import { CliError, ExitCode } from '../../../util/exit.js';
+import { codedWarning, formatWarningLine, WARNING_CODES } from '../../../core-open/warnings.js';
 import { writeJsonOutputFile, writeOutputFileSync } from '../../../util/output-file.js';
 import { resolveRegime, listRegimes, DEFAULT_REGIME } from './regimes.js';
 import { loadOrg, saveOrg, loadProducts, saveProducts, getProduct, freezeRelease, loadReleases } from './state.js';
@@ -178,6 +179,9 @@ const releaseCmd = new Command('release')
       buildkitMetadata: opts.buildkitMetadata ? path.resolve(rootDir, opts.buildkitMetadata) : undefined,
       provenance: opts.provenance ? path.resolve(rootDir, opts.provenance) : undefined,
       image: opts.image,
+      onWarning: (warning) => {
+        console.error(chalk.yellow(formatWarningLine(codedWarning(WARNING_CODES.SBOM_COMPONENT_SKIPPED, warning))));
+      },
     });
     const p = await freezeRelease(rootDir, release);
     console.log(chalk.green('✔') + ` froze ${chalk.bold(`${product.id}@${version}`)} — ${release.components.length} components, immutable at ${path.relative(rootDir, p)}`);

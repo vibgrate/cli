@@ -54,6 +54,8 @@ export const WARNING_CODES = {
   CVSS_UNPARSEABLE: 'VG_WARN_CVSS_UNPARSEABLE',
   /** A package URL could not be formed. The component is included without a purl. */
   PURL_UNAVAILABLE: 'VG_WARN_PURL_UNAVAILABLE',
+  /** Input SBOM components were skipped: no name, purl, or CPE, or the walk limit. */
+  SBOM_COMPONENT_SKIPPED: 'VG_WARN_SBOM_COMPONENT_SKIPPED',
   /** SBOM merge dropped a different dependency list for one package. */
   SBOM_LOSSY_EDGES: 'VG_WARN_SBOM_LOSSY_EDGES',
   /** SBOM merge dropped differing manifest metadata for one package. */

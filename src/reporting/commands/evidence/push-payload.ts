@@ -34,6 +34,10 @@ export interface PushComponent {
   version: string;
   ecosystem?: string;
   purl?: string;
+  /** Fallback identity, present when the component had no purl and no CPE. */
+  type?: string;
+  /** Identity when the component had a CPE and no purl. */
+  cpe?: string;
 }
 
 export interface PushRelease {
@@ -109,7 +113,12 @@ export function pushRelease(r: Release): PushRelease {
     distribution: r.distribution,
     frozenAt: r.frozenAt,
     componentCount: r.components.length,
-    components: r.components.map((c) => ({ name: c.name, version: c.version, ecosystem: c.ecosystem, purl: c.purl })),
+    components: r.components.map((c) => {
+      const row: PushComponent = { name: c.name, version: c.version, ecosystem: c.ecosystem, purl: c.purl };
+      if (c.type) row.type = c.type;
+      if (c.cpe) row.cpe = c.cpe;
+      return row;
+    }),
     ...(r.build ? { build: r.build } : {}),
   };
 }
