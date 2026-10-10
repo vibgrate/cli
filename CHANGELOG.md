@@ -42,12 +42,11 @@ backward compatible.
 
 ### Fixed
 
-- **`vg evidence release` rejects an invalid SPDX or CycloneDX SBOM.** A
-  `--from` file that is truncated, not valid JSON, or missing a required
-  field exits `1`. The message names the file and the expected format, and
-  says to regenerate the SBOM. It does not include the document or a home
-  directory. A component or package missing `name` fails the command instead
-  of being dropped. The same check applies to an SBOM attached to an image.
+- **A key or value `vg` does not accept in `driftBudget` or `review` stops the command.**
+  A misspelt key, a value of the wrong type, or a `driftBudget` that sets no
+  limit exits with an error. The error names the file and, when the file makes
+  it clear, the line and the key. The value is not printed.
+  `.vibgrate/review.toml` still skips keys it does not recognise. (#316)
 
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its

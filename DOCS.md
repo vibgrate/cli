@@ -1556,6 +1556,11 @@ Read from the **trusted base branch** when `--base` is given, so a pull request
 cannot weaken the policy applied to itself. It is read as data: a `review` block
 in a `.ts`/`.js` config is never run, so keep it in YAML or JSON.
 
+A key `vg` does not recognise, or a value of the wrong type, stops the command.
+The error names the file and, when the file makes it clear, the line and the
+key. The value is not printed. `.vibgrate/review.toml` still skips keys it does
+not recognise.
+
 The first `vg review` in a repository with no policy writes an advisory starter
 policy: a new `.vibgrate/config.yml` when there is no config, or a `review` block
 added to an existing `.vibgrate/config.yml` / `vibgrate.config.json`. A `.ts` or
@@ -5063,7 +5068,9 @@ driftBudget:
   opened the pull request.
 - `--drift-budget` / `--drift-worsening` still work; passing either uses the flags
   and ignores `driftBudget`.
-- Misspelt keys are reported, never silently ignored.
+- A misspelt key, a wrong type, or a `driftBudget` that sets no limit stops the
+  command. The error names the file and, when the file makes it clear, the line
+  and the key. The value is not printed.
 
 The GitHub App reads `driftBudget` and `review` from the pull request's base
 branch, so a change cannot loosen the limits it is checked against. It reads
