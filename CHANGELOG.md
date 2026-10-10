@@ -42,15 +42,11 @@ backward compatible.
 
 ### Fixed
 
-- **A truncated or syntactically invalid lockfile stops `vg scan` and `vg build` (#310).**
-  The check runs before a dependency graph is built and before source files are
-  parsed, so parse workers are not started and a partial map is not written.
-  The error names each bad file, in path order, including lockfiles the walk
-  otherwise skips (for example `bun.lock`, `mix.lock`, and `Cargo.lock`). It
-  tells you to regenerate the file with your package manager and does not
-  include the file's contents. The process exits non-zero. A valid lockfile is
-  scanned and built as before. An empty `go.sum` or `go.work.sum` is valid:
-  the module has no dependencies.
+- **A key or value `vg` does not accept in `driftBudget` or `review` stops the command.**
+  A misspelt key, a value of the wrong type, or a `driftBudget` that sets no
+  limit exits with an error. The error names the file and, when the file makes
+  it clear, the line and the key. The value is not printed.
+  `.vibgrate/review.toml` still skips keys it does not recognise. (#316)
 
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
