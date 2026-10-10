@@ -2,15 +2,15 @@
     ✖ lodash@4.17.20: GHSA-a (CVE-2021-1) (critical 9.8) — fixed in 4.17.21
       vibgrate/vulnerability in lodash
       fix available (4.17.21)
-    ⚠ left-pad@1.0.0: GHSA-b (moderate 5.6)
-      vibgrate/vulnerability in left-pad
-    ℹ Node.js runtime is current.
-      vibgrate/runtime-lag in app
     ✖ minimist@1.2.0: GHSA-c (high 7.5)
       vibgrate/vulnerability in minimist
       fix available (1.2.6, 1.2.7)
+    ⚠ left-pad@1.0.0: GHSA-b (moderate 5.6)
+      vibgrate/vulnerability in left-pad
     ⚠ debug@4.3.0: GHSA-d (low 3.1)
       vibgrate/vulnerability in debug
+    ℹ Node.js runtime is current.
+      vibgrate/runtime-lag in app
     ℹ qs@6.5.0: GHSA-e (moderate 5.3) — fix available (6.5.3)
       vibgrate/vulnerability in qs
     ℹ ms@2.0.0: GHSA-f (low 2.1)
