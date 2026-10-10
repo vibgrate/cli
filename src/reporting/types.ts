@@ -271,6 +271,11 @@ export interface ScanArtifact {
   projects: ProjectScan[];
   solutions?: SolutionScan[];
   drift: DriftScore;
+  /**
+   * Drift and vulnerability findings. `vg scan` sorts these before JSON and
+   * SARIF emit by rule id, then location, then message, then advisory id,
+   * package name, and package URL when `details` carries them.
+   */
   findings: Finding[];
   /**
    * Degrade-and-continue scan notices (skipped paths, unreadable baseline).

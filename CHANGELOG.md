@@ -42,6 +42,15 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` findings arrays no longer follow discovery order.** JSON and SARIF
+  sort drift and vulnerability findings by rule id, then location, then
+  message, then advisory id, package name, and package URL. Alias lists are
+  sorted too. Security-pack findings stay in path, line, address, rule, id
+  order, and reachability findings stay in ecosystem, package, advisory id,
+  symbol, version order. The text report still prints errors, then warnings,
+  then notes. The same tree produces the same findings order on every run.
+  (#293)
+
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
   Package URL when one is written, otherwise by package name, then by version.

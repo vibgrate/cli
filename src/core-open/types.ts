@@ -791,6 +791,12 @@ export interface ScanArtifact {
   projects: ProjectScan[];
   solutions?: SolutionScan[];
   drift: DriftScore;
+  /**
+   * Drift and vulnerability findings. Sorted before JSON and SARIF emit by
+   * rule id, then location, then message, then advisory id, package name, and
+   * package URL when `details` carries them. `details.aliases` is sorted too.
+   * The text report prints errors, then warnings, then notes.
+   */
   findings: Finding[];
   /**
    * Degrade-and-continue notices from this scan (skipped paths, an unreadable
@@ -884,6 +890,7 @@ export interface ScanReachabilityResult {
     modules: string[];
     importingFiles: number;
   }>;
+  /** Sorted by ecosystem, package, advisory id, symbol, then version. */
   findings: ScanReachabilityFinding[];
 }
 
