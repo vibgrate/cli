@@ -52,7 +52,7 @@ import { emitIngestIdLine, emitDriftScoreLine } from '../utils/ingest-id-output.
 import { formatUploadHttpFailure, uploadScanArtifact } from '../utils/upload.js';
 import { redactForDisplay } from '../../core-open/utils/redact.js';
 import { buildGraph } from '../../engine/build.js';
-import { assertDiscoveredLockfiles, mergeExcludes } from '../../engine/discover.js';
+import { assertLockfilesValid, LockfileSyntaxError } from '../../engine/lockfile-guard.js';
 import { writeArtifacts, resolveGraphPath } from '../../engine/artifacts.js';
 import { readHaileSidecar } from '../../engine/haile/sidecar.js';
 import { isUsableHaileSymbol } from '../../engine/haile/format.js';
@@ -478,14 +478,14 @@ export const scanCommand = new Command('scan')
       throw err;
     }
 
-    // Before preflight, project scanners, and the code-map parse pool. A
-    // truncated lockfile — including one nested in a subdirectory, and
-    // including `vg scan --no-graph` — must not become a drift report that
-    // looks empty, or a map failure that the command then skips.
-    assertDiscoveredLockfiles({
-      root: rootDir,
-      exclude: mergeExcludes(rootDir, opts.exclude),
-    });
+    // Before project scanners and the code-map parse workers. A truncated
+    // lockfile must not become a partial dependency graph or a successful exit.
+    try {
+      assertLockfilesValid(rootDir);
+    } catch (err) {
+      if (err instanceof LockfileSyntaxError) throw new CliError(err.message, ExitCode.ERROR);
+      throw err;
+    }
 
     // Fail closed before any scan work. A missing, unreadable, or unusable
     // --package-manifest must stop the command with a stable, actionable

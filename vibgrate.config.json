@@ -3,13 +3,11 @@
   "$excludeNotes": {
     "packages/test-solutions/**": "Vendored real-world sample repos (Next.js SaaS, Turborepo, Clean Architecture, …) used as scan test targets and as the recorded CLI-simulator scenarios — their dependencies are intentionally frozen in time and are never installed or executed.",
     "examples/**": "Documentation fixtures (Go pseudo-version matching, GitHub Actions workflows). Versions are chosen to illustrate the scanner, including a deliberately end-of-life Go toolchain, and are not dependencies of this package. Tests read the files directly.",
-    "example/**": "Singular form of examples/, excluded for the same reason.",
-    "test/__fixtures__/truncated-lockfile/**": "Deliberately truncated lockfiles used to assert vg scan and vg build fail. They are not dependencies of this package."
+    "example/**": "Singular form of examples/, excluded for the same reason."
   },
   "exclude": [
     "packages/test-solutions/**",
     "examples/**",
-    "example/**",
-    "test/__fixtures__/truncated-lockfile/**"
+    "example/**"
   ]
 }

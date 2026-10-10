@@ -37,7 +37,6 @@ import { formatSarif } from './formatters/sarif.js';
 import { formatMarkdown } from './formatters/markdown.js';
 import { loadConfig, appendExcludePatterns } from './config.js';
 import { pathExists, readJsonFile, writeJsonFile, writeTextFile, ensureDir, FileCache, quickTreeCount } from './utils/fs.js';
-import { LockfileParseError } from './utils/lockfile-parse.js';
 import { portableValue } from './utils/portable-path.js';
 import { assertSafeWalkRoot } from './utils/root-safety.js';
 import { detectVcs } from './utils/vcs.js';
@@ -765,10 +764,7 @@ export async function runCoreScan(
         { projects: allProjects, solutions, extended },
       );
       progress.completeStep('map', detail || 'done');
-    } catch (err) {
-      // A truncated lockfile is not a map failure. Swallowing it printed
-      // "skipped (map build failed)" and let the scan exit 0.
-      if (err instanceof LockfileParseError) throw err;
+    } catch {
       progress.completeStep('map', 'skipped (map build failed)');
     }
   }

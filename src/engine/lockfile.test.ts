@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { assertDiscoveredLockfiles, discover } from './discover.js';
+import { discover } from './discover.js';
 import { LockfileParseError } from '../core-open/utils/lockfile-parse.js';
 import { lockfileVersion, fullDependencyTree, fullDependencyGraph } from './lockfile.js';
 
@@ -379,52 +379,5 @@ describe('fullDependencyGraph', () => {
     fs.rmSync(path.join(root, 'poetry.lock'));
     write('uv.lock', ['[[package]]', 'name = "click"', 'version = "8.1.3"'].join('\n'));
     expect(fullDependencyGraph(root)?.ecosystem).toBe('pypi');
-  });
-});
-
-const TRUNCATED_JSON = '{"name":"fixture","lockfileVersion":3,"packages":{"node_modules/left-pad":{"version":"1.0.0"';
-
-describe('truncated lockfiles in the project walk', () => {
-  it('names the lexicographically first invalid lockfile', () => {
-    fs.mkdirSync(path.join(root, 'b'));
-    fs.mkdirSync(path.join(root, 'a'));
-    fs.writeFileSync(path.join(root, 'b', 'package-lock.json'), TRUNCATED_JSON);
-    fs.writeFileSync(
-      path.join(root, 'a', 'pnpm-lock.yaml'),
-      "lockfileVersion: '9.0'\npackages:\n  left-pad@1.0.0:\n    resolution: {integrity: sha512-abc",
-    );
-    const expected = path.join(root, 'a', 'pnpm-lock.yaml');
-    expect(() => discover({ root })).toThrow(LockfileParseError);
-    expect(() => assertDiscoveredLockfiles({ root })).toThrow(expected);
-    try {
-      assertDiscoveredLockfiles({ root });
-    } catch (err) {
-      const message = (err as Error).message;
-      expect(message).toContain('truncated or invalid YAML');
-      expect(message).toContain('package manager');
-      expect(message).not.toContain('left-pad');
-      expect(message).not.toContain('sha512-abc');
-      expect(message).not.toContain(path.join(root, 'b', 'package-lock.json'));
-    }
-  });
-
-  it('does not fail on a truncated lockfile under node_modules or a gitignore rule', () => {
-    fs.mkdirSync(path.join(root, 'node_modules', 'left-pad'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'node_modules', 'left-pad', 'package-lock.json'), TRUNCATED_JSON);
-    fs.mkdirSync(path.join(root, 'skip-lock'));
-    fs.writeFileSync(path.join(root, 'skip-lock', 'yarn.lock'), 'chalk@^5.0.0:\n');
-    write('.gitignore', 'skip-lock/\n');
-    write('app.ts', 'export const n = 1;\n');
-    expect(() => assertDiscoveredLockfiles({ root })).not.toThrow();
-    expect(discover({ root }).map((f) => f.rel)).toEqual(['app.ts']);
-  });
-
-  it('still fails a nested lockfile an exclude does not cover', () => {
-    fs.mkdirSync(path.join(root, 'packages', 'web'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'packages', 'web', 'package-lock.json'), TRUNCATED_JSON);
-    write('app.ts', 'export const n = 1;\n');
-    expect(() => assertDiscoveredLockfiles({ root, exclude: ['other/**'] })).toThrow(
-      path.join(root, 'packages', 'web', 'package-lock.json'),
-    );
   });
 });

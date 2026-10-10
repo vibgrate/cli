@@ -12,10 +12,6 @@ backward compatible.
 
 ## [Unreleased]
 
-### Fixed
-
-- **A truncated lockfile fails `vg scan` and `vg build`.** A `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, or peer lockfile cut off mid-file exits non-zero. The error names that file and the format, and tells you to regenerate it with your package manager. It does not include the file's contents. `vg scan` checks before scoring drift or starting parse workers, including `--no-graph` and a lockfile nested in a subdirectory. A nested lockfile used to be reported as "no lockfile", or the code map was skipped, and the command exited 0. When several lockfiles are invalid, the error names the path that sorts first.
-
 ### Changed
 
 - **Machine-readable output drops absolute home-directory paths (#282).**
@@ -45,6 +41,16 @@ backward compatible.
   are retired names for those flags.
 
 ### Fixed
+
+- **A truncated or syntactically invalid lockfile stops `vg scan` and `vg build` (#310).**
+  The check runs before a dependency graph is built and before source files are
+  parsed, so parse workers are not started and a partial map is not written.
+  The error names each bad file, in path order, including lockfiles the walk
+  otherwise skips (for example `bun.lock`, `mix.lock`, and `Cargo.lock`). It
+  tells you to regenerate the file with your package manager and does not
+  include the file's contents. The process exits non-zero. A valid lockfile is
+  scanned and built as before. An empty `go.sum` or `go.work.sum` is valid:
+  the module has no dependencies.
 
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its

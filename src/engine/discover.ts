@@ -4,7 +4,7 @@ import ignore, { type Ignore } from 'ignore';
 import { langForExtension, langById, type LanguageDef } from './languages.js';
 import { requireDataConfig } from '../core-open/config.js';
 import { dropBlankPatterns, gitignoreWithoutBlankLines } from '../core-open/utils/glob.js';
-import { assertLockfileFile, lockfileKind, LockfileParseError } from '../core-open/utils/lockfile-parse.js';
+import { assertLockfileFile, lockfileKind } from '../core-open/utils/lockfile-parse.js';
 import { assertSafeWalkRoot, createWalkBudget, noteWalkEntry } from '../core-open/utils/root-safety.js';
 import { emitSkippedSymlinkNotice } from '../core-open/utils/skipped-symlinks.js';
 
@@ -226,84 +226,47 @@ export function loadRootIgnore(root: string, exclude: string[]): Ignore {
   return ig;
 }
 
-interface ProjectWalk {
-  root: string;
-  exclude?: string[];
-  paths?: string[];
-  maxEntries?: number;
-  /** Source files to keep. Omit when the caller only validates lockfiles. */
-  found?: Map<string, DiscoveredFile>;
-  allowLang?: (lang: LanguageDef) => boolean;
-  /**
-   * Symlinks this walk skipped. Omit to stay quiet — `vg scan` validates
-   * lockfiles before the file walk that prints the one notice.
-   */
-  skippedSymlinks?: string[];
-}
-
-/**
- * The invalid lockfile whose path sorts first. Directory entries are sorted
- * before the walk, and this pick does not depend on which of two bad files
- * `readdir` returned first.
- */
-function firstLockfileError(errors: readonly LockfileParseError[]): LockfileParseError | undefined {
-  if (errors.length === 0) return undefined;
-  return [...errors].sort((a, b) => (a.filePath < b.filePath ? -1 : a.filePath > b.filePath ? 1 : 0))[0];
-}
-
-/**
- * Walk a project the way {@link discover} does. Lockfiles are syntax-checked
- * here, on this thread, before any source parse worker exists. A truncated
- * file is recorded and the walk continues so the reported path is stable.
- */
-function walkProject(options: ProjectWalk): LockfileParseError[] {
+export function discover(options: DiscoverOptions): DiscoveredFile[] {
   const root = path.resolve(options.root);
-  const rootIg = loadRootIgnore(root, options.exclude ?? []);
-  const allowLang = options.allowLang ?? ((): boolean => true);
-  const found = options.found;
-  const skippedSymlinks = options.skippedSymlinks;
-  const lockfileErrors: LockfileParseError[] = [];
-  const budget = createWalkBudget(root, options.maxEntries);
+  const onlyLangs = (options.only ?? []).filter(Boolean);
+  const allowLang = (lang: LanguageDef): boolean =>
+    onlyLangs.length === 0 || onlyLangs.includes(lang.id);
 
+  // Validate `--only` ids early so a typo is a usage error, not silent emptiness.
+  for (const id of onlyLangs) {
+    if (!langById(id)) {
+      throw new UsageError(`unknown language "${id}" for --only`);
+    }
+  }
+
+  const rootIg = loadRootIgnore(root, options.exclude ?? []);
+
+  // Scope roots: explicit paths, or the whole repo.
   const scopeAbs = (options.paths && options.paths.length
     ? options.paths.map((p) => path.resolve(root, p))
     : [root]
   ).filter((p) => fs.existsSync(p));
+
+  const found = new Map<string, DiscoveredFile>();
+  const budget = createWalkBudget(root, options.maxEntries);
+  // Symlinks are not followed. Dirent.isDirectory() / isFile() are false for a
+  // link, so a directory link to its parent cannot re-enter this walk. The
+  // notice lists the ones this walk skipped; ignored links stay quiet.
+  const skippedSymlinks: string[] = [];
 
   const considerFile = (abs: string): void => {
     const rel = toPosix(path.relative(root, abs));
     if (rel.startsWith('..')) return; // outside root
     if (rel === '' || rootIg.ignores(rel)) return;
     if (SKIP_FILES.has(path.basename(abs).toLowerCase())) {
-      // Lockfiles are not source. A truncated one must fail the command
-      // rather than be skipped into an empty dependency graph.
-      if (lockfileKind(path.basename(abs))) {
-        try {
-          assertLockfileFile(abs);
-        } catch (err) {
-          if (err instanceof LockfileParseError) {
-            lockfileErrors.push(err);
-            return;
-          }
-          throw err;
-        }
-      }
+      // Lockfiles are not source, but a truncated one must fail the build
+      // here — before the parse pool starts — rather than being skipped.
+      if (lockfileKind(path.basename(abs))) assertLockfileFile(abs);
       return;
     }
-    if (!found) return;
     const lang = langForExtension(path.extname(abs));
     if (!lang || !allowLang(lang)) return;
     found.set(rel, { rel, abs, lang });
-  };
-
-  const note = (): void => {
-    const over = noteWalkEntry(budget);
-    if (!over) return;
-    // A lockfile we already know is bad is the error to show. The budget
-    // still stops a walk that has not seen one.
-    const lockfileError = firstLockfileError(lockfileErrors);
-    if (lockfileError) throw lockfileError;
-    throw over;
   };
 
   const walk = (dir: string): void => {
@@ -313,24 +276,24 @@ function walkProject(options: ProjectWalk): LockfileParseError[] {
     } catch {
       return; // unreadable dir — skip rather than crash the build
     }
-    // Sorted so two invalid lockfiles always surface the same path.
-    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const entry of entries) {
       const abs = path.join(dir, entry.name);
       const rel = toPosix(path.relative(root, abs));
       if (entry.isSymbolicLink()) {
         if (rel && (rootIg.ignores(rel) || rootIg.ignores(`${rel}/`))) continue;
-        if (rel && skippedSymlinks) skippedSymlinks.push(rel);
+        if (rel) skippedSymlinks.push(rel);
         continue;
       }
       if (entry.isDirectory()) {
         if (isSkippedDirName(entry.name)) continue;
         if (rel && rootIg.ignores(`${rel}/`)) continue;
-        note();
+        const over = noteWalkEntry(budget);
+        if (over) throw over;
         walk(abs);
       } else if (entry.isFile()) {
         if (rel && rootIg.ignores(rel)) continue;
-        note();
+        const over = noteWalkEntry(budget);
+        if (over) throw over;
         considerFile(abs);
       }
     }
@@ -344,56 +307,8 @@ function walkProject(options: ProjectWalk): LockfileParseError[] {
     } else if (stat.isFile()) considerFile(scope);
   }
 
-  return lockfileErrors;
-}
-
-export function discover(options: DiscoverOptions): DiscoveredFile[] {
-  const onlyLangs = (options.only ?? []).filter(Boolean);
-  const allowLang = (lang: LanguageDef): boolean =>
-    onlyLangs.length === 0 || onlyLangs.includes(lang.id);
-
-  // Validate `--only` ids early so a typo is a usage error, not silent emptiness.
-  for (const id of onlyLangs) {
-    if (!langById(id)) {
-      throw new UsageError(`unknown language "${id}" for --only`);
-    }
-  }
-
-  const found = new Map<string, DiscoveredFile>();
-  // Symlinks are not followed. Dirent.isDirectory() / isFile() are false for a
-  // link, so a directory link to its parent cannot re-enter this walk. The
-  // notice lists the ones this walk skipped; ignored links stay quiet.
-  const skippedSymlinks: string[] = [];
-  const lockfileError = firstLockfileError(walkProject({
-    root: options.root,
-    exclude: options.exclude,
-    paths: options.paths,
-    maxEntries: options.maxEntries,
-    found,
-    allowLang,
-    skippedSymlinks,
-  }));
-  // Before the symlink notice, and before the caller starts parse workers.
-  if (lockfileError) throw lockfileError;
   emitSkippedSymlinkNotice(skippedSymlinks);
   return [...found.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
-}
-
-/**
- * Fail when any in-scope lockfile is truncated or invalid. Same skip and
- * ignore rules as {@link discover}. Does not print the symlink notice and
- * does not start parse workers. `vg scan` calls this before drift scoring.
- */
-export function assertDiscoveredLockfiles(
-  options: Pick<DiscoverOptions, 'root' | 'exclude' | 'paths' | 'maxEntries'>,
-): void {
-  const lockfileError = firstLockfileError(walkProject({
-    root: options.root,
-    exclude: options.exclude,
-    paths: options.paths,
-    maxEntries: options.maxEntries,
-  }));
-  if (lockfileError) throw lockfileError;
 }
 
 /** A usage error that maps to exit code 5 at the CLI boundary. */

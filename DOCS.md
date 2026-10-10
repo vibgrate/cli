@@ -2136,6 +2136,8 @@ Switches (flags that take no value, such as `--vulns`, `--offline` or `--no-grap
 
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
+A truncated or syntactically invalid lockfile stops the scan before a dependency graph is built. The error names the file (for example `package-lock.json`, `pnpm-lock.yaml`, or `yarn.lock`) and tells you to regenerate it with your package manager. The message does not include the lockfile, and the process exits non-zero. A valid lockfile is scanned as before.
+
 `vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once on stderr. See [Symlinks](#symlinks).
 
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
@@ -2152,7 +2154,7 @@ pnpm-lock.yaml: unknown optional lockfile field "futureOptional"; continuing wit
 
 The path is relative to the directory you ran the command from, when the lockfile is under that directory. Otherwise the warning uses the file name only. The warning names the field. It does not print the field's value, an environment value, or an authorization header. A field name that is not a plain identifier is reported as `(name omitted)`.
 
-A lockfile that is truncated, empty, or missing the structure its format requires still fails the command. The error names the file and the format, tells you to regenerate the file with your package manager, and the process exits non-zero. The error does not include the file's contents. `vg scan` performs this check before it scores drift or starts parse workers, including with `--no-graph`, and including a lockfile in a subdirectory. `vg build` checks during discovery, before the parse pool starts. When more than one lockfile is invalid, the error names the path that sorts first.
+A lockfile that is truncated or not valid syntax still fails the command, including the other lockfiles the walk skips (for example `bun.lock`, `mix.lock`, `Cargo.lock`). The error names each bad file, in path order, tells you to regenerate it with your package manager, and the process exits non-zero. The error does not include the file's contents. An empty `go.sum` or `go.work.sum` is valid: the module has no dependencies.
 
 `vg scan` and `vg sbom export` follow this for npm, pnpm, yarn, poetry, uv, pdm, Pipfile, Cargo, Composer, NuGet, Swift package pins, and pub. A Gradle lock line, a Gemfile spec, and a `go.sum` line do not have optional field names. A line that does not match that format is invalid, and the command fails.
 
@@ -2707,6 +2709,8 @@ vg build [paths...]
 ```
 
 Maps source code into a graph artifact, enabling all downstream queries (`vg show`, `vg ask`, `vg impact`, etc.).
+
+A truncated or syntactically invalid lockfile stops the build before source files are parsed, so parse workers are not left running and a partial map is not written. The error names the file and tells you to regenerate it with your package manager. A valid lockfile builds as before.
 
 | Flag | Default | Description |
 |------|---------|-------------|

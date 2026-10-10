@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { discover, mergeExcludes, type DiscoveredFile } from './discover.js';
+import { assertLockfilesValid } from './lockfile-guard.js';
 import { parseFiles } from './pool.js';
 import { resolve } from './resolve.js';
 import { inheritDuties } from './duties-inherit.js';
@@ -159,6 +160,9 @@ export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
   const timer = new StageTimer();
   timer.start('total');
   const root = path.resolve(options.root);
+  // Before discovery and source parse workers. A bad lockfile must not start
+  // a worker pool or leave a partial graph behind.
+  assertLockfilesValid(root);
   const exclude = mergeExcludes(root, options.exclude);
   // Resolved before discovery so the walk itself stops at the corpus cap
   // instead of reading a filesystem root or an enormous unpack first.
