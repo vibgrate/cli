@@ -493,6 +493,8 @@ docker buildx build --push --provenance=true --sbom=true --metadata-file build.j
 vg evidence release acme-gateway 3.2.1 --image ghcr.io/acme/gateway:3.2.1 --ship-date 2025-02-14
 ```
 
+An SBOM passed with `--from`, or attached to the image, has to be valid CycloneDX or SPDX JSON. A file that is truncated, not JSON, or missing a required field exits 1. The message names the file and the format it expected, and says to regenerate the SBOM. It does not include the document. A component or package missing `name` fails the command instead of being dropped.
+
 `--image <ref>` asks Docker for the image digest, its `org.opencontainers.image.*` labels, and the provenance and SBOM attestations attached to it; the attached SBOM becomes the manifest. It runs `docker image inspect` and `docker buildx imagetools inspect`, and the second contacts the registry when the reference is not present locally. Without a daemon, pass the same facts as files: `--buildkit-metadata build.json` for the digest and build reference, `--provenance <file>` for a SLSA attestation (source repository, commit, base images), and `--from <file>` for a CycloneDX or SPDX SBOM, bare or as an attestation. The result is recorded under `build` in the frozen manifest. A `--digest` that contradicts the build is an error, and attestation signatures are recorded as unverified — `vg` has no registry trust root, so verify them with `cosign`.
 
 ### What is in a bundle, and what "verified" means

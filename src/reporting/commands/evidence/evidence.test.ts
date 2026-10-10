@@ -13,27 +13,6 @@ import { osvToAdvisory } from './advisory.js';
 import { buildTimeStampReq, parseTimestampToken, verifyTimestamp } from './tsa.js';
 import type { Advisory, EvidenceOrg, Product, Release } from './types.js';
 
-/** SPDX 2.3 document the release reader accepts. Package fields fill the schema defaults. */
-function spdxDocument(packages: Array<Record<string, unknown>>): Record<string, unknown> {
-  return {
-    spdxVersion: 'SPDX-2.3',
-    dataLicense: 'CC0-1.0',
-    SPDXID: 'SPDXRef-DOCUMENT',
-    name: 'example',
-    documentNamespace: 'https://example.com/spdx/example',
-    creationInfo: { created: '2026-01-01T00:00:00Z', creators: ['Tool: vg-test'] },
-    packages: packages.map((pkg, index) => ({
-      SPDXID: `SPDXRef-Package-${index + 1}`,
-      downloadLocation: 'NOASSERTION',
-      filesAnalyzed: false,
-      licenseConcluded: 'NOASSERTION',
-      licenseDeclared: 'NOASSERTION',
-      copyrightText: 'NOASSERTION',
-      ...pkg,
-    })),
-  };
-}
-
 const org: EvidenceOrg = {
   defaultRegime: 'cra',
   coordinatorCsirt: 'NCSC-NL',
@@ -169,7 +148,7 @@ describe('release freezing', () => {
     expect(comps[0]).toMatchObject({ name: 'netty', version: '4.1.104', ecosystem: 'Maven' });
   });
   it('extracts components from an SPDX document and from an SBOM attestation', () => {
-    const spdx = spdxDocument([{ name: 'netty', versionInfo: '4.1.104', externalRefs: [{ referenceType: 'purl', referenceLocator: 'pkg:maven/io.netty/netty@4.1.104' }] }]);
+    const spdx = { spdxVersion: 'SPDX-2.3', SPDXID: 'SPDXRef-DOCUMENT', name: 'netty-sbom', packages: [{ name: 'netty', versionInfo: '4.1.104', externalRefs: [{ referenceType: 'purl', referenceLocator: 'pkg:maven/io.netty/netty@4.1.104' }] }] };
     expect(componentsFromSource(spdx, 'sbom.spdx.json')).toEqual({ attested: false, components: [{ name: 'netty', version: '4.1.104', purl: 'pkg:maven/io.netty/netty@4.1.104', ecosystem: 'Maven' }] });
     const statement = { _type: 'https://in-toto.io/Statement/v0.1', subject: [], predicateType: 'https://spdx.dev/Document', predicate: spdx };
     const envelope = { payloadType: 'application/vnd.in-toto+json', payload: Buffer.from(JSON.stringify(statement)).toString('base64'), signatures: [] };
@@ -190,7 +169,7 @@ describe('release freezing from BuildKit outputs', () => {
       { uri: 'git+https://github.com/acme/web@refs/heads/main', digest: { sha1: 'deadbeef' } },
     ],
   };
-  const spdx = spdxDocument([{ name: 'left-pad', versionInfo: '1.3.0', externalRefs: [{ referenceType: 'purl', referenceLocator: 'pkg:npm/left-pad@1.3.0' }] }]);
+  const spdx = { spdxVersion: 'SPDX-2.3', SPDXID: 'SPDXRef-DOCUMENT', name: 'left-pad-sbom', packages: [{ name: 'left-pad', versionInfo: '1.3.0', externalRefs: [{ referenceType: 'purl', referenceLocator: 'pkg:npm/left-pad@1.3.0' }] }] };
   const base = { productId: 'sentinelgate', version: '3.2.1', distribution: ['DE'], frozenAt: '2026-09-09T00:00:00.000Z' };
 
   function tmp(files: Record<string, unknown>): string {

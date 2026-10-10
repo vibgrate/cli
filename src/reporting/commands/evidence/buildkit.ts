@@ -24,7 +24,6 @@
 
 import { execFile } from 'node:child_process';
 import { CliError, ExitCode } from '../../../util/exit.js';
-import { SbomInputError } from './sbom-input.js';
 import type { FrozenComponent, ReleaseBuild } from './types.js';
 
 // ── `--metadata-file` ──
@@ -255,30 +254,17 @@ function ecosystemForPurl(purl: string): string | undefined {
 /**
  * SPDX 2.x `packages[]` → frozen components. The package that *describes the
  * image itself* (purpose `CONTAINER`, or a `pkg:oci/` purl) is not a component
- * of the release and is skipped; so is a schema-valid package with no
- * `versionInfo` (that field is optional, and a frozen manifest needs a
- * concrete version). A package that is not an object, or that has no name, is
- * a schema failure — it is not dropped.
+ * of the release and is skipped; so is anything without a concrete version.
  */
-export function componentsFromSpdx(doc: SpdxDocument, label = 'SBOM'): FrozenComponent[] {
-  if (doc.packages !== undefined && !Array.isArray(doc.packages)) {
-    throw new SbomInputError(label, 'SPDX', 'packages must be an array');
-  }
+export function componentsFromSpdx(doc: SpdxDocument): FrozenComponent[] {
   const out: FrozenComponent[] = [];
   const seen = new Set<string>();
-  const packages = doc.packages ?? [];
-  for (let i = 0; i < packages.length; i++) {
-    const pkg: unknown = packages[i];
-    if (pkg === null || typeof pkg !== 'object' || Array.isArray(pkg)) {
-      throw new SbomInputError(label, 'SPDX', `packages[${i}] must be an object`);
-    }
-    const entry = pkg as SpdxPackage;
-    const name = str(entry.name);
-    const version = str(entry.versionInfo);
-    if (!name) throw new SbomInputError(label, 'SPDX', `packages[${i}] is missing required field "name"`);
-    if (!version) continue;
-    const purl = purlFromExternalRefs(entry.externalRefs, i, label);
-    if (entry.primaryPackagePurpose === 'CONTAINER' || purl?.startsWith('pkg:oci/')) continue;
+  for (const pkg of doc.packages ?? []) {
+    const name = str(pkg.name);
+    const version = str(pkg.versionInfo);
+    if (!name || !version) continue;
+    const purl = pkg.externalRefs?.find((r) => r.referenceType === 'purl' && typeof r.referenceLocator === 'string')?.referenceLocator;
+    if (pkg.primaryPackagePurpose === 'CONTAINER' || purl?.startsWith('pkg:oci/')) continue;
     const ecosystem = purl ? ecosystemForPurl(purl) : undefined;
     const key = `${ecosystem ?? ''}|${name}|${version}`;
     if (seen.has(key)) continue;
@@ -286,18 +272,6 @@ export function componentsFromSpdx(doc: SpdxDocument, label = 'SBOM'): FrozenCom
     out.push({ name, version, purl, ecosystem });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
-}
-
-function purlFromExternalRefs(refs: SpdxPackage['externalRefs'], index: number, label: string): string | undefined {
-  if (refs === undefined) return undefined;
-  if (!Array.isArray(refs)) throw new SbomInputError(label, 'SPDX', `packages[${index}].externalRefs must be an array`);
-  for (let i = 0; i < refs.length; i++) {
-    const ref: unknown = refs[i];
-    if (ref === null || typeof ref !== 'object' || Array.isArray(ref)) {
-      throw new SbomInputError(label, 'SPDX', `packages[${index}].externalRefs[${i}] must be an object`);
-    }
-  }
-  return refs.find((r) => r.referenceType === 'purl' && typeof r.referenceLocator === 'string')?.referenceLocator;
 }
 
 // ── Local image inspection (`docker`) ──

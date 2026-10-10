@@ -42,6 +42,13 @@ backward compatible.
 
 ### Fixed
 
+- **`vg evidence release` rejects an invalid SPDX or CycloneDX SBOM.** A
+  `--from` file that is truncated, not valid JSON, or missing a required
+  field exits `1`. The message names the file and the expected format, and
+  says to regenerate the SBOM. It does not include the document or a home
+  directory. A component or package missing `name` fails the command instead
+  of being dropped. The same check applies to an SBOM attached to an image.
+
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
   Package URL when one is written, otherwise by package name, then by version.
