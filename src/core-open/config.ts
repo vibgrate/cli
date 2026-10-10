@@ -6,6 +6,7 @@ import * as fs from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import type * as TsModule from 'typescript';
 import { parseDocument } from 'yaml';
+import { parseDriftBudget } from './drift-budget.js';
 import type { VibgrateConfig } from './types.js';
 import { pathExists, readTextFile } from './utils/fs.js';
 import { redactSecrets } from './utils/redact.js';
@@ -59,7 +60,9 @@ export function isConfigFileError(err: unknown): err is ConfigFileError {
 /**
  * Parse a data config (YAML or JSON) into a plain object. Throws
  * {@link ConfigFileError} naming the file (and the line or key when the
- * parser can say) when the text is not a valid mapping.
+ * parser can say) when the text is not a valid mapping, or when `driftBudget`
+ * or `review` names an unknown key or a value of the wrong type. The message
+ * does not include the value.
  */
 export function parseDataConfig(text: string, file: string): Record<string, unknown> {
   const parsed = /\.ya?ml$/.test(file) ? parseYamlConfig(text, file) : parseJsonConfig(text, file);
@@ -298,6 +301,181 @@ function assertKnownShapes(parsed: Record<string, unknown>, text: string, file: 
       { file, line, key: check.key },
     );
   }
+  // A mapping still has to name known keys and the right types, so a typo
+  // stops the command instead of scanning or reviewing under defaults.
+  if (isRecord(parsed.driftBudget)) assertDriftBudgetShape(parsed.driftBudget, text, file);
+  if (isRecord(parsed.review)) assertReviewBlock(parsed.review, text, file);
+}
+
+function throwKeyProblem(file: string, text: string, key: string, problem: string): never {
+  const line = lineOfPath(text, file, key.split('.'));
+  const at = line !== undefined ? ` (line ${line})` : '';
+  throw configFileError(
+    `${file}: \`${key}\` ${problem}${at}. Fix that key and run the command again.`,
+    { file, line, key },
+  );
+}
+
+/** First `parseDriftBudget` failure, as a config error. Same input, same message. */
+function assertDriftBudgetShape(value: unknown, text: string, file: string): void {
+  const parsed = parseDriftBudget(value);
+  if (!parsed || parsed.ok) return;
+  const error = parsed.errors[0] ?? 'driftBudget is not valid.';
+  const match = /^(driftBudget(?:\.[^ ]+)*)\s+([\s\S]+)$/.exec(error);
+  const key = match?.[1] ?? 'driftBudget';
+  const problem = (match?.[2] ?? error).replace(/\.$/, '');
+  throwKeyProblem(file, text, key, problem);
+}
+
+const REVIEW_KEYS = [
+  'enforcement',
+  'failOn',
+  'targetPattern',
+  'approvedExceptions',
+  'protected',
+  'highConfidenceThreshold',
+  'highSeverityDecision',
+  'detectionMode',
+  'minSeverity',
+] as const;
+
+const REVIEW_KEY_SET: ReadonlySet<string> = new Set(REVIEW_KEYS);
+
+const REVIEW_ENUMS: Record<string, readonly string[]> = {
+  enforcement: ['advisory', 'enforced'],
+  failOn: ['none', 'fail', 'needs_review'],
+  highSeverityDecision: ['fail', 'needs_review'],
+  detectionMode: ['budget', 'balanced', 'precise', 'ultra'],
+  minSeverity: ['low', 'medium', 'high', 'critical'],
+};
+
+const PROTECTED_KEYS = ['unguardedEntrypoint', 'knownVulnerableDependency', 'validatedTaint'] as const;
+const PROTECTED_KEY_SET: ReadonlySet<string> = new Set(PROTECTED_KEYS);
+
+function joinWords(values: readonly string[]): string {
+  if (values.length <= 1) return values[0] ?? '';
+  if (values.length === 2) return `${values[0]} or ${values[1]}`;
+  return `${values.slice(0, -1).join(', ')}, or ${values[values.length - 1]}`;
+}
+
+function joinQuoted(values: readonly string[]): string {
+  return joinWords(values.map((value) => `"${value}"`));
+}
+
+/**
+ * Known `review` keys with the wrong type, and unknown keys, are errors.
+ * A misspelt policy key must not silently keep the default (often a weaker
+ * gate). Absent keys are fine — those keep their defaults later.
+ */
+function assertReviewBlock(block: Record<string, unknown>, text: string, file: string): void {
+  for (const key of Object.keys(block)) {
+    const path = `review.${key}`;
+    if (!REVIEW_KEY_SET.has(key)) {
+      throwKeyProblem(file, text, path, `is not a known setting. Use ${joinWords(REVIEW_KEYS)}`);
+    }
+    const problem = reviewFieldProblem(key, block[key]);
+    if (problem) throwKeyProblem(file, text, problem.key, problem.problem);
+  }
+}
+
+function reviewFieldProblem(key: string, value: unknown): { key: string; problem: string } | null {
+  const path = `review.${key}`;
+  const allowed = REVIEW_ENUMS[key];
+  if (allowed) {
+    if (typeof value === 'string' && allowed.includes(value)) return null;
+    return { key: path, problem: `must be ${joinQuoted(allowed)}` };
+  }
+  if (key === 'targetPattern') {
+    return typeof value === 'string' ? null : { key: path, problem: 'must be a string' };
+  }
+  if (key === 'approvedExceptions') {
+    return isStringList(value)
+      ? null
+      : { key: path, problem: 'must be a list of strings, for example approvedExceptions: ["ui/api"]' };
+  }
+  if (key === 'highConfidenceThreshold') {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1) return null;
+    return { key: path, problem: 'must be a number from 0 to 1' };
+  }
+  if (key === 'protected') return protectedProblem(value);
+  return { key: path, problem: 'is not a supported setting' };
+}
+
+function protectedProblem(value: unknown): { key: string; problem: string } | null {
+  if (!isRecord(value)) {
+    return { key: 'review.protected', problem: 'must be a mapping of true or false settings' };
+  }
+  for (const key of Object.keys(value)) {
+    const path = `review.protected.${key}`;
+    if (!PROTECTED_KEY_SET.has(key)) {
+      return { key: path, problem: `is not a known setting. Use ${joinWords(PROTECTED_KEYS)}` };
+    }
+    if (typeof value[key] !== 'boolean') return { key: path, problem: 'must be true or false' };
+  }
+  return null;
+}
+
+function lineOfPath(text: string, file: string, parts: readonly string[]): number | undefined {
+  if (parts.length === 0) return undefined;
+  return /\.json$/.test(file) ? lineOfJsonPath(text, parts) : lineOfYamlPath(text, parts);
+}
+
+function lineOfJsonPath(text: string, parts: readonly string[]): number | undefined {
+  let from = 0;
+  let found: number | undefined;
+  for (const part of parts) {
+    const match = jsonKeyRe(part).exec(text.slice(from));
+    if (!match) return found;
+    const index = from + match.index;
+    found = text.slice(0, index).split(/\r?\n/).length;
+    from = index + match[0].length;
+  }
+  return found;
+}
+
+function jsonKeyRe(key: string): RegExp {
+  return new RegExp(`"${escapeRegExp(key)}"\\s*:`);
+}
+
+function lineOfYamlPath(text: string, parts: readonly string[]): number | undefined {
+  const lines = text.split(/\r?\n/);
+  let lineIndex = 0;
+  let minIndent = 0;
+  let found: number | undefined;
+  for (let depth = 0; depth < parts.length; depth++) {
+    const re = yamlKeyRe(parts[depth] ?? '');
+    let hit: number | undefined;
+    let indent = 0;
+    for (let i = lineIndex; i < lines.length; i++) {
+      const line = lines[i] ?? '';
+      const trimmed = line.trim();
+      if (trimmed === '' || trimmed.startsWith('#')) continue;
+      const indentNow = leadingSpaces(line);
+      if (depth > 0 && indentNow < minIndent) return found;
+      if (!re.test(line)) continue;
+      indent = indentNow;
+      hit = i;
+      break;
+    }
+    if (hit === undefined) return found;
+    found = hit + 1;
+    lineIndex = hit + 1;
+    minIndent = indent + 1;
+  }
+  return found;
+}
+
+function yamlKeyRe(key: string): RegExp {
+  const escaped = escapeRegExp(key);
+  return new RegExp(`^\\s*(?:${escaped}|"${escaped}"|'${escaped}')\\s*:`);
+}
+
+function leadingSpaces(line: string): number {
+  return /^ */.exec(line)?.[0].length ?? 0;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function toStaticValue(
