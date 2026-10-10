@@ -320,6 +320,8 @@ export class FileCache {
   private _stuckPaths: string[] = [];
   /** Files skipped because they exceed maxFileSizeToScan */
   private _skippedLargeFiles: string[] = [];
+  /** Symlinks the shared walk did not follow. One coalesced warning is printed. */
+  private _skippedSymlinks: string[] = [];
   /** Maximum file size (bytes) we will read. 0 = unlimited. */
   private _maxFileSize = 0;
   /** Per-project / per-directory scan timeout in ms. */
@@ -397,6 +399,11 @@ export class FileCache {
   /** Get files that were skipped because they exceeded maxFileSizeToScan */
   get skippedLargeFiles(): readonly string[] {
     return this._skippedLargeFiles;
+  }
+
+  /** Symlink paths this cache's walk skipped. Root-relative, walk order. */
+  get skippedSymlinks(): readonly string[] {
+    return this._skippedSymlinks;
   }
 
   // ── Directory walking ──
@@ -591,6 +598,7 @@ export class FileCache {
 
     await walk(rootDir, []);
     if (budgetError) throw budgetError;
+    for (const rel of skippedSymlinks) this._skippedSymlinks.push(rel);
     emitSkippedSymlinkNotice(skippedSymlinks);
 
     let totalDirs = 0;

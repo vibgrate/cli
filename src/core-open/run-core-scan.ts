@@ -37,6 +37,7 @@ import { formatSarif } from './formatters/sarif.js';
 import { formatMarkdown } from './formatters/markdown.js';
 import { loadConfig, appendExcludePatterns } from './config.js';
 import { pathExists, readJsonFile, writeJsonFile, writeTextFile, ensureDir, FileCache, quickTreeCount } from './utils/fs.js';
+import { skippedSymlinkWarning } from './utils/skipped-symlinks.js';
 import { portableValue } from './utils/portable-path.js';
 import { assertSafeWalkRoot } from './utils/root-safety.js';
 import { detectVcs } from './utils/vcs.js';
@@ -774,7 +775,12 @@ export async function runCoreScan(
   const degradations: CodedWarning[] = [];
   const stuckPaths = [...fileCache.stuckPaths].sort((a, b) => a.localeCompare(b));
   const skippedLarge = [...fileCache.skippedLargeFiles].sort((a, b) => a.localeCompare(b));
+  const symlinkSkip = skippedSymlinkWarning(fileCache.skippedSymlinks);
   const timeoutSeconds = Math.round(projectScanTimeoutMs / 1000);
+
+  // The walk already wrote this one line. Recording it here puts the same
+  // warning on the artifact without a second stderr copy.
+  if (symlinkSkip) degradations.push(symlinkSkip);
 
   if (stuckPaths.length > 0) {
     for (const rel of stuckPaths) {
@@ -871,6 +877,7 @@ export async function runCoreScan(
   if (sortedDegradations.length > 0) {
     artifact.degradations = sortedDegradations;
     for (const warning of sortedDegradations) {
+      if (warning.code === WARNING_CODES.SYMLINK_SKIPPED) continue;
       console.error(chalk.yellow(formatWarningLine(warning)));
     }
   }

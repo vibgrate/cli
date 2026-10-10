@@ -7,6 +7,7 @@ import { dropBlankPatterns, gitignoreWithoutBlankLines } from '../core-open/util
 import { assertLockfileFile, lockfileKind } from '../core-open/utils/lockfile-parse.js';
 import { assertSafeWalkRoot, createWalkBudget, noteWalkEntry } from '../core-open/utils/root-safety.js';
 import { emitSkippedSymlinkNotice } from '../core-open/utils/skipped-symlinks.js';
+import type { CodedWarning } from '../core-open/warnings.js';
 
 /**
  * Deterministic file discovery.
@@ -167,6 +168,11 @@ export interface DiscoverOptions {
    * Default: `VG_MAX_FILES`, else 100000.
    */
   maxEntries?: number;
+  /**
+   * Called with the one coalesced symlink-skip warning when this walk skips
+   * any. The stderr line is still written here.
+   */
+  onSymlinkSkip?: (warning: CodedWarning) => void;
 }
 
 export interface DiscoveredFile {
@@ -307,7 +313,8 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
     } else if (stat.isFile()) considerFile(scope);
   }
 
-  emitSkippedSymlinkNotice(skippedSymlinks);
+  const symlinkSkip = emitSkippedSymlinkNotice(skippedSymlinks);
+  if (symlinkSkip) options.onSymlinkSkip?.(symlinkSkip);
   return [...found.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 }
 
