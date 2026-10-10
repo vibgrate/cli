@@ -29,7 +29,10 @@ different problems and get different numbers.
 > **Availability:** **DriftScore is free** and computed by the CLI (offline).
 > **RiskScore and DriftRisk are premium and [Vibgrate Cloud](https://vibgrate.com/cloud)-only** — they require a
 > completed scan ingestion (server-side security data + the blend), so they appear
-> in the dashboard, never in the free/offline CLI output.
+> in the dashboard, never in the free/offline CLI output. Which score fields
+> `vg scan --format json` actually writes, and how an unmeasured score reads
+> (`null`, never `0`), is documented in
+> [DOCS.md](https://github.com/vibgrate/cli/blob/main/DOCS.md#score-fields-in-the-json-artifact).
 
 ---
 

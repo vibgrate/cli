@@ -581,7 +581,7 @@ vg scan --baseline .vibgrate/baseline.json --drift-budget 40 --drift-worsening 5
 
 - `--drift-budget <score>` fails the build if drift exceeds your budget.
 - `--drift-worsening <percent>` fails the build if drift worsens by more than X% vs baseline.
-- `--summary-out <file>` writes a small JSON summary (`driftScore`, `riskLevel`, change since `--baseline`) that a CI step can read, even when a gate fails the run.
+- `--summary-out <file>` writes a small JSON summary (`driftScore`, `riskLevel`, change since `--baseline`) that a CI step can read, even when a gate fails the run. An unmeasured score is `null`, never `0`. The full artifact carries the same `drift.*` fields plus the per-component scores: [DOCS.md](./DOCS.md#score-fields-in-the-json-artifact).
 - `--junit <file>` writes a deterministic JUnit XML summary of findings and those gates, next to `--format` (JSON or SARIF). The exit code is unchanged; see [DOCS.md](./DOCS.md#junit).
 
 ```bash
