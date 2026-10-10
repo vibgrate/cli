@@ -364,12 +364,7 @@ function npmLockGraph(root: string): LockfileGraph | undefined {
       // package by its install-path segment ("foo-cjs") but record the real
       // registry name in `name` ("foo") — use that when present, or the SBOM
       // reports a component/purl for a package that doesn't exist on npm.
-      // A blank `name` is not a name. Keep the path segment so the component
-      // is never emitted with an empty name (that is "PURL name is required"
-      // in a consumer).
-      const declaredName = typeof val?.name === 'string' ? val.name.trim() : '';
-      const name = declaredName || m[1];
-      if (!name) continue;
+      const name = typeof val?.name === 'string' ? val.name : m[1];
       const key = `${name}@${version}`;
       keyOf.set(p, key);
       components.set(key, { package: name, version });

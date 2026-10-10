@@ -93,6 +93,8 @@ A CycloneDX component for `typescript` has `type`, `bom-ref`, `name`, `version`,
 
 On a direct row, `vibgrate:project` is the `package.json` name (`scope-fixture`). On a lockfile-only row it is the scanned project whose lockfile supplied the kept row. In a single-project scan that is the same package name. `vibgrate:projects` lists every contributing project. It is not the scan root's directory name.
 
+When the root `package.json` has no `name`, that project name is the directory's last segment instead. When it has no `version`, `repository.version` and the CycloneDX metadata component omit version. `vg sbom export` still writes the dependency rows and prints one `VG_WARN_ROOT_PACKAGE_IDENTITY` warning. The rule is in [DOCS.md](../DOCS.md#root-packagejson-without-a-name-or-version).
+
 The same manifest with a `pnpm-lock.yaml` or a `yarn.lock` writes the same `direct` / `transitive` split for packages the manifest declared, and writes `nested-prod` as `transitive`. Both omit `dependencies` and `relationships`, so nothing records that `left-pad` depends on `nested-prod`, and nothing records that `typescript` is a development dependency.
 
 A Cargo tree with `[dependencies] serde`, `[dependencies] optional-crate` (`optional = true`), `[dev-dependencies] criterion`, and `[build-dependencies] cc` exports `serde` and `optional-crate` as `direct`. `criterion`, `cc`, and the root package entry from `Cargo.lock` are `transitive`. `optional = true` does not become a field. `dependencies` and `relationships` are omitted.

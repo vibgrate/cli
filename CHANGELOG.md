@@ -42,6 +42,8 @@ backward compatible.
 
 ### Fixed
 
+- **A root `package.json` with no `name`, no `version`, or neither no longer stops `vg build`, `vg scan`, or `vg sbom export`.** The root component name falls back to the directory name. A missing version is omitted. Each command prints one `VG_WARN_ROOT_PACKAGE_IDENTITY` warning, and dependencies are still resolved. The fallback does not use an absolute path. (#359)
+
 - **SBOM component order no longer follows scan or filesystem order.**
   `vg sbom export` and CycloneDX/SPDX graph export sort a component by its
   Package URL when one is written, otherwise by package name, then by version.

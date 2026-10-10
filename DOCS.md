@@ -1984,26 +1984,27 @@ is still no package.
 
 #### Root package.json without a name or version
 
-A root `package.json` may omit `name`, `version`, or both. `vg build`, `vg scan`, and `vg sbom export` continue. They do not throw. They do not build a Package URL for the root component. A Package URL whose name is empty is what makes other SBOM tools fail with `PURL name is required`.
+A root `package.json` may omit `name`, `version`, or both. A missing field is
+one that is absent, blank, or not a string. `vg build`, `vg scan`, and
+`vg sbom export` keep going. Each prints one warning,
+`warning [VG_WARN_ROOT_PACKAGE_IDENTITY]`. Dependencies declared in that file,
+and the versions the lockfile resolves, are still reported.
 
-The fallback is one rule:
+The fallback name is the last segment of the directory you passed to the
+command. It is not an absolute path, so the same tree produces the same name
+on every machine. A missing version is omitted. The command does not write
+`0.0.0` in its place.
 
-| Field | When the field is a non-empty string | Otherwise |
+| Field | When `package.json` has the field | When it does not |
 | --- | --- | --- |
-| `name` | That string, trimmed | The directory basename: the last path segment only. This is never an absolute path, a home directory, or a host name. An empty basename, `.`, or `..` becomes `unnamed`. |
-| `version` | That string, trimmed. `vg scan` records it on `repository.version`. | Omitted. No version is invented. The CycloneDX root component has no `version` and no `purl`. |
+| Code-map package node, scan project `name`, and `repository.name` | the `name` string | the directory name |
+| `repository.version` | the `version` string | the field is omitted |
+| CycloneDX `metadata.component.name` | the directory name (`rootPath`) | the directory name (`rootPath`) |
+| CycloneDX `metadata.component.version` | omitted | omitted |
+| SPDX document `name` | `<rootPath>-sbom` | `<rootPath>-sbom` |
 
-When `name` is omitted, that basename is the root component name. `vg build` stores it as the root `package` node's qualified name. `vg scan` stores it as the project name and, unless `--repository-name` overrides it, as `repository.name`. CycloneDX `metadata.component.name` is the scan root's basename, which is the same string. Dependencies declared in the manifest are still resolved from the lockfile and from `node_modules`.
-
-One warning is printed, code `VG_WARN_ROOT_PACKAGE_IDENTITY`. The same inputs produce the same sentence. The sentence names the fallback and does not contain an absolute path.
-
-| Missing | Warning |
-| --- | --- |
-| `name` | `Root package.json has no name. The root component name is "<name>".` |
-| `version` | `Root package.json has no version. No version was invented for the root component.` |
-| both | `Root package.json has no name or version. The root component name is "<name>". No version was invented.` |
-
-`<name>` is the fallback from the table. CycloneDX repeats the sentence on `metadata.properties` as `vibgrate:rootIdentityWarning`, with `vibgrate:warningCode` set to `VG_WARN_ROOT_PACKAGE_IDENTITY`. SPDX repeats it as two document annotations. The second annotation is `warningCode=VG_WARN_ROOT_PACKAGE_IDENTITY`.
+The code map does not name that package `.`. `vg sbom export` still writes the
+root component and the dependency rows.
 
 **Gaps.** These are holes in the inventory, labeled as holes.
 
@@ -5768,7 +5769,7 @@ Stderr lines look like `warning [VG_WARN_PARSE_FAILED]: …`. The code is the to
 
 `vg build --json` keeps `warnings` as strings and adds `codedWarnings`: an array of `{ code, message }` in that same order. Each string in `warnings` ends with ` [CODE]`. `codedWarnings` is left out when there are no warnings.
 
-`vg scan --format json` adds `degradations` when a path was skipped or a baseline file could not be read. The field is left out when there are none. `vg report` prints those same rows.
+`vg scan --format json` adds `degradations` when a path was skipped, a baseline file could not be read, or the root `package.json` omitted `name` or `version`. The field is left out when there are none. `vg report` prints those same rows.
 
 `vg sbom export` prints the code on stderr. CycloneDX adds a `vibgrate:warningCode` property next to the existing warning property. SPDX adds an annotation whose comment is `warningCode=VG_WARN_…`. The warning sentences already stored on the document stay as they are.
 
@@ -5797,6 +5798,7 @@ A truncated or invalid lockfile stops the command. Warning codes cover condition
 | `VG_WARN_LICENSE_UNREPRESENTABLE` | `vg sbom` | A declared license cannot be represented in an SBOM. |
 | `VG_WARN_CVSS_UNPARSEABLE` | `vg scan` | A CVSS vector was present and could not be parsed. |
 | `VG_WARN_PURL_UNAVAILABLE` | `vg sbom` | A package URL could not be formed. The component is included without a purl. |
+| `VG_WARN_ROOT_PACKAGE_IDENTITY` | `vg build`, `vg scan`, `vg sbom` | The root `package.json` omitted `name`, `version`, or both. The root component uses the directory name when `name` is missing, and omits `version` when that field is missing. Dependencies are still resolved. |
 | `VG_WARN_SBOM_LOSSY_EDGES` | `vg sbom` | Merge dropped a different dependency list for one package. |
 | `VG_WARN_SBOM_LOSSY_MANIFEST` | `vg sbom` | Merge dropped differing manifest metadata for one package. |
 | `VG_WARN_SBOM_UNKNOWN_ECOSYSTEM` | `vg sbom` | Merge recorded an unknown ecosystem as npm. |

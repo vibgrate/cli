@@ -24,13 +24,8 @@ import type { Ignore } from 'ignore';
 import { XMLParser } from 'fast-xml-parser';
 import { nodeId, edgeId } from './ids.js';
 import { isSkippedDirName, loadRootIgnore } from './discover.js';
+import { directoryFallbackName, nonEmptyManifestString } from '../core-open/utils/root-package-identity.js';
 import { parseToml } from '../core-open/utils/toml.js';
-import {
-  directoryBaseName,
-  manifestField,
-  rootPackageIdentity,
-} from '../core-open/utils/root-package-identity.js';
-import type { CodedWarning } from '../core-open/warnings.js';
 import type { GraphEdge, GraphNode } from '../schema.js';
 
 export interface ManifestExtract {
@@ -39,11 +34,6 @@ export interface ManifestExtract {
   /** Number of manifest files processed. */
   files: number;
   deps: number;
-  /**
-   * Set when the root package.json omitted name, version, or both.
-   * Null when that file is absent, unreadable, or declares both fields.
-   */
-  rootIdentityWarning: CodedWarning | null;
 }
 
 const xml = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
@@ -89,16 +79,14 @@ export function extractManifests(
   const nodes = new Map<string, GraphNode>();
   const edges = new Map<string, GraphEdge>();
   let deps = 0;
-  let rootIdentityWarning: CodedWarning | null = null;
+  const rootBase = directoryFallbackName(absRoot);
 
   for (const rel of [...found.keys()].sort()) {
     const abs = found.get(rel)!;
     const base = path.posix.basename(rel);
     try {
       if (base === 'package.json') {
-        const ingested = ingestPackageJson(rel, abs, nodes, edges);
-        deps += ingested.deps;
-        if (ingested.warning) rootIdentityWarning = ingested.warning;
+        deps += ingestPackageJson(rel, abs, nodes, edges, rootBase);
       } else if (base === 'go.mod') {
         deps += ingestGoMod(rel, abs, nodes, edges);
       } else if (base === 'pom.xml') {
@@ -123,21 +111,7 @@ export function extractManifests(
     ),
     files: found.size,
     deps,
-    rootIdentityWarning,
   };
-}
-
-/**
- * Package node name. A declared `name` wins. The root manifest falls back to
- * the directory basename (never `.`, never an absolute path). A nested
- * manifest keeps its repo-relative directory.
- */
-function packageNodeName(rel: string, abs: string, raw: { name?: unknown }): string {
-  const declared = manifestField(raw.name);
-  if (declared) return declared;
-  if (rel === 'package.json') return directoryBaseName(path.dirname(abs));
-  const dir = path.posix.dirname(rel);
-  return dir && dir !== '.' ? dir : '.';
 }
 
 /**
@@ -183,16 +157,19 @@ function ingestPackageJson(
   abs: string,
   nodes: Map<string, GraphNode>,
   edges: Map<string, GraphEdge>,
-): { deps: number; warning: CodedWarning | null } {
+  rootBase: string,
+): number {
   const raw = JSON.parse(fs.readFileSync(abs, 'utf8')) as {
-    name?: unknown;
-    version?: unknown;
+    name?: string;
     dependencies?: Record<string, string>;
     peerDependencies?: Record<string, string>;
     optionalDependencies?: Record<string, string>;
   };
-  const pkgName = packageNodeName(rel, abs, raw);
-  const warning = rel === 'package.json' ? rootPackageIdentity(path.dirname(abs), raw).warning : null;
+  const declared = nonEmptyManifestString(raw.name);
+  const dir = path.posix.dirname(rel);
+  // The root manifest has no directory segment. `.` is not an identity.
+  const fallback = dir === '.' ? rootBase : dir || rootBase;
+  const pkgName = declared || fallback || 'unnamed';
   const localId = makePackageNode(nodes, edges, {
     rel,
     qualifiedName: pkgName,
@@ -214,7 +191,7 @@ function ingestPackageJson(
     addEdge(edges, 'import', localId, extId, 1.0);
     n++;
   }
-  return { deps: n, warning };
+  return n;
 }
 
 function ingestGoMod(

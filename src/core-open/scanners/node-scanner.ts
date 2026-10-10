@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { findPackageJsonFiles, readJsonFile, readTextFile, pathExists, FileCache } from '../utils/fs.js';
+import { directoryFallbackName, nonEmptyManifestString } from '../utils/root-package-identity.js';
 import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { loadNpmLockIndex, type NpmLockIndex, type LockfileIo } from './npm-lockfile.js';
 import { Semaphore } from '../utils/semaphore.js';
@@ -12,7 +13,6 @@ import { withTimeout } from '../utils/timeout.js';
 import { NpmCache, isSemverSpec } from './npm-cache.js';
 import { classifyNpmVersionLag } from './npm-latest.js';
 import { buildDependencyLicense, normalizeLicenseSourcePath } from '../licenses/dependency-license.js';
-import { directoryBaseName, manifestField } from '../utils/root-package-identity.js';
 import { ageDaysBetween, daysToLibyears, aggregateLibyears } from '../scoring/libyear.js';
 import { latestLts, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
@@ -474,7 +474,7 @@ async function scanOnePackageJson(
   return {
     type: 'node',
     path: projectPath,
-    name: manifestField(pj.name) ?? directoryBaseName(absProjectPath),
+    name: nonEmptyManifestString(pj.name) ?? directoryFallbackName(absProjectPath),
     runtime: nodeEngine,
     runtimeLatest,
     runtimeMajorsBehind,

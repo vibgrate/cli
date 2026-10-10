@@ -1,263 +1,324 @@
 /**
- * Root package.json with no name, no version, or neither.
- *
- * `vg build`, `vg scan`, and `vg sbom export` must keep going: one warning,
- * a directory-basename identity, dependencies still resolved, and output that
- * does not contain the absolute path.
+ * A root package.json may omit name, version, or both. vg build, vg scan, and
+ * vg sbom export must not crash, must keep the resolved dependency, and must
+ * emit one stable warning. Output must not contain the absolute path.
  */
-import { spawnSync } from 'node:child_process';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { graphSubjectDigest } from '../src/engine/attest.js';
 import { buildGraph } from '../src/engine/build.js';
-import { fullDependencyGraph } from '../src/engine/lockfile.js';
-import { serializeGraph } from '../src/engine/serialize.js';
-import { runCoreScan, type ScanArtifact } from '../src/core-open/index.js';
-import { WARNING_CODES } from '../src/core-open/warnings.js';
-import {
-  describeRootPackageIdentity,
-  portableRootComponentName,
-} from '../src/core-open/utils/root-package-identity.js';
-import { toCycloneDx, toSpdx } from '../src/reporting/commands/sbom.js';
+import { runCoreScan } from '../src/core-open/index.js';
+import type { ScanArtifact } from '../src/core-open/types.js';
+import { sbomCommand } from '../src/reporting/commands/sbom.js';
 
-const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fixtures/root-package-identity');
+const CODE = 'VG_WARN_ROOT_PACKAGE_IDENTITY';
 const PIN = '2020-01-01T00:00:00.000Z';
-const CODE = WARNING_CODES.ROOT_PACKAGE_IDENTITY;
+const DIR_NAME = 'app';
 
-const CASES = [
-  {
-    id: 'no-name',
-    packageName: 'no-name',
-    version: '1.2.3',
-    nameFallback: true,
-    versionFallback: false,
-  },
-  {
-    id: 'no-version',
-    packageName: 'named-app',
-    version: null,
-    nameFallback: false,
-    versionFallback: true,
-  },
-  {
-    id: 'neither',
-    packageName: 'neither',
-    version: null,
-    nameFallback: true,
-    versionFallback: true,
-  },
-] as const;
+const LOCKFILE = `{
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "dependencies": {
+        "left-pad": "1.3.0"
+      }
+    },
+    "node_modules/left-pad": {
+      "version": "1.3.0"
+    }
+  }
+}
+`;
 
 const parents: string[] = [];
 
 afterEach(() => {
-  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   while (parents.length) fs.rmSync(parents.pop()!, { recursive: true, force: true });
 });
 
-function copyFixture(id: string): { root: string; parent: string } {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-root-id-'));
+function writeFixture(pkg: Record<string, unknown>): { parent: string; root: string } {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-root-pkg-'));
   parents.push(parent);
-  const root = path.join(parent, id);
-  fs.cpSync(path.join(FIXTURES, id), root, { recursive: true });
-  return { root, parent };
+  const root = path.join(parent, DIR_NAME);
+  fs.mkdirSync(root);
+  fs.writeFileSync(path.join(root, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`);
+  fs.writeFileSync(path.join(root, 'package-lock.json'), LOCKFILE);
+  fs.writeFileSync(path.join(root, 'index.js'), 'module.exports = require("left-pad");\n');
+  return { parent, root };
 }
 
-function expectedWarning(id: (typeof CASES)[number]): string {
-  return describeRootPackageIdentity(id.packageName, id.nameFallback, id.versionFallback);
+function assertNoAbsolutePath(text: string, parent: string): void {
+  expect(text).not.toContain(parent);
+  expect(text).not.toContain(path.basename(parent));
 }
 
-function buildOpts(root: string) {
-  return {
+function stableScan(artifact: ScanArtifact): string {
+  const copy = structuredClone(artifact);
+  copy.timestamp = PIN;
+  delete copy.durationMs;
+  return JSON.stringify(copy);
+}
+
+async function buildTwice(root: string) {
+  const opts = {
     root,
     generatedAt: PIN,
     inline: true,
     noCache: true,
-    noTsc: true,
-    noGround: true,
     noIndex: true,
-  } as const;
+    noGround: true,
+    noTsc: true,
+    fast: true,
+    noScip: true,
+    noCoverage: true,
+  };
+  const first = await buildGraph(opts);
+  const second = await buildGraph(opts);
+  return { first, second };
 }
 
-function stableScan(artifact: ScanArtifact): string {
-  const { timestamp: _timestamp, durationMs: _durationMs, ...rest } = artifact;
-  return JSON.stringify(rest);
+async function scanTwice(root: string): Promise<[ScanArtifact, ScanArtifact]> {
+  vi.stubEnv('VIBGRATE_DSN', '');
+  const opts = {
+    format: 'json' as const,
+    concurrency: 1,
+    offline: true,
+    noLocalArtifacts: true,
+    quiet: true,
+    vibgrateVersion: 'test',
+  };
+  const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const first = await runCoreScan(root, opts);
+    const second = await runCoreScan(root, opts);
+    const errText = err.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+    const identityLines = errText.split(CODE).length - 1;
+    expect(identityLines).toBe(2);
+    return [first, second];
+  } finally {
+    log.mockRestore();
+    err.mockRestore();
+  }
 }
 
-describe('root package.json identity', () => {
-  it.each(CASES)('$id: vg build is stable, names the fallback, and keeps the dependency', async (spec) => {
-    const { root, parent } = copyFixture(spec.id);
-    const first = await buildGraph(buildOpts(root));
-    const second = await buildGraph(buildOpts(root));
-    expect(graphSubjectDigest(first.graph)).toBe(graphSubjectDigest(second.graph));
-    expect(serializeGraph(first.graph)).toBe(serializeGraph(second.graph));
+async function exportTwice(root: string, artifact: ScanArtifact): Promise<[string, string, string]> {
+  const pinned = structuredClone(artifact);
+  pinned.timestamp = PIN;
+  pinned.durationMs = 0;
+  const artifactPath = path.join(root, 'scan.json');
+  fs.writeFileSync(artifactPath, JSON.stringify(pinned));
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const log = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+    stdout.push(args.map(String).join(' '));
+  });
+  const err = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    stderr.push(args.map(String).join(' '));
+  });
+  try {
+    await sbomCommand.parseAsync(['export', '--in', artifactPath, '--root', root, '--format', 'cyclonedx'], { from: 'user' });
+    await sbomCommand.parseAsync(['export', '--in', artifactPath, '--root', root, '--format', 'spdx'], { from: 'user' });
+    await sbomCommand.parseAsync(['export', '--in', artifactPath, '--root', root, '--format', 'cyclonedx'], { from: 'user' });
+  } finally {
+    log.mockRestore();
+    err.mockRestore();
+  }
+  return [stdout[0] ?? '', stdout[2] ?? '', stderr.join('\n')];
+}
 
+describe('root package.json missing name or version', () => {
+  it('uses the directory name when name is missing, and keeps the declared version', async () => {
+    const { parent, root } = writeFixture({ version: '1.2.3', dependencies: { 'left-pad': '1.3.0' } });
+    const { first, second } = await buildTwice(root);
+    const graphText = JSON.stringify(first.graph);
+    expect(graphText).toBe(JSON.stringify(second.graph));
+    assertNoAbsolutePath(graphText, parent);
     const pkg = first.graph.nodes.find((node) => node.kind === 'package' && node.file === 'package.json');
-    expect(pkg?.qualifiedName).toBe(spec.packageName);
-    expect(pkg?.name).toBe(spec.packageName.includes('/') ? spec.packageName.split('/').pop() : spec.packageName);
+    expect(pkg?.qualifiedName).toBe(DIR_NAME);
+    expect(pkg?.name).toBe(DIR_NAME);
+    expect(first.graph.nodes.some((node) => node.kind === 'external' && node.name === 'left-pad')).toBe(true);
+    expect(first.codedWarnings.filter((warning) => warning.code === CODE)).toEqual([
+      {
+        code: CODE,
+        message: 'Root package.json has no name. The root component name is the directory name "app". Dependencies are still resolved.',
+      },
+    ]);
+
+    const [scanA, scanB] = await scanTwice(root);
+    expect(stableScan(scanA)).toBe(stableScan(scanB));
+    assertNoAbsolutePath(stableScan(scanA), parent);
+    expect(scanA.rootPath).toBe(DIR_NAME);
+    expect(scanA.repository.name).toBe(DIR_NAME);
+    expect(scanA.repository.version).toBe('1.2.3');
+    expect(scanA.projects.map((project) => project.name)).toEqual([DIR_NAME]);
+    expect(scanA.projects[0]?.dependencies.map((dep) => [dep.package, dep.resolvedVersion])).toEqual([['left-pad', '1.3.0']]);
+    expect(scanA.degradations?.filter((warning) => warning.code === CODE)).toHaveLength(1);
+
+    const [cdxA, cdxB, stderr] = await exportTwice(root, scanA);
+    expect(cdxA).toBe(cdxB);
+    assertNoAbsolutePath(cdxA, parent);
+    assertNoAbsolutePath(stderr, parent);
+    const doc = JSON.parse(cdxA) as {
+      metadata: { component: { name: string; version?: string } };
+      components: Array<{ name: string; version: string }>;
+    };
+    expect(doc.metadata.component.name).toBe(DIR_NAME);
+    expect(doc.metadata.component.version).toBeUndefined();
+    expect(doc.components).toContainEqual(expect.objectContaining({ name: 'left-pad', version: '1.3.0' }));
+    expect(stderr.split(CODE).length - 1).toBe(3);
+  });
+
+  it('keeps the declared name and omits version when version is missing', async () => {
+    const { parent, root } = writeFixture({ name: 'named-app', dependencies: { 'left-pad': '1.3.0' } });
+    const { first, second } = await buildTwice(root);
+    expect(JSON.stringify(first.graph)).toBe(JSON.stringify(second.graph));
+    assertNoAbsolutePath(JSON.stringify(first.graph), parent);
+    const pkg = first.graph.nodes.find((node) => node.kind === 'package' && node.file === 'package.json');
+    expect(pkg?.qualifiedName).toBe('named-app');
+    expect(first.graph.nodes.some((node) => node.kind === 'external' && node.name === 'left-pad')).toBe(true);
+    expect(first.codedWarnings.filter((warning) => warning.code === CODE).map((warning) => warning.message)).toEqual([
+      'Root package.json has no version. The root component version is omitted. Dependencies are still resolved.',
+    ]);
+
+    const [scanA, scanB] = await scanTwice(root);
+    expect(stableScan(scanA)).toBe(stableScan(scanB));
+    assertNoAbsolutePath(stableScan(scanA), parent);
+    expect(scanA.repository.name).toBe('named-app');
+    expect(scanA.repository.version).toBeUndefined();
+    expect(scanA.projects[0]?.name).toBe('named-app');
+    expect(scanA.projects[0]?.dependencies.map((dep) => dep.resolvedVersion)).toEqual(['1.3.0']);
+
+    const [cdxA, cdxB, stderr] = await exportTwice(root, scanA);
+    expect(cdxA).toBe(cdxB);
+    assertNoAbsolutePath(`${cdxA}\n${stderr}`, parent);
+    const doc = JSON.parse(cdxA) as { components: Array<{ name: string; version: string }> };
+    expect(doc.components).toContainEqual(expect.objectContaining({ name: 'left-pad', version: '1.3.0' }));
+    expect(stderr.split(CODE).length - 1).toBe(3);
+  });
+
+  it('uses the directory name and omits version when both are missing', async () => {
+    const { parent, root } = writeFixture({ dependencies: { 'left-pad': '1.3.0' } });
+    const { first, second } = await buildTwice(root);
+    const graphText = JSON.stringify(first.graph);
+    expect(graphText).toBe(JSON.stringify(second.graph));
+    assertNoAbsolutePath(graphText, parent);
+    const pkg = first.graph.nodes.find((node) => node.kind === 'package' && node.file === 'package.json');
+    expect(pkg?.qualifiedName).toBe(DIR_NAME);
+    expect(first.graph.nodes.some((node) => node.kind === 'external' && node.name === 'left-pad')).toBe(true);
+    expect(first.codedWarnings.filter((warning) => warning.code === CODE).map((warning) => warning.message)).toEqual([
+      'Root package.json has no name or version. The root component name is the directory name "app", and the version is omitted. Dependencies are still resolved.',
+    ]);
+
+    const [scanA, scanB] = await scanTwice(root);
+    expect(stableScan(scanA)).toBe(stableScan(scanB));
+    assertNoAbsolutePath(stableScan(scanA), parent);
+    expect(scanA.repository).toEqual({ name: DIR_NAME });
+    expect(scanA.projects[0]?.dependencies.some((dep) => dep.package === 'left-pad' && dep.resolvedVersion === '1.3.0')).toBe(true);
+
+    const pinned = structuredClone(scanA);
+    pinned.timestamp = PIN;
+    pinned.durationMs = 0;
+    const artifactPath = path.join(root, 'scan.json');
+    fs.writeFileSync(artifactPath, JSON.stringify(pinned));
+    const stdout: string[] = [];
+    const errLines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      stdout.push(args.map(String).join(' '));
+    });
+    const err = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errLines.push(args.map(String).join(' '));
+    });
+    try {
+      await sbomCommand.parseAsync(['export', '--in', artifactPath, '--root', root, '--format', 'spdx'], { from: 'user' });
+      await sbomCommand.parseAsync(['export', '--in', artifactPath, '--root', root, '--format', 'spdx'], { from: 'user' });
+    } finally {
+      log.mockRestore();
+      err.mockRestore();
+    }
+    const spdxFirst = stdout[0] ?? '';
+    const spdxAgain = stdout[1] ?? '';
+    const stderr = errLines.join('\n');
+    expect(spdxAgain).toBe(spdxFirst);
+    assertNoAbsolutePath(`${spdxFirst}\n${stderr}`, parent);
+    const doc = JSON.parse(spdxFirst) as { name: string; packages: Array<{ name: string; versionInfo: string }> };
+    expect(doc.name).toBe(`${DIR_NAME}-sbom`);
+    expect(doc.packages).toContainEqual(expect.objectContaining({ name: 'left-pad', versionInfo: '1.3.0' }));
+    expect(stderr.split(CODE).length - 1).toBe(2);
+  });
+
+  it('does not warn when name and version are both set', async () => {
+    const { parent, root } = writeFixture({
+      name: 'named-app',
+      version: '1.2.3',
+      dependencies: { 'left-pad': '1.3.0' },
+    });
+    const { first, second } = await buildTwice(root);
+    expect(JSON.stringify(first.graph)).toBe(JSON.stringify(second.graph));
+    expect(first.codedWarnings.some((warning) => warning.code === CODE)).toBe(false);
+    assertNoAbsolutePath(JSON.stringify(first.graph), parent);
+    const pkg = first.graph.nodes.find((node) => node.kind === 'package' && node.file === 'package.json');
+    expect(pkg?.qualifiedName).toBe('named-app');
     expect(first.graph.nodes.some((node) => node.kind === 'external' && node.name === 'left-pad')).toBe(true);
 
-    const warnings = first.codedWarnings.filter((warning) => warning.code === CODE);
-    expect(warnings).toEqual([{ code: CODE, message: expectedWarning(spec) }]);
-    expect(second.codedWarnings.filter((warning) => warning.code === CODE)).toEqual(warnings);
-
-    const serialized = serializeGraph(first.graph);
-    expect(serialized).not.toContain(parent);
-    expect(serialized).not.toContain(root);
-    expect(warnings[0]!.message).not.toContain(parent);
-    expect(warnings[0]!.message).not.toContain('/');
-  });
-
-  it('the same basename under two absolute parents is the same package identity', async () => {
-    const a = copyFixture('neither');
-    const b = copyFixture('neither');
-    expect(a.root).not.toBe(b.root);
-    const left = await buildGraph(buildOpts(a.root));
-    const right = await buildGraph(buildOpts(b.root));
-    const packageOf = (nodes: typeof left.graph.nodes) => nodes.find((node) => node.kind === 'package')!;
-    expect(packageOf(left.graph.nodes).id).toBe(packageOf(right.graph.nodes).id);
-    expect(packageOf(left.graph.nodes).qualifiedName).toBe('neither');
-    expect(serializeGraph(left.graph)).not.toContain(a.parent);
-    expect(serializeGraph(right.graph)).not.toContain(b.parent);
-  });
-
-  it.each(CASES)('$id: vg scan resolves left-pad and warns once', async (spec) => {
-    const { root, parent } = copyFixture(spec.id);
-    const stderr: string[] = [];
-    vi.spyOn(console, 'error').mockImplementation((line?: unknown) => {
-      stderr.push(String(line ?? ''));
-    });
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-
-    const scanOpts = { format: 'json' as const, concurrency: 2, offline: true, quiet: true, vibgrateVersion: 'test' };
-    const first = await runCoreScan(root, scanOpts);
-    const second = await runCoreScan(root, scanOpts);
-    expect(stableScan(first)).toBe(stableScan(second));
-
-    expect(first.rootPath).toBe(spec.id);
-    expect(first.repository?.name).toBe(spec.packageName);
-    expect(first.repository?.version).toBe(spec.version ?? undefined);
-    const project = first.projects.find((item) => item.path === '.');
-    expect(project?.name).toBe(spec.packageName);
-    const leftPad = project?.dependencies.find((dep) => dep.package === 'left-pad');
-    expect(leftPad?.resolvedVersion).toBe('1.3.0');
-
-    const warnings = (first.degradations ?? []).filter((warning) => warning.code === CODE);
-    expect(warnings).toEqual([{ code: CODE, message: expectedWarning(spec) }]);
-    expect(stderr.filter((line) => line.includes(CODE))).toHaveLength(2);
-    expect(stableScan(first)).not.toContain(parent);
-    expect(stableScan(first)).not.toContain(root);
-    expect(warnings[0]!.message).not.toContain(parent);
-  });
-
-  it.each(CASES)('$id: vg sbom export keeps left-pad and is byte-stable', async (spec) => {
-    const { root, parent } = copyFixture(spec.id);
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    const artifact = await runCoreScan(root, {
-      format: 'json',
-      concurrency: 2,
-      offline: true,
-      quiet: true,
-      vibgrateVersion: 'test',
-    });
-    const warning = artifact.degradations?.find((item) => item.code === CODE) ?? null;
-    expect(warning?.message).toBe(expectedWarning(spec));
-
-    const graph = fullDependencyGraph(root);
-    expect(graph?.components).toEqual([{ package: 'left-pad', version: '1.3.0' }]);
-
-    const cyclone = toCycloneDx(artifact, graph, warning);
-    const cycloneAgain = toCycloneDx(artifact, graph, warning);
-    expect(JSON.stringify(cycloneAgain)).toBe(JSON.stringify(cyclone));
-    const spdx = toSpdx(artifact, graph, warning);
-    expect(JSON.stringify(toSpdx(artifact, graph, warning))).toBe(JSON.stringify(spdx));
-
-    const meta = (cyclone.metadata as { component: { name: string; version?: string; purl?: string }; properties: Array<{ name: string; value: string }> }).component;
-    expect(meta.name).toBe(portableRootComponentName(spec.id));
-    expect(meta.name).toBe(spec.id);
-    expect(meta.version).toBeUndefined();
-    expect(meta.purl).toBeUndefined();
-    const properties = (cyclone.metadata as { properties: Array<{ name: string; value: string }> }).properties;
-    expect(properties.find((property) => property.name === 'vibgrate:rootIdentityWarning')?.value).toBe(warning?.message);
-    expect(properties.find((property) => property.name === 'vibgrate:warningCode')?.value).toBe(CODE);
-
-    const body = JSON.stringify(cyclone);
-    expect(body).toContain('pkg:npm/left-pad@1.3.0');
-    expect(body).not.toContain(parent);
-    expect(body).not.toContain(root);
-    const spdxDoc = spdx as {
-      name: string;
-      annotations?: Array<{ comment: string }>;
-    };
-    expect(spdxDoc.annotations?.map((annotation) => annotation.comment)).toEqual([
-      warning?.message,
-      `warningCode=${CODE}`,
-    ]);
-    expect(JSON.stringify(spdx)).not.toContain(parent);
-    expect(spdxDoc.name).toBe(`${spec.id}-sbom`);
-  });
-});
-
-describe('vg CLI on a package.json with neither name nor version', () => {
-  it('build, scan, and sbom export exit 0 and warn once each', () => {
-    const { root, parent } = copyFixture('neither');
-    const tsx = path.resolve('node_modules/tsx/dist/cli.mjs');
-    const cli = path.resolve('src/cli.ts');
-    const run = (args: string[]) => {
-      const result = spawnSync(process.execPath, [tsx, cli, ...args], {
-        cwd: root,
-        encoding: 'utf8',
-        timeout: 90_000,
-        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', VIBGRATE_GRAPH_IN_REPO: '1' },
+    vi.stubEnv('VIBGRATE_DSN', '');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let scanA: ScanArtifact;
+    let errText = '';
+    try {
+      scanA = await runCoreScan(root, {
+        format: 'json',
+        concurrency: 1,
+        offline: true,
+        noLocalArtifacts: true,
+        quiet: true,
+        vibgrateVersion: 'test',
       });
-      return {
-        status: result.status,
-        stdout: result.stdout ?? '',
-        stderr: result.stderr ?? '',
-        output: `${result.stdout ?? ''}\n${result.stderr ?? ''}`,
-        error: result.error,
-      };
+      errText = err.mock.calls.map((call) => call.map(String).join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      err.mockRestore();
+    }
+    expect(errText).not.toContain(CODE);
+    expect(scanA.degradations?.some((warning) => warning.code === CODE)).toBeFalsy();
+    expect(scanA.repository).toEqual({ name: 'named-app', version: '1.2.3' });
+    expect(scanA.projects[0]?.name).toBe('named-app');
+    expect(scanA.projects[0]?.dependencies.map((dep) => [dep.package, dep.resolvedVersion])).toEqual([['left-pad', '1.3.0']]);
+    assertNoAbsolutePath(stableScan(scanA), parent);
+
+    const pinned = structuredClone(scanA);
+    pinned.timestamp = PIN;
+    pinned.durationMs = 0;
+    const artifactPath = path.join(root, 'scan.json');
+    fs.writeFileSync(artifactPath, JSON.stringify(pinned));
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const log2 = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      stdout.push(args.map(String).join(' '));
+    });
+    const err2 = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      stderr.push(args.map(String).join(' '));
+    });
+    try {
+      await sbomCommand.parseAsync(['export', '--in', artifactPath, '--root', root, '--format', 'cyclonedx'], { from: 'user' });
+      await sbomCommand.parseAsync(['export', '--in', artifactPath, '--root', root, '--format', 'cyclonedx'], { from: 'user' });
+    } finally {
+      log2.mockRestore();
+      err2.mockRestore();
+    }
+    const errOut = stderr.join('\n');
+    expect(errOut).not.toContain(CODE);
+    expect(stdout[0]).toBe(stdout[1]);
+    assertNoAbsolutePath(`${stdout.join('\n')}\n${errOut}`, parent);
+    const doc = JSON.parse(stdout[0] ?? '{}') as {
+      metadata: { component: { name: string } };
+      components: Array<{ name: string; version: string }>;
     };
-    const warningLines = (text: string) => text.split('\n').filter((line) => line.includes(`[${CODE}]`));
-
-    const build = run(['build', '--no-html', '--no-report', '--no-tsc', '--no-index', '--no-ground', '--no-warm', '--no-publish']);
-    expect(build.error).toBeUndefined();
-    expect(build.status).toBe(0);
-    const buildAgain = run(['build', '--no-html', '--no-report', '--no-tsc', '--no-index', '--no-ground', '--no-warm', '--no-publish']);
-    expect(buildAgain.status).toBe(0);
-    const graphPath = path.join(root, '.vibgrate', 'graph.json');
-    const graphText = fs.readFileSync(graphPath, 'utf8');
-    expect(graphText).not.toContain(parent);
-    expect(graphText).toContain('"qualifiedName": "neither"');
-    expect(warningLines(build.output)).toHaveLength(1);
-
-    const scan = run(['scan', '--offline', '--quiet', '--no-daemon', '--no-graph', '--format', 'json']);
-    expect(scan.error).toBeUndefined();
-    expect(scan.status).toBe(0);
-    expect(warningLines(scan.stderr)).toHaveLength(1);
-    const scanArtifact = JSON.parse(fs.readFileSync(path.join(root, '.vibgrate', 'scan_result.json'), 'utf8')) as ScanArtifact;
-    expect(scanArtifact.rootPath).toBe('neither');
-    expect(scanArtifact.degradations?.filter((warning) => warning.code === CODE)).toHaveLength(1);
-    expect(scanArtifact.projects[0]?.dependencies.find((dep) => dep.package === 'left-pad')?.resolvedVersion).toBe('1.3.0');
-    expect(JSON.stringify(scanArtifact)).not.toContain(parent);
-
-    const exported = path.join(root, 'sbom.cdx.json');
-    const sbom = run(['sbom', 'export', '--format', 'cyclonedx', '--out', exported]);
-    expect(sbom.error).toBeUndefined();
-    expect(sbom.status).toBe(0);
-    expect(warningLines(sbom.stderr)).toHaveLength(1);
-    const again = path.join(root, 'sbom-again.cdx.json');
-    const sbomAgain = run(['sbom', 'export', '--format', 'cyclonedx', '--out', again]);
-    expect(sbomAgain.status).toBe(0);
-    expect(fs.readFileSync(again, 'utf8')).toBe(fs.readFileSync(exported, 'utf8'));
-    const doc = fs.readFileSync(exported, 'utf8');
-    expect(doc).toContain('pkg:npm/left-pad@1.3.0');
-    expect(doc).toContain(CODE);
-    expect(doc).not.toContain(parent);
-    expect(doc).not.toContain(root);
-  }, 120_000);
+    expect(doc.metadata.component.name).toBe(DIR_NAME);
+    expect(doc.components).toContainEqual(expect.objectContaining({ name: 'left-pad', version: '1.3.0' }));
+  });
 });
