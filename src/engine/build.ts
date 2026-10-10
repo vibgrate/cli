@@ -50,8 +50,8 @@ import type { FileParse } from './types.js';
 import type { ResolveResult } from './resolve.js';
 import { fileRolesFromParses } from './ast-roles.js';
 import type { AstRoleHit } from '../core-open/scanners/architecture/ast-roles.js';
-import { emitSkippedNonUtf8Notice, NON_UTF8_SKIP_MARK } from '../core-open/utils/source-text.js';
 import { stampWarning, WARNING_CODES, type CodedWarning } from '../core-open/warnings.js';
+import { collapseNonTextWarnings, inspectUtf8 } from '../core-open/utils/text-bytes.js';
 import { assembleEngineWarnings } from './warning-codes.js';
 
 export interface BuildOptions {
@@ -157,15 +157,6 @@ export interface BuildResult {
 }
 
 export async function buildGraph(options: BuildOptions): Promise<BuildResult> {
-  const skippedNonUtf8: string[] = [];
-  try {
-    return await buildGraphUnchecked(options, skippedNonUtf8);
-  } finally {
-    emitSkippedNonUtf8Notice(skippedNonUtf8);
-  }
-}
-
-async function buildGraphUnchecked(options: BuildOptions, skippedNonUtf8: string[]): Promise<BuildResult> {
   const timer = new StageTimer();
   timer.start('total');
   const root = path.resolve(options.root);
@@ -180,8 +171,6 @@ async function buildGraphUnchecked(options: BuildOptions, skippedNonUtf8: string
     exclude,
     paths: options.paths,
     maxEntries: limits.maxFiles,
-    maxSourceBytes: limits.maxFileBytes === 0 ? 32 * 1024 * 1024 : limits.maxFileBytes,
-    skippedNonUtf8,
   });
   timer.end('discover');
 
@@ -221,6 +210,17 @@ async function buildGraphUnchecked(options: BuildOptions, skippedNonUtf8: string
   const toParse: DiscoveredFile[] = [];
   const reused: FileParse[] = [];
   const buildWarnings: string[] = [];
+  // A binary `.gitignore` contributes no rules. Say so once, with the path
+  // only — the bytes are not ignore syntax and must not be echoed.
+  try {
+    const gitignorePath = path.join(root, '.gitignore');
+    if (fs.existsSync(gitignorePath)) {
+      const inspected = inspectUtf8(fs.readFileSync(gitignorePath));
+      if (!inspected.ok) buildWarnings.push(stampWarning(WARNING_CODES.NON_TEXT_FILE, '.gitignore'));
+    }
+  } catch {
+    // Unreadable .gitignore: discover already continued without its rules.
+  }
   /** Files skipped for size — in fileStats under a sentinel hash, never in the manifest. */
   const oversizeRels = new Set<string>();
   let statHits = 0;
@@ -288,13 +288,21 @@ async function buildGraphUnchecked(options: BuildOptions, skippedNonUtf8: string
     for (const p of pendingHash) {
       const r = byRel.get(p.file.rel);
       if (!r || !r.ok) continue;
-      hashes.set(p.file.rel, r.hash);
       fileStats.push({
         rel: p.file.rel,
         size: p.size,
         mtimeMs: p.mtimeMs,
         hash: r.hash,
       });
+      // Binary and non-UTF-8 files stay in the freshness snapshot (so a
+      // probe does not report them as newly added) but are not parsed and
+      // are not handed to the TypeScript program. `hashes` is the parsed
+      // corpus; leaving them out is what keeps tsc from opening the bytes.
+      if (r.nonText) {
+        buildWarnings.push(stampWarning(WARNING_CODES.NON_TEXT_FILE, p.file.rel));
+        continue;
+      }
+      hashes.set(p.file.rel, r.hash);
       const cached = cache.get(p.file.rel, r.hash, p.file.lang.id);
       if (cached) {
         reused.push(cached);
@@ -307,16 +315,12 @@ async function buildGraphUnchecked(options: BuildOptions, skippedNonUtf8: string
   timer.end('hash');
 
   timer.start('parse');
-  const parsedNew = (await parseFiles(toParse, {
+  const parsedNew = await parseFiles(toParse, {
     jobs: options.jobs,
     inline: options.inline,
     onProgress: options.onParseProgress,
     grammarsDir: options.grammarsDir,
     memoryBudgetMb: limits.memoryBudgetMb,
-  })).filter((parsed) => {
-    if (!parsed.warnings?.includes(NON_UTF8_SKIP_MARK)) return true;
-    skippedNonUtf8.push(parsed.rel);
-    return false;
   });
   timer.end('parse');
   checkMemoryBudget('parse', limits.memoryBudgetMb);
@@ -355,8 +359,8 @@ async function buildGraphUnchecked(options: BuildOptions, skippedNonUtf8: string
   const manifests = extractManifests(root, {
     exclude,
     paths: options.paths,
-    skippedNonUtf8,
   });
+  for (const rel of manifests.skippedNonText) warnings.push(stampWarning(WARNING_CODES.NON_TEXT_FILE, rel));
   if (manifests.files > 0) {
     const byId = new Map(resolved.nodes.map((n) => [n.id, n]));
     for (const n of manifests.nodes) {
@@ -535,7 +539,6 @@ async function buildGraphUnchecked(options: BuildOptions, skippedNonUtf8: string
     exclude,
     paths: options.paths,
     maxEntries: limits.maxFiles,
-    skippedNonUtf8,
   });
   for (const d of docs) {
     try {
@@ -547,7 +550,9 @@ async function buildGraphUnchecked(options: BuildOptions, skippedNonUtf8: string
       /* skip unreadable docs */
     }
   }
-  const docNodes = documentNodesFromDocs(docs);
+  const skippedDocs: string[] = [];
+  const docNodes = documentNodesFromDocs(docs, skippedDocs);
+  for (const rel of skippedDocs) warnings.push(stampWarning(WARNING_CODES.NON_TEXT_FILE, rel));
   if (docNodes.length) nodes = [...nodes, ...docNodes];
 
   // Structural extraction over the same discovered set (engine/toolchain/).
@@ -694,7 +699,7 @@ async function buildGraphUnchecked(options: BuildOptions, skippedNonUtf8: string
 
   timer.end('total');
   const stages = timer.snapshot();
-  const assembled = assembleEngineWarnings(warnings);
+  const assembled = assembleEngineWarnings(collapseNonTextWarnings(warnings));
 
   return {
     graph,

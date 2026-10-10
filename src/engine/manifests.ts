@@ -23,8 +23,8 @@ import * as path from 'node:path';
 import type { Ignore } from 'ignore';
 import { XMLParser } from 'fast-xml-parser';
 import { nodeId, edgeId } from './ids.js';
-import { isUtf8SourceText } from '../core-open/utils/source-text.js';
 import { isSkippedDirName, loadRootIgnore } from './discover.js';
+import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
 import { parseToml } from '../core-open/utils/toml.js';
 import type { GraphEdge, GraphNode } from '../schema.js';
 
@@ -34,6 +34,8 @@ export interface ManifestExtract {
   /** Number of manifest files processed. */
   files: number;
   deps: number;
+  /** Repo-relative paths left unread because the bytes are binary or not UTF-8. */
+  skippedNonText: string[];
 }
 
 const xml = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
@@ -63,7 +65,7 @@ const emptyNode = (
  */
 export function extractManifests(
   root: string,
-  opts: { exclude?: string[]; paths?: string[]; skippedNonUtf8?: string[] } = {},
+  opts: { exclude?: string[]; paths?: string[] } = {},
 ): ManifestExtract {
   const absRoot = path.resolve(root);
   const ig = loadRootIgnore(absRoot, opts.exclude ?? []);
@@ -78,19 +80,19 @@ export function extractManifests(
 
   const nodes = new Map<string, GraphNode>();
   const edges = new Map<string, GraphEdge>();
+  const skippedNonText: string[] = [];
   let deps = 0;
 
   for (const rel of [...found.keys()].sort()) {
     const abs = found.get(rel)!;
     const base = path.posix.basename(rel);
-    let manifestBytes: Buffer;
     try {
-      manifestBytes = fs.readFileSync(abs);
+      const inspected = inspectUtf8(fs.readFileSync(abs));
+      if (!inspected.ok) {
+        skippedNonText.push(rel);
+        continue;
+      }
     } catch {
-      continue;
-    }
-    if (!isUtf8SourceText(manifestBytes)) {
-      opts.skippedNonUtf8?.push(rel);
       continue;
     }
     try {
@@ -120,6 +122,7 @@ export function extractManifests(
     ),
     files: found.size,
     deps,
+    skippedNonText,
   };
 }
 

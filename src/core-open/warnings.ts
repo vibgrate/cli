@@ -18,6 +18,11 @@
 export const WARNING_CODES = {
   /** A source file failed to parse. The build continues without its symbols. */
   PARSE_FAILED: 'VG_WARN_PARSE_FAILED',
+  /**
+   * A file under the walk is binary or not UTF-8. It is left out of the map
+   * and out of text parsers. The message is a count and paths, never bytes.
+   */
+  NON_TEXT_FILE: 'VG_WARN_NON_TEXT_FILE',
   /** A file exceeded the per-file size cap and was left out of the map. */
   BUILD_FILE_OVERSIZE: 'VG_WARN_BUILD_FILE_OVERSIZE',
   /** The TypeScript resolver was skipped because the corpus exceeded its file cap. */

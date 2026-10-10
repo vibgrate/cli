@@ -113,7 +113,6 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [Thresholds](#thresholds)
   - [Scanner Toggles](#scanner-toggles)
   - [Symlinks](#symlinks)
-  - [Binary and non-UTF-8 files](#binary-and-non-utf-8-files)
 - [Extended Scanners](#extended-scanners)
   - [Platform Matrix](#platform-matrix)
   - [Dependency Risk](#dependency-risk)
@@ -2137,7 +2136,7 @@ Switches (flags that take no value, such as `--vulns`, `--offline` or `--no-grap
 
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
-`vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once on stderr. See [Symlinks](#symlinks). A binary or non-UTF-8 file that would otherwise be read as source is skipped. The scan prints one notice on stderr; when the scan also builds the code map, that build prints its own. See [Binary and non-UTF-8 files](#binary-and-non-utf-8-files).
+`vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once on stderr. See [Symlinks](#symlinks).
 
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
 
@@ -2729,7 +2728,7 @@ Maps source code into a graph artifact, enabling all downstream queries (`vg sho
 | `--attestation <file>` | `.vibgrate/attestation.intoto.jsonl` | Where `--attest` writes, and where `--verify` reads |
 | `--pub <path>` | — | Public key PEM that pins the signer for `--verify` |
 
-`vg build` does not follow symlinks while it discovers files. A skipped link is named once on stderr. See [Symlinks](#symlinks). `.gitignore` and `--exclude` still apply. A binary or non-UTF-8 file that would otherwise be read as source is skipped and named once on stderr. See [Binary and non-UTF-8 files](#binary-and-non-utf-8-files).
+`vg build` does not follow symlinks while it discovers files. A skipped link is named once on stderr. See [Symlinks](#symlinks). `.gitignore` and `--exclude` still apply.
 
 **Local by default — no git churn.** The first time vg writes into `.vibgrate/` it also creates `.vibgrate/.gitignore`, keeping the graph artifacts (`graph.json`, `graph.html`, `GRAPH_REPORT.md`, `facts.jsonl`, `mcp-navigation.json`) and the cache out of git — so builds, auto-refreshes, and MCP use never leave your branch dirty. Run `vg share` when you want the map committed for your team (it rewrites that ignore file). vg never touches an existing `.vibgrate/.gitignore`, so edit it (or leave it empty) to manage the ignores yourself.
 
@@ -5135,31 +5134,15 @@ notice: skipped 3 symlinks (alias.ts, nested/cycle, via). vg does not follow sym
 
 ### Binary and non-UTF-8 files
 
-`vg build` and `vg scan` read source as UTF-8 text. A file under the walk can still be a binary, a media blob, or another encoding, including one whose extension looks like source (`payload.js`, `README.md`). vg does not decode those bytes. It leaves the file out of the map and out of scan text, prints one notice for that walk on stderr, and continues. `vg scan` builds a code map after the scan unless you pass `--no-graph`, so the map build can print a second notice for the same paths. The command does not crash, and neither notice includes file bytes.
+`vg build` and `vg scan` read project files as text. A file that contains a NUL byte, or bytes that are not valid UTF-8, is not text. That includes a binary blob saved with a source or manifest extension, and UTF-16 saved as `.md` or `.json`.
 
-Known media extensions (images, fonts, audio, video, archives) are already left out of the scan walk. This notice is for a file vg would otherwise have opened as text. Output files do not change because of the notice itself, and the exit code stays the same when the rest of the command succeeds.
+Those files are left out. The build does not parse them and does not put their bytes in the map. The scan does not feed them to text parsers. One warning names the count and the first few root-relative paths, in sorted order (at most five; further files are a `+N more` count). It tells you to leave the files out with a `.gitignore` entry, or to pass `--exclude`. The warning does not include the file's bytes.
 
-The notice is the count, then the first few root-relative paths in sorted order (at most five; further files are a `+N more` count). Paths are relative to the root you passed. Absolute paths are not printed. The line goes to stderr, so `--format json` and `vg build --json` keep a JSON document on stdout. `--quiet` hides promotional text only; it does not hide this notice.
+A lockfile that is binary or not UTF-8 still stops the command. That message names the file and tells you to leave it out the same way, or to replace it with a text lockfile. It does not include the file's bytes.
 
 ```text
-notice: skipped 2 files that are not UTF-8 text (README.md, payload.js). vg does not read binary or non-UTF-8 files as source. Ignore them with --exclude or a .gitignore rule. Example: vg build --exclude 'README.md'
+warning [VG_WARN_NON_TEXT_FILE]: skipped 2 files that are binary or not UTF-8 (blob.ts, notes.md). Leave them out with a .gitignore entry, or pass --exclude.
 ```
-
-To leave a file out without a notice, list it in `.gitignore` or pass `--exclude`. Both commands accept the flag. A config `exclude` list is merged in as well.
-
-```bash
-vg build --exclude 'payload.js'
-vg build --exclude '*.bin' --exclude 'vendor-blobs/**'
-vg scan --exclude 'legacy/blob.js'
-```
-
-```gitignore
-# binary checked in under a source-like name
-payload.js
-*.bin
-```
-
-A source file that is valid UTF-8, including non-ASCII text, is still read. Save a file that uses another encoding as UTF-8 if it should be part of the map.
 
 ---
 

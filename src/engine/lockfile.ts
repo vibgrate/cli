@@ -6,6 +6,7 @@ import {
   LockfileParseError,
   parseLockfileJson,
 } from '../core-open/utils/lockfile-parse.js';
+import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
 import {
   emitUnknownOptionalLockfileWarnings,
   lockfileWarningPath,
@@ -31,8 +32,11 @@ import type { DepRecord } from './drift.js';
  */
 function readOptionalText(abs: string): string | undefined {
   try {
-    return fs.readFileSync(abs, 'utf8');
+    const inspected = inspectUtf8(fs.readFileSync(abs));
+    if (!inspected.ok) throw new LockfileParseError(abs, 'binary');
+    return inspected.text;
   } catch (err) {
+    if (err instanceof LockfileParseError) throw err;
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw new LockfileParseError(abs, 'unreadable');
   }

@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
 
 /**
  * Module resolution for import edges. Resolves an import specifier (relative,
@@ -350,7 +351,9 @@ function readTsconfigChain(root: string, file: string, seen: Set<string>): TsPat
   seen.add(file);
   let cfg: { extends?: string; compilerOptions?: { baseUrl?: string; paths?: Record<string, string[]> } };
   try {
-    cfg = parseJsonc(fs.readFileSync(file, 'utf8'));
+    const inspected = inspectUtf8(fs.readFileSync(file));
+    if (!inspected.ok) return null;
+    cfg = parseJsonc(inspected.text);
   } catch {
     return null;
   }
@@ -383,16 +386,26 @@ function loadWorkspacePackages(root: string): Map<string, string> {
   const rootPkg = path.join(root, 'package.json');
   if (fs.existsSync(rootPkg)) {
     try {
-      const pkg = JSON.parse(fs.readFileSync(rootPkg, 'utf8')) as { workspaces?: string[] | { packages?: string[] } };
-      const ws = Array.isArray(pkg.workspaces) ? pkg.workspaces : pkg.workspaces?.packages;
-      if (ws) globs.push(...ws);
+      const inspected = inspectUtf8(fs.readFileSync(rootPkg));
+      if (inspected.ok) {
+        const pkg = JSON.parse(inspected.text) as { workspaces?: string[] | { packages?: string[] } };
+        const ws = Array.isArray(pkg.workspaces) ? pkg.workspaces : pkg.workspaces?.packages;
+        if (ws) globs.push(...ws);
+      }
     } catch {
       /* ignore */
     }
   }
   const pnpmWs = path.join(root, 'pnpm-workspace.yaml');
   if (fs.existsSync(pnpmWs)) {
-    for (const line of fs.readFileSync(pnpmWs, 'utf8').split('\n')) {
+    let wsText = '';
+    try {
+      const inspected = inspectUtf8(fs.readFileSync(pnpmWs));
+      if (inspected.ok) wsText = inspected.text;
+    } catch {
+      wsText = '';
+    }
+    for (const line of wsText.split('\n')) {
       const m = /^\s*-\s*['"]?([^'"\n]+)['"]?\s*$/.exec(line);
       if (m) globs.push(m[1].trim());
     }

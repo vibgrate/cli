@@ -1,6 +1,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { assertSafeWalkRoot } from '../core-open/utils/root-safety.js';
+import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
+
+/** Read a manifest as UTF-8. Throws when the file is missing, binary, or not UTF-8. */
+function readProjectText(file: string): string {
+  const inspected = inspectUtf8(fs.readFileSync(file));
+  if (!inspected.ok) throw Object.assign(new Error('non-text'), { code: 'ENONTEXT' });
+  return inspected.text;
+}
 
 /**
  * Dependency currency (VG-LOCAL-MODELS §9 / VG-DEVELOPMENT-PLAN Phase 2.4).
@@ -122,7 +130,7 @@ function npmDeps(files: string[], root: string): DepRecord[] {
   for (const file of files) {
     let pkg: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
     try {
-      pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+      pkg = JSON.parse(readProjectText(file));
     } catch {
       continue;
     }
@@ -146,7 +154,7 @@ function installedNpmVersion(dir: string, name: string, root: string): string | 
   for (let i = 0; i < 12; i++) {
     const p = path.join(cur, 'node_modules', name, 'package.json');
     try {
-      return (JSON.parse(fs.readFileSync(p, 'utf8')) as { version: string }).version;
+      return (JSON.parse(readProjectText(p)) as { version: string }).version;
     } catch {
       /* keep climbing */
     }
@@ -212,7 +220,7 @@ function installedPypiVersion(root: string, name: string): string | undefined {
 function installedPhpVersion(root: string, name: string): string | undefined {
   let data: unknown;
   try {
-    data = JSON.parse(fs.readFileSync(path.join(root, 'vendor', 'composer', 'installed.json'), 'utf8'));
+    data = JSON.parse(readProjectText(path.join(root, 'vendor', 'composer', 'installed.json')));
   } catch {
     return undefined;
   }
@@ -235,7 +243,7 @@ function pypiDeps(files: string[]): DepRecord[] {
   for (const file of files) {
     let text: string;
     try {
-      text = fs.readFileSync(file, 'utf8');
+      text = readProjectText(file);
     } catch {
       continue;
     }
@@ -334,7 +342,7 @@ function goDeps(files: string[]): DepRecord[] {
   for (const mod of files) {
     let text: string;
     try {
-      text = fs.readFileSync(mod, 'utf8');
+      text = readProjectText(mod);
     } catch {
       continue;
     }
@@ -400,7 +408,7 @@ function cargoDeps(files: string[]): DepRecord[] {
   for (const file of files) {
     let text: string;
     try {
-      text = fs.readFileSync(file, 'utf8');
+      text = readProjectText(file);
     } catch {
       continue;
     }
@@ -434,7 +442,7 @@ function rubyDeps(files: string[]): DepRecord[] {
   for (const file of files) {
     let text: string;
     try {
-      text = fs.readFileSync(file, 'utf8');
+      text = readProjectText(file);
     } catch {
       continue;
     }
@@ -451,7 +459,7 @@ function phpDeps(files: string[]): DepRecord[] {
   for (const file of files) {
     let pkg: { require?: Record<string, string>; 'require-dev'?: Record<string, string> };
     try {
-      pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
+      pkg = JSON.parse(readProjectText(file));
     } catch {
       continue;
     }
@@ -470,7 +478,7 @@ function dotnetDeps(files: string[]): DepRecord[] {
   for (const file of files) {
     let text: string;
     try {
-      text = fs.readFileSync(file, 'utf8');
+      text = readProjectText(file);
     } catch {
       continue;
     }
@@ -496,7 +504,7 @@ function swiftDeps(files: string[]): DepRecord[] {
   for (const file of files) {
     let text: string;
     try {
-      text = fs.readFileSync(file, 'utf8');
+      text = readProjectText(file);
     } catch {
       continue;
     }
@@ -520,7 +528,7 @@ function dartDeps(files: string[]): DepRecord[] {
   for (const file of files) {
     let text: string;
     try {
-      text = fs.readFileSync(file, 'utf8');
+      text = readProjectText(file);
     } catch {
       continue;
     }
@@ -552,7 +560,7 @@ function javaDeps(files: string[]): DepRecord[] {
   for (const file of files) {
     let text: string;
     try {
-      text = fs.readFileSync(file, 'utf8');
+      text = readProjectText(file);
     } catch {
       continue;
     }

@@ -5,10 +5,9 @@ import { langForExtension, langById, type LanguageDef } from './languages.js';
 import { requireDataConfig } from '../core-open/config.js';
 import { dropBlankPatterns, gitignoreWithoutBlankLines } from '../core-open/utils/glob.js';
 import { assertLockfileFile, lockfileKind } from '../core-open/utils/lockfile-parse.js';
+import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
 import { assertSafeWalkRoot, createWalkBudget, noteWalkEntry } from '../core-open/utils/root-safety.js';
-import { emitSkippedNonUtf8Notice, shouldSkipNonUtf8File } from '../core-open/utils/source-text.js';
 import { emitSkippedSymlinkNotice } from '../core-open/utils/skipped-symlinks.js';
-import { DEFAULT_MAX_FILE_BYTES } from './limits.js';
 
 /**
  * Deterministic file discovery.
@@ -169,17 +168,6 @@ export interface DiscoverOptions {
    * Default: `VG_MAX_FILES`, else 100000.
    */
   maxEntries?: number;
-  /**
-   * Largest file fully checked for UTF-8 before it is treated as source.
-   * Larger files are judged on a prefix. Default: the build's per-file cap.
-   * `0` checks a prefix only.
-   */
-  maxSourceBytes?: number;
-  /**
-   * When set, binary and non-UTF-8 source files are recorded here and this
-   * call does not print the notice. The caller prints once.
-   */
-  skippedNonUtf8?: string[];
 }
 
 export interface DiscoveredFile {
@@ -228,8 +216,11 @@ export function loadRootIgnore(root: string, exclude: string[]): Ignore {
   const gitignorePath = path.join(root, '.gitignore');
   try {
     if (fs.existsSync(gitignorePath)) {
-      const rules = gitignoreWithoutBlankLines(fs.readFileSync(gitignorePath, 'utf8'));
-      if (rules) ig.add(rules);
+      const inspected = inspectUtf8(fs.readFileSync(gitignorePath));
+      if (inspected.ok) {
+        const rules = gitignoreWithoutBlankLines(inspected.text);
+        if (rules) ig.add(rules);
+      }
     }
   } catch {
     // Unreadable .gitignore: walk the tree rather than fail the build.
@@ -266,8 +257,6 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
   // link, so a directory link to its parent cannot re-enter this walk. The
   // notice lists the ones this walk skipped; ignored links stay quiet.
   const skippedSymlinks: string[] = [];
-  const skippedNonUtf8 = options.skippedNonUtf8 ?? [];
-  const fullReadCap = options.maxSourceBytes ?? DEFAULT_MAX_FILE_BYTES;
 
   const considerFile = (abs: string): void => {
     const rel = toPosix(path.relative(root, abs));
@@ -281,12 +270,6 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
     }
     const lang = langForExtension(path.extname(abs));
     if (!lang || !allowLang(lang)) return;
-    // A source extension does not make the bytes text. Skip before parse so
-    // a blob is never decoded, hashed into a symbol, or copied into a warning.
-    if (rel && shouldSkipNonUtf8File(abs, fullReadCap)) {
-      skippedNonUtf8.push(rel);
-      return;
-    }
     found.set(rel, { rel, abs, lang });
   };
 
@@ -329,7 +312,6 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
   }
 
   emitSkippedSymlinkNotice(skippedSymlinks);
-  if (!options.skippedNonUtf8) emitSkippedNonUtf8Notice(skippedNonUtf8);
   return [...found.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 }
 

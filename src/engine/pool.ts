@@ -7,7 +7,7 @@ import { setGrammarsOverride, resetParser } from './grammars.js';
 import { checkMemoryBudget, envJobs, envWorkerHeapMb, ResourceLimitError } from './limits.js';
 import type { DiscoveredFile } from './discover.js';
 import type { FileParse } from './types.js';
-import { NON_UTF8_SKIP_MARK, readUtf8SourceSync } from '../core-open/utils/source-text.js';
+import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
 import { stampWarning, WARNING_CODES } from '../core-open/warnings.js';
 import type { ParseTask } from './parse-worker.js';
 
@@ -77,8 +77,14 @@ async function parseInline(files: DiscoveredFile[], options: ParseOptions): Prom
   onProgress?.(0, files.length);
   for (const file of files) {
     try {
-      const source = readUtf8SourceSync(file.abs);
-      out.push(source === null ? nonUtf8Parse(file) : await parseSource(file.rel, file.lang.id, source));
+      const inspected = inspectUtf8(fs.readFileSync(file.abs));
+      if (!inspected.ok) {
+        out.push(emptyParse(file, stampWarning(WARNING_CODES.NON_TEXT_FILE, file.rel)));
+        onProgress?.(out.length, files.length);
+        if (out.length % MEM_CHECK_EVERY === 0) checkMemoryBudget('parse', memoryBudgetMb);
+        continue;
+      }
+      out.push(await parseSource(file.rel, file.lang.id, inspected.text));
     } catch (err) {
       // A wasm-level parse crash can leave the language's reused parser
       // mid-state; drop it so the failure stays contained to this file.
@@ -169,22 +175,6 @@ function chunk<T>(items: T[], buckets: number): T[][] {
 
 function sortByRel(parses: FileParse[]): FileParse[] {
   return parses.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
-}
-
-function nonUtf8Parse(file: DiscoveredFile): FileParse {
-  return {
-    rel: file.rel,
-    lang: file.lang.id,
-    hash: '',
-    bytes: 0,
-    defs: [],
-    calls: [],
-    imports: [],
-    heritage: [],
-    typeRefs: [],
-    guards: [],
-    warnings: [NON_UTF8_SKIP_MARK],
-  };
 }
 
 function emptyParse(file: DiscoveredFile, warning: string): FileParse {
