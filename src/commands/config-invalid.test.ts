@@ -2,13 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ConfigFileError, parseDataConfig } from '../core-open/config.js';
+import { ConfigFileError, parseDataConfig, requireDataConfig } from '../core-open/config.js';
 import { readConfigExcludes } from '../engine/discover.js';
 import { loadReviewConfig } from '../review/config.js';
+import { configNotes } from './doctor.js';
 import { main } from '../cli.js';
 
 const TOKEN = 'example-placeholder';
 const BROKEN_YAML = `token: ${TOKEN}\nexclude: [unclosed\n`;
+const SCHEMA_YAML = `# note\ndriftBudget:\n  mode: enforce\n  maxScore: "${TOKEN}"\n`;
 
 const roots: string[] = [];
 function project(files: Record<string, string>): string {
@@ -61,6 +63,24 @@ describe('malformed project config fails closed', () => {
     expect(() => readConfigExcludes(root)).toThrow(ConfigFileError);
     expect(() => readConfigExcludes(root)).toThrow(/\.vibgrate\/config\.yml is not valid YAML at line 3/);
     expect(() => readConfigExcludes(root)).not.toThrow(new RegExp(TOKEN));
+  });
+
+  it('names the key and line for a schema-invalid driftBudget and does not echo the value', () => {
+    const message = expectedMessage(SCHEMA_YAML, '.vibgrate/config.yml');
+    expect(message).toBe(
+      '.vibgrate/config.yml: `driftBudget.maxScore` must be a number from 0 to 100 (line 4). Fix that key and run the command again.',
+    );
+    expect(message).not.toContain(TOKEN);
+    expect(message).not.toContain('[REDACTED]');
+    expect(message).not.toMatch(/\n\s+at /);
+    const root = project({ '.vibgrate/config.yml': SCHEMA_YAML });
+    expect(() => requireDataConfig(root)).toThrow(ConfigFileError);
+    try {
+      requireDataConfig(root);
+    } catch (err) {
+      expect(err).toMatchObject({ line: 4, key: 'driftBudget.maxScore' });
+    }
+    expect(configNotes(root)).toEqual([message]);
   });
 
   it('does not fall back to review defaults when the committed config is invalid', () => {
@@ -117,5 +137,13 @@ describe('vg exits non-zero on a malformed config file', () => {
     expect(scan).toEqual({ code: 1, stderr: expected, stdout: '' });
     expect(build).toEqual({ code: 1, stderr: expected, stdout: '' });
     expect(review).toEqual({ code: 1, stderr: expected, stdout: '' });
+  });
+
+  it('vg scan stops on a schema-invalid config instead of scanning with defaults', async () => {
+    const root = project({ '.vibgrate/config.yml': SCHEMA_YAML });
+    const expected = `error: ${expectedMessage(SCHEMA_YAML, '.vibgrate/config.yml')}\n`;
+    const scan = await runCli(['scan', root, '--offline', '--no-graph', '--quiet', '--no-local-artifacts']);
+    expect(scan).toEqual({ code: 1, stderr: expected, stdout: '' });
+    expect(scan.stderr).not.toContain(TOKEN);
   });
 });
