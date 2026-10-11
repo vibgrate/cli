@@ -22,6 +22,7 @@ import { renderReport } from '../engine/report.js';
 import { renderHtml } from '../engine/html.js';
 import { UsageError, mergeExcludes } from '../engine/discover.js';
 import { ResourceLimitError } from '../engine/limits.js';
+import { ParseWorkerError } from '../engine/pool.js';
 import { UnsafeRootError } from '../core-open/utils/root-safety.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { resolveSelfJsEntry } from '../util/cli-invocation.js';
@@ -150,7 +151,9 @@ export async function runBuild(
   } catch (err) {
     bar?.done();
     if (err instanceof UsageError) throw usageError(err.message);
-    if (err instanceof ResourceLimitError) throw new CliError(err.message, ExitCode.ERROR);
+    if (err instanceof ResourceLimitError || err instanceof ParseWorkerError) {
+      throw new CliError(err.message, ExitCode.ERROR);
+    }
     if (err instanceof UnsafeRootError) throw new CliError(err.message, ExitCode.ERROR);
     throw err;
   }

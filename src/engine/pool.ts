@@ -9,6 +9,7 @@ import type { DiscoveredFile } from './discover.js';
 import type { FileParse } from './types.js';
 import { stampWarning, WARNING_CODES } from '../core-open/warnings.js';
 import type { ParseTask } from './parse-worker.js';
+import { parsePoolGuard, type ManagedPool } from './pool-guard.js';
 
 /**
  * Parse a set of discovered files into FileParse tables.
@@ -37,6 +38,8 @@ export interface ParseOptions {
   grammarsDir?: string;
   /** Heap budget (MiB) checked as parse results accumulate; 0/unset skips. */
   memoryBudgetMb?: number;
+  /** Worker module path. Set by tests; production resolves the bundled worker. */
+  workerFile?: string;
 }
 
 const DEFAULT_INLINE_THRESHOLD = 24;
@@ -51,7 +54,7 @@ export async function parseFiles(
   // workers caps peak memory too (each worker holds its own grammar set).
   const jobs = Math.max(1, options.jobs ?? envJobs() ?? (Math.min(cores - 1, files.length) || 1));
 
-  const workerFile = resolveWorkerFile();
+  const workerFile = resolveWorkerFile(options.workerFile);
   const useInline =
     options.inline === true ||
     jobs <= 1 ||
@@ -106,43 +109,80 @@ async function parsePooled(
     filename: workerFile,
     maxThreads: jobs,
     minThreads: 1,
+    // Bound a stuck worker.terminate() so destroy cannot hang forever.
+    terminateTimeout: 1_000,
     ...(workerHeapMb ? { resourceLimits: { maxOldGenerationSizeMb: workerHeapMb } } : {}),
   });
-  try {
-    // More, smaller buckets than threads → finer live progress + better load
-    // balancing. Round-robin keeps shards balanced; the final sort makes the
-    // output independent of bucket count, so determinism is unaffected.
-    const total = files.length;
-    const buckets = chunk(
-      files.map<ParseTask>((f) => ({ rel: f.rel, abs: f.abs, lang: f.lang.id })),
-      Math.min(total, jobs * 8),
-    );
-    let done = 0;
-    onProgress?.(0, total);
-    const results = await Promise.all(
-      buckets.map((b) =>
-        (pool.run({ tasks: b, grammarsDir }) as Promise<FileParse[]>).then((r) => {
-          done += b.length;
-          onProgress?.(done, total);
-          // Results accumulate in *this* process; guard its heap as they land.
-          checkMemoryBudget('parse', memoryBudgetMb);
-          return r;
-        }),
-      ),
-    );
-    return results.flat();
-  } catch (err) {
-    if (isWorkerOom(err)) {
-      throw new ResourceLimitError(
-        `graph build stopped: a parse worker exceeded its ${workerHeapMb ?? '?'} MiB heap cap ` +
-          `(VG_WORKER_HEAP_MB). Raise the cap, exclude the offending files (--exclude), or ` +
-          `run single-threaded with --jobs 1.`,
+  // A worker that dies with no in-flight task emits 'error'. Without a
+  // listener that becomes an uncaught exception and skips pool teardown.
+  pool.on('error', () => undefined);
+  return parsePoolGuard.using(pool as unknown as ManagedPool, async () => {
+    try {
+      // More, smaller buckets than threads → finer live progress + better load
+      // balancing. Round-robin keeps shards balanced; the final sort makes the
+      // output independent of bucket count, so determinism is unaffected.
+      const total = files.length;
+      const buckets = chunk(
+        files.map<ParseTask>((f) => ({ rel: f.rel, abs: f.abs, lang: f.lang.id })),
+        Math.min(total, jobs * 8),
       );
+      let done = 0;
+      onProgress?.(0, total);
+      const results = await Promise.all(
+        buckets.map((b) =>
+          (pool.run({ tasks: b, grammarsDir }) as Promise<FileParse[]>).then((r) => {
+            done += b.length;
+            onProgress?.(done, total);
+            // Results accumulate in *this* process; guard its heap as they land.
+            checkMemoryBudget('parse', memoryBudgetMb);
+            return r;
+          }),
+        ),
+      );
+      return results.flat();
+    } catch (err) {
+      // A signal is already shutting the pool down and will exit. Parking
+      // keeps this rejection from being reported as a second, unrelated error
+      // or from letting the command finish successfully.
+      if (parsePoolGuard.isExiting) await new Promise(() => undefined);
+      throw toParseWorkerError(err, workerHeapMb);
     }
-    throw err;
-  } finally {
-    await pool.destroy();
+  });
+}
+
+/** A parse worker failed. The message says what happened and how to re-run. */
+export class ParseWorkerError extends Error {
+  readonly isParseWorkerError = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ParseWorkerError';
   }
+}
+
+/** Turn a worker failure into an error the CLI can print as-is. */
+export function toParseWorkerError(err: unknown, workerHeapMb?: number): Error {
+  if (err instanceof ResourceLimitError || err instanceof ParseWorkerError) return err;
+  if (isWorkerOom(err)) {
+    return new ResourceLimitError(
+      `graph build stopped: a parse worker exceeded its ${workerHeapMb ?? '?'} MiB heap cap ` +
+        `(VG_WORKER_HEAP_MB). Raise the cap, exclude the offending files (--exclude), or ` +
+        `run single-threaded with --jobs 1.`,
+    );
+  }
+  return new ParseWorkerError(
+    `graph build stopped: a parse worker failed (${publicDetail(err)}). ` +
+      `Re-run with --jobs 1 to parse in this process, or skip files with --exclude.`,
+  );
+}
+
+/** One line, no absolute paths — caller-facing, not a stack trace. */
+function publicDetail(err: unknown): string {
+  const raw = err instanceof Error && err.message ? err.message : 'the worker stopped unexpectedly';
+  let line = raw.replace(/\s+/g, ' ').trim();
+  line = line.replace(/file:\/\/\S+/g, 'a file');
+  line = line.replace(/(?:[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]+)|(?:\/(?:[\w.+@~-]+\/)+[\w.+@~-]+)/g, 'a file');
+  if (!line) return 'the worker stopped unexpectedly';
+  return line.length > 240 ? `${line.slice(0, 239)}…` : line;
 }
 
 function isWorkerOom(err: unknown): boolean {
@@ -150,7 +190,8 @@ function isWorkerOom(err: unknown): boolean {
   return e?.code === 'ERR_WORKER_OUT_OF_MEMORY' || /out of memory/i.test(e?.message ?? '');
 }
 
-function resolveWorkerFile(): string | null {
+function resolveWorkerFile(override?: string): string | null {
+  if (override) return fs.existsSync(override) ? override : null;
   // Only the compiled .js worker is runnable by a bare worker_thread. Under a
   // TS-only runner (vitest/tsx) the .js won't exist → fall back to inline.
   const here = path.dirname(fileURLToPath(import.meta.url));

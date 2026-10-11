@@ -703,57 +703,65 @@ export const scanCommand = new Command('scan')
     let iacRun = null as SecurityRunResult | null;
     if (wantGraph) {
       scanOpts.postScan = async (report, ctx) => {
-        const result = await buildGraph({
-          root: rootDir,
-          exclude: opts.exclude,
-          onParseProgress: (done, total) => report(done, total, 'parsing'),
-        });
-        builtGraph = result.graph;
-        const written = writeArtifacts(result.graph, { root: rootDir });
-        if (written.architecturePolicyError) console.error(chalk.red(`\narchitecture policy: ${written.architecturePolicyError}`));
-        // Freshness snapshot → lets `vg serve`/`vg ask` auto-refresh this map
-        // when the working tree drifts (see engine/freshness.ts).
-        writeSnapshot(rootDir, result.graph.provenance.corpusHash, result.fileStats, {
-          exclude: opts.exclude,
-        });
-        // Refine before format/write — architecture is already on these objects.
-        // --no-graph / map failed / --max-privacy never reach here.
-        // AST roles first so @Entity / @Controller confirm (or override a
-        // filename suffix) before boundary violations are collected.
-        refineArchitectureWithAstRoles(
-          { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
-          result.fileRoles,
-        );
-        refineArchitectureWithGraph(
-          { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
-          architectureGraphView(result.graph),
-        );
-        // Infrastructure packs run here, after the map, so facts bind to the
-        // node ids the graph just assigned — and before runCoreScan assembles
-        // the artifact, so the section is on it for every formatter and the
-        // upload. `ctx.extended` is the very object the artifact carries.
-        const { counts } = result.graph.meta;
-        let detail = `${counts.nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} edges`;
-        if (wantIac) {
-          try {
-            // Provision the module on first use the way `vg build` does —
-            // bounded, consent-respecting, never under --offline (plan §2.8).
-            iacRun = await runSecurityPacks({
-              root: rootDir,
-              exclude: opts.exclude,
-              packs: IAC_PACKS,
-              provision: { offline: Boolean(opts.offline) },
-            });
-          } catch {
-            iacRun = { status: 'abstained' };
+        try {
+          const result = await buildGraph({
+            root: rootDir,
+            exclude: opts.exclude,
+            onParseProgress: (done, total) => report(done, total, 'parsing'),
+          });
+          builtGraph = result.graph;
+          const written = writeArtifacts(result.graph, { root: rootDir });
+          if (written.architecturePolicyError) console.error(chalk.red(`\narchitecture policy: ${written.architecturePolicyError}`));
+          // Freshness snapshot → lets `vg serve`/`vg ask` auto-refresh this map
+          // when the working tree drifts (see engine/freshness.ts).
+          writeSnapshot(rootDir, result.graph.provenance.corpusHash, result.fileStats, {
+            exclude: opts.exclude,
+          });
+          // Refine before format/write — architecture is already on these objects.
+          // --no-graph / map failed / --max-privacy never reach here.
+          // AST roles first so @Entity / @Controller confirm (or override a
+          // filename suffix) before boundary violations are collected.
+          refineArchitectureWithAstRoles(
+            { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
+            result.fileRoles,
+          );
+          refineArchitectureWithGraph(
+            { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
+            architectureGraphView(result.graph),
+          );
+          // Infrastructure packs run here, after the map, so facts bind to the
+          // node ids the graph just assigned — and before runCoreScan assembles
+          // the artifact, so the section is on it for every formatter and the
+          // upload. `ctx.extended` is the very object the artifact carries.
+          const { counts } = result.graph.meta;
+          let detail = `${counts.nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} edges`;
+          if (wantIac) {
+            try {
+              // Provision the module on first use the way `vg build` does —
+              // bounded, consent-respecting, never under --offline (plan §2.8).
+              iacRun = await runSecurityPacks({
+                root: rootDir,
+                exclude: opts.exclude,
+                packs: IAC_PACKS,
+                provision: { offline: Boolean(opts.offline) },
+              });
+            } catch {
+              iacRun = { status: 'abstained' };
+            }
+            if (iacRun.status === 'ok') {
+              ctx.extended.security = iacRun.section;
+              const n = iacRun.section.findings.length;
+              detail += ` · ${n} infrastructure finding${n === 1 ? '' : 's'}`;
+            }
           }
-          if (iacRun.status === 'ok') {
-            ctx.extended.security = iacRun.section;
-            const n = iacRun.section.findings.length;
-            detail += ` · ${n} infrastructure finding${n === 1 ? '' : 's'}`;
-          }
+          return detail;
+        } catch (err) {
+          // Fail-soft at the step, but say why the map stopped. The pool has
+          // already torn its workers down; this is the message the user sees.
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(chalk.red(`error: ${message}`));
+          throw err;
         }
-        return detail;
       };
     }
 

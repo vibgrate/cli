@@ -46,6 +46,7 @@ import { ConfigFileError } from './core-open/config.js';
 import { LockfileParseError } from './core-open/utils/lockfile-parse.js';
 import { UnsafeRootError } from './core-open/utils/root-safety.js';
 import { CliError, ExitCode, usageError } from './util/exit.js';
+import { ParseWorkerError } from './engine/pool.js';
 import { c, info, disableColor, exitAfterFlush } from './util/output.js';
 
 // Drift-reporting commands (merged from the Vibgrate CLI). These run on the
@@ -438,7 +439,13 @@ function handleError(err: unknown): never {
       /* stdout closed */
     }
   };
-  if (err instanceof CliError || err instanceof LockfileParseError || err instanceof ConfigFileError || err instanceof UnsafeRootError) {
+  if (
+    err instanceof CliError ||
+    err instanceof ParseWorkerError ||
+    err instanceof LockfileParseError ||
+    err instanceof ConfigFileError ||
+    err instanceof UnsafeRootError
+  ) {
     const code = err instanceof CliError ? err.code : ExitCode.ERROR;
     emitHostError(err.message);
     info(c.red(`error: ${err.message}`));
