@@ -21,7 +21,7 @@ import { resolveAdvisory } from './advisory.js';
 import { buildRelease } from './release.js';
 import { buildPushPayload, describePushResult, type PushAttestation, type PushResponse } from './push-payload.js';
 import { buildPack } from './pack.js';
-import { buildEvidenceStatement, signEvidenceStatement, verifyEvidenceEnvelope, resolveSigningKey, writeBundle } from './bundle.js';
+import { buildEvidenceStatement, signEvidenceStatement, verifyEvidenceEnvelope, resolveSigningKey, writeBundle, loadEvidenceBundle } from './bundle.js';
 import { synthesizeAdvisory, undeterminedFields, recordDrill, hasRecentDrill } from './drill.js';
 import { formatExposure, formatReadiness, formatRegimeList } from './format.js';
 import { resolveDsn } from '../../credentials.js';
@@ -385,28 +385,30 @@ const drillCmd = new Command('drill')
     }
   });
 
+function readPinnedPublicKey(file: string): string {
+  try {
+    return fs.readFileSync(path.resolve(file), 'utf8');
+  } catch {
+    throw new CliError(`could not read the public key at ${file}. Pass --pub with a PEM file.`, ExitCode.USAGE_ERROR);
+  }
+}
+
 // ── verify ──
 const verifyCmd = new Command('verify')
   .description('Verify an evidence bundle offline (no Vibgrate needed)')
   .argument('<bundle>', 'Path to an evidence bundle directory or evidence.intoto.jsonl')
   .option('--pub <file>', 'Public key PEM to pin the signer (establish trust)')
   .action((bundlePath: string, opts) => {
-    const abs = path.resolve(bundlePath);
-    const envPath = fs.statSync(abs).isDirectory() ? path.join(abs, 'evidence.intoto.jsonl') : abs;
-    if (!fs.existsSync(envPath)) throw new CliError(`no evidence.intoto.jsonl at ${bundlePath}`, ExitCode.NOT_FOUND);
-    const envelope = JSON.parse(fs.readFileSync(envPath, 'utf8').trim().split('\n')[0]) as DsseEnvelope;
-    const resultPath = path.join(path.dirname(envPath), 'result.json');
-    const result = fs.existsSync(resultPath) ? (JSON.parse(fs.readFileSync(resultPath, 'utf8')) as ExposureResult) : undefined;
-    const publicKeyPem = opts.pub ? fs.readFileSync(path.resolve(opts.pub as string), 'utf8') : undefined;
-    const v = verifyEvidenceEnvelope(envelope, { publicKeyPem, result });
+    const loaded = loadEvidenceBundle(bundlePath);
+    const publicKeyPem = opts.pub ? readPinnedPublicKey(opts.pub as string) : undefined;
+    const v = verifyEvidenceEnvelope(loaded.envelope, { publicKeyPem, result: loaded.result });
     const color = v.status === 'verified' ? chalk.green : v.status === 'failed' ? chalk.red : chalk.yellow;
     console.log('  ' + color(v.status.toUpperCase()) + `  ${v.reason}`);
     if (v.evidenceId) console.log('  ' + chalk.dim(`evidence ${v.evidenceId} · regime ${v.regime} · advisory ${v.advisoryId} · ${v.overallStatus}`));
 
     // RFC 3161 timestamp, when the bundle carries one.
-    const tsrPath = path.join(path.dirname(envPath), 'timestamp.tsr');
-    if (fs.existsSync(tsrPath) && result) {
-      const t = verifyTimestamp(fs.readFileSync(tsrPath), exposureSubjectDigest(result));
+    if (loaded.timestampToken && loaded.result) {
+      const t = verifyTimestamp(loaded.timestampToken, exposureSubjectDigest(loaded.result));
       const tcolor = t.imprintMatches ? chalk.green : chalk.red;
       console.log('  ' + tcolor('TIMESTAMP') + `  ${t.reason}`);
     }

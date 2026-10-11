@@ -1,0 +1,5 @@
+{
+  "bomFormat": "CycloneDX",
+  "metadata": { "note": "npm_SbomSecretMustNotLeak" },
+  "components": [{ "version": "1.2.3" }]
+}

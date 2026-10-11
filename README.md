@@ -493,6 +493,8 @@ docker buildx build --push --provenance=true --sbom=true --metadata-file build.j
 vg evidence release acme-gateway 3.2.1 --image ghcr.io/acme/gateway:3.2.1 --ship-date 2025-02-14
 ```
 
+An SBOM passed with `--from`, or attached to the image, has to be valid CycloneDX or SPDX JSON. A file that is truncated, not JSON, or missing a required field exits 1. The message names the file and the format it expected, and says to regenerate the SBOM. It does not include the document. A component or package missing `name` fails the command instead of being dropped.
+
 `--image <ref>` asks Docker for the image digest, its `org.opencontainers.image.*` labels, and the provenance and SBOM attestations attached to it; the attached SBOM becomes the manifest. It runs `docker image inspect` and `docker buildx imagetools inspect`, and the second contacts the registry when the reference is not present locally. Without a daemon, pass the same facts as files: `--buildkit-metadata build.json` for the digest and build reference, `--provenance <file>` for a SLSA attestation (source repository, commit, base images), and `--from <file>` for a CycloneDX or SPDX SBOM, bare or as an attestation. The result is recorded under `build` in the frozen manifest. A `--digest` that contradicts the build is an error, and attestation signatures are recorded as unverified — `vg` has no registry trust root, so verify them with `cosign`.
 
 ### What is in a bundle, and what "verified" means
@@ -506,6 +508,8 @@ vg evidence release acme-gateway 3.2.1 --image ghcr.io/acme/gateway:3.2.1 --ship
 | `verified` | Signature checks, the signer is pinned to a trust root you supplied with `--pub`, **and** the result digest still matches |
 | `unverified` | Cryptographically intact and unmodified, but the signer is not pinned — real, and not yet trusted by you |
 | `failed` | Bad signature, or a `result.json` that no longer matches what was signed |
+
+A truncated, invalid, or unreadable bundle is not one of those states. `vg evidence verify` exits 1 and tells you to restore the bundle or re-create it with `vg evidence exposure --bundle`. The message does not include the file's contents.
 
 Exit codes make it a CI gate: **0** no exposure · **2** exposure found · **3** undetermined, needs manual review · **1** operational error.
 
