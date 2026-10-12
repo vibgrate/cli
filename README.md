@@ -76,6 +76,37 @@ npx vg scan                     # vg is the primary command; vibgrate is an alia
 
 ---
 
+## Windows installation
+
+Windows is supported with Node.js 22 or newer. PowerShell is the preferred shell for the Windows installer:
+
+```powershell
+irm https://vibgrate.com/install.ps1 | iex
+```
+
+If you prefer npm, install the CLI globally:
+
+```powershell
+npm install -g @vibgrate/cli
+```
+
+For a one-off run without changing PATH, use:
+
+```powershell
+npx @vibgrate/cli scan
+```
+
+A global npm install places the `vg.cmd` and `vibgrate.cmd` shims in npm's global prefix. Check the exact location with `npm config get prefix`; if `vg` is not found, add that directory to your user `PATH`, then open a new PowerShell window. Verify the installation with:
+
+```powershell
+vg --help
+vg doctor
+```
+
+`vg doctor` is a read-only diagnostic command. If `vg` conflicts with another command on your system, use the identical `vibgrate` command instead. Command examples elsewhere in this README use POSIX path syntax; adapt paths to PowerShell on Windows.
+
+---
+
 ## Use it with your AI assistant
 
 `vg serve` starts **[Vibgrate AI Context](https://vibgrate.com/library)** — a local-first [MCP](https://vibgrate.com/glossary/model-context-protocol) server that
