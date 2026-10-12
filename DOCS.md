@@ -65,6 +65,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg path](#vg-path)
   - [vg savings](#vg-savings)
   - [vg serve](#vg-serve)
+    - [Serving over HTTP](#serving-over-http)
   - [vg share](#vg-share)
   - [vg show](#vg-show)
   - [vg status](#vg-status)
@@ -4000,7 +4001,7 @@ vg serve
 | `--no-refresh` | — | Serve the map as built; skip the auto-rebuild when files change |
 | `--compress`, `--compress-only`, `--background`, `--compress-port`, `--compress-mode`, `--profile`, `[agent…]` | — | Context compression in the same process — see [vg serve --compress](#vg-serve---compress) |
 
-Via stdio (default), your AI assistant spawns the server. Via `--http`, it runs as a local HTTP endpoint for browser or shared access.
+Via stdio (default), your AI assistant spawns the server. `--http` listens on loopback for clients that connect by URL — see [Serving over HTTP](#serving-over-http).
 
 **A live status display shows what the server is doing for you.** While `vg serve` runs in a terminal, a status block on stderr updates in place: uptime, which AI clients are connected (detected from the MCP handshake), calls and average response time per tool, and — for the navigation tools with a grep/read baseline — the context tokens served vs the estimated tokens a grep-and-read agent would have burned instead, with the estimated saving labelled as such. Outside a terminal (when your assistant spawns the server) it degrades to a quiet one-line heartbeat in the server logs every 15 minutes, and only when there has been activity. The display is in-memory only and always on — nothing is written to disk or uploaded (recording and sharing below stay opt-in) — and `--quiet` turns it off.
 
@@ -4018,7 +4019,56 @@ The server exposes read-only tools your assistant can call over the code map and
 - `upgrade_impact` — what an upgrade will cost: version distance, how many files import the package, the vulnerabilities it fixes, and — with `changelog: true` — online breaking-change notes between your version and the latest.
 - `resolve_library`, `library_docs` — version-correct, drift-annotated library docs.
 
-All tools are read-only. The server is local-first: it always answers from your machine when it can, and its only network touches are the embedder's one-time model fetch, `upgrade_impact`'s `changelog`, and `library_docs`' fall-through to the hosted catalog when the local docs for a library are thin or missing. `--offline` is the hard airgap — it disables all three.
+All tools are read-only. The server is local-first: it always answers from your machine when it can, and its only network touches are the embedder's one-time model fetch, `upgrade_impact`'s `changelog`, and `library_docs`' fall-through to the hosted catalog when the local docs for a library are thin or missing. `--offline` is the hard airgap — it disables all three. `--local` implies `--offline`.
+
+#### Serving over HTTP
+
+`--http` serves those same read-only tools over stateless streamable HTTP, for a client that connects to a URL instead of spawning a process. Startup prints the exact URL (`http://<host>:<port>/mcp`).
+
+```bash
+vg serve --http
+```
+
+`--host` defaults to `127.0.0.1` and `--port` defaults to `7437`, so the printed URL is `http://127.0.0.1:7437/mcp`. `/mcp` is the only route. Any other path returns 404.
+
+Each request builds a fresh MCP server and drops it when the response finishes. `--dedup` collapses a node's heavy relation lists on repeat reads inside one session, so it only accumulates over stdio, not across HTTP calls.
+
+**Origin check.** A request with no `Origin` header passes. That is how the CLI and native MCP clients connect. A browser-set `Origin` must be loopback — `localhost`, `127.0.0.0/8`, or `[::1]` — or listed in the comma-separated `VIBGRATE_ALLOWED_ORIGINS` variable. Anything else gets 403. This is the DNS-rebinding guard. A list value of `*` allows every origin; it is an explicit escape hatch.
+
+With the server on the default bind, a non-loopback Origin is rejected:
+
+```bash
+curl -i -X POST -H 'Origin: https://example.com' http://127.0.0.1:7437/mcp
+```
+
+The status line is `HTTP/1.1 403 Forbidden`.
+
+**Binding.** The endpoint has no authentication. The URL takes no key, token, or query secret, and the client config below has none either. Binding past loopback exposes the read-only code map to anything that can reach the port:
+
+```bash
+vg serve --http --host 0.0.0.0
+```
+
+Leave the bind address at `127.0.0.1`. For a remote machine, tunnel the loopback port and keep the client on localhost:
+
+```bash
+ssh -N -L 7437:127.0.0.1:7437 user@remote
+```
+
+**Network.** The HTTP listener adds no outbound call of its own. The only outbound touches are the same three as stdio: the embedder's one-time model fetch, `upgrade_impact` with `changelog: true`, and `library_docs` falling through to the hosted catalog when the local docs are thin or missing. `--offline` disables all three. `--local` implies `--offline`, so it is the same airgap. The opt-in `--share-stats` upload described above stays off unless you pass the flag, and `--offline` disables it too.
+
+Point the client at the loopback URL:
+
+```json
+{
+  "mcpServers": {
+    "vg": {
+      "type": "http",
+      "url": "http://127.0.0.1:7437/mcp"
+    }
+  }
+}
+```
 
 ---
 
