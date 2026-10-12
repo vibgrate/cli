@@ -21,8 +21,8 @@ export const NUDGE_END = '<!-- vg:end -->';
  * v2 = versioned markers + the strong MCP-first recommendation;
  * v3 = library-docs workflow resolves by package name only, and an
  * `entityCount` of 0 means read `node_modules` rather than retry;
- * v4 = `vg report` formats are text (default), md, and json. There is no
- * HTML report, and sarif belongs to `vg scan`;
+ * v4 = `vg report` formats were text (default), md, and json (html came
+ * in v5), and sarif belongs to `vg scan`;
  * v5 = `vg report` also accepts `html` (a self-contained page).
  */
 export const INSTALL_CONTENT_VERSION = 5;
