@@ -351,21 +351,63 @@ No language model touches any figure in the evidence path, and every determinati
 Turn a drift scan into ranked, risk-tiered upgrade plans and **apply** the one
 you choose — bringing packages up to date with confidence.
 
-`vg fix` uses the hosted Vibgrate planner, so it needs a login: run `vg login`
-(or set `VIBGRATE_DSN`). The CLI only measures your project locally — your source
-never leaves your machine; only dependency versions and the aggregate usage
-signals the planner needs are sent.
+`vg fix` calls the hosted Vibgrate planner. It requires a DSN from `vg login`,
+the `VIBGRATE_DSN` environment variable, or `--dsn`. Resolution order is
+`--dsn`, then `VIBGRATE_DSN`, then the credential stored by `vg login`. With
+none of those set, the command exits `1` before it plans.
+
+The request sends each drifted dependency's name, ecosystem, and current and
+latest versions. For npm and PyPI it also sends aggregate usage signals
+measured on this machine: import-site and file counts, and the imported symbol
+names. The body includes the CLI version and, when git metadata is available,
+the repository name and commit id. Source files stay on the machine.
+
+Applying a chosen plan is a further network step. `vg fix` runs the project's
+own package manager, which reaches the registries that manager is configured
+to use.
 
 ```bash
-vg login                     # once, to authenticate
-vg fix                       # analyse, then choose/apply a plan
-vg fix --dry-run             # show exactly what would change, apply nothing
-vg fix --plan safe --yes     # apply a specific plan non-interactively (CI)
-vg fix --no-apply            # only print the plans
+vg login                     # once; stores a DSN for later commands
+vg fix                       # analyse, then choose and apply a plan
 vg fix --format json         # machine-readable report for CI or an agent (no apply)
 vg fix --kind patch --yes    # group and apply just the patch-level bumps
 vg fix --packages "lodash,chalk" --yes  # group and apply exactly this batch
 ```
+
+**Preview, then apply.** `--no-apply`, `--dry-run`, and apply are three
+different modes. Each of them still calls the hosted planner.
+
+| Mode | Command | Effect |
+| --- | --- | --- |
+| Print plans | `vg fix --no-apply` | Print the plans. Never touch the project. |
+| Preview one plan | `vg fix --dry-run` | Show what the chosen or recommended plan would change. Never prompts. Pass `--plan <tier>` to preview that tier. When more than one plan contains upgrades and `--plan` is omitted, the preview is the recommended plan. |
+| Apply | `vg fix --yes` or `vg fix --plan <tier>` | Apply the recommended plan (`--yes`) or that tier (`--plan`). The package manager runs. |
+
+```bash
+vg fix --no-apply                  # print the plans; never touch the project
+vg fix --dry-run                   # preview the recommended plan; never prompts
+vg fix --plan balanced --dry-run   # preview the Balanced plan; never prompts
+vg fix --yes                       # apply the recommended plan
+vg fix --plan safe                 # apply the Low-risk plan
+```
+
+On a terminal, `vg fix` asks which plan to apply when more than one plan
+contains upgrades. A single such plan is applied directly. With no terminal,
+and without `--yes` or `--plan`, it prints the plans and leaves the project
+unchanged.
+
+**Credentials.** In CI, set `VIBGRATE_DSN` from the secret store:
+
+```yaml
+- name: Apply a ranked upgrade plan
+  env:
+    VIBGRATE_DSN: ${{ secrets.VIBGRATE_DSN }}
+  run: vg fix --plan safe --yes
+```
+
+Keep the DSN, registry tokens, and `.env` contents out of the workflow file
+and the command. Set the secret in `VIBGRATE_DSN`. Passing it with `--dsn`
+puts the value in the process list.
 
 **Grouping, instead of one PR per package.** `--packages` and `--kind` narrow
 planning to a specific batch — every patch bump, every minor bump, or an
@@ -377,26 +419,31 @@ cross-package conflicts *within that batch* (e.g. two packages that would pin
 a shared peer dependency to incompatible ranges once bumped together) are
 still caught — a conflict blocks apply unless you pass `--force`.
 
-**Applying.** When there's more than one plan, `vg fix` shows them and asks which
-to apply; with a single plan it applies it directly. Applying runs your project's
-own package manager (pnpm/npm/yarn/bun, pip, cargo, go, composer, dotnet, dart, …)
-to pin each target version — editing the manifest and installing in one step.
-Ecosystems without a clean one-shot pin (e.g. Maven/Gradle) are reported for a
-manual edit rather than skipped silently. Changes are local and git-reversible;
-use `--dry-run` to preview, `--no-apply` to never touch the project, `--yes`/
-`--plan` for non-interactive runs. `--format json`/`md` are report-only.
+**Applying.** Applying runs your project's own package manager
+(pnpm/npm/yarn/bun, pip, cargo, go, composer, dotnet, dart, …) to pin each
+target version — editing the manifest and installing in one step. That install
+reaches the registries the package manager is configured to use. Ecosystems
+without a clean one-shot pin (for example Maven and Gradle) are reported for a
+manual edit. The manifest edits are local and git-reversible. `--format json`
+and `--format md` print the report and do not apply, the same as `--no-apply`.
 
 It reads the last scan artifact (`.vibgrate/scan_result.json`); if there isn't
 one it runs a drift scan first, skipping the code map. Every drifted dependency —
 across all supported ecosystems (npm, PyPI, Go, Cargo, Maven/Gradle, NuGet,
 Composer, RubyGems, pub, Hex, …) — is sent to the planner, which builds three
-plans and names the categorical best one:
+plans and names the categorical best one.
 
-- **Low-risk** — patch and minor updates only, limited to lightly-used packages
+The words in the report are labels. `--plan` takes the tier id on the same plan:
+
+- **Low-risk** (`--plan safe`) — patch and minor updates only, limited to lightly-used packages
   with no breaking-change signals and no dependency conflicts.
-- **Balanced** — the low-risk set plus single, clean major upgrades.
-- **Full** — everything to latest stable, except upgrades that are mutually
+- **Balanced** (`--plan balanced`) — the low-risk set plus single, clean major upgrades.
+- **Full** (`--plan aggressive`) — everything to latest stable, except upgrades that are mutually
   incompatible at those versions.
+
+`--plan` accepts `safe`, `balanced`, and `aggressive`. Any other value is an
+error. When two tiers list the same upgrades, the CLI keeps the lower-risk
+tier and the other id selects that surviving plan.
 
 The analysis runs in two phases. A fast pass classifies every upgrade
 (patch / minor / major) and measures its blast radius from how heavily the
@@ -431,10 +478,10 @@ disruptive plan.
 | `--in <file>` | Scan artifact to read (default `.vibgrate/scan_result.json`, resolved against the analysed path). |
 | `--dsn <dsn>` | DSN token (or use `VIBGRATE_DSN` / `vg login`). |
 | `--region <region>` | Override data residency region (`us`, `eu`). |
-| `--plan <tier>` | Apply a specific plan non-interactively (`safe`/`balanced`/`aggressive`). |
+| `--plan <tier>` | Apply this tier without prompting: `safe` (Low-risk), `balanced` (Balanced), or `aggressive` (Full). |
 | `--yes` | Apply the recommended plan without prompting. |
-| `--dry-run` | Show what would change without applying. |
-| `--no-apply` | Only print the plans; never modify the project. |
+| `--dry-run` | Preview the recommended plan, or the tier given with `--plan`. Never prompts and never writes. When more than one plan contains upgrades and `--plan` is omitted, previews the recommended plan. |
+| `--no-apply` | Print the plans. Never touch the project. |
 | `--repository-name <name>` | Override the repository name recorded for this plan. |
 | `--packages <names>` | Plan/apply only these packages (comma-separated) — for grouping a specific batch instead of every drifted dependency. |
 | `--kind <patch\|minor\|major>` | Plan/apply only upgrades of this semver bump kind. Combine with `--packages` to target one Dependabot-style batch. |
