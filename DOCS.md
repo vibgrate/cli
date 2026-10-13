@@ -5171,7 +5171,7 @@ A finding is a `<failure>` only when its level fails the drift gate you set. Any
 | `warning` | skipped | failure | skipped |
 | `note` | skipped | skipped | skipped |
 
-Budget cases follow the same exit rules as the CLI. `--drift-budget` / an enforced `driftBudget` breach is a `<failure>`. A score that was not measured, a worsening limit with no `--baseline`, and a warn-mode or shadow breach are `<skipped>` — they do not fail the scan. Every requested gate is included, including gates after the one that stopped the process. The confirmation line goes to stderr, so `--format json` on stdout stays intact. See [Exit Codes](#exit-codes): the XML is written, then the process exits `2` when a gate fails. SARIF stays the code-scanning artifact; see [SARIF](#sarif).
+Budget cases follow the same exit rules as the CLI. `--drift-budget` / an enforced `driftBudget` breach is a `<failure>`. A score that was not measured, `driftBudget.maxWorseningPercent` with no `--baseline`, and a warn-mode or shadow breach are `<skipped>` — they do not fail the scan. `--drift-worsening` with a measured score and no `--baseline` is a `<failure>` and exits `2`: the flag cannot compare. The same worsening limit in project config, with no baseline, is not evaluated and does not fail. Every requested gate is included, including gates after the one that stopped the process. The confirmation line goes to stderr, so `--format json` on stdout stays intact. See [Exit Codes](#exit-codes): the XML is written, then the process exits `2` when a gate fails. The code is `2` exactly when the file has at least one `<failure>`. SARIF stays the code-scanning artifact; see [SARIF](#sarif).
 
 ```bash
 vg scan --format sarif --out vibgrate.sarif --junit vibgrate.junit.xml --fail-on error --drift-budget 40
@@ -5965,7 +5965,7 @@ CI and agents branch on these, so they are a stable contract.
 | `5`  | `USAGE_ERROR`         | Bad invocation: unknown command, invalid flag value, missing argument, a signing key that is missing or not Ed25519, or a retired name such as `vg attest` |
 | `6`  | `ENGINE_UNAVAILABLE`  | A required optional module is not installed and could not be fetched (see [`vg module`](#vg-module)) |
 
-`vg scan --junit` writes that file before it exits, including when the code is `2`. See [JUnit](#junit).
+`vg scan --junit` writes that file before it exits, including when the code is `2`. The code is `2` exactly when that file has at least one `<failure>`. A warn-mode or shadow budget breach, an unmeasured DriftScore, and `driftBudget.maxWorseningPercent` with no `--baseline` are `<skipped>` and the code stays `0`. `--drift-worsening` with a measured score and no `--baseline` is a `<failure>` and the code is `2`: the flag cannot compare. See [JUnit](#junit).
 
 `6` is deliberately distinct from `2`: a CI gate must never read "engine missing" as a gate verdict.
 The same rule is why [`vg review`](#vg-review) exits `6` when there is no code map, and why `--explain`
