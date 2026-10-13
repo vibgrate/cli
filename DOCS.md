@@ -15,6 +15,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg bisect](#vg-bisect)
   - [vg drift](#vg-drift)
   - [vg evidence](#vg-evidence)
+    - [Readiness, regimes, and a local drill](#readiness-regimes-and-a-local-drill)
   - [vg fix](#vg-fix)
   - [vg init](#vg-init)
   - [vg report](#vg-report)
@@ -309,12 +310,12 @@ vg evidence export [--out <dir>] [--regime <id>]
 | Command | Description |
 |---------|-------------|
 | `vg evidence init` | Set org, coordinator CSIRT, and the person with filing authority |
-| `vg evidence regimes` | List available reporting regimes and their clocks |
+| `vg evidence regimes` | List available reporting regimes and their clocks. See [Readiness, regimes, and a local drill](#readiness-regimes-and-a-local-drill) |
 | `vg evidence product add` | Register a product with digital elements (PDE) |
 | `vg evidence release` | Freeze a shipped release into an immutable component manifest |
 | `vg evidence exposure` | Which shipped products contain a vulnerability — with signed evidence |
-| `vg evidence readiness` | Deterministic gap report against the regime's obligations |
-| `vg evidence drill` | Timed dry-run of the determination against a simulated advisory |
+| `vg evidence readiness` | Deterministic gap report against the regime's obligations. See [Readiness, regimes, and a local drill](#readiness-regimes-and-a-local-drill) |
+| `vg evidence drill` | Timed dry-run of the determination against a simulated advisory. See [Readiness, regimes, and a local drill](#readiness-regimes-and-a-local-drill) |
 | `vg evidence pack` | Build the submission pack a human pastes into the reporting platform |
 | `vg evidence watch` | Check CISA KEV for new exposure against your shipped components |
 | `vg evidence verify` | Verify an evidence bundle offline — no account, no network |
@@ -338,6 +339,147 @@ If a command cannot serialize or write a JSON or JSONL file — permission denie
 `vg evidence verify` reads the bundle before it reports `verified`, `unverified`, or `failed`. A missing bundle exits `3`. A bundle whose envelope or `result.json` is truncated, is not valid JSON, or is not an evidence document this version can read exits `1`. The message names the envelope or the result and tells you to restore the bundle or re-create it with `vg evidence exposure --bundle`. It does not print the file's contents or a stack trace. A readable bundle that was signed and then edited still reports `failed`.
 
 No language model touches any figure in the evidence path, and every determination carries an evidence-not-compliance disclaimer. Vibgrate Evidence produces evidence to support your obligations under a regime; it does not determine compliance and is not legal advice.
+
+#### Readiness, regimes, and a local drill
+
+`vg evidence regimes`, `vg evidence readiness`, and `vg evidence drill` answer a question you can settle on one machine, before `vg evidence push`: which reporting clocks apply, which local records are still missing, and what a rehearsal of the determination prints. They need no workspace DSN and no registry token. From a checkout of this repo, `pnpm dev evidence …` is the same binary as `vg evidence …`.
+
+The handlers live in `src/reporting/commands/evidence/`. Regime profiles are `regimes.ts`. Gap rules are `readiness.ts`. The simulated advisory and the on-disk drill record are `drill.ts`. Flags are wired in `index.ts`.
+
+| Command | What it is for | What it reads | What it writes |
+| --- | --- | --- | --- |
+| `vg evidence regimes` | The reporting profiles shipped in the CLI, and the clock for each stage | Those profiles. No project directory and no `.vibgrate/` tree | Nothing |
+| `vg evidence readiness` | A gap report for the selected regime: each obligation is `ready`, `gap`, or `n/a` | `.vibgrate/evidence/` — `org.json`, `products.json`, `releases/*.json`, `drills/*.json`. A missing file is a gap or `n/a` | Nothing |
+| `vg evidence drill` | A rehearsal of the exposure determination against a simulated advisory built from a component in a frozen release | The same local files. One frozen release has to contain at least one component | `.vibgrate/evidence/drills/drill_<id>.json` |
+
+`regimes` has no `--cwd`. `readiness` and `drill` take `-C, --cwd <dir>` (default: the current directory). `--regime <id>` selects a bundled profile. With no `org.json`, and when `vg evidence init` has not set another default, the id is `cra`. An unknown id exits `5`:
+
+```text
+error: unknown regime "nope" — available regimes: cra, dora-incident
+```
+
+Nothing in these three commands contacts a registry, the CISA KEV catalog, or Vibgrate Cloud. `vg evidence watch` is the command that reads KEV. `vg evidence push` is the opt-in upload, and it is outside this dry-run. `vg evidence export` copies the same local state and includes a `readiness.json` snapshot of this report. `vg evidence verify` checks a signed exposure bundle. The [lifecycle](./README.md#the-lifecycle) and the [privacy notes](./README.md#privacy--offline-first) cover those steps. This dry-run leaves `.vibgrate/attest-key.pem` untouched.
+
+**Regimes.** `vg evidence regimes` prints the bundled profiles. The list is the same on every machine:
+
+```text
+  Available regimes
+
+  cra             EU Cyber Resilience Act  (EU · Regulation (EU) 2024/2847)
+    early-warning PT24H · notification PT72H · final P14D
+    submission: ENISA Single Reporting Platform (Art. 16) — manual (no API)
+  dora-incident   DORA major ICT-related incident reporting  (EU · Regulation (EU) 2022/2554)
+    initial-notification PT24H · intermediate-report P3D · final-report P1M
+    submission: Relevant competent authority (per the ESAs' harmonised templates) — manual (no API)
+```
+
+The clock tokens are ISO-8601 durations: `PT24H` is 24 hours, `PT72H` is 72 hours, `P3D` is 3 days, `P14D` is 14 days, and `P1M` is one month. Each submission line says the filing is manual. The `cra` profile also records an alternate final clock — one month from notification for a severe incident — that this list view leaves out. That alternate, and the classification ids `product add --classification` accepts for `cra` (`default`, `annex-iii-class-i`, `annex-iii-class-ii`, `annex-iv`), live on the profile in `regimes.ts`.
+
+**Readiness stays a gap report.** Each row is one of three statuses. `ready` means the local record is present. `gap` means the obligation can be assessed and the record is absent; the table prints a `fix:` command under that row. `n/a` means there is nothing to assess yet. `n/a` is left out of the score, so a missing record is never counted as ready.
+
+The score is `round(100 * ready / assessable)`, where `assessable` is the rows whose status is `ready` or `gap`. The exposure exit codes above belong to `exposure` and `pack`. Readiness prints the report and exits `0`, gaps included. A directory with no evidence state is `0% (0/4 ready)`:
+
+```text
+  Readiness — EU Cyber Resilience Act   0%  (0/4 ready)
+
+  ✗ Product inventory of products with digital elements   no products registered
+      fix: vg evidence product add <name>
+  – Scope determination recorded per product              no products yet
+  – Frozen component manifest for every shipped release   no products yet
+  – Support period declared per product                   no products yet
+  – Markets recorded per product                          no products yet
+  ✗ Coordinator CSIRT identified                          no coordinator CSIRT set
+      fix: vg evidence init --coordinator <csirt>
+  ✗ Named individual with filing authority                no responsible person with filing authority
+      fix: vg evidence init --responsible "<name>" --filing-authority
+  ✗ Out-of-hours escalation contact                       no out-of-hours contact for the filing person
+      fix: vg evidence init --responsible "<name>" --filing-authority --ooo "<contact>"
+  – A drill in the last 90 days                           no local drill records found — run one
+
+  Vibgrate produces evidence to support your obligations under the selected regime. It does not determine compliance, is not a certification, and is not legal advice. The scope determination, the "actively exploited" determination, and the filing decision are yours.
+```
+
+`--format json` is the same report: `regime`, `score`, `assessable`, `ready`, `items[]` (`id`, `label`, `status`, `detail`, and `fix` when there is a command), and the regime `disclaimer`. The table prints `fix:` on `gap` rows. The JSON also carries `fix` on the `n/a` drill row.
+
+| `id` | `ready` when | Otherwise |
+| --- | --- | --- |
+| `product-inventory` | At least one product is registered | `gap` |
+| `scope-determination` | Every product has `--in-scope` or `--out-of-scope` | `n/a` with no products; `gap` when any product has no scope determination |
+| `frozen-manifests` | Every product that has a `--bind` has at least one frozen release | `n/a` with no products; `gap` when a bound product has no release. A product with no binding and no release is `ready` on this row |
+| `support-period` | Every product has a declared end (`--until` or `vg evidence support-period`) | `n/a` with no products; `gap` otherwise |
+| `markets` | Every product records at least one market | `n/a` with no products; `gap` otherwise |
+| `coordinator-csirt` | `org.json` names a coordinator | `gap` |
+| `filing-authority` | A responsible person was saved with `--filing-authority` | `gap` |
+| `out-of-hours` | That filing person has `--ooo` | `gap`, including when nobody has filing authority |
+| `recent-drill` | A file in `drills/` has `ranAt` within the last 90 days of the UTC date the command uses | `n/a` when `drills/` is missing or empty; `gap` when every record is older than 90 days |
+
+Until a drill record exists, `recent-drill` stays `n/a`. A tree with the other eight rows filled prints `100% (8/8 ready)` and still shows the drill row as `n/a`. After `vg evidence drill`, that row becomes assessable and the same tree prints `100% (9/9 ready)`. The disclaimer is on every report. The percentage counts local records.
+
+Readiness prints the coordinator string and the filing person's name in `detail`. The dry-run below uses placeholders. Keep real contacts, phone numbers, and any DSN out of committed fixtures and out of public issues.
+
+**Drill.** The default `--scenario` is `kev-recent`. That string is a seed. The advisory is synthesized from a component in a frozen manifest, and the output labels it `(NOT a real vulnerability)`. With no frozen release that contains a component, the command exits `3`:
+
+```text
+error: no frozen releases to drill against — register a product and freeze a release first
+```
+
+`--elapsed <seconds>` stores the number you pass. Omit it on a solo dry-run. The table and `--format json` show the drill id, the scenario, the simulated advisory id, `overallStatus`, and `undeterminedFields`. `elapsedSeconds` and `ranAt` are on the JSON file under `drills/`. The id is `drill_` plus the evidence id for that regime, advisory, local state, and UTC date. The same state on the same date rewrites the same file. The advisory id comes from the scenario seed: `--scenario fixture` prints `SIM-FIXTURE-1771`.
+
+`undeterminedFields` lists submission fields this determination could not fill. Drill writes the record and exits `0`, including when the determination is `exposure found`. On `cra`, a drill with a frozen release and no `vg evidence init` reports `coordinator_csirt` and `responsible_person` there. The line `would block a filing` in the table is that list. An empty list prints `nothing — all required fields present`. The exit code that gates CI is on `vg evidence exposure`.
+
+**Dry-run.** Use a throwaway directory so the fixture state stays out of a checkout. The product id is the slug of the name (`Example Gateway` → `example-gateway`). `--bind` is what makes a missing freeze a readiness gap.
+
+```bash
+mkdir -p /tmp/vg-evidence-drill && cd /tmp/vg-evidence-drill
+
+cat > sbom.cdx.json << 'EOF'
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "components": [
+    {
+      "type": "library",
+      "name": "left-pad",
+      "version": "1.3.0",
+      "purl": "pkg:npm/left-pad@1.3.0"
+    }
+  ]
+}
+EOF
+
+vg evidence regimes
+vg evidence readiness --format json
+
+vg evidence init --regime cra \
+  --coordinator "Example CSIRT" \
+  --responsible "Ada Example" \
+  --filing-authority \
+  --ooo "oncall@example.invalid"
+vg evidence product add "Example Gateway" \
+  --markets DE,FR \
+  --in-scope \
+  --rationale "fixture product" \
+  --until 2027-01-01 \
+  --bind example-gateway
+vg evidence release example-gateway 1.0.0 \
+  --from ./sbom.cdx.json \
+  --ship-date 2025-02-14
+
+vg evidence drill --scenario fixture
+vg evidence readiness
+```
+
+The synthesized range is `introduced: 0.0.0` with no fixed version. `left-pad` 1.3.0 falls in that range, so the determination is `exposure found`. After `init`, `undeterminedFields` is empty. The directory then holds:
+
+| Path | Written by |
+| --- | --- |
+| `.vibgrate/evidence/org.json` | `vg evidence init` |
+| `.vibgrate/evidence/products.json` | `vg evidence product add` |
+| `.vibgrate/evidence/releases/example-gateway@1.0.0.json` | `vg evidence release` (immutable; a second freeze of the same version is an error) |
+| `.vibgrate/evidence/drills/drill_<id>.json` | `vg evidence drill` |
+
+Add `.vibgrate/` to `.gitignore` in any tree you keep. Uploading that state is `vg evidence push`, which reads a DSN. This sequence stops at the local drill.
 
 ---
 

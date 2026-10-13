@@ -34,6 +34,10 @@ pnpm dev ask "where is auth handled?"
 Both `vg` and `vibgrate` invoke the same binary. `vg` is the canonical command
 in all docs; please prefer it in examples and tests.
 
+A first look at evidence readiness, regimes, and drill — what each command
+reads, what stays on the machine, and a dry-run that does not upload — is in
+[DOCS.md](./DOCS.md#readiness-regimes-and-a-local-drill).
+
 ## How the code is organized
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full module map. In short:
