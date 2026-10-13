@@ -706,6 +706,8 @@ export async function runCoreScan(
   // package-version manifest (air-gapped). Off unless `--vulns` is set, so the
   // default scan keeps its behaviour, latency, and network surface.
   let vulnFindings: Finding[] = [];
+  // JSON collapses alias-linked advisories. SARIF keeps one result per advisory id.
+  let sarifVulnFindings: Finding[] = [];
   if (opts.vulns) {
     progress.insertStepBefore('drift', { id: 'vulns', label: 'Scanning for vulnerabilities', weight: 3 });
     progress.startStep('vulns');
@@ -736,7 +738,8 @@ export async function runCoreScan(
     ) {
       extended.vulnerabilities = vulnerabilities;
     }
-    vulnFindings = generateVulnerabilityFindings(vulnerabilities);
+    sarifVulnFindings = generateVulnerabilityFindings(vulnerabilities);
+    vulnFindings = generateVulnerabilityFindings(vulnerabilities, { groupAliases: true });
     const affected = vulnerabilities.packages.length;
     const transitiveAffected = vulnerabilities.packages.filter((p) => p.transitive).length;
     progress.completeStep(
@@ -764,7 +767,9 @@ export async function runCoreScan(
   // ── Step: Findings ──
   progress.startStep('findings');
   // Same package, license id, and path is one finding in text, JSON, and SARIF.
-  const findings = dedupeLicenseFindings([...generateFindings(allProjects, config), ...vulnFindings]);
+  const driftFindings = generateFindings(allProjects, config);
+  const findings = dedupeLicenseFindings([...driftFindings, ...vulnFindings]);
+  const sarifFindings = dedupeLicenseFindings([...driftFindings, ...sarifVulnFindings]);
   const warnCount = findings.filter((f) => f.level === 'warning').length;
   const errCount = findings.filter((f) => f.level === 'error').length;
   const noteCount = findings.filter((f) => f.level === 'note').length;
@@ -916,10 +921,11 @@ export async function runCoreScan(
   // to it. JSON then sorts findings. SARIF keeps the pre-sort copy.
   artifact = portableValue(artifact, rootDir);
   // SARIF keeps drift findings ahead of vulnerability results, and within a
-  // package it keeps severity order. JSON (stdout and scan_result.json) sorts
-  // findings by path, rule, advisory id, and package URL so two runs agree
-  // even when directory walk order does not.
-  const sarifArtifact = artifact;
+  // package it keeps one result per advisory id in severity order. JSON
+  // (stdout and scan_result.json) collapses alias-linked advisories, then
+  // sorts findings by path, rule, advisory id, and package URL so two runs
+  // agree even when directory walk order does not.
+  const sarifArtifact = portableValue({ ...artifact, findings: sarifFindings }, rootDir);
   artifact = orderScanArtifactForEmit(artifact);
 
   if (!opts.noLocalArtifacts && !maxPrivacyMode) {
