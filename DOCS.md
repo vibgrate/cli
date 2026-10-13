@@ -29,6 +29,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
     - [Production, development, and optional scope](./docs/sbom-dependency-scope.md)
   - [vg scan](#vg-scan)
     - [Unknown lockfile fields](#unknown-lockfile-fields)
+    - [CDN and non-registry resolutions](./docs/non-registry-lockfile-resolutions.md)
     - [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest)
     - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
       - [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible)
@@ -1718,6 +1719,8 @@ Match a component on its [package URL](https://github.com/package-url/purl-spec)
 
 `projects[].type` is the project kind (`java`, `node`, `python`). The vulnerability block uses the advisory ecosystem (`maven`, `npm`, `pypi`). `vg sbom export` turns those coordinates into the purl type (`pkg:maven`, `pkg:npm`, `pkg:pypi`).
 
+A CDN, tarball, or git URL in the lockfile does not change that purl. The URL is omitted from the scan row and from the SBOM. Which fields stay authoritative is in [CDN and non-registry lockfile resolutions](./docs/non-registry-lockfile-resolutions.md).
+
 Build metadata stays on that recorded version. `1.2.3+build.7` is written as `1.2.3+build.7` in scan JSON (`resolvedVersion`) and as the SBOM component version. The package URL encodes `+` as `%2B` (`pkg:npm/example-build-meta@1.2.3%2Bbuild.7`). Range checks ignore the suffix. A Go scan drops a leading `v` and keeps the suffix, so `v1.2.3+build.7` is recorded as `1.2.3+build.7`. `vg sbom export` for Go uses the require token, which keeps the leading `v` and matches `go.sum`. The same shape is checked in at `examples/semver-build-metadata/`.
 
 These documents have no CPE field. The CLI does not write one, including when a name has several segments (a Maven `group:artifact`, an npm scope, a Go module path). A missing CPE is the normal record. Leave it missing. If a file from another cataloger carries a `cpe` property, keep the purl as the identity you match. A CPE does not replace a purl, rank above it, or stand in for a purl that was omitted.
@@ -2245,6 +2248,12 @@ A lockfile that is truncated or not valid syntax still fails the command, includ
 
 `vg scan` and `vg sbom export` follow this for npm, pnpm, yarn, poetry, uv, pdm, Pipfile, Cargo, Composer, NuGet, Swift package pins, and pub. A Gradle lock line, a Gemfile spec, and a `go.sum` line do not have optional field names. A line that does not match that format is invalid, and the command fails.
 
+### CDN and non-registry resolutions
+
+A lockfile URL — npm or Yarn `resolved`, a pnpm `resolution.tarball`, a Cargo `source`, a Swift `location` — does not change the ecosystem or the purl. The scan row keeps `package` and `resolvedVersion`. The advisory match keeps `ecosystem`, `package`, and `version`. The code map's `external` node keeps the manifest name, with no version and no URL. A `resolved` URL with no `version` is omitted, and the version is not read from the URL.
+
+The field tables, the `workspace:` / `file:` / `git+` cases, and where a credential in a manifest spec can still appear are in [CDN and non-registry lockfile resolutions](./docs/non-registry-lockfile-resolutions.md).
+
 ### Offline scan with a package-version manifest
 
 `--offline` scores drift, and with `--vulns` it matches known vulnerabilities, from files on the machine. `--package-manifest` is the local file those lookups read.
@@ -2367,7 +2376,7 @@ Maven scopes, Maven profiles, and Gradle configurations do not all become depend
 
 SARIF from that scan is one result per package and advisory. How a GHSA, a CVE, and other aliases share that result, and when a second code-scanning alert is expected, is under [Advisories with several ids](#advisories-with-several-ids).
 
-Machine-readable JSON (`vg scan --format json`, and the `.vibgrate/scan_result.json` artifact) lists each advisory under `extended.vulnerabilities.packages[].advisories`. Match the package on `ecosystem`, `package`, and `version` — the same identity `vg sbom export` writes as a purl. See [Component identity](#component-identity). When the advisory data used for that scan already carries exploitability, the same object includes these optional fields:
+Machine-readable JSON (`vg scan --format json`, and the `.vibgrate/scan_result.json` artifact) lists each advisory under `extended.vulnerabilities.packages[].advisories`. Match the package on `ecosystem`, `package`, and `version` — the same identity `vg sbom export` writes as a purl. See [Component identity](#component-identity). A CDN or git URL in the lockfile does not retarget that ecosystem. See [CDN and non-registry lockfile resolutions](./docs/non-registry-lockfile-resolutions.md). When the advisory data used for that scan already carries exploitability, the same object includes these optional fields:
 
 | Field | Type | Meaning |
 | ----- | ---- | ------- |
@@ -2800,6 +2809,8 @@ vg build [paths...]
 Maps source code into a graph artifact, enabling all downstream queries (`vg show`, `vg ask`, `vg impact`, etc.).
 
 A truncated or syntactically invalid lockfile stops the build before source files are parsed, so parse workers are not left running and a partial map is not written. The error names the file and tells you to regenerate it with your package manager. A valid lockfile builds as before.
+
+The map's dependency edges come from the manifest. An `external` node is the package name. A lockfile `resolved` URL is not a node and is not a version on that node. See [CDN and non-registry lockfile resolutions](./docs/non-registry-lockfile-resolutions.md).
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -4967,7 +4978,7 @@ The default output. A coloured, human-readable report showing:
 
 The full scan artifact in JSON format. Contains all raw data, scores, findings, and VCS metadata. Stable schema (`schemaVersion: "1.0"`). This is the same artifact saved to `.vibgrate/scan_result.json`.
 
-Dependency identity in this file is `projects[].type` plus `dependencies[].package` and `resolvedVersion`. An advisory match is `extended.vulnerabilities.packages[]` (`ecosystem`, `package`, `version`). `vg sbom export` writes those coordinates as a package URL. The file has no CPE field. See [Component identity](#component-identity). A dependency row has no package digest. `projects[].projectId` and `solutions[].solutionId` identify the project and the solution. See [Package digests](#package-digests).
+Dependency identity in this file is `projects[].type` plus `dependencies[].package` and `resolvedVersion`. An advisory match is `extended.vulnerabilities.packages[]` (`ecosystem`, `package`, `version`). `vg sbom export` writes those coordinates as a package URL. The file has no CPE field. A lockfile download URL is not one of these fields. See [Component identity](#component-identity) and [CDN and non-registry lockfile resolutions](./docs/non-registry-lockfile-resolutions.md). A dependency row has no package digest. `projects[].projectId` and `solutions[].solutionId` identify the project and the solution. See [Package digests](#package-digests).
 
 #### Score fields in the JSON artifact
 
