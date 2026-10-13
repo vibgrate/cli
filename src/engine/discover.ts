@@ -297,6 +297,10 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
     for (const entry of entries) {
       const abs = path.join(dir, entry.name);
       const rel = toPosix(path.relative(root, abs));
+      // A scope directory can sit outside this root. The ignore matcher
+      // rejects `../` paths, and those files are not part of the project.
+      // A name that merely begins with `..` (`..keep`) is inside the root.
+      if (rel === '..' || rel.startsWith('../')) continue;
       if (entry.isSymbolicLink()) {
         if (rel && (rootIg.ignores(rel) || rootIg.ignores(`${rel}/`))) continue;
         rememberSkippedSymlink(skippedSymlinks, rel);

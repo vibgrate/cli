@@ -63,7 +63,10 @@ export function registerBuild(program: Command): void {
   const cmd = program
     .command('build')
     .description('build / update the code map (incremental, deterministic)')
-    .argument('[paths...]', 'folders or files to map (default: current folder)')
+    .argument(
+      '[paths...]',
+      'folders or files to map (default: the working directory). A directory outside the working directory is mapped as its own project',
+    )
     .option('--only <langs>', 'restrict to languages, e.g. ts,py,go')
     .option('--exclude <glob>', 'extra ignore glob (repeatable)', collect, [])
     .option('--no-html', 'do not write graph.html')
@@ -97,13 +100,44 @@ export interface RunBuildHooks {
   onParseProgress?: (done: number, total: number) => void;
 }
 
+/**
+ * Where `vg build` reads lockfiles, `node_modules`, and project config.
+ *
+ * Paths inside the working directory (or `-C`) stay a scope of that project:
+ * `vg build src` still maps `src` with the repo's lockfile and config. A
+ * single directory outside that project is the project itself — `vg build
+ * ../other` must not read the working directory's lockfile, install tree, or
+ * config, and must not write artifacts there.
+ */
+export function resolveBuildRoot(cwd: string, paths: readonly string[]): { root: string; paths: string[] } {
+  const base = path.resolve(cwd);
+  const listed = [...paths];
+  if (listed.length !== 1) return { root: base, paths: listed };
+  const only = path.resolve(base, listed[0]);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(only);
+  } catch {
+    return { root: base, paths: listed };
+  }
+  if (!stat.isDirectory() || only === base || isInsideDir(base, only)) return { root: base, paths: listed };
+  return { root: only, paths: [] };
+}
+
+function isInsideDir(parent: string, child: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
 export async function runBuild(
   paths: string[],
   opts: BuildCmdOpts,
   global: GlobalOpts,
   hooks?: RunBuildHooks,
 ): Promise<void> {
-  const root = path.resolve(global.cwd ?? '.');
+  const located = resolveBuildRoot(global.cwd ?? '.', paths);
+  const root = located.root;
+  const scopePaths = located.paths;
 
   if (opts.verify) {
     await verifyGraph(root, opts, global);
@@ -129,7 +163,7 @@ export async function runBuild(
   try {
     result = await buildGraph({
       root,
-      paths: paths.length ? paths : undefined,
+      paths: scopePaths.length ? scopePaths : undefined,
       only,
       exclude: opts.exclude,
       jobs,
@@ -194,7 +228,7 @@ export async function runBuild(
     writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats, {
       only,
       exclude: mergeExcludes(root, opts.exclude),
-      paths: paths.length ? paths : undefined,
+      paths: scopePaths.length ? scopePaths : undefined,
       deep: global.deep,
       noGround: opts.ground === false,
       scip: typeof opts.scip === 'string' ? opts.scip : undefined,

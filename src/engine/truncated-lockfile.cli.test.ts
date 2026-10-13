@@ -24,8 +24,8 @@ function fixture(): string {
 }
 
 function run(dir: string, command: 'scan' | 'build'): { status: number | null; signal: NodeJS.Signals | null; stderr: string; error?: Error } {
-  // `-C` makes the fixture the project root. A path argument alone is a scope
-  // inside the process cwd, so a lockfile outside that cwd would be skipped.
+  // `-C` makes the fixture the project root. A path inside the process cwd is
+  // only a discovery scope, so this test passes `-C` rather than a path.
   const args =
     command === 'scan'
       ? [cli, 'scan', dir, '--offline', '--no-graph', '--no-daemon', '--quiet']

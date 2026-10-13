@@ -2803,7 +2803,7 @@ A truncated or syntactically invalid lockfile stops the build before source file
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `[paths...]` | `.` | Folders or files to map |
+| `[paths...]` | `.` | Folders or files to map. A directory outside the working directory is mapped as its own project |
 | `--only <langs>` | — | Restrict to languages (e.g. `ts,py,go`) |
 | `--exclude <glob>` | — | Extra ignore glob (repeatable) |
 | `--jobs <n>` | auto | Worker count (`1` = single-threaded) |
