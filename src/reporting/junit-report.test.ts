@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { XMLParser } from 'fast-xml-parser';
 import { describe, expect, it } from 'vitest';
 import { evaluateConfigDriftBudget } from './drift-budget-gate.js';
 import {
@@ -179,6 +180,85 @@ describe('scan JUnit gates', () => {
     expect(cases.map((c) => c.name)).toEqual(['drift-budget maxWorseningPercent']);
     expect(cases[0]).toMatchObject({ status: 'skipped' });
     expect(cases[0]?.status === 'skipped' && cases[0].message).toContain('Run with --baseline to compare.');
+  });
+
+  it.each(['warn', 'enforce', 'shadow'] as const)('keeps local RiskScore cases skipped after DriftScore cases in %s mode', (mode) => {
+    const gate = evaluateConfigDriftBudget({
+      raw: {
+        mode,
+        maxRiskWorseningPercent: 0,
+        maxRiskScore: 0,
+        agents: { maxWorseningPercent: 0 },
+        maxWorseningPercent: 5,
+        maxScore: 40,
+      },
+      configFile: '.vibgrate/config.yml',
+      headScore: 40,
+      baseScore: 40,
+    });
+    const cases = configDriftBudgetCases(gate);
+    expect(cases.map((c) => [c.name, c.status])).toEqual([
+      ['drift-budget maxScore', 'pass'],
+      ['drift-budget maxWorseningPercent', 'pass'],
+      ['drift-budget maxRiskScore', 'skipped'],
+      ['drift-budget maxRiskWorseningPercent', 'skipped'],
+    ]);
+
+    const xml = renderScanJUnit({ findings: [], extraSuites: [{ name: 'gates', cases }] });
+    const parsed = new XMLParser({ ignoreAttributes: false }).parse(xml);
+    const suite = parsed.testsuites.testsuite[1];
+    expect(suite['@_name']).toBe('gates');
+    expect(suite.testcase.map((c: { '@_name': string }) => c['@_name'])).toEqual(cases.map((c) => c.name));
+    expect(suite.testcase.slice(2).map((c: { skipped: { '@_message': string } }) => c.skipped['@_message'])).toEqual([
+      'drift budget: Not evaluated on a local scan. The GitHub App computes RiskScore on a Team plan or above.',
+      'drift budget: Not evaluated on a local scan. The GitHub App computes RiskScore on a Team plan or above.',
+    ]);
+    expect(suite['@_failures']).toBe('0');
+    expect(suite['@_skipped']).toBe('2');
+    expect(xml).not.toContain('agents.maxWorseningPercent');
+    expect(gate.exitCode).toBe(0);
+  });
+
+  it('does not fail an enforced RiskScore-only budget on a local scan', () => {
+    const gate = evaluateConfigDriftBudget({
+      raw: { mode: 'enforce', maxRiskScore: 0, maxRiskWorseningPercent: 0 },
+      configFile: '.vibgrate/config.yml',
+      headScore: 99,
+      baseScore: null,
+    });
+    const cases = configDriftBudgetCases(gate);
+    expect(cases.map((c) => [c.name, c.status])).toEqual([
+      ['drift-budget maxRiskScore', 'skipped'],
+      ['drift-budget maxRiskWorseningPercent', 'skipped'],
+    ]);
+    const xml = renderScanJUnit({ findings: [], extraSuites: [{ name: 'gates', cases }] });
+    const parsed = new XMLParser({ ignoreAttributes: false }).parse(xml);
+    expect(parsed.testsuites['@_failures']).toBe('0');
+    expect(parsed.testsuites.testsuite[1]).toMatchObject({
+      '@_name': 'gates', '@_tests': '2', '@_failures': '0', '@_skipped': '2',
+    });
+    expect(xml).not.toContain('<failure');
+    expect(gate.exitCode).toBe(0);
+  });
+
+  it('preserves an enforced DriftScore failure alongside skipped RiskScore cases', () => {
+    const gate = evaluateConfigDriftBudget({
+      raw: { mode: 'enforce', maxScore: 40, maxRiskScore: 0, maxRiskWorseningPercent: 0 },
+      configFile: '.vibgrate/config.yml',
+      headScore: 44,
+      baseScore: null,
+    });
+    const cases = configDriftBudgetCases(gate);
+    const xml = renderScanJUnit({ findings: [], extraSuites: [{ name: 'gates', cases }] });
+    const parsed = new XMLParser({ ignoreAttributes: false }).parse(xml);
+    expect(parsed.testsuites.testsuite[1]).toMatchObject({
+      '@_name': 'gates', '@_tests': '3', '@_failures': '1', '@_skipped': '2',
+    });
+    expect(parsed.testsuites.testsuite[1].testcase[0]).toMatchObject({
+      '@_name': 'drift-budget maxScore',
+      failure: { '@_type': 'gate' },
+    });
+    expect(gate.exitCode).toBe(2);
   });
 
   it('sorts architecture rows and keeps a blocked gate as one failure', () => {

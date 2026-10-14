@@ -5161,7 +5161,7 @@ The same findings and gates always produce the same bytes. Case order is fixed, 
 | `findings` | Always | One case per drift finding. `classname` is `vg.findings`. `name` is `{ruleId} {location}` (` #2`, ` #3`, … on ties). No findings → one passing case, `no findings`. |
 | `architecture` | `--fail-on architecture-finding` or `architecture-warning` | One failure per boundary row (`classname` `vg.architecture`), a passing `architecture` case when the gate is clean, or one failure when the gate could not run. |
 | `security` | `--fail-on iac-finding` or `security-finding` | One case per security finding when the packs ran (`classname` `vg.security`). Findings below the severity are `<skipped>`. A passing `security` case when there are none. One failure when the gate could not run. |
-| `gates` | A drift budget was judged | `drift-budget` / `drift-worsening` for the flags, or `drift-budget maxScore` and `drift-budget maxWorseningPercent` for [`driftBudget`](#drift-budget) in project config. |
+| `gates` | A drift budget was judged | `drift-budget` / `drift-worsening` for the flags. For [`driftBudget`](#drift-budget) in project config: `drift-budget maxScore`, `drift-budget maxWorseningPercent`, `drift-budget maxRiskScore`, and `drift-budget maxRiskWorseningPercent`, in that order when configured. The two RiskScore cases are `<skipped>` on a local scan because `vg scan` does not compute RiskScore. `agents.maxWorseningPercent` never appears here; the GitHub App check evaluates it. |
 
 A finding is a `<failure>` only when its level fails the drift gate you set. Anything else is `<skipped>` (present, not gating):
 
