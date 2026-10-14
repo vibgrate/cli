@@ -1666,7 +1666,7 @@ vg sbom export --format spdx --out sbom.spdx.json
 | Created | `metadata.timestamp` is the artifact's `timestamp` | `creationInfo.created` is that same timestamp |
 | Scan root | `metadata.component` has `type` `application`, `bom-ref` `vibgrate-root`, and `name` set to the scan root. That component is not copied into `components` | There is no package for the scan root |
 | Package identity | `components[].purl`. When a purl is written, `bom-ref` is that purl | `packages[].externalRefs[]` with `referenceCategory` `PACKAGE-MANAGER`, `referenceType` `purl`, and `referenceLocator` set to the purl. `SPDXID` is `SPDXRef-Package-N` |
-| Dependency graph | `dependencies` is an array of `{ ref, dependsOn }`. `ref` is a `bom-ref`. The first entry is `vibgrate-root`. Every component is an entry after that, in the component order above. `dependsOn` lists child `bom-ref` values, or is `[]` when none were recorded for that component | `relationships` is an array of `{ spdxElementId, relatedSpdxElementId, relationshipType }`. `relationshipType` is `DEPENDS_ON`. Edges from the document use `SPDXRef-DOCUMENT`. A row is written only for a recorded edge. `SPDXID` values follow the component order above |
+| Dependency graph | `dependencies` is an array of `{ ref, dependsOn }`. `ref` is a `bom-ref`. The first entry is `vibgrate-root`. Every component is an entry after that, in the component order above. `dependsOn` lists child `bom-ref` values, or is `[]` when none were recorded for that component. The array has no kind | `relationships` is an array of `{ spdxElementId, relatedSpdxElementId, relationshipType }`. `relationshipType` is `DEPENDS_ON` for a production edge, a peer edge, and every child edge. A direct development dependency is `DEV_DEPENDENCY_OF` from the package to `SPDXRef-DOCUMENT`. A resolved optional dependency is `OPTIONAL_DEPENDENCY_OF` from the package to `SPDXRef-DOCUMENT`. `SPDXID` values follow the component order above. The mapping is in [Dependency scope](./docs/sbom-dependency-scope.md) |
 | Licenses | `licenses` is present when the declared license can be written, and absent when it cannot | `licenseDeclared` is set on every package. `licenseConcluded` is `NOASSERTION` on every package. `hasExtractedLicensingInfos` is present when a `LicenseRef-…` is used. Every package has `downloadLocation` `NOASSERTION` and `filesAnalyzed` `false` |
 
 `dataLicense` `CC0-1.0` is the SPDX license for the document data. Package licenses stay on `licenseDeclared`.
@@ -1905,12 +1905,13 @@ second scanned project that resolved that exact version, does not add a row.
 The row that is kept for a shared identity follows a fixed precedence. Direct
 manifest rows come first. Among those, the first project in the scan artifact
 wins, and `vibgrate:project`, `vibgrate:currentSpec`, `vibgrate:drift`,
-`vibgrate:majorsBehind`, and the declared license come from that project.
+`vibgrate:majorsBehind`, the declared license, and the manifest section come
+from that project.
 Lockfile rows come next, in sorted project-path order, and the first path
 wins. A later copy is not an error. `vibgrate:projects` (SPDX: `projects=` on
 the package annotation) lists every project that contributed the identity,
-sorted. When a later manifest row carries different drift, spec, or license
-metadata, that metadata is dropped, the component stays, and
+sorted. When a later manifest row carries different drift, spec, license, or
+manifest-section metadata, that metadata is dropped, the component stays, and
 `vibgrate:mergeWarning` records the drop. The same warning is an additional SPDX
 annotation, and `vg sbom export` prints it on stderr.
 
@@ -1924,9 +1925,11 @@ manifest declared stays in the document as `transitive`. On a transitive row,
 first sorted project path that listed it). `vibgrate:projects` still lists
 every project whose lockfile listed that identity.
 
-That value is `direct` or `transitive`. Production, development, and optional
-are recorded or dropped before export, and the CycloneDX `scope` member is
-omitted. The mapping, a worked example, and the gaps are in
+That value is `direct` or `transitive`. A direct row also sets CycloneDX
+component `scope` from the manifest section (`required`, `optional`, or
+`excluded`). SPDX uses `DEV_DEPENDENCY_OF` and `OPTIONAL_DEPENDENCY_OF` for
+development and optional edges when a graph is written. The mapping, a worked
+example, and the gaps are in
 [Dependency scope](./docs/sbom-dependency-scope.md).
 
 ```bash

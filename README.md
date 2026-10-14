@@ -658,7 +658,7 @@ vg vex                          # generate an OpenVEX document for attestation
 
 `vg sbom export` writes an inventory, not a compliance determination. CycloneDX component `type` is `application` on the metadata component and `library` on every dependency row, including a container image. SPDX `primaryPackagePurpose` is omitted. The mapping, the gaps (OS packages, image contents, Terraform resources), and short fixture examples are in [DOCS.md](./DOCS.md#cyclonedx-type-and-spdx-primarypackagepurpose).
 
-`vibgrate:scope` on each component is `direct` or `transitive`. How production, development, and optional dependencies are written in CycloneDX and SPDX, including fields the export omits, is in [Dependency scope](./docs/sbom-dependency-scope.md).
+`vibgrate:scope` on each component is `direct` or `transitive`. CycloneDX component `scope` (`required`, `optional`, or `excluded`) and SPDX `DEV_DEPENDENCY_OF` / `OPTIONAL_DEPENDENCY_OF` record production, development, and optional separately. The mapping and remaining gaps are in [Dependency scope](./docs/sbom-dependency-scope.md).
 
 Match a component on its package URL (`purl` in CycloneDX, the `purl` externalRef in SPDX). Scan JSON uses the same coordinates (`projects[].type`, `dependencies[].package`, `resolvedVersion`, and `extended.vulnerabilities.packages[]`) and does not repeat the purl string. These files have no CPE field. The CLI does not invent one, and a CPE from another cataloger does not replace the purl. Fields and a local example: [DOCS.md](./DOCS.md#component-identity).
 
