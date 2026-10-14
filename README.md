@@ -744,6 +744,8 @@ Under each set, commands are listed A–Z. A short **typical path** (usual order
 
 **Typical path:** `vg build` → `vg status` → `vg ask` → `vg impact` → `vg share`
 
+`vg ask` answers from the local map. The question and your code stay on this machine. `--offline` skips the optional module fetches and this process's embedding-model download. See [What stays local / when the network is used](./DOCS.md#what-stays-local--when-the-network-is-used).
+
 | Command | Description |
 | --- | --- |
 | `vg ask "<question>"` | Query the map in natural language |

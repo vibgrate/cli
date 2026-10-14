@@ -2774,7 +2774,7 @@ Ask the code map a question using hybrid lexical + structural + semantic search.
 vg ask "<question>"
 ```
 
-A local ONNX embedding model is downloaded once on first use, then cached and fully offline. Degrades gracefully to lexical-only under `--offline` or `--no-semantic`.
+A local ONNX embedding model is downloaded once on first use, then cached and fully offline. Degrades gracefully to lexical-only under `--offline` or `--no-semantic`. [What stays local / when the network is used](#what-stays-local--when-the-network-is-used) lists every step that can reach the network.
 
 > **Semantic search is opt-in.** The embedding backend (`fastembed`, which pulls a native ONNX runtime) is declared as an **optional dependency**: package managers install it by default, but if it's absent — e.g. you installed with `--omit=optional`, or it failed to build on your platform — `vg ask` and `vg embed` transparently fall back to lexical + structural search. Nothing else in the CLI needs it, so `vg build`, `vg show`, `vg impact`, drift reporting, and MCP serving all run without it. If you never use semantic `ask`, you can install lean: `npm i @vibgrate/cli --omit=optional`. A host application that bundles the CLI without optional dependencies (Vibgrate for VS Code does this) can supply the backend from its own directory by setting `VIBGRATE_EMBEDDER_PATH` to a folder whose `node_modules` contains `fastembed`; when set, that copy is used first.
 
@@ -2786,6 +2786,35 @@ Before answering, `ask` checks whether files changed since the map was last buil
 | `-b, --budget <n>` | `2000` | Approx token budget for returned context |
 | `--no-semantic` | — | Lexical only; skip the local embedding pass |
 | `--no-refresh` | — | Answer from the map as built; skip the auto-rebuild when files changed |
+
+#### What stays local / when the network is used
+
+The answer is a context block from the local code map (`graph.json`, written by `vg build`). The question, the source, and that block stay on this machine. When the optional relevance module is installed, it ranks in-process. When the local runtime (`vgd`) ranks instead, the question goes to that process over a local socket.
+
+Three steps can reach the network. Each one downloads a model or a module. The question and the source are not in those requests.
+
+- **Embedding model, once.** The first semantic ask downloads the default ONNX model `bge-small-en-v1.5` from `https://storage.googleapis.com/qdrant-fastembed/fast-bge-small-en-v1.5.tar.gz` into `$XDG_CACHE_HOME/vibgrate/models` (`~/.cache/vibgrate/models` when `XDG_CACHE_HOME` is unset). The download runs in this process, or inside `vgd` when the daemon holds the index. Later asks read that cache and embed node text locally. A failed download still answers with lexical search. If the optional embedding backend is not installed, this download does not run.
+- **Relevance module.** When the command may use the network, `vg ask` waits on a fetch of the optional relevance module from the npm registry (`https://registry.npmjs.org`, or `VIBGRATE_MODULE_REGISTRY` when that is set): package metadata, then the tarball. It is unpacked into the local modules cache and then runs on this machine. The fetch runs when the module is missing, and again when the installed copy predates the ranking API. A failure is silent, and ranking uses the built-in matcher. `VIBGRATE_NO_KERNEL=1` skips the fetch. So does a recorded decline from answering "no" at `vg module install relevance`.
+- **Startup module kicks.** Any `vg` command that may use the network, including `vg ask`, can start a background fetch of that relevance module and of the Architecture module (`vg module install arch`). A kick waits an hour after the last attempt, and it is skipped when the module is already installed (the relevance kick also stays quiet once a ranking-capable copy is installed). `vg ask` does not wait on the Architecture module. Role hints in an answer come from the classify file `vg build` already wrote beside the map, when that file is there. `VIBGRATE_NO_KERNEL=1` and a recorded decline from `vg module install arch` skip that kick.
+
+`--offline` skips all three. `--local` implies `--offline`, so it skips them too. Search is lexical, and stderr includes `semantic skipped under --offline; used lexical`. See [`--offline` vs `--local`](#--offline-vs---local).
+
+`--no-semantic` skips the embedding pass in this process. The relevance fetch and the startup kicks still run. Pass `--offline` or `--local` when those must stay off as well.
+
+Attaching to `vgd` is separate from those flags. `vg ask` attaches unless `--no-daemon`, `VG_NO_DAEMON`, `VIBGRATE_NO_DAEMON`, or `CI` is set, and that includes `--offline` and `--no-semantic`. The first time that daemon stores this map, it warms a semantic index in the background and can download the same embedding model. That warm stays on the machine. Pass `--no-daemon` when that download must not start. While that daemon is left running, a later file change can make it run `vg build` in the background, and that build can fetch the Architecture module.
+
+The auto-refresh above is a local stat check (size and mtime) and, when files drifted, an incremental rebuild of local files. It does not install modules. Locating the map may run a local `git rev-parse`. That call does not fetch or push. `--no-refresh` answers from the map as built. A path passed with `--graph` is left unchanged.
+
+`vg code` is the command that calls a model. A hosted provider receives the task and the file contents the agent read. Ollama, LM Studio, and the on-device binding stay on the machine. `vg code --local` selects only those backends, and it implies `--offline`. When the network is allowed, `vg code` uses the same relevance-module fetch.
+
+```bash
+npm install -g @vibgrate/cli
+vg build
+vg ask "where is rate limiting enforced?"
+vg ask --offline "where is rate limiting enforced?"
+```
+
+With no map yet, the command exits 3 and prints `error: no map found — run \`vg\` to build one first`.
 
 ---
 
