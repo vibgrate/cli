@@ -202,7 +202,7 @@ A public GitHub repository Vibgrate has not scanned shows `scanning…` on the f
 
 `vg build` reads a workflow file that sits directly in `.github/workflows/` and whose name ends in `.yml` or `.yaml`. A file in a subdirectory of that folder is not extracted here. Only the first YAML document in the file is read.
 
-Each step with a `uses:` string becomes a step node and an external node, joined by a `depends_on` edge. The string is copied as it is written. The map has no field that labels the pin a commit SHA, a tag, a branch, a local path, or a `docker://` image.
+Each step with a `uses:` string becomes a step node and an external node, joined by a `depends_on` edge. The string is copied as it is written. A YAML alias is the same string: `uses: *checkout_ref` records the pin written on `&checkout_ref`, and a step written `- *checkout` records that step on every job that aliases it. The line stored for an aliased node is the anchored node's line, where the value is written, not the `*alias` token. A step that only aliases its `uses:` value keeps the step line on the step written in that job; the action line is the anchored scalar. Two steps that share an anchored `with:` block each keep the `uses:` pin written on that step. An alias expansion past the parser's cap of 100 is not expanded. That document is skipped, the file contributes no nodes, and the build warning is `VG_WARN_YAML_DOCUMENT_UNMATERIALISED`. The map has no field that labels the pin a commit SHA, a tag, a branch, a local path, or a `docker://` image.
 
 | Node | Kind | Signature | Qualified name | What holds the pin |
 | --- | --- | --- | --- | --- |

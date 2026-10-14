@@ -1,4 +1,4 @@
-import YAML from 'yaml';
+import YAML, { isAlias, isCollection } from 'yaml';
 import type { LineIndex } from './util.js';
 import type { ToolchainSpan } from './types.js';
 import { stampWarning, WARNING_CODES } from '../../core-open/warnings.js';
@@ -82,22 +82,48 @@ export function parseYamlStream(rel: string, source: string): YamlParseResult {
 
 /**
  * Byte range of the value at `path` within a document, as a line span.
- * Falls back to the document's own range when the path has no node — a span is
- * always better than no span, because it still anchors an editor decoration.
+ *
+ * Alias span rule: follow the anchor. An alias (`*checkout`) resolves to the
+ * anchored node, and the span is that node's range — where the value is
+ * written — not the `*alias` token. A path that continues through an alias
+ * (the `uses:` of a step reused as `- *checkout`) keeps walking inside the
+ * anchored mapping. `Document.getIn` stops on the Alias node, which previously
+ * fell back to the whole document. An alias that does not resolve keeps the
+ * alias token's range. A path with no node at all still falls back to the
+ * document range: a span is better than no span, because it still anchors an
+ * editor decoration.
  */
 export function spanAt(doc: YamlDoc, lines: LineIndex, path: (string | number)[]): ToolchainSpan {
-  const node = path.length ? safeGetIn(doc.ast, path) : doc.ast.contents;
+  const node = nodeAt(doc.ast, path);
   const range = nodeRange(node) ?? nodeRange(doc.ast.contents);
   if (!range) return { start: 1, end: 1 };
   return lines.span(range[0], range[2] ?? range[1]);
 }
 
-function safeGetIn(ast: YAML.Document.Parsed, path: (string | number)[]): unknown {
+/**
+ * Node at `path`, with aliases resolved to their anchors.
+ * Never throws: a broken node yields `undefined` and {@link spanAt} falls back.
+ */
+function nodeAt(ast: YAML.Document.Parsed, path: readonly (string | number)[]): unknown {
   try {
-    return ast.getIn(path, true);
+    let current: unknown = ast.contents;
+    for (const key of path) {
+      current = anchored(current, ast);
+      if (!isCollection(current)) return undefined;
+      const next = current.get(key, true);
+      if (next === undefined) return undefined;
+      current = next;
+    }
+    return anchored(current, ast);
   } catch {
     return undefined;
   }
+}
+
+/** Resolve an Alias to the anchored node. Anything else is returned as-is. */
+function anchored(node: unknown, ast: YAML.Document.Parsed): unknown {
+  if (!isAlias(node)) return node;
+  return node.resolve(ast) ?? node;
 }
 
 function nodeRange(node: unknown): [number, number, number] | null {

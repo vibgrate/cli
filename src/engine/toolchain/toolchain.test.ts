@@ -26,6 +26,23 @@ function fixture(files: Record<string, string>): { root: string; docs: Discovere
   return { root, docs };
 }
 
+/** 1-based line number of the first line containing `needle`. */
+function lineContaining(source: string, needle: string): number {
+  const line = lineNumbers(source, needle)[0];
+  if (line === undefined) throw new Error(`fixture line not found: ${needle}`);
+  return line;
+}
+
+/** 1-based line numbers of every line containing `needle`, in file order. */
+function lineNumbers(source: string, needle: string): number[] {
+  const found: number[] = [];
+  const lines = source.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]?.includes(needle)) found.push(i + 1);
+  }
+  return found;
+}
+
 describe('util', () => {
   it('maps byte offsets to 1-based lines', () => {
     const index = new LineIndex('a\nbb\nccc\n');
@@ -806,6 +823,179 @@ jobs:
   it('resolves a terraform directory against the workspace root, not the workflow file', async () => {
     const result = await githubActionsExtractor.extract('.github/workflows/cd.yml', workflow);
     expect(result.nodes.map((n) => n.qualifiedName)).toContain('tfdir:infra');
+  });
+
+  // Span rule (see spanAt): an alias is transparent. The span is the anchored
+  // node's range, where the value is written, not the `*alias` token.
+  it('records a step reused through an alias on every job, spanned at the anchor', async () => {
+    const source = `name: CI
+on: push
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - &checkout
+        name: Checkout
+        uses: actions/checkout@v4
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - *checkout
+`;
+    const pin = 'actions/checkout@v4';
+    const result = await githubActionsExtractor.extract('.github/workflows/ci.yml', source);
+    const again = await githubActionsExtractor.extract('.github/workflows/ci.yml', source);
+    expect(again).toEqual(result);
+    expect(result.warnings).toEqual([]);
+
+    const steps = result.nodes.filter((n) => n.kind === 'step');
+    expect(steps.map((n) => n.qualifiedName)).toEqual(['job:lint#0', 'job:test#0']);
+    expect(steps.map((n) => n.signature)).toEqual(['gha.step.uses', 'gha.step.uses']);
+    expect(steps.map((n) => n.doc)).toEqual([`uses ${pin}`, `uses ${pin}`]);
+
+    const usesLine = lineContaining(source, `uses: ${pin}`);
+    const nameLine = lineContaining(source, 'name: Checkout');
+    const anchorSpan = { start: nameLine, end: usesLine };
+    // Both jobs share the anchored step body. The `*checkout` line is not the span.
+    expect(steps.map((n) => n.span)).toEqual([anchorSpan, anchorSpan]);
+    expect(source.split('\n')[usesLine - 1]).toContain(pin);
+    const aliasLine = lineContaining(source, '*checkout');
+    expect(anchorSpan).not.toEqual({ start: aliasLine, end: aliasLine });
+
+    const actions = result.nodes.filter((n) => n.qualifiedName === `action:${pin}`);
+    expect(actions).toHaveLength(2);
+    expect(actions.map((n) => n.span)).toEqual([
+      { start: usesLine, end: usesLine },
+      { start: usesLine, end: usesLine },
+    ]);
+    expect(result.edges).toEqual(expect.arrayContaining([
+      { kind: 'contains', from: 'job:lint', to: 'job:lint#0', confidence: 1 },
+      { kind: 'contains', from: 'job:test', to: 'job:test#0', confidence: 1 },
+      { kind: 'depends_on', from: 'job:lint#0', to: `action:${pin}`, confidence: 1 },
+      { kind: 'depends_on', from: 'job:test#0', to: `action:${pin}`, confidence: 1 },
+    ]));
+  });
+
+  it('records a uses pin reused through an alias, spanned at the anchored scalar', async () => {
+    const source = `name: CI
+on: push
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: &checkout_ref actions/checkout@v4
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout again
+        uses: *checkout_ref
+`;
+    const pin = 'actions/checkout@v4';
+    const result = await githubActionsExtractor.extract('.github/workflows/ci.yml', source);
+    const again = await githubActionsExtractor.extract('.github/workflows/ci.yml', source);
+    expect(again).toEqual(result);
+    expect(result.warnings).toEqual([]);
+
+    const steps = result.nodes.filter((n) => n.kind === 'step');
+    expect(steps.map((n) => n.qualifiedName)).toEqual(['job:lint#0', 'job:test#0']);
+    expect(steps.every((n) => n.doc === `uses ${pin}`)).toBe(true);
+
+    const anchorLine = lineContaining(source, '&checkout_ref');
+    const aliasLine = lineContaining(source, '*checkout_ref');
+    expect(anchorLine).not.toBe(aliasLine);
+    const actions = result.nodes.filter((n) => n.qualifiedName === `action:${pin}`);
+    expect(actions).toHaveLength(2);
+    // The pin's span follows the anchor, including for the job that only wrote `*checkout_ref`.
+    expect(actions.map((n) => n.span)).toEqual([
+      { start: anchorLine, end: anchorLine },
+      { start: anchorLine, end: anchorLine },
+    ]);
+    expect(source.split('\n')[anchorLine - 1]).toContain(pin);
+    // The step mapping itself is written in each job; only the `uses` value is an alias.
+    expect(steps[1]?.span).toEqual({
+      start: lineContaining(source, 'name: Checkout again'),
+      end: aliasLine,
+    });
+    expect(steps[1]?.span).not.toEqual(steps[0]?.span);
+
+    expect(result.edges).toEqual(expect.arrayContaining([
+      { kind: 'contains', from: 'job:lint', to: 'job:lint#0', confidence: 1 },
+      { kind: 'contains', from: 'job:test', to: 'job:test#0', confidence: 1 },
+      { kind: 'depends_on', from: 'job:lint#0', to: `action:${pin}`, confidence: 1 },
+      { kind: 'depends_on', from: 'job:test#0', to: `action:${pin}`, confidence: 1 },
+    ]));
+  });
+
+  it('records the same uses pin when two steps share an anchored with block', async () => {
+    const source = `name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup
+        uses: actions/setup-node@v4
+        with: &node_opts
+          node-version: '22'
+          cache: npm
+      - name: Setup again
+        uses: actions/setup-node@v4
+        with: *node_opts
+`;
+    const pin = 'actions/setup-node@v4';
+    const result = await githubActionsExtractor.extract('.github/workflows/ci.yml', source);
+    const again = await githubActionsExtractor.extract('.github/workflows/ci.yml', source);
+    expect(again).toEqual(result);
+    expect(result.warnings).toEqual([]);
+
+    const steps = result.nodes.filter((n) => n.kind === 'step');
+    expect(steps.map((n) => n.qualifiedName)).toEqual(['job:build#0', 'job:build#1']);
+    expect(steps.every((n) => n.signature === 'gha.step.uses' && n.doc === `uses ${pin}`)).toBe(true);
+
+    const usesLines = lineNumbers(source, `uses: ${pin}`);
+    expect(usesLines).toHaveLength(2);
+    const actions = result.nodes.filter((n) => n.qualifiedName === `action:${pin}`);
+    expect(actions).toHaveLength(2);
+    // `uses` is written on each step; the shared `with` block must not pull either pin onto a fallback span.
+    expect(actions.map((n) => n.span)).toEqual(usesLines.map((line) => ({ start: line, end: line })));
+    expect(steps[0]?.span).toEqual({
+      start: lineContaining(source, '- name: Setup'),
+      end: lineContaining(source, 'cache: npm'),
+    });
+    expect(steps[1]?.span).toEqual({
+      start: lineContaining(source, 'name: Setup again'),
+      end: lineContaining(source, '*node_opts'),
+    });
+    for (const node of [...steps, ...actions]) {
+      expect(node.span.start).toBeGreaterThanOrEqual(1);
+      expect(node.span.end).toBeGreaterThanOrEqual(node.span.start);
+      expect(node.span.end).toBeLessThan(source.split('\n').length);
+    }
+
+    expect(result.edges).toEqual(expect.arrayContaining([
+      { kind: 'contains', from: 'job:build', to: 'job:build#0', confidence: 1 },
+      { kind: 'contains', from: 'job:build', to: 'job:build#1', confidence: 1 },
+      { kind: 'depends_on', from: 'job:build#0', to: `action:${pin}`, confidence: 1 },
+      { kind: 'depends_on', from: 'job:build#1', to: `action:${pin}`, confidence: 1 },
+    ]));
+  });
+
+  it('refuses a YAML alias bomb instead of expanding it', async () => {
+    // Ten aliases of a ten-alias node expands past parseYamlStream's maxAliasCount (100).
+    const source = `a: &a ["x"]
+b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]
+c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]
+d: *c
+`;
+    const result = await githubActionsExtractor.extract('.github/workflows/bomb.yml', source);
+    expect(result.nodes).toEqual([]);
+    expect(result.edges).toEqual([]);
+    expect(result.warnings).toEqual([
+      '.github/workflows/bomb.yml: YAML document 1 could not be materialised (Excessive alias count indicates a resource exhaustion attack) [VG_WARN_YAML_DOCUMENT_UNMATERIALISED]',
+    ]);
+    const again = await githubActionsExtractor.extract('.github/workflows/bomb.yml', source);
+    expect(again).toEqual(result);
   });
 });
 
