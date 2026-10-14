@@ -2217,7 +2217,9 @@ vg scan [path] [--vulns] [--full] [--iac] [--format text|json|sarif|md] [--out <
 | `--project-scan-timeout <seconds>` | `180` | Per-project scan timeout |
 | `--repository-name <name>` | directory / `package.json` name | Override the repository name recorded for this scan |
 | `--force` | — | Always create a fresh ingest, even when the repository is unchanged since the last scan |
-| `--quiet` | — | Suppress promotional output; scan results are unaffected |
+| `--quiet` | — | Suppress promotional output (the free-plan tracking panel, the post-scan CI hint, and the AI Context install prompt); scan results are unaffected |
+
+On an interactive terminal, outside CI, the text report ends by naming the biggest measured drift driver and suggesting `vg init --ci github` so the scan runs on every pull request. That panel is human-only: it is printed with the text report on stdout, and progress and warnings stay on stderr. It is not part of `--format json`, `--format sarif`, or `--format md`, and it is not written to `--junit` or `--summary-out`. It is also omitted when stdout is not a terminal (a pipe or a redirect), when `CI` or another CI variable is set (`GITHUB_ACTIONS`, `GITLAB_CI`, `CIRCLECI`, `TRAVIS`, `BUILDKITE`, `JENKINS_URL`, `TF_BUILD`), when `--out` writes the report to a file, when `--quiet` is set, and when a file under `.github/workflows` already mentions Vibgrate. Pass `--quiet` to hide it at an interactive terminal; the drift report itself is unchanged. When the score was not measured, the panel is omitted as well.
 
 Switches (flags that take no value, such as `--vulns`, `--offline` or `--no-graph`) are off unless you pass them. They do not accept a value or an invented `--no-` form: `--vulns=false`, `--vulns=true` and `--no-vulns` stop with exit code `5` and name the form that works. In a CI template, add or leave out the flag itself rather than passing `true` or `false`.
 

@@ -430,7 +430,7 @@ export const scanCommand = new Command('scan')
   .option('--force', 'Always create a fresh scan ingest, even if the repository is unchanged since the last scan (skips the unchanged/reuse optimization). Used by scheduled and dashboard-triggered scans.')
   .option('--no-graph', 'Skip building the local code map (the AI/docs index) that scan produces after scoring drift')
   .option('--no-daemon', 'Never auto-start or use the local runtime (vgd) — run everything in this process')
-  .option('--quiet', 'Suppress promotional output (the free-plan tracking panel and the AI Context install prompt); scan results are unaffected')
+  .option('--quiet', 'Suppress promotional output (the free-plan tracking panel, the post-scan CI hint, and the AI Context install prompt); scan results are unaffected')
   .action(async (targetPath: string, opts: {
     out?: string;
     format: string;
