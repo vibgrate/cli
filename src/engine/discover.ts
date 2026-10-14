@@ -18,9 +18,10 @@ import {
  * Deterministic file discovery.
  *
  * Respects `.gitignore` (including nested ones), explicit config excludes, and a
- * built-in SKIP_DIRS set consistent with the scanner. Results are returned
- * sorted by relative POSIX path so the build is order-independent of the
- * filesystem.
+ * built-in SKIP_DIRS set consistent with the scanner. The tree is listed
+ * once; each file's language comes from its extension in that pass, so
+ * enabling more languages does not walk again. Results are returned sorted
+ * by relative POSIX path so the build is order-independent of the filesystem.
  *
  * Archive files are not language sources, so this walk never opens them.
  * A ZIP package-version manifest is the scan path that inflates an archive;
@@ -163,6 +164,27 @@ export const SKIP_FILES = new Set<string>([
   'flake.lock',
 ]);
 
+/**
+ * Lists one directory the way `fs.readdirSync(dir, { withFileTypes: true })`
+ * does. The walk calls this once per directory it enters.
+ */
+export type DirectoryReader = (dir: string) => fs.Dirent[];
+
+function readDirectoryEntries(dir: string): fs.Dirent[] {
+  return fs.readdirSync(dir, { withFileTypes: true });
+}
+
+/**
+ * Test seam for the source walk. Node's `fs` exports are non-configurable, so
+ * a spy on `readdirSync` never sees these reads. Pass `null` to restore the
+ * real reader.
+ */
+let directoryReader: DirectoryReader = readDirectoryEntries;
+
+export function setDiscoverDirectoryReaderForTests(reader: DirectoryReader | null): void {
+  directoryReader = reader ?? readDirectoryEntries;
+}
+
 export interface DiscoverOptions {
   /** Absolute root directory. */
   root: string;
@@ -290,7 +312,7 @@ export function discover(options: DiscoverOptions): DiscoveredFile[] {
   const walk = (dir: string): void => {
     let entries: fs.Dirent[];
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
+      entries = directoryReader(dir);
     } catch {
       return; // unreadable dir — skip rather than crash the build
     }
