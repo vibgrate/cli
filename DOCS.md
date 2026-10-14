@@ -468,13 +468,29 @@ so if a patch closes a critical CVE, that's the plan it points you to rather tha
 a sweeping major bump. With nothing severe outstanding, it prefers the least
 disruptive plan.
 
+**Offline advisory resolution.** `vg fix --offline --package-manifest <file>`
+does not call the hosted planner and does not need a DSN. It reads
+`package.json` and `package-lock.json`, matches advisories carried in the local
+manifest, and prints one plan for the `--plan` policy (`safe` when omitted).
+An advisory is `resolved` only when the version that plan selects is outside
+the advisory's affected range and every parent or peer pin allows it — a
+transitive package pinned to a vulnerable range stays `blocked` unless the
+plan also bumps the parent that declares the range. A fix that is only
+available as a major outside the policy is `blocked`, and the reason names
+the package and the allowed range. An advisory with no fixed version is
+listed as `no fix available`. Rows are ordered by package name, then advisory
+id. This mode prints the plan and does not modify the project. A manifest
+package may include `requires` and `peers` maps (`version` → dependency name →
+semver range) so a parent bump is credited only when the new version's range
+actually allows the fix.
+
 | Flag | Meaning |
 |---|---|
 | `--format <text\|json\|md>` | Output format (default `text`; `json`/`md` are report-only, no apply). |
 | `--in <file>` | Scan artifact to read (default `.vibgrate/scan_result.json`, resolved against the analyzed path). |
 | `--dsn <dsn>` | DSN. Checked before `VIBGRATE_DSN`, which is checked before the DSN saved by `vg login`. |
 | `--region <region>` | Override data residency region (`us`, `eu`). |
-| `--plan <tier>` | Apply `safe`, `balanced`, or `aggressive` with no prompt (report labels Low-risk, Balanced, and Full). With `--dry-run`, preview that tier instead. |
+| `--plan <tier>` | Apply `safe`, `balanced`, or `aggressive` with no prompt (report labels Low-risk, Balanced, and Full). With `--dry-run`, preview that tier instead. With `--offline`, the tier is the allowed bump policy: `safe` is patch and minor, `balanced` is one major, `aggressive` is any published fix. |
 | `--yes` | Apply the recommended plan with no prompt. |
 | `--dry-run` | Preview the `--plan` tier. Never prompts. With several plans and no `--plan`, previews the recommended one. With only one plan that has upgrades, previews that plan. Does not modify the project. |
 | `--no-apply` | Print the plans and stop. Never modifies the project. |
@@ -483,6 +499,8 @@ disruptive plan.
 | `--kind <patch\|minor\|major>` | Plan/apply only upgrades of this semver bump kind. Combine with `--packages` to target one Dependabot-style batch. |
 | `--force` | Apply a plan even if the planner flagged a blocking cross-package conflict within it. |
 | `--fail-on-vulns <severity>` | Exit non-zero if the recommended plan leaves an advisory at or above this severity unresolved. |
+| `--offline` | Judge advisory resolution from a local manifest. Does not call the hosted planner or require a DSN. |
+| `--package-manifest <file>` | Package-version manifest JSON/ZIP used with `--offline`. Required when `--offline` is set. |
 
 Exit codes: `0` on success, `2` when `--fail-on-vulns` finds an unresolved
 advisory at or above the threshold or an apply step fails.

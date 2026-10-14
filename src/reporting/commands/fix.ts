@@ -30,6 +30,14 @@ import { renderText, renderMarkdown } from '../planning/render.js';
 import { dedupePlans } from '../planning/dedupe.js';
 import { estimateDriftScore } from '../planning/expected-drift.js';
 import { applyPlan, type NpmPackageManager, type WorkspaceTarget } from '../planning/apply.js';
+import {
+  renderAdvisoryResolutionMarkdown,
+  renderAdvisoryResolutionText,
+  resolveAdvisoryPlan,
+  type AdvisoryResolutionReport,
+  type UpgradePolicy,
+} from '../planning/advisory-resolution.js';
+import { loadPackageVersionManifest } from '../package-version-manifest.js';
 import { detectWorkspaceRoot } from './update.js';
 import type { FixCandidateInput, FixPlanRequest, FixPlanResponse, PlanTier, PlannedUpgrade, UpgradeConflict, UpgradeKind, UpgradePlan } from '../planning/types.js';
 
@@ -173,7 +181,7 @@ async function repositoryIdentity(rootDir: string, override?: string): Promise<{
 }
 
 export const fixCommand = new Command('fix')
-  .description('Get ranked, risk-tiered upgrade plans from the hosted planner and optionally apply them (prompts before changing files; --yes applies non-interactively, --dry-run previews, --no-apply only prints). Requires login/DSN.')
+  .description('Get ranked, risk-tiered upgrade plans from the hosted planner and optionally apply them (prompts before changing files; --yes applies non-interactively, --dry-run previews, --no-apply only prints). Requires login/DSN. --offline --package-manifest judges advisory resolution locally and does not call the planner.')
   .argument('[path]', 'Path to analyse', '.')
   .option('--in <file>', 'Scan artifact to read', '.vibgrate/scan_result.json')
   .option('--format <format>', 'Output format (text|json|md)', 'text')
@@ -188,6 +196,8 @@ export const fixCommand = new Command('fix')
   .option('--kind <bump>', 'Plan/apply only upgrades of this semver bump kind (patch|minor|major) — combine with --packages to target one Dependabot-style batch')
   .option('--force', 'Apply a plan even if the planner flagged a blocking cross-package conflict within it')
   .option('--fail-on-vulns <severity>', 'Exit non-zero if the recommended plan leaves an advisory at/above this severity unresolved (low|moderate|high|critical)')
+  .option('--offline', 'Judge advisory resolution locally from --package-manifest; do not call the hosted planner')
+  .option('--package-manifest <file>', 'Local package-version manifest JSON/ZIP (required with --offline)')
   .action(async (targetPath: string, opts: {
     in: string;
     format: string;
@@ -202,11 +212,18 @@ export const fixCommand = new Command('fix')
     kind?: string;
     force?: boolean;
     failOnVulns?: string;
+    offline?: boolean;
+    packageManifest?: string;
   }) => {
     const rootDir = path.resolve(targetPath);
     if (!(await pathExists(rootDir))) {
       console.error(chalk.red(`Path does not exist: ${rootDir}`));
       process.exit(1);
+    }
+
+    if (opts.offline) {
+      await runOfflineAdvisoryFix(rootDir, opts);
+      return;
     }
 
     const failOn = opts.failOnVulns as VulnSeverity | undefined;
@@ -412,6 +429,55 @@ function emit(report: FixPlanResponse, format: string): void {
     case 'text':
     default:
       console.log(renderText(report));
+      break;
+  }
+}
+
+const UPGRADE_POLICIES = new Set<UpgradePolicy>(['safe', 'balanced', 'aggressive']);
+
+/**
+ * Local advisory plan. Never calls the hosted planner. An advisory is resolved
+ * only when the selected version is outside its affected range and every
+ * blocking pin is lifted by that same plan.
+ */
+async function runOfflineAdvisoryFix(
+  rootDir: string,
+  opts: { format: string; plan?: string; packageManifest?: string },
+): Promise<void> {
+  if (!opts.packageManifest) {
+    console.error(chalk.red('--offline requires --package-manifest <file>.'));
+    process.exit(1);
+  }
+  const policy = (opts.plan ?? 'safe') as UpgradePolicy;
+  if (!UPGRADE_POLICIES.has(policy)) {
+    console.error(chalk.red(`Unknown plan '${opts.plan}'. Use safe, balanced, or aggressive.`));
+    process.exit(1);
+  }
+  const manifestPath = path.isAbsolute(opts.packageManifest) ? opts.packageManifest : path.resolve(rootDir, opts.packageManifest);
+  let manifest: unknown;
+  try {
+    manifest = await loadPackageVersionManifest(manifestPath);
+  } catch (e: unknown) {
+    console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+    process.exit(1);
+  }
+  let report: AdvisoryResolutionReport;
+  try {
+    report = resolveAdvisoryPlan({ rootDir, manifest, policy });
+  } catch (e: unknown) {
+    console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+    process.exit(1);
+  }
+  switch (opts.format) {
+    case 'json':
+      console.log(JSON.stringify(report, null, 2));
+      break;
+    case 'md':
+      console.log(renderAdvisoryResolutionMarkdown(report));
+      break;
+    case 'text':
+    default:
+      console.log(renderAdvisoryResolutionText(report));
       break;
   }
 }
