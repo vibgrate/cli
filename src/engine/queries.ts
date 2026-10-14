@@ -169,7 +169,15 @@ const JAVA: LangQueries = {
     { kind: 'class', query: '(class_declaration name: (identifier) @name) @def' },
     { kind: 'interface', query: '(interface_declaration name: (identifier) @name) @def' },
   ],
-  calls: ['(method_invocation name: (identifier) @callee)', '(object_creation_expression type: (type_identifier) @callee)'],
+  calls: [
+    '(method_invocation name: (identifier) @callee)',
+    '(object_creation_expression type: (type_identifier) @callee)',
+    // `new Cache<User>()` and the diamond `new Handler<>()` wrap the constructed
+    // type in generic_type. The type_identifier child is the outer type; type
+    // arguments sit under type_arguments and must not become callees. Java's
+    // generic_type has no `type` field (unlike Scala's extends_clause form).
+    '(object_creation_expression type: (generic_type (type_identifier) @callee))',
+  ],
   imports: ['(import_declaration (scoped_identifier) @source)'],
   heritage: [
     '(superclass (type_identifier) @extends)',
@@ -182,6 +190,11 @@ const JAVA: LangQueries = {
   typeRefs: [
     '(constructor_declaration parameters: (formal_parameters (formal_parameter type: (type_identifier) @typeref)))',
     '(field_declaration type: (type_identifier) @typeref)',
+    // `Repository<User, Long>` / `EventBus<OrderEvent>`: same outer-type rule as
+    // construction. Only the generic_type's type_identifier child is the
+    // dependency; User, Long, and OrderEvent are arguments, not edges.
+    '(constructor_declaration parameters: (formal_parameters (formal_parameter type: (generic_type (type_identifier) @typeref))))',
+    '(field_declaration type: (generic_type (type_identifier) @typeref))',
   ],
   // A Java package is a directory, so cross-directory (cross-package) DI
   // resolves through `import a.b.Foo`. Capturing the package lets the resolver
