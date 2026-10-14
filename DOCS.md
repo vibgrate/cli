@@ -15,6 +15,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg bisect](#vg-bisect)
   - [vg drift](#vg-drift)
   - [vg evidence](#vg-evidence)
+    - [Air-gapped export and verify](#air-gapped-export-and-verify)
   - [vg fix](#vg-fix)
   - [vg init](#vg-init)
   - [vg report](#vg-report)
@@ -319,7 +320,7 @@ vg evidence export [--out <dir>] [--regime <id>]
 | `vg evidence watch` | Check CISA KEV for new exposure against your shipped components |
 | `vg evidence verify` | Verify an evidence bundle offline — no account, no network |
 | `vg evidence push` | Push the product registry, every frozen release manifest, and an optional signed exposure bundle to Vibgrate Cloud, which verifies the signature |
-| `vg evidence export` | Air-gap bundle of all evidence state |
+| `vg evidence export` | Air-gap bundle of all evidence state. See [Air-gapped export and verify](#air-gapped-export-and-verify) |
 
 `release` freezes the manifest from a Vibgrate scan artifact or an SBOM — CycloneDX, SPDX, or either one wrapped in an in-toto / DSSE **SBOM attestation**. A component with neither a package URL nor a CPE is kept when it has a name, a version, and a type. A component that cannot be identified is skipped, and the command prints one warning for that file. See [Reading an SBOM that has no package URL and no CPE](#reading-an-sbom-that-has-no-package-url-and-no-cpe). Where the artefact is a container image, it can also take the facts straight from what BuildKit wrote instead of values typed in by hand: `--buildkit-metadata` reads the `docker buildx build --metadata-file` output for the image digest and build reference; `--provenance` reads a SLSA provenance attestation for the source repository, commit, and base images; and `--image <ref>` asks Docker for the image's digest, `org.opencontainers.image.*` labels, and any attached provenance and SBOM attestations (an attached SBOM becomes the manifest when `--from` is not given). `--image` runs `docker image inspect` and `docker buildx imagetools inspect`; the second contacts the image's registry when the reference is not present locally. Those facts are stored under `build` in the frozen manifest. A typed `--digest` that disagrees with what the build wrote is an error, never a silent preference, and attestation signatures are recorded as unverified — verify them with `cosign`.
 
@@ -338,6 +339,41 @@ If a command cannot serialize or write a JSON or JSONL file — permission denie
 `vg evidence verify` reads the bundle before it reports `verified`, `unverified`, or `failed`. A missing bundle exits `3`. A bundle whose envelope or `result.json` is truncated, is not valid JSON, or is not an evidence document this version can read exits `1`. The message names the envelope or the result and tells you to restore the bundle or re-create it with `vg evidence exposure --bundle`. It does not print the file's contents or a stack trace. A readable bundle that was signed and then edited still reports `failed`.
 
 No language model touches any figure in the evidence path, and every determination carries an evidence-not-compliance disclaimer. Vibgrate Evidence produces evidence to support your obligations under a regime; it does not determine compliance and is not legal advice.
+
+#### Air-gapped export and verify
+
+Freeze a shipped release, answer from a local advisory, export the evidence state, and check the signed bundle on a machine with no network and no account. The steps are the [lifecycle](./README.md#the-lifecycle). Nothing reaches Vibgrate Cloud until `vg evidence push` ([privacy](./README.md#privacy--offline-first)).
+
+```bash
+vg evidence release acme-gateway 3.2.1 --from sbom.cdx.json --ship-date 2025-02-14
+vg evidence exposure CVE-2025-12345 --offline --advisory ./advisory.json --bundle ./ev
+vg evidence export --out ./evidence-export
+vg evidence verify <bundle> --pub .vibgrate/attest-key.pem.pub
+```
+
+`<bundle>` is the directory `exposure` prints, `<dir>/evidence-<id>/` under `--bundle`.
+
+| Step | Local inputs |
+| --- | --- |
+| `vg evidence release` | A product from `vg evidence product add`, and `--from`: a CycloneDX or SPDX SBOM, a scan artifact, or the default `.vibgrate/scan_result.json`. Writes one immutable manifest at `.vibgrate/evidence/releases/<product>@<version>.json`. |
+| `vg evidence exposure --offline --bundle` | Those frozen manifests, and `--advisory <file>`. The file is OSV JSON (an `affected` array) or a Vibgrate advisory (`id` and `ranges`). `--offline` requires that file. Signing uses `.vibgrate/attest-key.pem`, or the key in `VG_ATTEST_KEY`. The first signed bundle mints the default key and `.vibgrate/attest-key.pem.pub` when `VG_ATTEST_KEY` is unset. |
+| `vg evidence export` | The evidence state already on disk (org, products, frozen manifests). `--regime <id>` selects the readiness snapshot. `--out` defaults to `evidence-export`. |
+| copy | The printed bundle directory, the public key (`.vibgrate/attest-key.pem.pub`, or the public PEM for `VG_ATTEST_KEY`), and the export directory. The private key stays on the signing machine ([README](./README.md#what-is-in-a-bundle-and-what-verified-means)). |
+| `vg evidence verify` | That bundle directory, or its `evidence.intoto.jsonl`, and `--pub <file>` with the public key. No account and no network. |
+
+`exposure --bundle` writes the signed bundle the command prints. That directory holds `result.json`, the DSSE envelope `evidence.intoto.jsonl`, `VERIFY.md`, `manifest.json`, `provenance.json`, `inputs/advisory.json`, `inputs/releases/<product>@<version>.json`, and `inputs/datapack.lock`. What the signature covers is in the [README](./README.md#what-is-in-a-bundle-and-what-verified-means).
+
+`export` writes a separate air-gap directory: `org.json`, `products.json`, `releases/<product>@<version>.json`, and `readiness.json`. `verify` reads the signed exposure bundle.
+
+`vg evidence verify` reports one of three states, in the same words as the [README](./README.md#what-is-in-a-bundle-and-what-verified-means):
+
+- `verified` — the signature checks, the signer is pinned to the trust root you supplied with `--pub`, and the `result.json` digest still matches.
+- `unverified` — the bundle is cryptographically intact and unmodified, and the signer is not pinned. It is real, and not yet trusted by you.
+- `failed` — the signature is bad, or `result.json` no longer matches what was signed.
+
+A missing bundle exits `3`. A truncated, invalid, or unreadable bundle exits `1`. Both are described above.
+
+`--tsa <url>` is optional. It asks an RFC 3161 timestamp authority for `timestamp.tsr`, so the machine that runs `exposure` needs a network path to that authority. The token and the `openssl ts -verify` check are already described in the `exposure` paragraph above and in the [README known limits](./README.md#known-limits).
 
 ---
 
