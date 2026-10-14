@@ -2,16 +2,17 @@
  * Deterministic JUnit XML for `vg scan --junit <file>`.
  *
  * The report summarizes drift findings and the gates `vg scan` actually
- * judges (drift `--fail-on`, architecture, security packs, drift budget).
- * It is a pure function of that input: no clock, no host name, no DSN, no
- * repository URL. The optional JUnit `timestamp` attribute is omitted;
- * `time` is always `0` because wall-clock duration is not part of the result.
+ * judges (drift `--fail-on`, architecture, security packs, drift budget,
+ * EPSS). It is a pure function of that input: no clock, no host name, no
+ * DSN, no repository URL. The optional JUnit `timestamp` attribute is
+ * omitted; `time` is always `0` because wall-clock duration is not part of
+ * the result.
  *
  * Suites, in order:
  *   1. `findings` — one testcase per drift finding (`classname` `vg.findings`)
  *   2. `architecture` — only when that gate was requested
  *   3. `security` — only when a security / iac gate was requested
- *   4. `gates` — drift-budget and drift-worsening cases that were judged
+ *   4. `gates` — drift-budget, drift-worsening, and epss cases that were judged
  *
  * Finding names are `{ruleId} {location}`, sorted by rule id, location,
  * level (`error`, `warning`, `note`), then message. A ` #2` suffix breaks
@@ -20,6 +21,7 @@
  */
 import * as path from 'node:path';
 import { compareDriftBudget, type DriftBudgetGateResult } from './drift-budget-gate.js';
+import { type EpssGateJudgement } from './epss-gate.js';
 import { compareCodeUnits } from '../core-open/utils/code-unit.js';
 import { writeTextFile } from './utils/fs.js';
 
@@ -274,6 +276,18 @@ export function driftWorseningFlagCase(
     }
   }
   return pass(JUNIT_GATES_CLASS, 'drift-worsening');
+}
+
+/** One `epss` case. The message matches the stderr line from `judgeEpssGate`. */
+export function epssGateCase(judgement: EpssGateJudgement): JUnitTestCase {
+  if (judgement.status === 'failure' && judgement.message) {
+    const body = [judgement.message, ...judgement.rows].join('\n');
+    return failure(JUNIT_GATES_CLASS, 'epss', 'gate', judgement.message, body);
+  }
+  if (judgement.status === 'skipped' && judgement.message) {
+    return skipped(JUNIT_GATES_CLASS, 'epss', judgement.message);
+  }
+  return pass(JUNIT_GATES_CLASS, 'epss');
 }
 
 export function configDriftBudgetAbsentCase(): JUnitTestCase {

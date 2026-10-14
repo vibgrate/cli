@@ -3,12 +3,14 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { evaluateConfigDriftBudget } from './drift-budget-gate.js';
+import { judgeEpssGate } from './epss-gate.js';
 import {
   FINDING_SKIP_NO_GATE,
   architectureGateSuite,
   configDriftBudgetCases,
   driftBudgetFlagCase,
   driftWorseningFlagCase,
+  epssGateCase,
   renderScanJUnit,
   securityGateSuite,
   type JUnitFinding,
@@ -124,6 +126,61 @@ describe('scan JUnit gates', () => {
       status: 'failure',
       message: 'Failing fitness function: DriftScore 44/100 exceeds budget 40.',
     });
+  });
+
+  it('maps the epss gate the same way the CLI does', () => {
+    const breached = judgeEpssGate({
+      threshold: 0.8,
+      source: 'flag',
+      scanned: true,
+      vulnerabilities: {
+        source: 'manifest',
+        packages: [{
+          ecosystem: 'npm',
+          package: 'left-pad',
+          version: '1.3.0',
+          advisories: [{ id: 'GHSA-hot', epss: 0.9 }],
+        }],
+      },
+    });
+    expect(epssGateCase(breached)).toMatchObject({
+      status: 'failure',
+      classname: 'vg.gates',
+      name: 'epss',
+      type: 'gate',
+      message: 'Failing: 1 advisory with EPSS at or above --fail-on-epss 0.8.',
+    });
+
+    const clear = judgeEpssGate({
+      threshold: 0.95,
+      source: 'flag',
+      scanned: true,
+      vulnerabilities: {
+        source: 'manifest',
+        packages: [{
+          ecosystem: 'npm',
+          package: 'left-pad',
+          version: '1.3.0',
+          advisories: [{ id: 'GHSA-hot', epss: 0.9 }],
+        }],
+      },
+    });
+    expect(epssGateCase(clear)).toEqual({ status: 'pass', classname: 'vg.gates', name: 'epss' });
+
+    const absent = judgeEpssGate({ threshold: 0.8, source: 'flag', scanned: false });
+    expect(epssGateCase(absent)).toMatchObject({
+      status: 'skipped',
+      name: 'epss',
+      message: 'EPSS scores are absent; --fail-on-epss 0.8 was not compared.',
+    });
+
+    const xml = renderScanJUnit({
+      findings: [],
+      extraSuites: [{ name: 'gates', cases: [epssGateCase(breached)] }],
+    });
+    expect(xml).toContain('name="epss"');
+    expect(xml).toContain('npm left-pad@1.3.0  GHSA-hot  epss 0.9');
+    expect(xml.indexOf('name="findings"')).toBeLessThan(xml.indexOf('name="gates"'));
   });
 
   it('maps --drift-worsening, including a missing baseline', () => {

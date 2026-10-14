@@ -21,6 +21,7 @@ import {
 import { compareCodeUnits } from '../../core-open/utils/code-unit.js';
 import { writeScanSummary } from '../scan-summary.js';
 import { compareDriftBudget, evaluateConfigDriftBudget } from '../drift-budget-gate.js';
+import { judgeEpssGate, parseConfiguredFailOnEpss, parseFailOnEpssFlag } from '../epss-gate.js';
 import {
   ARCHITECTURE_NEEDS_GRAPH,
   ARCHITECTURE_NOT_CLASSIFIED,
@@ -30,6 +31,7 @@ import {
   configDriftBudgetCases,
   driftBudgetFlagCase,
   driftWorseningFlagCase,
+  epssGateCase,
   securityGateSuite,
   securityNotEvaluatedMessage,
   securityUnavailableMessage,
@@ -396,7 +398,7 @@ export const scanCommand = new Command('scan')
   .argument('[path]', 'Path to scan', '.')
   .option('--out <file>', 'Output file path')
   .option('--format <format>', 'Output format (text|json|sarif|md)', 'text')
-  .option('--junit <file>', 'Also write a deterministic JUnit XML report of findings and budget gates to this file')
+  .option('--junit <file>', 'Also write a deterministic JUnit XML report of findings and CI gates to this file')
   .option(
     '--fail-on <gates>',
     'Fail on warn or error. architecture-finding (hard boundary violations) or architecture-warning (violations and warnings) gate on the architecture module\'s boundary findings, judged under the policy pack in force: .vibgrate/architecture.toml (policy = "hexagonal-v1" | "layered-v1" | "vertical-v1", plus any [[overlay]] rules), VIBGRATE_ARCHITECTURE_POLICY, or vg build --policy; default hexagonal-v1. The pack is named in the output. See docs/architecture-policies.md. iac-finding[=<severity>] fails on infrastructure findings from the iac-cis-v1 pack at or above <severity> (critical|high|medium|low|info; default high) and needs --iac (or --full) plus the code map — it exits 2 when the Architecture module is missing rather than passing an unevaluated tree; security-finding[=<severity>] is the umbrella across every security pack that ran. Comma-separated: at most one of warn/error/architecture-* plus any security gates, e.g. --fail-on error,iac-finding=medium',
@@ -426,6 +428,10 @@ export const scanCommand = new Command('scan')
   .option('--project-scan-timeout <seconds>', 'Per-project scan timeout in seconds (default: 180)')
   .option('--drift-budget <score>', 'Fail if DriftScore is above budget (0-100); overrides driftBudget in the project config')
   .option('--drift-worsening <percent>', 'Fail if drift worsens by more than % since baseline; overrides driftBudget in the project config')
+  .option(
+    '--fail-on-epss <probability>',
+    'Fail if any advisory EPSS probability is at or above this value (0-1, inclusive). An omitted score is not 0 and does not count. Overrides failOnEpss in the project config. Scores come from the vulnerability scan (--vulns or --full); offline, only from --package-manifest',
+  )
   .option('--repository-name <name>', 'Override the repository name recorded for this scan (defaults to the directory or package.json name)')
   .option('--force', 'Always create a fresh scan ingest, even if the repository is unchanged since the last scan (skips the unchanged/reuse optimization). Used by scheduled and dashboard-triggered scans.')
   .option('--no-graph', 'Skip building the local code map (the AI/docs index) that scan produces after scoring drift')
@@ -458,6 +464,7 @@ export const scanCommand = new Command('scan')
     projectScanTimeout?: string;
     driftBudget?: string;
     driftWorsening?: string;
+    failOnEpss?: string;
     summaryOut?: string;
     repositoryName?: string;
     force?: boolean;
@@ -509,6 +516,9 @@ export const scanCommand = new Command('scan')
     // security gates are evaluated after the scan against `extended.security`.
     const failOn = parseFailOn(opts.failOn);
     if (failOn.invalid) throw usageError(failOn.invalid);
+    // Same moment as `--fail-on`: a bad probability is a usage error before
+    // the scan, not a gate result after it.
+    const failOnEpss = parseFailOnEpssFlag(opts.failOnEpss);
     if (opts.format === 'junit') {
       throw usageError('JUnit XML is written with --junit <file>, alongside --format text, json, sarif, or md.');
     }
@@ -873,6 +883,21 @@ export const scanCommand = new Command('scan')
       if (!opts.quiet) console.error(chalk.green('✔') + ` Scan summary written to ${opts.summaryOut}`);
     }
 
+    // `--fail-on-epss` replaces `failOnEpss`. A present invalid config value
+    // still fails, so the flag cannot hide a bad key. Data configs are also
+    // rejected by the config schema when the scan loads them.
+    const epssFile = findConfigFile(rootDir) ?? 'the project config';
+    const configuredEpss = parseConfiguredFailOnEpss((await loadConfig(rootDir)).failOnEpss, epssFile);
+    const epssThreshold = failOnEpss ?? configuredEpss;
+    const epssJudgement = epssThreshold === undefined
+      ? null
+      : judgeEpssGate({
+          threshold: epssThreshold,
+          source: failOnEpss !== undefined ? 'flag' : 'config',
+          scanned: Boolean(scanOpts.vulns),
+          vulnerabilities: artifact.extended?.vulnerabilities,
+        });
+
     async function writeJUnitFile(): Promise<void> {
       if (!junitFile || junitWritten) return;
       junitWritten = true;
@@ -941,6 +966,7 @@ export const scanCommand = new Command('scan')
       if (scanOpts.driftWorseningPercent !== undefined) {
         gateCases.push(driftWorseningFlagCase(measuredDrift, artifact.delta, scanOpts.driftWorseningPercent));
       }
+      if (epssJudgement) gateCases.push(epssGateCase(epssJudgement));
       if (scanOpts.driftBudget === undefined && scanOpts.driftWorseningPercent === undefined) {
         // A config read failure must not run ahead of the finding gates below.
         // The budget block still loads the config and reports that failure.
@@ -1099,6 +1125,16 @@ export const scanCommand = new Command('scan')
         return failGate();
       }
       if (!opts.quiet) console.error(chalk.dim(`\niac gate: no findings at or above ${threshold} (${securityPacksLabel(section)}).`));
+    }
+
+    if (epssJudgement?.message) {
+      if (epssJudgement.status === 'failure') {
+        console.error(chalk.red(`\n${epssJudgement.message}`));
+        for (const row of epssJudgement.rows.slice(0, 50)) console.error(chalk.dim(`  ${row}`));
+        if (epssJudgement.rows.length > 50) console.error(chalk.dim(`  … ${epssJudgement.rows.length - 50} more`));
+        return failGate();
+      }
+      console.error(chalk.yellow(`\n${epssJudgement.message}`));
     }
 
     if (scanOpts.driftBudget !== undefined) {

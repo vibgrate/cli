@@ -98,6 +98,8 @@ Two different knobs both use the word "warn". They do not mean the same thing.
 | `--fail-on warn`, and any warning or error finding | 2 | Fail. |
 | `--drift-budget 40`, DriftScore **above** 40 | 2 | Fail. A score equal to 40 passes. |
 | `--drift-budget 40`, DriftScore not measured | 0 | Pass. The score is absent, not 0, and the budget is not compared. |
+| `--fail-on-epss 0.8`, and an advisory EPSS at or above 0.8 | 2 | Fail. A score equal to the threshold fails. An omitted EPSS does not count, and it is not 0. |
+| `--fail-on-epss 0.8`, vulnerability scan did not run | 0 | Pass. The gate is not compared. |
 | `--drift-worsening 5`, score measured, no `--baseline` | 2 | Fail. The flag cannot compare. |
 | `--drift-worsening 5`, DriftScore not measured | 0 | Pass. The flag is not compared. |
 | `--drift-worsening 5`, worsening **above** 5% versus the baseline | 2 | Fail. |
@@ -160,6 +162,12 @@ A test that asserts on the report needs a frozen input. Pass `--offline` and a c
 
 ```bash
 vg scan --offline --package-manifest ./package-versions.json --format json --out vibgrate-report.json --fail-on error --drift-budget 40
+```
+
+An EPSS gate uses the same offline manifest. `--vulns` matches advisories in that file. A present `epss` at or above the threshold exits 2. An advisory that omits `epss` does not fail the gate, and a missing score is not treated as 0.
+
+```bash
+vg scan --vulns --offline --package-manifest ./package-versions.json --fail-on-epss 0.8
 ```
 
 ## DriftScore badge

@@ -61,9 +61,9 @@ export function isConfigFileError(err: unknown): err is ConfigFileError {
 /**
  * Parse a data config (YAML or JSON) into a plain object. Throws
  * {@link ConfigFileError} naming the file (and the line or key when the
- * parser can say) when the text is not a valid mapping, or when `driftBudget`
- * or `review` is present but does not match its schema. The message never
- * includes a config value.
+ * parser can say) when the text is not a valid mapping, or when `driftBudget`,
+ * `failOnEpss`, or `review` is present but does not match its schema. The
+ * message never includes a config value.
  */
 export function parseDataConfig(text: string, file: string): Record<string, unknown> {
   const parsed = /\.ya?ml$/.test(file) ? parseYamlConfig(text, file) : parseJsonConfig(text, file);
@@ -274,6 +274,10 @@ function isNonNegativeNumber(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
+function isUnitInterval(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
 const SHAPE_CHECKS: readonly ShapeCheck[] = [
   { key: 'include', ok: isStringList, expect: 'a list of strings, for example include: ["src/**"]' },
   { key: 'exclude', ok: isStringList, expect: 'a list of strings, for example exclude: ["legacy/**"]' },
@@ -283,6 +287,7 @@ const SHAPE_CHECKS: readonly ShapeCheck[] = [
   { key: 'scanners', ok: (value) => value === false || isRecord(value), expect: 'a mapping of scanner settings, or false' },
   { key: 'thresholds', ok: isRecord, expect: 'a mapping of threshold settings' },
   { key: 'driftBudget', ok: isRecord, expect: 'a mapping of budget settings' },
+  { key: 'failOnEpss', ok: isUnitInterval, expect: 'a number from 0 to 1, for example failOnEpss: 0.1' },
   { key: 'review', ok: isRecord, expect: 'a mapping of review settings' },
 ];
 

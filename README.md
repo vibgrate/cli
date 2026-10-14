@@ -886,7 +886,7 @@ Local scoring does not require this — nothing leaves your machine until you pu
 
 ```bash
 vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [--fail-on warn|error|architecture-finding|architecture-warning] \
-  [--offline] [--package-manifest <file>] [--no-local-artifacts] [--max-privacy] \
+  [--fail-on-epss <probability>] [--offline] [--package-manifest <file>] [--no-local-artifacts] [--max-privacy] \
   [--drift-budget <score>] [--drift-worsening <percent>] [--baseline <file>] [--summary-out <file>]
 ```
 
