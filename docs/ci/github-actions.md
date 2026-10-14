@@ -114,6 +114,8 @@ The Action inputs map to scan flags: `vulns: true` adds `--vulns`, `fail-on` add
 after the scan (with `always()`, so findings still surface when the gate fails).
 Prefer raw CLI steps? `npx @vibgrate/cli scan --vulns --format sarif --out
 vibgrate-vulns.sarif --fail-on error`, then upload the file yourself.
+How advisory severity maps onto that gate, and what a local scan does with
+RiskScore and EPSS: [Gating CI on vulnerability severity, RiskScore and EPSS](../../DOCS.md#gating-ci-on-vulnerability-severity-riskscore-and-epss).
 
 ## Infrastructure misconfiguration gate (`--iac`)
 
