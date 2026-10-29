@@ -123,8 +123,8 @@ function packageResolved(root: string, name: string): string | undefined {
   if (!parsed || typeof parsed !== 'object') return undefined;
   reportLockfileFields(root, 'Package.resolved', (rel, notes) => notePackageResolved(parsed, rel, notes));
   const data = parsed as {
-    pins?: Array<{ identity?: string; package?: string; state?: { version?: string } }>;
-    object?: { pins?: Array<{ identity?: string; package?: string; state?: { version?: string } }> };
+    pins?: Array<{ identity?: string; package?: string; repositoryURL?: string; state?: { version?: string } }>;
+    object?: { pins?: Array<{ identity?: string; package?: string; repositoryURL?: string; state?: { version?: string } }> };
   };
   const pins = data.pins ?? data.object?.pins;
   if (!Array.isArray(pins)) return undefined;
@@ -132,6 +132,10 @@ function packageResolved(root: string, name: string): string | undefined {
   for (const p of pins) {
     const id = (p.identity ?? p.package ?? '').toLowerCase();
     if (id === target && p.state?.version) return p.state.version;
+    // v1 files carry only `package` (display name) and `repositoryURL`; the
+    // identity is the last path segment of the URL, `.git` stripped, lower-cased.
+    const urlIdentity = p.repositoryURL?.replace(/\/+$/, '').split('/').pop()?.replace(/\.git$/i, '').toLowerCase();
+    if (urlIdentity && urlIdentity === target && p.state?.version) return p.state.version;
   }
   return undefined;
 }
@@ -142,15 +146,19 @@ function pubspecLock(root: string, name: string): string | undefined {
   if (text === undefined) return undefined;
   reportLockfileFields(root, 'pubspec.lock', (rel, notes) => notePubspecLockText(text, rel, notes));
   let inPkg = false;
+  let sdkSource = false;
   for (const line of text.split('\n')) {
     const key = /^  ([A-Za-z0-9_.]+):\s*$/.exec(line);
     if (key) {
       inPkg = key[1] === name;
+      sdkSource = false;
       continue;
     }
     if (inPkg) {
+      const sm = /^\s+source:\s*"?([^"\s]+)"?/.exec(line);
+      if (sm) sdkSource = sm[1] === 'sdk';
       const vm = /^\s+version:\s*"?([^"\s]+)"?/.exec(line);
-      if (vm) return vm[1];
+      if (vm) return sdkSource ? undefined : vm[1];
     }
   }
   return undefined;

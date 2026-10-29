@@ -232,7 +232,7 @@ export const NUGET_LOCK_ENTRY: ReadonlySet<string> = new Set([
 ]);
 
 export const SWIFT_RESOLVED_TOP: ReadonlySet<string> = new Set(['version', 'originHash', 'pins', 'object']);
-export const SWIFT_PIN: ReadonlySet<string> = new Set(['identity', 'kind', 'location', 'state', 'package']);
+export const SWIFT_PIN: ReadonlySet<string> = new Set(['identity', 'kind', 'location', 'state', 'package', 'repositoryURL']);
 export const SWIFT_PIN_STATE: ReadonlySet<string> = new Set(['version', 'revision', 'branch']);
 
 export const PUBSPEC_LOCK_TOP: ReadonlySet<string> = new Set(['packages', 'sdks']);

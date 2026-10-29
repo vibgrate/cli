@@ -494,3 +494,179 @@ describe('lockfile package digests', () => {
     ]);
   });
 });
+
+describe('lockfileVersion — dotnet (packages.lock.json)', () => {
+  it('matches ids case-insensitively (newtonsoft.json finds Newtonsoft.Json)', () => {
+    write(
+      'packages.lock.json',
+      JSON.stringify({
+        dependencies: {
+          'net8.0': { 'Newtonsoft.Json': { type: 'Direct', requested: '13.0.3', resolved: '13.0.3' } },
+        },
+      }),
+    );
+    expect(lockfileVersion(root, 'dotnet', 'newtonsoft.json')).toBe('13.0.3');
+  });
+
+  it('returns undefined for "type": "Project" entries without a resolved pin', () => {
+    write(
+      'packages.lock.json',
+      JSON.stringify({
+        dependencies: {
+          'net8.0': {
+            ProjectX: { type: 'Project', requested: '1.0.0' },
+            'Newtonsoft.Json': { type: 'Direct', requested: '13.0.3', resolved: '13.0.3' },
+          },
+        },
+      }),
+    );
+    expect(lockfileVersion(root, 'dotnet', 'ProjectX')).toBeUndefined();
+  });
+
+  it('uses the first target framework that pins the package', () => {
+    write(
+      'packages.lock.json',
+      JSON.stringify({
+        dependencies: {
+          'net6.0': { 'Serilog.Sinks.Console': { type: 'Direct', requested: '4.1.0', resolved: '4.1.0' } },
+          'net8.0': { 'Serilog.Sinks.Console': { type: 'Direct', requested: '5.0.0', resolved: '5.0.0' } },
+        },
+      }),
+    );
+    expect(lockfileVersion(root, 'dotnet', 'Serilog.Sinks.Console')).toBe('4.1.0');
+  });
+});
+
+describe('lockfileVersion — swift (Package.resolved)', () => {
+  it('resolves v1 pins from the repositoryURL-derived identity', () => {
+    write(
+      'Package.resolved',
+      JSON.stringify({
+        object: {
+          pins: [
+            {
+              package: 'ArgumentParser',
+              repositoryURL: 'https://github.com/apple/swift-argument-parser',
+              state: { revision: 'abc123', version: '1.2.0' },
+            },
+          ],
+        },
+        version: 1,
+      }),
+    );
+    expect(lockfileVersion(root, 'swift', 'swift-argument-parser')).toBe('1.2.0');
+  });
+
+  it('strips a trailing .git suffix when deriving the v1 identity', () => {
+    write(
+      'Package.resolved',
+      JSON.stringify({
+        object: {
+          pins: [
+            {
+              package: 'NIO',
+              repositoryURL: 'https://github.com/apple/swift-nio.git',
+              state: { revision: 'abc123', version: '2.65.0' },
+            },
+          ],
+        },
+        version: 1,
+      }),
+    );
+    expect(lockfileVersion(root, 'swift', 'swift-nio')).toBe('2.65.0');
+  });
+
+  it('matches v2 identities case-insensitively', () => {
+    write(
+      'Package.resolved',
+      JSON.stringify({
+        pins: [{ identity: 'Swift-NIO', state: { revision: 'abc123', version: '2.65.0' } }],
+        version: 2,
+      }),
+    );
+    expect(lockfileVersion(root, 'swift', 'swift-nio')).toBe('2.65.0');
+  });
+
+  it('returns undefined for branch pins without a version', () => {
+    write(
+      'Package.resolved',
+      JSON.stringify({
+        pins: [{ identity: 'swift-nio', state: { branch: 'main', revision: 'abc123' } }],
+        version: 2,
+      }),
+    );
+    expect(lockfileVersion(root, 'swift', 'swift-nio')).toBeUndefined();
+  });
+});
+
+describe('lockfileVersion — dart (pubspec.lock)', () => {
+  const SDK_LOCK = [
+    'packages:',
+    '  flutter:',
+    '    dependency: "direct main"',
+    '    description: flutter',
+    '    source: sdk',
+    '    version: "0.0.0"',
+    '  http:',
+    '    dependency: "direct main"',
+    '    description:',
+    '      name: http',
+    '      sha256: deadbeef',
+    '      url: "https://pub.dev"',
+    '    source: hosted',
+    '    version: "1.2.2"',
+    '',
+  ].join('\n');
+
+  it('returns undefined for SDK packages (source: sdk) instead of the fake 0.0.0 pin', () => {
+    write('pubspec.lock', SDK_LOCK);
+    expect(lockfileVersion(root, 'dart', 'flutter')).toBeUndefined();
+  });
+
+  it('still resolves hosted packages', () => {
+    write('pubspec.lock', SDK_LOCK);
+    expect(lockfileVersion(root, 'dart', 'http')).toBe('1.2.2');
+  });
+
+  it('returns the version as written for path packages', () => {
+    write(
+      'pubspec.lock',
+      [
+        'packages:',
+        '  my_pkg:',
+        '    dependency: "direct main"',
+        '    description:',
+        '      path: "../my_pkg"',
+        '      relative: true',
+        '    source: path',
+        '    version: "0.4.1"',
+        '',
+      ].join('\n'),
+    );
+    expect(lockfileVersion(root, 'dart', 'my_pkg')).toBe('0.4.1');
+  });
+});
+
+describe('lockfileVersion — java (gradle.lockfile)', () => {
+  const LOCKFILE = [
+    '# This is a comment, never a match',
+    '# com.fake:fake:9.9.9=compileClasspath,runtimeClasspath',
+    'com.google.guava:guava:33.0.0-jre=compileClasspath',
+    '',
+  ].join('\n');
+
+  it('requires the group:artifact form (guava alone returns undefined)', () => {
+    write('gradle.lockfile', LOCKFILE);
+    expect(lockfileVersion(root, 'java', 'guava')).toBeUndefined();
+  });
+
+  it('resolves the full group:artifact pin', () => {
+    write('gradle.lockfile', LOCKFILE);
+    expect(lockfileVersion(root, 'java', 'com.google.guava:guava')).toBe('33.0.0-jre');
+  });
+
+  it('never matches a commented pin line', () => {
+    write('gradle.lockfile', LOCKFILE);
+    expect(lockfileVersion(root, 'java', 'com.fake:fake')).toBeUndefined();
+  });
+});
