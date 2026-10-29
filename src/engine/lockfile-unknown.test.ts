@@ -177,7 +177,7 @@ describe('lockfile unknown optional fields', () => {
   });
 
   it('keeps a Cargo pin and warns on one unknown package key', () => {
-    const text = ['version = 4', '[[package]]', 'name = "serde"', 'version = "1.0.203"', `futureOptional = "${SECRET}"`, ''].join('\n');
+    const text = ['version = 4', '[[package]]', 'name = "serde"', 'version = "1.0.203"', 'source = "registry+https://github.com/rust-lang/crates.io-index"', `futureOptional = "${SECRET}"`, ''].join('\n');
     expect(parseCargoLock(text).get('serde')).toEqual(['1.0.203']);
     expect(warnings()).toEqual([WARN('Cargo.lock', 'futureOptional')]);
     expect(warnings().join('\n')).not.toContain(SECRET);

@@ -22,14 +22,17 @@ version = "0.1.0"
 [[package]]
 name = "dev-optional-crate"
 version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "optional-crate"
 version = "2.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "required-crate"
 version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 `;
 
 function manifest(order: 'required-first' | 'optional-first'): string {
@@ -132,6 +135,8 @@ describe('sbom export: Cargo optional dependencies', () => {
       },
     ]);
     expect(spdx.relationships.some((rel) => rel.relationshipType === 'DEV_DEPENDENCY_OF')).toBe(false);
-    expect(spdx.packages.map((pkg) => pkg.name)).toEqual(['app', 'dev-optional-crate', 'optional-crate', 'required-crate']);
+    // The root crate ("app") has no `source` in Cargo.lock and is dropped
+    // from the SBOM; only registry crates are components (see #512).
+    expect(spdx.packages.map((pkg) => pkg.name)).toEqual(['dev-optional-crate', 'optional-crate', 'required-crate']);
   });
 });

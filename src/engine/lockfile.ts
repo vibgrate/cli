@@ -583,6 +583,10 @@ function yarnHeaderRealName(spec: string): string | undefined {
  * version of that crate is present, and resolving the bare form correctly
  * needs the same edge bookkeeping `npmLockGraph` does for npm — not worth
  * duplicating for a components-only SBOM listing.
+ *
+ * Only registry and git crates carry a `source = "..."` key; the crate being
+ * scanned, path dependencies and workspace members do not. Those are not
+ * crates.io components, so a block without `source` is skipped (see #512).
  */
 function cargoLockTree(root: string): LockfileComponent[] | undefined {
   const text = readCheckedText(root, 'Cargo.lock');
@@ -593,6 +597,9 @@ function cargoLockTree(root: string): LockfileComponent[] | undefined {
     const nm = /(?:^|\n)\s*name\s*=\s*"([^"]+)"/.exec(block);
     const ver = /(?:^|\n)\s*version\s*=\s*"([^"]+)"/.exec(block);
     if (!nm || !ver) continue;
+    // Root crates, path dependencies and workspace members have no `source`.
+    // Listing them would claim a local project is a crates.io component.
+    if (!/(?:^|\n)\s*source\s*=\s*"/.test(block)) continue;
     const sum = /(?:^|\n)\s*checksum\s*=\s*"([^"]+)"/.exec(block);
     const digests = digestFromCargoChecksum(sum?.[1]);
     rememberComponent(out, { package: nm[1], version: ver[1], ...(digests.length ? { digests } : {}) });
@@ -607,6 +614,11 @@ function cargoLockTree(root: string): LockfileComponent[] | undefined {
  * `h1:` value is that component's SHA-256 digest. The `/go.mod` hash is a
  * different artifact and is not a second digest. No edges: go.sum records
  * the flattened build list, not which module required which.
+ *
+ * `go.work` is intentionally not read: a workspace layout does not change
+ * what each module's `go.sum` claims, so the scanned module directory is
+ * the resolution unit. A tree with only `go.work` (no `go.sum`) resolves
+ * to nothing. Both are pinned by tests (see #512).
  */
 function goSumTree(root: string): LockfileComponent[] | undefined {
   const text = readCheckedText(root, 'go.sum');
