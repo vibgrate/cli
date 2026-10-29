@@ -506,13 +506,29 @@ function yarnLockTree(root: string): LockfileComponent[] | undefined {
   };
   for (const line of text.split('\n')) {
     if (line && !/^\s/.test(line) && !line.startsWith('#')) {
-      pendingNames = line
+      const specs = line
         .replace(/:\s*$/, '')
         .split(',')
-        .map((spec) => yarnHeaderRealName(spec.trim().replace(/^"|"$/g, '')))
-        .filter((n): n is string => Boolean(n));
-      pendingDigests = [];
-      open = [];
+        .map((spec) => spec.trim().replace(/^"|"$/g, ''));
+
+      // Yarn Berry workspace root (e.g. "my-app@workspace:.") is the project,
+      // not a registry package — never emit it as an SBOM component.
+      const allWorkspace = specs.length > 0 && specs.every((spec) => {
+        const parsed = splitYarnDescriptor(spec);
+        return parsed?.range.startsWith('workspace:');
+      });
+
+      if (allWorkspace) {
+        pendingNames = [];
+        pendingDigests = [];
+        open = [];
+      } else {
+        pendingNames = specs
+          .map((spec) => yarnHeaderRealName(spec))
+          .filter((n): n is string => Boolean(n));
+        pendingDigests = [];
+        open = [];
+      }
     } else if (pendingNames.length) {
       const m = /^\s+version:?\s+"?([^"\s]+)"?/.exec(line);
       if (m) {
@@ -730,9 +746,6 @@ function headerNamesPackage(header: string, name: string): boolean {
     .split(',')
     .some((spec) => {
       const s = spec.trim().replace(/^"|"$/g, '');
-      const at = s.lastIndexOf('@');
-      if (at <= 0) return false; // <=0 keeps scoped leading '@' from matching empty name
-      const specName = s.slice(0, at);
-      return specName === name;
+      return splitYarnDescriptor(s)?.name === name;
     });
 }
