@@ -14,6 +14,8 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` reads Cargo target-specific dependency tables, and `vg sbom export` marks Cargo dev and build crates as development dependencies.** `[build-dependencies]` and `[target.<spec>.dependencies]`, `[target.<spec>.dev-dependencies]`, and `[target.<spec>.build-dependencies]` are parsed. `<spec>` may be a single-quoted `cfg`, a double-quoted `cfg` with escaped quotes, or a bare target triple. Target tables use the same section as the table without `target`. Dev and build crates are direct rows with section `devDependencies`. CycloneDX component `scope` is `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. `vibgrate:scope` stays `direct`. A crate also declared in `[dependencies]` stays a production row, and that declaration supplies the version. A plain `[dependencies]` row wins over a target production row. `optional = true` on a normal dependency stays `optionalDependencies`, including when the same crate is also a dev or build dependency. Registry lookups and drift buckets still count production crates only.
+
 - **`vg sbom export` marks Python dependency groups as development dependencies.**
   A package declared only in `pyproject.toml` `[dependency-groups]`,
   `[tool.poetry.group.<name>.dependencies]`, or the legacy

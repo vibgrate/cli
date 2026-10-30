@@ -83,50 +83,111 @@ const KNOWN_RUST_FRAMEWORKS: Record<string, string> = {
   'ethers': 'ethers-rs',
 };
 
+type CargoDepTable = 'dependencies' | 'dev-dependencies' | 'build-dependencies';
+
 interface RustDependency {
   name: string;
   version: string;
   optional: boolean;
   features: string[];
+  /** `[dev-dependencies]` and `[build-dependencies]`, including target-specific forms. */
   isDev: boolean;
+  /** Declared under `[target.<spec>.*]` rather than a plain dependency table. */
+  fromTarget: boolean;
+}
+
+/**
+ * `[target.<spec>.dependencies]` and the dev and build forms of that header.
+ * `<spec>` is a single-quoted cfg, a double-quoted cfg (escaped quotes
+ * included), or a bare target triple such as `x86_64-unknown-linux-gnu`.
+ */
+const TARGET_DEP_HEADER =
+  /^\[target\.(?:'[^']*'|"(?:[^"\\]|\\.)*"|[^.\]]+)\.(dependencies|dev-dependencies|build-dependencies)\]$/;
+
+interface CargoTable {
+  section: CargoDepTable;
+  fromTarget: boolean;
+}
+
+function classifyCargoHeader(trimmed: string): CargoTable | null {
+  if (
+    trimmed === '[dependencies]' ||
+    trimmed === '[dev-dependencies]' ||
+    trimmed === '[build-dependencies]'
+  ) {
+    return { section: trimmed.slice(1, -1) as CargoDepTable, fromTarget: false };
+  }
+  const target = TARGET_DEP_HEADER.exec(trimmed);
+  const section = target?.[1];
+  if (section !== 'dependencies' && section !== 'dev-dependencies' && section !== 'build-dependencies') {
+    return null;
+  }
+  return { section, fromTarget: true };
+}
+
+/**
+ * A plain `[dependencies]` row outranks a target production table, which
+ * outranks dev and build. Two rows of the same rank keep the first.
+ */
+function rustDepRank(dep: RustDependency): number {
+  if (!dep.isDev && !dep.fromTarget) return 0;
+  if (!dep.isDev) return 1;
+  if (!dep.fromTarget) return 2;
+  return 3;
+}
+
+/** One row per crate. A production declaration wins over a dev, build, or target duplicate. */
+function dedupeRustDeps(deps: RustDependency[]): RustDependency[] {
+  const byName = new Map<string, RustDependency>();
+  const order: string[] = [];
+  for (const dep of deps) {
+    const existing = byName.get(dep.name);
+    if (!existing) {
+      byName.set(dep.name, dep);
+      order.push(dep.name);
+      continue;
+    }
+    if (rustDepRank(dep) < rustDepRank(existing)) byName.set(dep.name, dep);
+  }
+  return order.map((name) => byName.get(name)!);
 }
 
 /**
  * Parse Cargo.toml to extract dependencies.
- * 
+ *
  * Example:
  *   [dependencies]
  *   serde = { version = "1.0", features = ["derive"] }
  *   tokio = "1.35"
- *   
+ *
  *   [dev-dependencies]
  *   criterion = "0.5"
+ *
+ *   [build-dependencies]
+ *   cc = "1.0"
+ *
+ *   [target.'cfg(windows)'.dependencies]
+ *   winapi = { version = "0.3", features = ["winuser"] }
  */
 function parseCargoToml(content: string): RustDependency[] {
   const deps: RustDependency[] = [];
-  let currentSection: 'dependencies' | 'dev-dependencies' | null = null;
+  let current: CargoTable | null = null;
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
 
-    // Track sections
-    if (trimmed === '[dependencies]') {
-      currentSection = 'dependencies';
-      continue;
-    } else if (trimmed === '[dev-dependencies]') {
-      currentSection = 'dev-dependencies';
-      continue;
-    } else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-      currentSection = null;
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      current = classifyCargoHeader(trimmed);
       continue;
     }
 
-    if (!currentSection) continue;
+    if (!current) continue;
 
     // Parse dependency lines
     // Simple: serde = "1.0"
     // Complex: serde = { version = "1.0", features = ["derive"], optional = true }
-    
+
+    const isDev = current.section !== 'dependencies';
     const simpleMatch = trimmed.match(/^([\w-]+)\s*=\s*"([^"]+)"/);
     if (simpleMatch) {
       deps.push({
@@ -134,7 +195,8 @@ function parseCargoToml(content: string): RustDependency[] {
         version: simpleMatch[2]!,
         optional: false,
         features: [],
-        isDev: currentSection === 'dev-dependencies',
+        isDev,
+        fromTarget: current.fromTarget,
       });
       continue;
     }
@@ -143,29 +205,30 @@ function parseCargoToml(content: string): RustDependency[] {
     if (complexMatch) {
       const name = complexMatch[1]!;
       const attrs = complexMatch[2]!;
-      
+
       const versionMatch = attrs.match(/version\s*=\s*"([^"]+)"/);
       const version = versionMatch?.[1] ?? '*';
-      
+
       const optionalMatch = attrs.match(/optional\s*=\s*true/);
       const optional = !!optionalMatch;
-      
+
       const featuresMatch = attrs.match(/features\s*=\s*\[([^\]]*)\]/);
-      const features = featuresMatch 
+      const features = featuresMatch
         ? featuresMatch[1]!.split(',').map(f => f.trim().replace(/"/g, ''))
         : [];
-      
+
       deps.push({
         name,
         version,
         optional,
         features,
-        isDev: currentSection === 'dev-dependencies',
+        isDev,
+        fromTarget: current.fromTarget,
       });
     }
   }
 
-  return deps;
+  return dedupeRustDeps(deps);
 }
 
 /**
@@ -261,10 +324,7 @@ async function scanOneRustProject(
   };
   let lockIndex: CargoLockIndex | null = await loadCargoLockIndex(dir, lockIo).catch(swallow);
   if (!lockIndex && dir !== rootDir) lockIndex = await loadCargoLockIndex(rootDir, lockIo).catch(swallow);
-  
-  // Filter out dev dependencies for main analysis
-  const prodDeps = allDeps.filter(d => !d.isDev);
-  
+
   // Determine Rust edition lag (edition is different from version)
   // Rust uses editions: 2015, 2018, 2021, 2024
   let runtimeMajorsBehind: number | undefined;
@@ -282,13 +342,13 @@ async function scanOneRustProject(
   const frameworks: DetectedFramework[] = [];
   const buckets = { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 };
 
-  // Fetch all metadata in parallel
-  const metaPromises = prodDeps.map(async (dep) => {
-    const meta = await cargoCache.get(dep.name);
+  // Dev and build crates are rows. Registry lookups, age buckets, and
+  // framework detection stay on production crates, so those drift numbers
+  // do not move when the development rows appear.
+  const resolved = await Promise.all(allDeps.map(async (dep) => {
+    const meta = dep.isDev ? null : await cargoCache.get(dep.name);
     return { dep, meta };
-  });
-
-  const resolved = await Promise.all(metaPromises);
+  }));
 
   for (const { dep, meta } of resolved) {
     // Prefer the lockfile's exact version; otherwise coerce the declared spec (e.g. "1.0" → 1.0.0).
@@ -296,35 +356,36 @@ async function scanOneRustProject(
     const resolvedVersion = locked && recordedSemver(locked)
       ? locked
       : recordedSemver(dep.version) ?? semver.valid(semver.coerce(dep.version));
-    const latestStable = meta.latestStableOverall;
+    const latestStable = meta?.latestStableOverall ?? null;
 
     let majorsBehind: number | null = null;
     let drift: DependencyRow['drift'] = 'unknown';
 
-    if (resolvedVersion && latestStable) {
-      const currentMajor = semver.major(resolvedVersion);
-      const latestMajor = semver.major(latestStable);
-      majorsBehind = latestMajor - currentMajor;
+    if (!dep.isDev) {
+      if (resolvedVersion && latestStable) {
+        const currentMajor = semver.major(resolvedVersion);
+        const latestMajor = semver.major(latestStable);
+        majorsBehind = latestMajor - currentMajor;
 
-      if (majorsBehind === 0) {
-        drift = semver.eq(resolvedVersion, latestStable) ? 'current' : 'minor-behind';
-      } else if (majorsBehind > 0) {
-        drift = 'major-behind';
+        if (majorsBehind === 0) {
+          drift = semver.eq(resolvedVersion, latestStable) ? 'current' : 'minor-behind';
+        } else if (majorsBehind > 0) {
+          drift = 'major-behind';
+        } else {
+          drift = 'current'; // somehow ahead
+        }
+
+        if (majorsBehind <= 0) buckets.current++;
+        else if (majorsBehind === 1) buckets.oneBehind++;
+        else buckets.twoPlusBehind++;
       } else {
-        drift = 'current'; // somehow ahead
+        buckets.unknown++;
       }
-
-      if (majorsBehind <= 0) buckets.current++;
-      else if (majorsBehind === 1) buckets.oneBehind++;
-      else buckets.twoPlusBehind++;
-    } else {
-      buckets.unknown++;
     }
 
-    // A normal dependency with `optional = true` is an optional row. A
-    // `[dev-dependencies]` entry stays a dev row even when it also sets
-    // `optional = true` (those rows are still omitted above, with the rest
-    // of that table).
+    // A normal dependency with `optional = true` is an optional row. A dev
+    // or build entry stays a dev row even when it also sets `optional = true`.
+    // A production declaration wins over a dev, build, or target duplicate.
     let section: DepSection = 'dependencies';
     if (dep.isDev) section = 'devDependencies';
     else if (dep.optional) section = 'optionalDependencies';
@@ -339,8 +400,7 @@ async function scanOneRustProject(
       drift,
     });
 
-    // Detect known frameworks
-    if (dep.name in KNOWN_RUST_FRAMEWORKS) {
+    if (!dep.isDev && dep.name in KNOWN_RUST_FRAMEWORKS) {
       frameworks.push({
         name: KNOWN_RUST_FRAMEWORKS[dep.name]!,
         currentVersion: resolvedVersion,
