@@ -14,6 +14,8 @@ backward compatible.
 
 ### Fixed
 
+- **`vg sbom export` marks .NET `PrivateAssets="all"` package references as development dependencies.** A `PackageReference` whose `PrivateAssets` value is `all` (attribute or child element, any letter case, trimmed) is stored as section `devDependencies`. CycloneDX component `scope` is `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. Any other value, and a reference with no `PrivateAssets`, stay section `dependencies`. The same package referenced again in the project without `PrivateAssets="all"` stays a production dependency, and that production reference supplies the version. `vibgrate:scope` stays `direct`. Age buckets still count every kept row.
+
 - **`vg sbom export` marks Python dependency groups as development dependencies.**
   A package declared only in `pyproject.toml` `[dependency-groups]`,
   `[tool.poetry.group.<name>.dependencies]`, or the legacy

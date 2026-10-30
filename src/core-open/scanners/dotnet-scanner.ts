@@ -10,7 +10,7 @@ import { NuGetCache } from './nuget-cache.js';
 import { latestStable, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
 import type { RuntimeCatalog } from '../runtimes/types.js';
-import type { ProjectScan, DependencyRow, DetectedFramework, ProjectReference } from '../types.js';
+import type { ProjectScan, DependencyRow, DetectedFramework, ProjectReference, DepSection } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
 
 const parser = new XMLParser({
@@ -297,11 +297,75 @@ function stripDotnetProjectExtension(filePath: string): string {
   return path.basename(filePath).replace(/\.(cs|vb|sql)proj$/i, '');
 }
 
+interface PackageReference {
+  name: string;
+  version: string;
+  /** True when `PrivateAssets` trims to `all` (build-time-only). */
+  dev: boolean;
+}
+
 interface CsprojData {
   targetFrameworks: string[];
-  packageReferences: { name: string; version: string }[];
+  packageReferences: PackageReference[];
   projectReferences: string[];
   projectName: string;
+}
+
+function lookupXmlKey(record: Record<string, unknown>, wanted: string): unknown {
+  const target = wanted.toLowerCase();
+  for (const key of Object.keys(record)) {
+    if (key.toLowerCase() === target) return record[key];
+  }
+  return undefined;
+}
+
+/** Text of an attribute or a child element, including a `#text` wrapper. */
+function xmlScalar(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (Array.isArray(value)) return value.length > 0 ? xmlScalar(value[0]) : '';
+  if (value && typeof value === 'object' && '#text' in value) {
+    return xmlScalar((value as { '#text': unknown })['#text']);
+  }
+  return '';
+}
+
+/**
+ * `PrivateAssets` from the attribute (`@_PrivateAssets`, any letter case) or
+ * the child element. The attribute wins when both are present.
+ */
+function privateAssetsText(ref: Record<string, unknown>): string {
+  const attribute = lookupXmlKey(ref, '@_privateassets');
+  if (attribute !== undefined) return xmlScalar(attribute);
+  const element = lookupXmlKey(ref, 'privateassets');
+  if (element !== undefined) return xmlScalar(element);
+  return '';
+}
+
+/** `all` (trimmed, any letter case) is a build-time-only package reference. */
+function isPrivateAssetsAll(ref: Record<string, unknown>): boolean {
+  return privateAssetsText(ref).trim().toLowerCase() === 'all';
+}
+
+function packageReferenceSection(ref: PackageReference): DepSection {
+  return ref.dev ? 'devDependencies' : 'dependencies';
+}
+
+/**
+ * One row per package id. NuGet compares ids without regard to case.
+ * A reference that is not `PrivateAssets=all` replaces an earlier build-only
+ * row, including its version. Two production rows, and two build-only rows,
+ * keep the first.
+ */
+function considerPackageReference(refs: PackageReference[], next: PackageReference): void {
+  const index = refs.findIndex((row) => row.name.toLowerCase() === next.name.toLowerCase());
+  if (index === -1) {
+    refs.push(next);
+    return;
+  }
+  const existing = refs[index]!;
+  if (existing.dev && !next.dev) refs[index] = next;
 }
 
 function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
@@ -332,7 +396,7 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
     ? project.ItemGroup
     : project.ItemGroup ? [project.ItemGroup] : [];
 
-  const packageReferences: { name: string; version: string }[] = [];
+  const packageReferences: PackageReference[] = [];
   const projectReferences: string[] = [];
 
   for (const ig of itemGroups) {
@@ -342,10 +406,15 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
       : ig.PackageReference ? [ig.PackageReference] : [];
 
     for (const ref of pkgRefs) {
-      const name = ref['@_Include'] ?? ref['@_include'] ?? '';
-      const version = ref['@_Version'] ?? ref['@_version'] ?? ref.Version ?? '';
+      const record = ref as Record<string, unknown>;
+      const name = record['@_Include'] ?? record['@_include'] ?? '';
+      const version = record['@_Version'] ?? record['@_version'] ?? record.Version ?? '';
       if (name && version) {
-        packageReferences.push({ name: String(name), version: String(version) });
+        considerPackageReference(packageReferences, {
+          name: String(name),
+          version: String(version),
+          dev: isPrivateAssetsAll(record),
+        });
       }
     }
 
@@ -385,18 +454,18 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
  * declare their NuGet dependencies here instead of in the project file, so
  * without this they would surface zero dependencies and escape drift scoring.
  */
-function parsePackagesConfig(xml: string): { name: string; version: string }[] {
+function parsePackagesConfig(xml: string): PackageReference[] {
   const parsed = parser.parse(xml);
   const root = parsed?.packages;
   if (!root) return [];
 
   const pkgs = Array.isArray(root.package) ? root.package : root.package ? [root.package] : [];
-  const out: { name: string; version: string }[] = [];
+  const out: PackageReference[] = [];
   for (const pkg of pkgs) {
     const name = pkg['@_id'] ?? pkg['@_Id'] ?? '';
     const version = pkg['@_version'] ?? pkg['@_Version'] ?? '';
     if (name && version) {
-      out.push({ name: String(name), version: String(version) });
+      out.push({ name: String(name), version: String(version), dev: false });
     }
   }
   return out;
@@ -554,7 +623,7 @@ async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nug
 
       dependencies.push({
         package: ref.name,
-        section: 'dependencies',
+        section: packageReferenceSection(ref),
         currentSpec: ref.version,
         resolvedVersion,
         latestStable,
@@ -567,7 +636,7 @@ async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nug
     for (const ref of data.packageReferences) {
       dependencies.push({
         package: ref.name,
-        section: 'dependencies',
+        section: packageReferenceSection(ref),
         currentSpec: ref.version,
         resolvedVersion: ref.version,
         latestStable: null,
