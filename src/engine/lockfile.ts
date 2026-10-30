@@ -637,6 +637,8 @@ function poetryLikeLockTree(root: string, file: string): LockfileComponent[] | u
   if (kind) reportLockfileFields(root, file, (rel, notes) => noteTomlLockText(text, rel, notes, kind));
   const out = new Map<string, LockfileComponent>();
   for (const block of text.split(/\[\[package\]\]/)) {
+    // uv records local projects as editable or virtual sources, not PyPI packages.
+    if (/(?:^|\n)[ \t]*source[ \t]*=[ \t]*\{[ \t]*(?:editable|virtual)[ \t]*=/.test(block)) continue;
     const nm = /(?:^|\n)\s*name\s*=\s*"([^"]+)"/.exec(block);
     const ver = /(?:^|\n)\s*version\s*=\s*"([^"]+)"/.exec(block);
     if (!nm || !ver) continue;
