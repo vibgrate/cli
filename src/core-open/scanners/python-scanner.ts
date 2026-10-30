@@ -644,6 +644,11 @@ const PYTHON_MANIFEST_FILES = new Set([
   'Pipfile',
 ]);
 
+/** Keep requirements-file discovery and parsing in sync. */
+function isRequirementsFile(name: string): boolean {
+  return name === 'dev-requirements.txt' || /^requirements.*\.txt$/.test(name);
+}
+
 /**
  * Discover and scan all Python projects in the workspace.
  */
@@ -656,7 +661,7 @@ export async function scanPythonProjects(
 ): Promise<ProjectScan[]> {
   // Find Python manifest files
   const manifestFiles = cache
-    ? await cache.findFiles(rootDir, (name) => PYTHON_MANIFEST_FILES.has(name) || /^requirements.*\.txt$/.test(name))
+    ? await cache.findFiles(rootDir, (name) => PYTHON_MANIFEST_FILES.has(name) || isRequirementsFile(name))
     : await findPythonManifests(rootDir);
 
   // Group manifests by directory to form "projects"
@@ -697,7 +702,7 @@ export async function scanPythonProjects(
 async function findPythonManifests(rootDir: string): Promise<string[]> {
   // Import findFiles dynamically to avoid circular deps
   const { findFiles } = await import('../utils/fs.js');
-  return findFiles(rootDir, (name) => PYTHON_MANIFEST_FILES.has(name) || /^requirements.*\.txt$/.test(name));
+  return findFiles(rootDir, (name) => PYTHON_MANIFEST_FILES.has(name) || isRequirementsFile(name));
 }
 
 async function scanOnePythonProject(
@@ -736,7 +741,7 @@ async function scanOnePythonProject(
       for (const dep of parsePipfile(content)) {
         if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
       }
-    } else if (fileName.startsWith('requirements') && fileName.endsWith('.txt')) {
+    } else if (isRequirementsFile(fileName)) {
       for (const dep of parseRequirementsTxt(content)) {
         if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
       }
