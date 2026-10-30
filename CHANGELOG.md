@@ -14,6 +14,10 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` reads `dev-requirements.txt`.** Python requirements-file discovery
+  and parsing now use the same filename check, so dependencies declared only in
+  `dev-requirements.txt` are included in the scan (#523).
+
 - **`vg sbom export` marks Python dependency groups as development dependencies.**
   A package declared only in `pyproject.toml` `[dependency-groups]`,
   `[tool.poetry.group.<name>.dependencies]`, or the legacy
