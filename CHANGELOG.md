@@ -14,6 +14,8 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` keeps `mix.exs` dependency tuples that carry keyword options.** A Hex dependency with more than one option, a list-form `only:`, or options on the following line is kept. `only:` is a development row when every environment is `:dev` or `:test`; `only: [:dev, :prod]` stays production. `optional: true` is section `optionalDependencies`, and a development row stays `devDependencies` when it is also optional. `git:`, `path:`, and `in_umbrella:` dependencies stay skipped. Development rows are exported and are left out of drift age buckets and Hex lookups, so production drift counts stay on production rows.
+
 - **`vg sbom export` marks Python dependency groups as development dependencies.**
   A package declared only in `pyproject.toml` `[dependency-groups]`,
   `[tool.poetry.group.<name>.dependencies]`, or the legacy

@@ -3,15 +3,18 @@
 // and re-run the vendor script. Apache-2.0.
 import { fetchHexVersionsBulk } from './hex-cache.js';
 import { gt, minVersion, validRange } from 'semver';
-import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
+import type { ProjectScan, DependencyRow, DepSection, DetectedFramework } from '../types.js';
 import { readTextFile, pathExists, FileCache } from '../utils/fs.js';
 import type { PackageVersionManifest } from '../package-version-manifest.js';
 import * as path from 'node:path';
 
-interface ElixirDependency {
+export interface ElixirDependency {
   name: string;
   version: string;
+  /** True when every `only:` environment is `:dev` or `:test`. */
   isDev: boolean;
+  /** True when the tuple sets `optional: true`. A dev row still wins the section. */
+  optional: boolean;
 }
 
 const ELIXIR_MANIFEST_FILES = new Set(['mix.exs']);
@@ -70,51 +73,120 @@ const KNOWN_FRAMEWORKS = new Set([
   'hound',
 ]);
 
+const DEV_ENVS = new Set(['dev', 'test']);
+
 /**
- * Parse mix.exs to extract dependencies.
+ * Hex tuples start `{:name, "requirement"`. Walk to the matching `}` so a
+ * keyword list of any length, including `only: [:dev, :test]` and options on
+ * later lines, stays inside the tuple. Brackets and quotes do not end it.
  */
-async function parseMixExs(filePath: string, cache?: FileCache): Promise<{
+function readTupleRemainder(content: string, start: number): { options: string; end: number } | null {
+  let braces = 1;
+  let brackets = 0;
+  let quote: '"' | "'" | null = null;
+
+  for (let i = start; i < content.length; i++) {
+    const ch = content[i]!;
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '[') {
+      brackets++;
+      continue;
+    }
+    if (ch === ']') {
+      if (brackets > 0) brackets--;
+      continue;
+    }
+    if (ch === '{') {
+      braces++;
+      continue;
+    }
+    if (ch === '}') {
+      if (brackets > 0) continue;
+      braces--;
+      if (braces === 0) return { options: content.slice(start, i), end: i + 1 };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * `only: :dev`, `only: :test`, or a list of only those atoms is a dev row.
+ * `only: [:prod]` and any list that includes `:prod` stay production.
+ */
+function devOnlyEnvironments(options: string): boolean {
+  const only = options.match(/\bonly:\s*(\[[^\]]*\]|:\w+)/);
+  if (!only?.[1]) return false;
+  const raw = only[1];
+  const envs = raw.startsWith('[')
+    ? [...raw.matchAll(/:(\w+)/g)].map((match) => match[1]!)
+    : [raw.slice(1)];
+  return envs.length > 0 && envs.every((env) => DEV_ENVS.has(env));
+}
+
+/** `git:`, `path:`, and `in_umbrella:` tuples are not Hex packages. */
+function isNonHexTuple(options: string): boolean {
+  return /\b(?:git|path|in_umbrella):/.test(options);
+}
+
+/**
+ * Parse mix.exs source for the Elixir requirement and Hex `deps()` tuples.
+ * `git:`, `path:`, and `in_umbrella:` dependencies are skipped.
+ */
+export function parseMixExs(content: string): {
   elixirVersion?: string;
   deps: ElixirDependency[];
-}> {
-  const content = cache 
-    ? await cache.readTextFile(filePath)
-    : await readTextFile(filePath);
-  
+} {
   const deps: ElixirDependency[] = [];
   let elixirVersion: string | undefined;
 
-  // Extract Elixir version requirement
   const elixirMatch = content.match(/elixir:\s*"([^"]+)"/);
   if (elixirMatch) {
     elixirVersion = elixirMatch[1];
   }
 
-  // Parse dependencies - they appear in deps() function
-  // Format: {:package_name, "~> 1.0.0"} or {:package_name, "~> 1.0.0", only: :dev}
-  const depsRegex = /\{\s*:(\w+)\s*,\s*"([^"]+)"(?:,\s*(?:only|optional|runtime):\s*:(\w+))?\s*\}/g;
+  const tupleStart = /\{\s*:(\w+)\s*,\s*"([^"]+)"/g;
   let match: RegExpExecArray | null;
 
-  while ((match = depsRegex.exec(content)) !== null) {
-    const name = match[1];
-    const version = match[2];
-    const scope = match[3]; // dev, test, prod, etc.
+  while ((match = tupleStart.exec(content)) !== null) {
+    const name = match[1]!;
+    const version = match[2]!;
+    const remainder = readTupleRemainder(content, match.index + match[0].length);
+    if (!remainder) break;
+    if (remainder.end <= tupleStart.lastIndex) break;
+    tupleStart.lastIndex = remainder.end;
+    if (isNonHexTuple(remainder.options)) continue;
 
     deps.push({
       name,
       version,
-      isDev: scope === 'dev' || scope === 'test',
+      isDev: devOnlyEnvironments(remainder.options),
+      optional: /\boptional:\s*true\b/.test(remainder.options),
     });
   }
 
-  // Also handle git dependencies (for awareness, though we can't fetch versions)
-  // {:dep, git: "https://github.com/user/repo.git", tag: "v1.0.0"}
-  const gitDepsRegex = /\{\s*:(\w+)\s*,\s*git:\s*"[^"]+"/g;
-  while ((match = gitDepsRegex.exec(content)) !== null) {
-    // Skip git dependencies for version checking
-  }
-
   return { elixirVersion, deps };
+}
+
+/**
+ * A dev row stays `devDependencies` even when it also sets `optional: true`,
+ * matching the Cargo section order in `rust-scanner.ts`.
+ */
+function elixirSection(dep: ElixirDependency): DepSection {
+  if (dep.isDev) return 'devDependencies';
+  if (dep.optional) return 'optionalDependencies';
+  return 'dependencies';
 }
 
 /**
@@ -201,17 +273,18 @@ export async function scanElixir(
     return null;
   }
 
-  const { elixirVersion, deps } = await parseMixExs(mixExsPath, cache);
+  const content = cache
+    ? await cache.readTextFile(mixExsPath)
+    : await readTextFile(mixExsPath);
+  const { elixirVersion, deps } = parseMixExs(content);
 
   // Read mix.lock for exact versions
   const mixLockPath = `${projectPath}/mix.lock`;
   const resolvedVersions = await parseMixLock(mixLockPath, cache);
 
-  // Use resolved versions if available, otherwise parse from constraints
-  const depsToCheck = deps.filter(d => !d.isDev);
-  const packageNames = depsToCheck.map(d => d.name);
-
-  // Fetch latest versions
+  // Hex lookups stay on production rows, including optional ones. Dev rows
+  // are still emitted, and they do not move the drift buckets.
+  const packageNames = deps.filter((dep) => !dep.isDev).map((dep) => dep.name);
   const latestVersions = await fetchHexVersionsBulk(packageNames, manifest, offline);
 
   // Build dependency list with drift analysis
@@ -219,15 +292,15 @@ export async function scanElixir(
   const frameworks: DetectedFramework[] = [];
   const buckets = { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 };
 
-  for (const dep of depsToCheck) {
+  for (const dep of deps) {
     const resolvedVersion = resolvedVersions.get(dep.name);
     const currentVersion = resolvedVersion || dep.version;
-    const latestVersion = latestVersions.get(dep.name);
+    const latestVersion = dep.isDev ? undefined : latestVersions.get(dep.name);
     const drift = latestVersion ? calculateDrift(currentVersion, latestVersion) : 'unknown';
-    
+
     let majorsBehind: number | null = null;
-    
-    if (resolvedVersion && latestVersion) {
+
+    if (!dep.isDev && resolvedVersion && latestVersion) {
       try {
         const currentParsed = minVersion(validRange(currentVersion) || currentVersion);
         const latestParsed = minVersion(validRange(latestVersion) || latestVersion);
@@ -239,7 +312,7 @@ export async function scanElixir(
 
     dependencies.push({
       package: dep.name,
-      section: dep.isDev ? 'devDependencies' : 'dependencies',
+      section: elixirSection(dep),
       currentSpec: dep.version,
       resolvedVersion: resolvedVersion || null,
       latestStable: latestVersion || null,
@@ -247,7 +320,9 @@ export async function scanElixir(
       drift,
     });
 
-    // Update buckets
+    if (dep.isDev) continue;
+
+    // Update buckets for production rows only (optional rows included).
     if (drift === 'current') buckets.current++;
     else if (majorsBehind === 1) buckets.oneBehind++;
     else if (majorsBehind && majorsBehind > 1) buckets.twoPlusBehind++;
