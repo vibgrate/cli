@@ -383,6 +383,94 @@ describe('fullDependencyGraph', () => {
   });
 });
 
+describe('Python lockfiles', () => {
+  it.each(['editable', 'virtual'])('excludes a uv %s project from SBOM components', (source) => {
+    const project = `[[package]]
+name = "app"
+version = "0.1.0"
+source = { ${source} = "." }
+`;
+    const dependency = `[[package]]
+name = "click"
+version = "8.1.7"
+source = { registry = "https://pypi.org/simple" }
+`;
+    write('uv.lock', `version = 1\nrequires-python = ">=3.11"\n${project}\n${dependency}`);
+    const graph = fullDependencyGraph(root);
+    expect(graph?.components).toEqual([{ package: 'click', version: '8.1.7' }]);
+    expect(fullDependencyGraph(root)).toEqual(graph);
+    write('uv.lock', `version = 1\n${dependency}\n${project}`);
+    expect(fullDependencyGraph(root)).toEqual(graph);
+  });
+
+  it('recognizes whitespace around a local uv source', () => {
+    write('uv.lock', `[[package]]
+name = "app"
+version = "0.1.0"
+  source\t=\t{\teditable\t=\t"." }
+
+[[package]]
+name = "click"
+version = "8.1.7"
+source = { registry = "https://example.org/editable/simple" }
+`);
+    expect(fullDependencyGraph(root)?.components).toEqual([{ package: 'click', version: '8.1.7' }]);
+  });
+
+  it('keeps Poetry registry packages and sorts their components', () => {
+    write('poetry.lock', `[[package]]
+name = "requests"
+version = "2.31.0"
+
+[package.source]
+type = "legacy"
+url = "https://pypi.org/simple"
+reference = "pypi"
+
+[[package]]
+name = "click"
+version = "8.1.7"
+`);
+    expect(fullDependencyGraph(root)?.components).toEqual([
+      { package: 'click', version: '8.1.7' },
+      { package: 'requests', version: '2.31.0' },
+    ]);
+  });
+
+  it('prefers Poetry pins, then uv pins, then Pipfile pins', () => {
+    write('poetry.lock', '[[package]]\nname = "click"\nversion = "8.1.7"\n');
+    write('uv.lock', '[[package]]\nname = "click"\nversion = "8.1.6"\n');
+    write('Pipfile.lock', JSON.stringify({ default: { click: { version: '==8.1.5' } } }));
+    expect(lockfileVersion(root, 'pypi', 'click')).toBe('8.1.7');
+    fs.rmSync(path.join(root, 'poetry.lock'));
+    expect(lockfileVersion(root, 'pypi', 'click')).toBe('8.1.6');
+    fs.rmSync(path.join(root, 'uv.lock'));
+    expect(lockfileVersion(root, 'pypi', 'click')).toBe('8.1.5');
+  });
+
+  it.each(['poetry.lock', 'uv.lock', 'Pipfile.lock'])('normalizes PEP 503 names in %s', (file) => {
+    write(file, file === 'Pipfile.lock'
+      ? JSON.stringify({ default: { Flask_Cors: { version: '==4.0.0' } } })
+      : '[[package]]\nname = "Flask_Cors"\nversion = "4.0.0"\n');
+    for (const name of ['flask-cors', 'Flask.Cors', 'FLASK__..--CORS']) {
+      expect(lockfileVersion(root, 'pypi', name)).toBe('4.0.0');
+    }
+  });
+
+  it('resolves Pipfile develop pins without the equality prefix', () => {
+    write('Pipfile.lock', JSON.stringify({ default: {}, develop: { pytest: { version: '==8.0.0' } } }));
+    expect(lockfileVersion(root, 'pypi', 'pytest')).toBe('8.0.0');
+  });
+
+  it.each(['default', 'develop'])('does not guess versions for Pipfile path or git entries in %s', (section) => {
+    write('Pipfile.lock', JSON.stringify({
+      [section]: { local: { path: '.' }, checkout: { git: 'https://example.org/project.git' } },
+    }));
+    expect(lockfileVersion(root, 'pypi', 'local')).toBeUndefined();
+    expect(lockfileVersion(root, 'pypi', 'checkout')).toBeUndefined();
+  });
+});
+
 describe('lockfile package digests', () => {
   const sha256 = createHash('sha256').update('alpha').digest('base64');
   const sha512 = createHash('sha512').update('alpha').digest('base64');

@@ -14,6 +14,10 @@ backward compatible.
 
 ### Fixed
 
+- **`vg sbom export` excludes local uv projects from lockfile components.**
+  Packages with an editable or virtual source in `uv.lock` no longer appear as
+  third-party PyPI components. Registry dependencies remain included (#511).
+
 - **`vg sbom export` marks Python dependency groups as development dependencies.**
   A package declared only in `pyproject.toml` `[dependency-groups]`,
   `[tool.poetry.group.<name>.dependencies]`, or the legacy
