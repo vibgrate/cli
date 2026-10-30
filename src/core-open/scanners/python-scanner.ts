@@ -144,8 +144,9 @@ interface PythonDependency {
    * Manifest section. Omitted means `dependencies`.
    * PEP 621 extras and a Poetry inline table with `optional = true`
    * both set `optionalDependencies` on this field.
-   * PEP 735 dependency groups, Poetry dependency groups, and the legacy
-   * Poetry dev-dependencies table set `devDependencies`.
+   * PEP 735 dependency groups, Poetry dependency groups, the legacy
+   * Poetry dev-dependencies table, Pipfile `[dev-packages]`, and a
+   * dev or test requirements filename set `devDependencies`.
    */
   section?: DepSection;
 }
@@ -211,6 +212,23 @@ function parseRequirementsTxt(content: string): PythonDependency[] {
     if (dep) deps.push(dep);
   }
   return deps;
+}
+
+/**
+ * Requirements filenames that are development dependencies.
+ * `dev-requirements.txt` is included so a row is classified once that
+ * file is parsed. Other names, including `requirements.txt`, stay
+ * production (section omitted).
+ */
+const DEV_REQUIREMENTS_FILES = new Set([
+  'requirements-dev.txt',
+  'requirements_dev.txt',
+  'requirements-test.txt',
+  'dev-requirements.txt',
+]);
+
+export function requirementsSection(fileName: string): DepSection | undefined {
+  return DEV_REQUIREMENTS_FILES.has(fileName) ? 'devDependencies' : undefined;
 }
 
 interface PyProjectToml {
@@ -592,7 +610,7 @@ function parsePipfile(content: string): PythonDependency[] {
         const name = kv[1]!;
         const ver = kv[2] ?? kv[3] ?? '';
         const normalisedName = name.toLowerCase().replace(/[_.]+/g, '-');
-        deps.push({ name, spec: ver || '*', normalisedName });
+        deps.push({ name, spec: ver || '*', normalisedName, section: 'devDependencies' });
       }
     }
   }
@@ -712,8 +730,11 @@ async function scanOnePythonProject(
   let projectName = path.basename(dir === rootDir ? rootDir : dir);
   let pythonVersion: string | undefined;
   const allDeps = new Map<string, PythonDependency>();
+  const parsedRows: PythonDependency[] = [];
 
-  // Parse each manifest file, preferring pyproject.toml > setup.cfg > requirements.txt
+  // Parse every manifest, then keep one row per name. `pickPythonDep`
+  // chooses the section, so a production listing beats a dev listing
+  // whichever file is read first.
   for (const f of manifestFiles) {
     const fileName = path.basename(f);
     const content = cache ? await cache.readTextFile(f) : await readTextFile(f);
@@ -722,25 +743,24 @@ async function scanOnePythonProject(
       const parsed = parsePyprojectToml(content);
       if (parsed.projectName) projectName = parsed.projectName;
       if (parsed.pythonVersion) pythonVersion = parsed.pythonVersion;
-      for (const dep of parsed.dependencies) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
+      parsedRows.push(...parsed.dependencies);
     } else if (fileName === 'setup.cfg') {
       const parsed = parseSetupCfg(content);
       if (parsed.name) projectName = parsed.name;
       if (parsed.pythonVersion && !pythonVersion) pythonVersion = parsed.pythonVersion;
-      for (const dep of parsed.deps) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
+      parsedRows.push(...parsed.deps);
     } else if (fileName === 'Pipfile') {
-      for (const dep of parsePipfile(content)) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
+      parsedRows.push(...parsePipfile(content));
     } else if (fileName.startsWith('requirements') && fileName.endsWith('.txt')) {
+      const section = requirementsSection(fileName);
       for (const dep of parseRequirementsTxt(content)) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
+        parsedRows.push(section === undefined ? dep : { ...dep, section });
       }
     }
+  }
+
+  for (const dep of collapsePythonDeps(parsedRows)) {
+    allDeps.set(dep.normalisedName, dep);
   }
 
   // Determine Python runtime version lag

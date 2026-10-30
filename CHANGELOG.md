@@ -14,6 +14,15 @@ backward compatible.
 
 ### Fixed
 
+- **`vg sbom export` marks Pipfile dev packages and dev requirements files as development dependencies.**
+  A package declared in `Pipfile` `[dev-packages]`, or in `requirements-dev.txt`,
+  `requirements_dev.txt`, `requirements-test.txt`, or `dev-requirements.txt`, is
+  stored as section `devDependencies`. CycloneDX component `scope` is
+  `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. `vibgrate:scope` stays
+  `direct`. `[packages]`, `requirements.txt`, and other requirements filenames
+  stay production. A package named in a production manifest and one of those
+  dev files stays a production row, and the production declaration supplies
+  the spec, whichever file is read first.
 - **`vg sbom export` marks Python dependency groups as development dependencies.**
   A package declared only in `pyproject.toml` `[dependency-groups]`,
   `[tool.poetry.group.<name>.dependencies]`, or the legacy
