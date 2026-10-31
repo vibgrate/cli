@@ -18,6 +18,22 @@ backward compatible.
   and parsing now use the same filename check, so dependencies declared only in
   `dev-requirements.txt` are included in the scan (#523).
 
+- **`vg scan` reads Elixir keyword options in `mix.exs`.** A dependency tuple with a keyword list of any length is a scan row, including a tuple written across multiple lines. `only: :dev`, `only: :test`, and a list whose every environment is `:dev` or `:test` are section `devDependencies`. `only: [:dev, :prod]` stays a production dependency. `optional: true` is section `optionalDependencies`, and a development `only:` wins when both are set. `optional: false` stays section `dependencies`. A `git:`, `github:`, `path:`, or `in_umbrella:` dependency is still skipped. Development rows are not looked up on Hex and do not change drift age buckets.
+
+- **`vg sbom export` marks .NET `PrivateAssets="all"` package references as development dependencies.** A `<PackageReference>` whose `PrivateAssets` attribute or child element is `all` (trimmed, any letter case) is stored as section `devDependencies`. CycloneDX component `scope` is `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. Any other value, including `compile`, and a reference with no `PrivateAssets`, stays section `dependencies`. The same package referenced again in that project without `PrivateAssets=all` stays a production dependency, and the production reference supplies the version. `vibgrate:scope` stays `direct`.
+
+- **`vg sbom export` marks Cargo dev and build crates as development dependencies.** A crate declared only in `Cargo.toml` `[dev-dependencies]`, `[build-dependencies]`, or a `[target.<spec>.dev-dependencies]` or `[target.<spec>.build-dependencies]` table is stored as section `devDependencies`. CycloneDX component `scope` is `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. `vibgrate:scope` stays `direct`. `[target.<spec>.dependencies]` maps to `[dependencies]`, including `optional = true`. The target spec may be a single-quoted cfg, a double-quoted cfg with an escaped quote, or a bare triple. A crate that is also in a production table stays a production row, and that production declaration supplies the version. `[dependencies]` wins over a target production table. `[dev-dependencies]` wins over `[build-dependencies]`. Production drift buckets do not include dev or build crates.
+
+- **`vg sbom export` marks Pipfile dev packages and dev requirements files as development dependencies.**
+  A package declared only in `Pipfile` `[dev-packages]`, or only in a requirements
+  file whose base name has a `dev` or `test` segment (`requirements-dev.txt`,
+  `requirements_dev.txt`, `requirements-test.txt`, `dev-requirements.txt`), is
+  stored as section `devDependencies`. CycloneDX component `scope` is `excluded`,
+  and SPDX writes `DEV_DEPENDENCY_OF`. `vibgrate:scope` stays `direct`.
+  `[packages]` and `requirements.txt` stay production rows. A package that is
+  also in a production manifest row stays a production row, and that production
+  declaration supplies the spec, whichever file is read first.
+
 - **`vg sbom export` marks Python dependency groups as development dependencies.**
   A package declared only in `pyproject.toml` `[dependency-groups]`,
   `[tool.poetry.group.<name>.dependencies]`, or the legacy
@@ -129,8 +145,8 @@ backward compatible.
   CycloneDX component `scope` is `optional`, and SPDX writes
   `OPTIONAL_DEPENDENCY_OF`. A required crate still omits component `scope`.
   `vibgrate:scope` stays `direct`. An `optional = true` entry under
-  `[dev-dependencies]` is still left out of the scan artifact with the other
-  dev-dependencies.
+  `[dev-dependencies]` or `[build-dependencies]` stays a development row, not
+  an optional row.
 
 - **`vg report --format html` does not turn a skipped security pack into a
   row of zeros.** A DriftScore that was not measured stays `n/a`. A security

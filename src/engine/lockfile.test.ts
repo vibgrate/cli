@@ -494,3 +494,98 @@ describe('lockfile package digests', () => {
     ]);
   });
 });
+
+describe('Python lockfiles', () => {
+  it('drops the uv editable project from the SBOM and keeps only registry packages', () => {
+    write(
+      'uv.lock',
+      [
+        'version = 1',
+        'requires-python = ">=3.11"',
+        '',
+        '[[package]]',
+        'name = "app"',
+        'version = "0.1.0"',
+        'source = { editable = "." }',
+        '',
+        '[[package]]',
+        'name = "click"',
+        'version = "8.1.7"',
+        'source = { registry = "https://pypi.org/simple" }',
+        '',
+      ].join('\n'),
+    );
+    expect(fullDependencyGraph(root)?.ecosystem).toBe('pypi');
+    expect(fullDependencyGraph(root)?.components).toEqual([{ package: 'click', version: '8.1.7' }]);
+  });
+
+  it('drops virtual / workspace members from a uv lockfile', () => {
+    write(
+      'uv.lock',
+      [
+        '[[package]]',
+        'name = "shared-core"',
+        'version = "0.1.0"',
+        'source = { virtual = "packages/core" }',
+        '',
+        '[[package]]',
+        'name = "pydantic"',
+        'version = "2.9.2"',
+        'source = { registry = "https://pypi.org/simple" }',
+        '',
+      ].join('\n'),
+    );
+    expect(fullDependencyGraph(root)?.components).toEqual([{ package: 'pydantic', version: '2.9.2' }]);
+  });
+
+  it('keeps poetry.lock, then uv.lock, then Pipfile.lock precedence', () => {
+    write('poetry.lock', ['[[package]]', 'name = "click"', 'version = "8.1.3"'].join('\n'));
+    write(
+      'uv.lock',
+      ['[[package]]', 'name = "click"', 'version = "8.1.7"', 'source = { registry = "https://pypi.org/simple" }'].join('\n'),
+    );
+    write('Pipfile.lock', JSON.stringify({ default: { click: { version: '==8.0.0' } } }));
+    expect(lockfileVersion(root, 'pypi', 'click')).toBe('8.1.3');
+
+    fs.rmSync(path.join(root, 'poetry.lock'));
+    expect(lockfileVersion(root, 'pypi', 'click')).toBe('8.1.7');
+
+    fs.rmSync(path.join(root, 'uv.lock'));
+    expect(lockfileVersion(root, 'pypi', 'click')).toBe('8.0.0');
+  });
+
+  it('matches PEP 503 normalised names across separators and case', () => {
+    write(
+      'uv.lock',
+      ['[[package]]', 'name = "Flask_Cors"', 'version = "4.0.1"', 'source = { registry = "https://pypi.org/simple" }'].join('\n'),
+    );
+    expect(lockfileVersion(root, 'pypi', 'flask-cors')).toBe('4.0.1');
+    expect(lockfileVersion(root, 'pypi', 'Flask.Cors')).toBe('4.0.1');
+    expect(lockfileVersion(root, 'pypi', 'flask_cors')).toBe('4.0.1');
+  });
+
+  it('resolves Pipfile develop entries and strips the == prefix', () => {
+    write(
+      'Pipfile.lock',
+      JSON.stringify({
+        default: { requests: { version: '==2.31.0' } },
+        develop: { pytest: { version: '==8.0.0' } },
+      }),
+    );
+    expect(lockfileVersion(root, 'pypi', 'pytest')).toBe('8.0.0');
+  });
+
+  it('returns undefined for Pipfile path and git entries', () => {
+    write(
+      'Pipfile.lock',
+      JSON.stringify({
+        default: {
+          localpkg: { path: '.', editable: true },
+          gitpkg: { git: 'https://example.invalid/repo.git', ref: 'main' },
+        },
+      }),
+    );
+    expect(lockfileVersion(root, 'pypi', 'localpkg')).toBeUndefined();
+    expect(lockfileVersion(root, 'pypi', 'gitpkg')).toBeUndefined();
+  });
+});

@@ -66,7 +66,7 @@ inputs:
   image-tag:
     description: 'Scanner image tag to run (defaults to a pinned, tested release).'
     required: false
-    default: '2026.1029.1' # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
+    default: '2026.1031.1' # vibgrate:cli-version — stamped by scripts/stamp-release-pins.mjs
   verify:
     description: 'Verify the image cosign signature + provenance before running (requires cosign on the runner).'
     required: false

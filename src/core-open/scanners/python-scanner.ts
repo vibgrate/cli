@@ -144,8 +144,10 @@ interface PythonDependency {
    * Manifest section. Omitted means `dependencies`.
    * PEP 621 extras and a Poetry inline table with `optional = true`
    * both set `optionalDependencies` on this field.
-   * PEP 735 dependency groups, Poetry dependency groups, and the legacy
-   * Poetry dev-dependencies table set `devDependencies`.
+   * PEP 735 dependency groups, Poetry dependency groups, the legacy
+   * Poetry dev-dependencies table, Pipfile `[dev-packages]`, and a
+   * requirements file whose name marks it as dev or test set
+   * `devDependencies`.
    */
   section?: DepSection;
 }
@@ -204,11 +206,30 @@ function pep440ToSemver(ver: string): string | null {
 
 // ── File parsers ──
 
-function parseRequirementsTxt(content: string): PythonDependency[] {
+/**
+ * Section for a requirements file, from its base name.
+ *
+ * Segments are split on `-`, `_`, and `.`. A `dev` or `test` segment is a
+ * development manifest: `requirements-dev.txt`, `requirements_dev.txt`,
+ * `requirements-test.txt`, and `dev-requirements.txt`. `requirements.txt`
+ * has neither segment and stays production. Which files are discovered or
+ * read is a separate decision; this only classifies a file once it is parsed.
+ */
+export function requirementsManifestSection(fileName: string): DepSection {
+  const base = path.basename(fileName).toLowerCase();
+  const stem = base.endsWith('.txt') ? base.slice(0, -'.txt'.length) : base;
+  for (const segment of stem.split(/[-_.]+/)) {
+    if (segment === 'dev' || segment === 'test') return 'devDependencies';
+  }
+  return 'dependencies';
+}
+
+function parseRequirementsTxt(content: string, section: DepSection = 'dependencies'): PythonDependency[] {
   const deps: PythonDependency[] = [];
   for (const line of content.split('\n')) {
     const dep = parseRequirementLine(line);
-    if (dep) deps.push(dep);
+    if (!dep) continue;
+    deps.push(section === 'dependencies' ? dep : { ...dep, section });
   }
   return deps;
 }
@@ -235,7 +256,9 @@ function declaredSection(dep: PythonDependency): DepSection {
  * same way an extra that repeats a production requirement does.
  * Two optional rows keep the code-unit-smaller spec, then the smaller raw
  * name, so extra order does not matter. Two rows in any other winning
- * section keep the first one parsed.
+ * section keep the first one in the list the caller passes. The project
+ * merge sorts that list by file path, so directory enumeration order does
+ * not choose the row.
  */
 function pickPythonDep(rows: PythonDependency[]): PythonDependency {
   if (rows.length === 1) return rows[0]!;
@@ -565,37 +588,28 @@ function parsePyprojectToml(content: string): PyProjectToml {
   return result;
 }
 
+function parsePipfileTable(body: string, section?: DepSection): PythonDependency[] {
+  const deps: PythonDependency[] = [];
+  for (const line of body.split('\n')) {
+    const kv = line.match(/^\s*([A-Za-z0-9][-A-Za-z0-9_.]*)\s*=\s*(?:"([^"]+)"|{.*?version\s*=\s*"([^"]+)".*?}|\*|"[*]")/);
+    if (!kv) continue;
+    const name = kv[1]!;
+    const ver = kv[2] ?? kv[3] ?? '';
+    const normalisedName = name.toLowerCase().replace(/[_.]+/g, '-');
+    const dep: PythonDependency = { name, spec: ver || '*', normalisedName };
+    deps.push(section ? { ...dep, section } : dep);
+  }
+  return deps;
+}
+
 function parsePipfile(content: string): PythonDependency[] {
   const deps: PythonDependency[] = [];
-  // Find [packages] section
+  // [packages] is production. The pattern does not match `[dev-packages]`.
   const packagesMatch = content.match(/\[packages\]([\s\S]*?)(?=\n\s*\[|\n*$)/);
-  if (packagesMatch) {
-    const lines = packagesMatch[1]!.split('\n');
-    for (const line of lines) {
-      const kv = line.match(/^\s*([A-Za-z0-9][-A-Za-z0-9_.]*)\s*=\s*(?:"([^"]+)"|{.*?version\s*=\s*"([^"]+)".*?}|\*|"[*]")/);
-      if (kv) {
-        const name = kv[1]!;
-        const ver = kv[2] ?? kv[3] ?? '';
-        const normalisedName = name.toLowerCase().replace(/[_.]+/g, '-');
-        deps.push({ name, spec: ver || '*', normalisedName });
-      }
-    }
-  }
+  if (packagesMatch) deps.push(...parsePipfileTable(packagesMatch[1]!));
 
-  // Find [dev-packages] section
   const devMatch = content.match(/\[dev-packages\]([\s\S]*?)(?=\n\s*\[|\n*$)/);
-  if (devMatch) {
-    const lines = devMatch[1]!.split('\n');
-    for (const line of lines) {
-      const kv = line.match(/^\s*([A-Za-z0-9][-A-Za-z0-9_.]*)\s*=\s*(?:"([^"]+)"|{.*?version\s*=\s*"([^"]+)".*?}|\*|"[*]")/);
-      if (kv) {
-        const name = kv[1]!;
-        const ver = kv[2] ?? kv[3] ?? '';
-        const normalisedName = name.toLowerCase().replace(/[_.]+/g, '-');
-        deps.push({ name, spec: ver || '*', normalisedName });
-      }
-    }
-  }
+  if (devMatch) deps.push(...parsePipfileTable(devMatch[1]!, 'devDependencies'));
 
   return deps;
 }
@@ -716,9 +730,11 @@ async function scanOnePythonProject(
   const relDir = path.relative(rootDir, dir) || '.';
   let projectName = path.basename(dir === rootDir ? rootDir : dir);
   let pythonVersion: string | undefined;
-  const allDeps = new Map<string, PythonDependency>();
+  // Every manifest row is kept until `pickPythonDep` chooses one per name.
+  // Path order, not directory enumeration order, decides which row of the
+  // winning section is first. Production beats development.
+  const sourced: Array<{ path: string; dep: PythonDependency }> = [];
 
-  // Parse each manifest file, preferring pyproject.toml > setup.cfg > requirements.txt
   for (const f of manifestFiles) {
     const fileName = path.basename(f);
     const content = cache ? await cache.readTextFile(f) : await readTextFile(f);
@@ -727,25 +743,24 @@ async function scanOnePythonProject(
       const parsed = parsePyprojectToml(content);
       if (parsed.projectName) projectName = parsed.projectName;
       if (parsed.pythonVersion) pythonVersion = parsed.pythonVersion;
-      for (const dep of parsed.dependencies) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
+      for (const dep of parsed.dependencies) sourced.push({ path: f, dep });
     } else if (fileName === 'setup.cfg') {
       const parsed = parseSetupCfg(content);
       if (parsed.name) projectName = parsed.name;
       if (parsed.pythonVersion && !pythonVersion) pythonVersion = parsed.pythonVersion;
-      for (const dep of parsed.deps) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
+      for (const dep of parsed.deps) sourced.push({ path: f, dep });
     } else if (fileName === 'Pipfile') {
-      for (const dep of parsePipfile(content)) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
+      for (const dep of parsePipfile(content)) sourced.push({ path: f, dep });
     } else if (isRequirementsFile(fileName)) {
-      for (const dep of parseRequirementsTxt(content)) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
+      const section = requirementsManifestSection(fileName);
+      for (const dep of parseRequirementsTxt(content, section)) sourced.push({ path: f, dep });
     }
+  }
+
+  sourced.sort((a, b) => compareCodeUnits(a.path, b.path));
+  const allDeps = new Map<string, PythonDependency>();
+  for (const dep of collapsePythonDeps(sourced.map((row) => row.dep))) {
+    allDeps.set(dep.normalisedName, dep);
   }
 
   // Determine Python runtime version lag

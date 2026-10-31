@@ -12,10 +12,9 @@ const fixtureDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixt
 const artifact = JSON.parse(
   readFileSync(path.join(fixtureDir, 'fix-available-scan.json'), 'utf8'),
 ) as CoreArtifact & ReportArtifact;
-const expectedFindings = readFileSync(path.join(fixtureDir, 'fix-available-scan.txt'), 'utf8').replace(
-  /\n$/,
-  '',
-);
+const expectedFindings = readFileSync(path.join(fixtureDir, 'fix-available-scan.txt'), 'utf8')
+  .replace(/\r/g, '')
+  .replace(/\n$/, '');
 
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
 

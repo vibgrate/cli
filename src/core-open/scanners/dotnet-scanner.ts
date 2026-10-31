@@ -297,11 +297,76 @@ function stripDotnetProjectExtension(filePath: string): string {
   return path.basename(filePath).replace(/\.(cs|vb|sql)proj$/i, '');
 }
 
+interface PackageReferenceRow {
+  name: string;
+  version: string;
+  /**
+   * True only when every `PrivateAssets` value on this reference is `all`
+   * (trimmed, any letter case). A missing value, or any other value, is a
+   * production reference.
+   */
+  devOnly: boolean;
+}
+
 interface CsprojData {
   targetFrameworks: string[];
-  packageReferences: { name: string; version: string }[];
+  packageReferences: PackageReferenceRow[];
   projectReferences: string[];
   projectName: string;
+}
+
+function appendScalarText(raw: unknown, out: string[]): void {
+  if (raw == null) return;
+  if (Array.isArray(raw)) {
+    for (const item of raw) appendScalarText(item, out);
+    return;
+  }
+  if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
+    out.push(String(raw));
+    return;
+  }
+  if (typeof raw === 'object' && '#text' in raw) {
+    appendScalarText((raw as { '#text'?: unknown })['#text'], out);
+  }
+}
+
+/**
+ * `PrivateAssets="all"` and `<PrivateAssets>all</PrivateAssets>` are
+ * build-time-only references (SourceLink, analyzers, MinVer,
+ * coverlet.collector). The attribute or element name and the value are
+ * compared without regard to case. Only a trimmed value of `all` counts.
+ * `compile` and every other token stay production.
+ */
+function privateAssetsIsAll(ref: Record<string, unknown>): boolean {
+  const values: string[] = [];
+  for (const [key, raw] of Object.entries(ref)) {
+    const bare = key.startsWith('@_') ? key.slice(2) : key;
+    if (bare.toLowerCase() !== 'privateassets') continue;
+    appendScalarText(raw, values);
+  }
+  return values.length > 0 && values.every((value) => value.trim().toLowerCase() === 'all');
+}
+
+/**
+ * One row per package id (NuGet ids are case-insensitive). A reference that
+ * is not `PrivateAssets=all` keeps the package in production, and that
+ * production reference supplies the version. The first production row wins.
+ * Two build-time-only rows keep the first version.
+ */
+function addPackageReference(rows: PackageReferenceRow[], next: PackageReferenceRow): void {
+  const existing = rows.find((row) => row.name.toLowerCase() === next.name.toLowerCase());
+  if (!existing) {
+    rows.push(next);
+    return;
+  }
+  if (existing.devOnly && !next.devOnly) {
+    existing.version = next.version;
+    existing.devOnly = false;
+  }
+}
+
+function dependencySection(ref: PackageReferenceRow): 'dependencies' | 'devDependencies' {
+  return ref.devOnly ? 'devDependencies' : 'dependencies';
 }
 
 function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
@@ -332,7 +397,7 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
     ? project.ItemGroup
     : project.ItemGroup ? [project.ItemGroup] : [];
 
-  const packageReferences: { name: string; version: string }[] = [];
+  const packageReferences: PackageReferenceRow[] = [];
   const projectReferences: string[] = [];
 
   for (const ig of itemGroups) {
@@ -345,7 +410,12 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
       const name = ref['@_Include'] ?? ref['@_include'] ?? '';
       const version = ref['@_Version'] ?? ref['@_version'] ?? ref.Version ?? '';
       if (name && version) {
-        packageReferences.push({ name: String(name), version: String(version) });
+        const record = ref && typeof ref === 'object' ? ref as Record<string, unknown> : {};
+        addPackageReference(packageReferences, {
+          name: String(name),
+          version: String(version),
+          devOnly: privateAssetsIsAll(record),
+        });
       }
     }
 
@@ -373,7 +443,8 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
 
 /**
  * Parse a legacy `packages.config` (pre-SDK NuGet format) into the same
- * `{ name, version }` shape as SDK-style `<PackageReference>`s.
+ * `{ name, version, devOnly }` shape as SDK-style `<PackageReference>`s.
+ * `packages.config` has no `PrivateAssets`, so every row is production.
  *
  * ```xml
  * <packages>
@@ -385,18 +456,18 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
  * declare their NuGet dependencies here instead of in the project file, so
  * without this they would surface zero dependencies and escape drift scoring.
  */
-function parsePackagesConfig(xml: string): { name: string; version: string }[] {
+function parsePackagesConfig(xml: string): PackageReferenceRow[] {
   const parsed = parser.parse(xml);
   const root = parsed?.packages;
   if (!root) return [];
 
   const pkgs = Array.isArray(root.package) ? root.package : root.package ? [root.package] : [];
-  const out: { name: string; version: string }[] = [];
+  const out: PackageReferenceRow[] = [];
   for (const pkg of pkgs) {
     const name = pkg['@_id'] ?? pkg['@_Id'] ?? '';
     const version = pkg['@_version'] ?? pkg['@_Version'] ?? '';
     if (name && version) {
-      out.push({ name: String(name), version: String(version) });
+      out.push({ name: String(name), version: String(version), devOnly: false });
     }
   }
   return out;
@@ -476,18 +547,22 @@ async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nug
   // `packages.config` rather than in <PackageReference>. Merge those in so
   // .NET Framework estates are scored for dependency drift too. SDK-style
   // references take precedence on name collisions (rare — projects use one
-  // format or the other).
+  // format or the other): the PackageReference version is kept. packages.config
+  // has no PrivateAssets, so a name that appears there is not build-time-only.
   {
     const packagesConfigPath = path.join(csprojDir, 'packages.config');
     try {
       const cfgXml = cache
         ? await cache.readTextFile(packagesConfigPath)
         : await readTextFile(packagesConfigPath);
-      const seen = new Set(data.packageReferences.map((r) => r.name.toLowerCase()));
+      const seen = new Map(data.packageReferences.map((r) => [r.name.toLowerCase(), r]));
       for (const ref of parsePackagesConfig(cfgXml)) {
-        if (!seen.has(ref.name.toLowerCase())) {
+        const existing = seen.get(ref.name.toLowerCase());
+        if (!existing) {
           data.packageReferences.push(ref);
-          seen.add(ref.name.toLowerCase());
+          seen.set(ref.name.toLowerCase(), ref);
+        } else if (existing.devOnly) {
+          existing.devOnly = false;
         }
       }
     } catch {
@@ -554,7 +629,7 @@ async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nug
 
       dependencies.push({
         package: ref.name,
-        section: 'dependencies',
+        section: dependencySection(ref),
         currentSpec: ref.version,
         resolvedVersion,
         latestStable,
@@ -567,7 +642,7 @@ async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nug
     for (const ref of data.packageReferences) {
       dependencies.push({
         package: ref.name,
-        section: 'dependencies',
+        section: dependencySection(ref),
         currentSpec: ref.version,
         resolvedVersion: ref.version,
         latestStable: null,

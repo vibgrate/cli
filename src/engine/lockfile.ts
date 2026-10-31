@@ -626,6 +626,20 @@ function goSumTree(root: string): LockfileComponent[] | undefined {
 }
 
 /**
+ * True when a `[[package]]` block's `source` records an editable install
+ * (`source = { editable = … }`) or a virtual / workspace member
+ * (`source = { virtual = … }`). Both the inline-table form uv.lock emits and
+ * the `[package.source]` sub-table form are recognised. Such entries are
+ * local projects, not registry packages, so they must not appear in the SBOM.
+ */
+function hasEditableOrVirtualSource(block: string): boolean {
+  if (/(?:^|\n)\s*source\s*=\s*\{\s*(editable|virtual)\s*=/.test(block)) return true;
+  const subTable = /(?:^|\n)\s*\[\s*package\s*\.\s*source\s*\]/m.exec(block);
+  if (!subTable) return false;
+  return /(?:^|\n)\s*(?:editable|virtual)\s*=\s*"/m.test(block.slice(subTable.index + subTable[0].length));
+}
+
+/**
  * `poetry.lock` / `uv.lock` — same `[[package]]` TOML shape as `Cargo.lock`
  * (see `tomlPackageLock`, which does the equivalent point lookup), collected
  * in full for the SBOM's transitive component list.
@@ -640,6 +654,10 @@ function poetryLikeLockTree(root: string, file: string): LockfileComponent[] | u
     const nm = /(?:^|\n)\s*name\s*=\s*"([^"]+)"/.exec(block);
     const ver = /(?:^|\n)\s*version\s*=\s*"([^"]+)"/.exec(block);
     if (!nm || !ver) continue;
+    // uv.lock records the project itself (and virtual workspace members)
+    // with an editable or virtual source — those are not PyPI packages and
+    // must not pollute the SBOM.
+    if (hasEditableOrVirtualSource(block)) continue;
     const digests = digestsFromHashLabels(block);
     rememberComponent(out, { package: nm[1], version: ver[1], ...(digests.length ? { digests } : {}) });
   }
