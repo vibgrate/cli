@@ -1,0 +1,233 @@
+{
+  "schemaVersion": "1.0",
+  "timestamp": "2026-02-16T00:00:00.000Z",
+  "vibgrateVersion": "0.0.0-fixture",
+  "rootPath": "/fixture",
+  "projects": [],
+  "drift": {
+    "score": null,
+    "riskLevel": null,
+    "components": {
+      "runtimeScore": null,
+      "frameworkScore": null,
+      "dependencyScore": null,
+      "eolScore": null
+    }
+  },
+  "findings": [
+    {
+      "ruleId": "vibgrate/vulnerability",
+      "level": "error",
+      "message": "lodash@4.17.20: GHSA-single (CVE-2026-1001) (critical 9.8)",
+      "location": "lodash",
+      "details": {
+        "package": "lodash",
+        "installedVersion": "4.17.20",
+        "advisoryId": "GHSA-single",
+        "fixedVersions": ["4.17.21"]
+      }
+    },
+    {
+      "ruleId": "vibgrate/vulnerability",
+      "level": "warning",
+      "message": "minimist@1.2.0: GHSA-multi (high 7.5)",
+      "location": "minimist",
+      "details": {
+        "package": "minimist",
+        "installedVersion": "1.2.0",
+        "advisoryId": "GHSA-multi",
+        "fixedVersions": ["1.2.6", "1.2.7", "1.3.0"]
+      }
+    },
+    {
+      "ruleId": "vibgrate/vulnerability",
+      "level": "note",
+      "message": "axios@0.21.1: GHSA-long (moderate 5.6)",
+      "location": "axios",
+      "details": {
+        "package": "axios",
+        "installedVersion": "0.21.1",
+        "advisoryId": "GHSA-long",
+        "fixedVersions": [
+          "0.21.2",
+          "0.21.3",
+          "0.21.4",
+          "0.22.0",
+          "0.23.0",
+          "0.24.0",
+          "0.25.0",
+          "0.26.0",
+          "0.27.0",
+          "0.27.1",
+          "0.27.2",
+          "0.28.0"
+        ]
+      }
+    },
+    {
+      "ruleId": "vibgrate/vulnerability",
+      "level": "warning",
+      "message": "left-pad@1.0.0: GHSA-none (low 3.1)",
+      "location": "left-pad",
+      "details": {
+        "package": "left-pad",
+        "installedVersion": "1.0.0",
+        "advisoryId": "GHSA-none",
+        "fixedVersions": []
+      }
+    },
+    {
+      "ruleId": "vibgrate/vulnerability",
+      "level": "note",
+      "message": "debug@4.3.0: GHSA-blank (low 2.1)",
+      "location": "debug",
+      "details": {
+        "package": "debug",
+        "installedVersion": "4.3.0",
+        "advisoryId": "GHSA-blank",
+        "fixedVersions": ["", "  "]
+      }
+    },
+    {
+      "ruleId": "vibgrate/vulnerability",
+      "level": "note",
+      "message": "qs@6.5.0: GHSA-stale (moderate 5.3) — fix available (6.5.3)",
+      "location": "qs",
+      "details": {
+        "package": "qs",
+        "installedVersion": "6.5.0",
+        "advisoryId": "GHSA-stale",
+        "fixedVersions": ["6.5.3"]
+      }
+    },
+    {
+      "ruleId": "vibgrate/runtime-lag",
+      "level": "note",
+      "message": "Node.js runtime is current.",
+      "location": "app"
+    }
+  ],
+  "extended": {
+    "vulnerabilities": {
+      "source": "manifest",
+      "totalAdvisories": 5,
+      "severityCounts": {
+        "low": 2,
+        "moderate": 2,
+        "high": 1,
+        "critical": 1,
+        "unknown": 0
+      },
+      "packages": [
+        {
+          "ecosystem": "npm",
+          "package": "lodash",
+          "version": "4.17.20",
+          "advisories": [
+            {
+              "id": "GHSA-single",
+              "aliases": ["CVE-2026-1001"],
+              "summary": null,
+              "severity": "critical",
+              "cvss": 9.8,
+              "cvssVector": null,
+              "fixedVersions": ["4.17.21"],
+              "published": null,
+              "withdrawn": null,
+              "references": []
+            }
+          ]
+        },
+        {
+          "ecosystem": "npm",
+          "package": "minimist",
+          "version": "1.2.0",
+          "advisories": [
+            {
+              "id": "GHSA-multi",
+              "aliases": [],
+              "summary": null,
+              "severity": "high",
+              "cvss": 7.5,
+              "cvssVector": null,
+              "fixedVersions": ["1.2.6", "1.2.7", "1.3.0"],
+              "published": null,
+              "withdrawn": null,
+              "references": []
+            }
+          ]
+        },
+        {
+          "ecosystem": "npm",
+          "package": "axios",
+          "version": "0.21.1",
+          "advisories": [
+            {
+              "id": "GHSA-long",
+              "aliases": [],
+              "summary": null,
+              "severity": "moderate",
+              "cvss": 5.6,
+              "cvssVector": null,
+              "fixedVersions": [
+                "0.21.2",
+                "0.21.3",
+                "0.21.4",
+                "0.22.0",
+                "0.23.0",
+                "0.24.0",
+                "0.25.0",
+                "0.26.0",
+                "0.27.0",
+                "0.27.1",
+                "0.27.2",
+                "0.28.0"
+              ],
+              "published": null,
+              "withdrawn": null,
+              "references": []
+            }
+          ]
+        },
+        {
+          "ecosystem": "npm",
+          "package": "left-pad",
+          "version": "1.0.0",
+          "advisories": [
+            {
+              "id": "GHSA-none",
+              "aliases": [],
+              "summary": null,
+              "severity": "low",
+              "cvss": 3.1,
+              "cvssVector": null,
+              "fixedVersions": [],
+              "published": null,
+              "withdrawn": null,
+              "references": []
+            }
+          ]
+        },
+        {
+          "ecosystem": "npm",
+          "package": "debug",
+          "version": "4.3.0",
+          "advisories": [
+            {
+              "id": "GHSA-blank",
+              "aliases": [],
+              "summary": null,
+              "severity": "low",
+              "cvss": 2.1,
+              "cvssVector": null,
+              "fixedVersions": [],
+              "published": null,
+              "withdrawn": null,
+              "references": []
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
