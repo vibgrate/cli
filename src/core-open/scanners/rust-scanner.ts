@@ -83,50 +83,157 @@ const KNOWN_RUST_FRAMEWORKS: Record<string, string> = {
   'ethers': 'ethers-rs',
 };
 
+/** A Cargo dependency table the scanner reads. Build maps to the same dev rows as dev. */
+export type CargoDepTable = 'dependencies' | 'dev-dependencies' | 'build-dependencies';
+
+export interface CargoDependencyHeader {
+  table: CargoDepTable;
+  /** True for `[target.<spec>.…]`. The spec itself is not stored. */
+  target: boolean;
+}
+
+const CARGO_DEP_TABLES = new Set<string>(['dependencies', 'dev-dependencies', 'build-dependencies']);
+
+function isCargoDepTable(value: string): value is CargoDepTable {
+  return CARGO_DEP_TABLES.has(value);
+}
+
+/**
+ * One TOML key (bare, literal `'...'`, or basic `"..."`).
+ * A basic string treats `\` as an escape so `\"` does not end the key.
+ * A literal string does not. The returned text is the key, not a decoded cfg.
+ */
+function readTomlKey(input: string, index: number): { raw: string; next: number } | null {
+  let i = index;
+  while (input[i] === ' ' || input[i] === '\t') i++;
+  if (i >= input.length) return null;
+  const quote = input[i];
+  if (quote === "'" || quote === '"') {
+    i++;
+    let raw = '';
+    while (i < input.length) {
+      const ch = input[i]!;
+      if (quote === '"' && ch === '\\') {
+        if (i + 1 >= input.length) return null;
+        raw += input[i + 1]!;
+        i += 2;
+        continue;
+      }
+      if (ch === quote) return { raw, next: i + 1 };
+      raw += ch;
+      i++;
+    }
+    return null;
+  }
+  const bare = /^[A-Za-z0-9_-]+/.exec(input.slice(i));
+  if (!bare) return null;
+  return { raw: bare[0]!, next: i + bare[0]!.length };
+}
+
+/**
+ * Classify a Cargo.toml table header.
+ *
+ * `[dependencies]`, `[dev-dependencies]`, and `[build-dependencies]` match
+ * directly. `[target.<spec>.dependencies]`, `[target.<spec>.dev-dependencies]`,
+ * and `[target.<spec>.build-dependencies]` map to those same tables.
+ * `<spec>` may be a single-quoted cfg, a double-quoted cfg (escaped quotes
+ * included), or a bare triple. Any other header, including
+ * `[dependencies.<crate>]`, is not a dependency table.
+ */
+export function cargoDependencyHeader(headerLine: string): CargoDependencyHeader | null {
+  const trimmed = headerLine.trim();
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']') || trimmed.startsWith('[[')) return null;
+  const inner = trimmed.slice(1, -1);
+  const keys: string[] = [];
+  let i = 0;
+  while (i < inner.length) {
+    const key = readTomlKey(inner, i);
+    if (!key) return null;
+    keys.push(key.raw);
+    i = key.next;
+    while (inner[i] === ' ' || inner[i] === '\t') i++;
+    if (i >= inner.length) break;
+    if (inner[i] !== '.') return null;
+    i++;
+  }
+  if (keys.length === 1 && isCargoDepTable(keys[0]!)) return { table: keys[0], target: false };
+  if (keys.length === 3 && keys[0] === 'target' && isCargoDepTable(keys[2]!)) return { table: keys[2], target: true };
+  return null;
+}
+
 interface RustDependency {
   name: string;
   version: string;
   optional: boolean;
   features: string[];
   isDev: boolean;
+  table: CargoDepTable;
+  fromTarget: boolean;
+}
+
+/**
+ * Lower wins, independent of file order.
+ * A non-target production table beats a target production table.
+ * Either production table beats dev and build.
+ * `[dev-dependencies]` beats `[build-dependencies]`.
+ * A non-target dev or build table beats the same kind under `target`.
+ */
+function cargoRowRank(dep: RustDependency): number {
+  const targetBias = dep.fromTarget ? 1 : 0;
+  if (dep.table === 'dependencies') return targetBias;
+  if (dep.table === 'dev-dependencies') return 2 + targetBias;
+  return 4 + targetBias;
+}
+
+function dedupeCargoDeps(deps: RustDependency[]): RustDependency[] {
+  const byName = new Map<string, RustDependency>();
+  for (const dep of deps) {
+    const kept = byName.get(dep.name);
+    if (!kept || cargoRowRank(dep) < cargoRowRank(kept)) byName.set(dep.name, dep);
+  }
+  return [...byName.values()];
 }
 
 /**
  * Parse Cargo.toml to extract dependencies.
- * 
+ *
  * Example:
  *   [dependencies]
  *   serde = { version = "1.0", features = ["derive"] }
  *   tokio = "1.35"
- *   
+ *
  *   [dev-dependencies]
  *   criterion = "0.5"
+ *
+ *   [build-dependencies]
+ *   cc = "1.0"
+ *
+ *   [target.'cfg(windows)'.dependencies]
+ *   winapi = "0.3"
+ *
+ * Dev and build tables, including the matching `target` tables, are kept.
+ * A crate named in a production table and a dev or build table is one
+ * production row. The winning declaration supplies the version.
  */
 function parseCargoToml(content: string): RustDependency[] {
   const deps: RustDependency[] = [];
-  let currentSection: 'dependencies' | 'dev-dependencies' | null = null;
+  let current: CargoDependencyHeader | null = null;
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
 
-    // Track sections
-    if (trimmed === '[dependencies]') {
-      currentSection = 'dependencies';
-      continue;
-    } else if (trimmed === '[dev-dependencies]') {
-      currentSection = 'dev-dependencies';
-      continue;
-    } else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-      currentSection = null;
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      current = cargoDependencyHeader(trimmed);
       continue;
     }
 
-    if (!currentSection) continue;
+    if (!current) continue;
 
     // Parse dependency lines
     // Simple: serde = "1.0"
     // Complex: serde = { version = "1.0", features = ["derive"], optional = true }
-    
+    const isDev = current.table !== 'dependencies';
+
     const simpleMatch = trimmed.match(/^([\w-]+)\s*=\s*"([^"]+)"/);
     if (simpleMatch) {
       deps.push({
@@ -134,7 +241,9 @@ function parseCargoToml(content: string): RustDependency[] {
         version: simpleMatch[2]!,
         optional: false,
         features: [],
-        isDev: currentSection === 'dev-dependencies',
+        isDev,
+        table: current.table,
+        fromTarget: current.target,
       });
       continue;
     }
@@ -143,29 +252,31 @@ function parseCargoToml(content: string): RustDependency[] {
     if (complexMatch) {
       const name = complexMatch[1]!;
       const attrs = complexMatch[2]!;
-      
+
       const versionMatch = attrs.match(/version\s*=\s*"([^"]+)"/);
       const version = versionMatch?.[1] ?? '*';
-      
+
       const optionalMatch = attrs.match(/optional\s*=\s*true/);
       const optional = !!optionalMatch;
-      
+
       const featuresMatch = attrs.match(/features\s*=\s*\[([^\]]*)\]/);
-      const features = featuresMatch 
+      const features = featuresMatch
         ? featuresMatch[1]!.split(',').map(f => f.trim().replace(/"/g, ''))
         : [];
-      
+
       deps.push({
         name,
         version,
         optional,
         features,
-        isDev: currentSection === 'dev-dependencies',
+        isDev,
+        table: current.table,
+        fromTarget: current.target,
       });
     }
   }
 
-  return deps;
+  return dedupeCargoDeps(deps);
 }
 
 /**
@@ -245,6 +356,8 @@ async function scanOneRustProject(
   
   const content = cache ? await cache.readTextFile(manifestFile) : await readTextFile(manifestFile);
   const rustEdition = extractRustEdition(content);
+  // Dev and build crates stay in this list. A name that is also production
+  // is already a single production row (`parseCargoToml`).
   const allDeps = parseCargoToml(content);
 
   // Cargo.lock pins the exact resolved version of every crate. There is one per workspace, normally
@@ -261,10 +374,7 @@ async function scanOneRustProject(
   };
   let lockIndex: CargoLockIndex | null = await loadCargoLockIndex(dir, lockIo).catch(swallow);
   if (!lockIndex && dir !== rootDir) lockIndex = await loadCargoLockIndex(rootDir, lockIo).catch(swallow);
-  
-  // Filter out dev dependencies for main analysis
-  const prodDeps = allDeps.filter(d => !d.isDev);
-  
+
   // Determine Rust edition lag (edition is different from version)
   // Rust uses editions: 2015, 2018, 2021, 2024
   let runtimeMajorsBehind: number | undefined;
@@ -283,7 +393,7 @@ async function scanOneRustProject(
   const buckets = { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 };
 
   // Fetch all metadata in parallel
-  const metaPromises = prodDeps.map(async (dep) => {
+  const metaPromises = allDeps.map(async (dep) => {
     const meta = await cargoCache.get(dep.name);
     return { dep, meta };
   });
@@ -314,17 +424,20 @@ async function scanOneRustProject(
         drift = 'current'; // somehow ahead
       }
 
-      if (majorsBehind <= 0) buckets.current++;
-      else if (majorsBehind === 1) buckets.oneBehind++;
-      else buckets.twoPlusBehind++;
-    } else {
+      // Dev and build rows are exported, and they do not change production
+      // drift buckets. A target `dependencies` row is production.
+      if (!dep.isDev) {
+        if (majorsBehind <= 0) buckets.current++;
+        else if (majorsBehind === 1) buckets.oneBehind++;
+        else buckets.twoPlusBehind++;
+      }
+    } else if (!dep.isDev) {
       buckets.unknown++;
     }
 
-    // A normal dependency with `optional = true` is an optional row. A
-    // `[dev-dependencies]` entry stays a dev row even when it also sets
-    // `optional = true` (those rows are still omitted above, with the rest
-    // of that table).
+    // A normal or target `dependencies` entry with `optional = true` is an
+    // optional row. A dev or build entry stays a dev row even when it also
+    // sets `optional = true`.
     let section: DepSection = 'dependencies';
     if (dep.isDev) section = 'devDependencies';
     else if (dep.optional) section = 'optionalDependencies';
@@ -339,8 +452,8 @@ async function scanOneRustProject(
       drift,
     });
 
-    // Detect known frameworks
-    if (dep.name in KNOWN_RUST_FRAMEWORKS) {
+    // Dev and build crates are not production frameworks.
+    if (!dep.isDev && dep.name in KNOWN_RUST_FRAMEWORKS) {
       frameworks.push({
         name: KNOWN_RUST_FRAMEWORKS[dep.name]!,
         currentVersion: resolvedVersion,
