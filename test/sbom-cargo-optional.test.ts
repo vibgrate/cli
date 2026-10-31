@@ -1,7 +1,7 @@
 /**
  * Cargo `[dependencies] optional = true` is an optional manifest row.
- * `[dev-dependencies]` stays a development row, including when the entry
- * also sets `optional = true`, and is exported as a direct dependency.
+ * `[dev-dependencies]` stays off that mark, including when the entry also
+ * sets `optional = true`. That crate is a direct development row.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
