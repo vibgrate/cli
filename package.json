@@ -1,6 +1,6 @@
 {
   "name": "@vibgrate/cli",
-  "version": "2026.1029.1",
+  "version": "2026.1031.1",
   "description": "Vibgrate CLI scans your manifests — never your source — and scores drift (DriftScore) and exposure (RiskScore) separately. Free, offline, in about a minute.",
   "//mcpName": "Official MCP registry ownership proof: the registry fetches the published npm package and requires this field to match the com.vibgrate/ai-context server entry (see docs/marketing/mcp-registry/README.md). Must ship in the published @vibgrate/cli package.json.",
   "mcpName": "com.vibgrate/ai-context",
