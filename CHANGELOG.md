@@ -14,7 +14,9 @@ backward compatible.
 
 ### Fixed
 
-- **`vg sbom export` marks .NET `PrivateAssets="all"` package references as development dependencies.** A `PackageReference` whose `PrivateAssets` value is `all` (attribute or child element, any letter case, trimmed) is stored as section `devDependencies`. CycloneDX component `scope` is `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. Any other value, and a reference with no `PrivateAssets`, stay section `dependencies`. The same package referenced again in the project without `PrivateAssets="all"` stays a production dependency, and that production reference supplies the version. `vibgrate:scope` stays `direct`. Age buckets still count every kept row.
+- **`vg scan` reads Elixir keyword options in `mix.exs`.** A dependency tuple with a keyword list of any length is a scan row, including a tuple written across multiple lines. `only: :dev`, `only: :test`, and a list whose every environment is `:dev` or `:test` are section `devDependencies`. `only: [:dev, :prod]` stays a production dependency. `optional: true` is section `optionalDependencies`, and a development `only:` wins when both are set. `optional: false` stays section `dependencies`. A `git:`, `github:`, `path:`, or `in_umbrella:` dependency is still skipped. Development rows are not looked up on Hex and do not change drift age buckets.
+
+- **`vg sbom export` marks .NET `PrivateAssets="all"` package references as development dependencies.** A `<PackageReference>` whose `PrivateAssets` attribute or child element is `all` (trimmed, any letter case) is stored as section `devDependencies`. CycloneDX component `scope` is `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. Any other value, including `compile`, and a reference with no `PrivateAssets`, stays section `dependencies`. The same package referenced again in that project without `PrivateAssets=all` stays a production dependency, and the production reference supplies the version. `vibgrate:scope` stays `direct`.
 
 - **`vg sbom export` marks Python dependency groups as development dependencies.**
   A package declared only in `pyproject.toml` `[dependency-groups]`,
