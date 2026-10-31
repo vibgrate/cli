@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { discover } from './discover.js';
 import { LockfileParseError } from '../core-open/utils/lockfile-parse.js';
-import { lockfileVersion, fullDependencyTree, fullDependencyGraph } from './lockfile.js';
+import { lockfileVersion, fullDependencyTree, fullDependencyGraph, gemfileSpecPattern } from './lockfile.js';
 
 /**
  * The point of reading lockfiles at all is that `node_modules` is empty in CI
@@ -492,5 +492,99 @@ describe('lockfile package digests', () => {
         ],
       },
     ]);
+  });
+});
+
+describe('Gemfile.lock and composer.lock edge cases', () => {
+  // One fixture covering every pinned case: a platform-specific gem, a
+  // dot-separated prerelease, a 6-space nested constraint, a name prefix
+  // (`rails` vs `rails-html-sanitizer`), and PATH/GIT sources.
+  const GEMFILE_LOCK = [
+    'GEM',
+    '  remote: https://rubygems.org/',
+    '  specs:',
+    '    nokogiri (1.16.2-x86_64-linux)',
+    '    rails (7.1.3)',
+    '      rack (>= 2.2)',
+    '    rack (3.0.9)',
+    '    rails-html-sanitizer (1.6.0)',
+    '    rspec (1.0.0.pre)',
+    '',
+    'PATH',
+    '  remote: vendor/gems',
+    '  specs:',
+    '    billing (0.1.0)',
+    '',
+    'GIT',
+    '  remote: https://github.com/example/inline-tool.git',
+    '  revision: 0123456789abcdef0123456789abcdef01234567',
+    '  branch: main',
+    '  specs:',
+    '    inline-tool (0.2.0)',
+    '',
+    'PLATFORMS',
+    '  x86_64-linux',
+    '',
+    'DEPENDENCIES',
+    '  billing!',
+    '  inline-tool!',
+    '  nokogiri',
+    '  rails (~> 7.1)',
+    '',
+  ].join('\n');
+
+  it('ruby: strips the platform suffix from a platform-specific gem pin', () => {
+    write('Gemfile.lock', GEMFILE_LOCK);
+    expect(lockfileVersion(root, 'ruby', 'nokogiri')).toBe('1.16.2');
+  });
+
+  it('ruby: keeps a dot-separated prerelease version intact', () => {
+    write('Gemfile.lock', GEMFILE_LOCK);
+    expect(lockfileVersion(root, 'ruby', 'rspec')).toBe('1.0.0.pre');
+  });
+
+  it('ruby: PATH and GIT sections resolve like GEM specs', () => {
+    write('Gemfile.lock', GEMFILE_LOCK);
+    expect(lockfileVersion(root, 'ruby', 'billing')).toBe('0.1.0');
+    expect(lockfileVersion(root, 'ruby', 'inline-tool')).toBe('0.2.0');
+  });
+
+  it('ruby: a 6-space nested constraint is not the version, and a name prefix does not match', () => {
+    write('Gemfile.lock', GEMFILE_LOCK);
+    expect(lockfileVersion(root, 'ruby', 'rack')).toBe('3.0.9');
+    expect(lockfileVersion(root, 'ruby', 'rails')).toBe('7.1.3');
+    expect(lockfileVersion(root, 'ruby', 'rails-html-sanitizer')).toBe('1.6.0');
+  });
+
+  it('ruby: a hostile spec line does not backtrack quadratically', () => {
+    // No closing paren: the old pattern had to try every split between the
+    // version and the optional platform group, which is quadratic.
+    const hostile = `    nokogiri (1${'-a'.repeat(100_000)}`;
+    const started = Date.now();
+    expect(gemfileSpecPattern('nokogiri').test(hostile)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('php: packages-dev entries resolve', () => {
+    write(
+      'composer.lock',
+      JSON.stringify({
+        packages: [{ name: 'monolog/monolog', version: '3.5.0' }],
+        'packages-dev': [{ name: 'phpunit/phpunit', version: 'v10.5.0' }],
+      }),
+    );
+    expect(lockfileVersion(root, 'php', 'phpunit/phpunit')).toBe('10.5.0');
+  });
+
+  it('php: strips a leading v, and a path-repository dev version is returned as written', () => {
+    write(
+      'composer.lock',
+      JSON.stringify({
+        packages: [{ name: 'acme/tool', version: 'v3.5.0' }],
+        'packages-dev': [{ name: 'acme/local', version: 'dev-main' }],
+      }),
+    );
+    expect(lockfileVersion(root, 'php', 'acme/tool')).toBe('3.5.0');
+    expect(lockfileVersion(root, 'php', 'acme/local')).toBe('dev-main');
   });
 });
