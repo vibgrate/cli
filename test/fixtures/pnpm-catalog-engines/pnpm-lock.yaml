@@ -1,0 +1,55 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+catalogs:
+  default:
+    react: ^19.0.0
+
+importers:
+  .:
+    dependencies:
+      react:
+        specifier: 'catalog:'
+        version: 19.0.0
+      left-pad:
+        specifier: 1.3.0
+        version: 1.3.0
+    devDependencies:
+      typescript:
+        specifier: ^5.6.0
+        version: 5.6.3
+
+packages:
+  react@19.0.0:
+    resolution: {integrity: sha512-V8AVnmPIICi9pA2f0gRYEHr5T0L1B/cZ3bGY6wC8pm3CjO5U7TqQhvpLUJJlqmn2HrK58ELKPLFyWFtK4Wr7BA==}
+    engines: {node: '>=0.10.0'}
+    dev: false
+
+  '@types/react@19.0.0':
+    resolution: {integrity: sha512-cUjUeYcQkX0d1gJxQe2PrzIxL1w3v0EwLwNlTtvCPGoAQ3QjcijFBzVcYrYVPsn4PZTVTUvPNYKgYgSd1xWVw==}
+    engines: {node: '>=0.10.0'}
+    dev: true
+
+  left-pad@1.3.0:
+    resolution: {integrity: sha512-XI5MPzVNApdAy3RvCx1F6T8SB8lZqK8RZ7h00V1iW6iC4BR0v0QER2bHlG2G1EjJXxJ8/I8xqPq4j6ZJ5vYQ==}
+    engines: {node: '>=0.10.0'}
+    dev: false
+
+  typescript@5.6.3:
+    resolution: {integrity: sha512-aXpZfBxwDmVQwZPqPxUxBW2fG3zOlbYj7VvY8bBGlz/urWBUZu8s7CzWmZ6xvPnJTiMYCcLZv29t/5pvSsXNQ==}
+    engines: {node: '>=14.17'}
+    dev: true
+
+snapshots:
+  react@19.0.0:
+    dependencies:
+      left-pad: 1.3.0
+
+  left-pad@1.3.0: {}
+
+  '@types/react@19.0.0': {}
+
+  typescript@5.6.3: {}
