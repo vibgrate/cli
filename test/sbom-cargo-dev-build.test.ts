@@ -23,58 +23,72 @@ version = "0.1.0"
 [[package]]
 name = "both-dev"
 version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "cc"
 version = "1.0.97"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "core-foundation"
 version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "criterion"
 version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "libc"
 version = "0.2.155"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "lockfile-only"
 version = "9.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "nix"
 version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "optional-crate"
 version = "2.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "serde"
 version = "1.0.203"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "shared"
 version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "target-optional"
 version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "tokio"
 version = "1.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "winapi"
 version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "windows-sys"
 version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 `;
 
 const DEPS = `[dependencies]
@@ -248,7 +262,10 @@ describe('sbom export: Cargo dev and build dependencies', () => {
     }
     expect(vibScope(first.cdx, 'lockfile-only')).toBe('transitive');
     expect(first.cdx.components.find((row) => row.name === 'lockfile-only')?.scope).toBeUndefined();
-    expect(vibScope(first.cdx, 'app')).toBe('transitive');
+    // The root crate ("app") has no `source` in Cargo.lock, so it is the
+    // scanned project, not a crates.io component, and is left out (see #512).
+    expect(first.cdx.components.some((row) => row.name === 'app')).toBe(false);
+    expect(first.spdx.packages.some((pkg) => pkg.name === 'app')).toBe(false);
     expect(first.cdx.components.some((row) => row.name === 'dev-only-missing')).toBe(true);
     expect(first.cdx.dependencies).toBeUndefined();
 
