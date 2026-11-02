@@ -182,12 +182,33 @@ function gemfileLock(root: string, name: string): string | undefined {
 }
 
 /**
- * The spec-line pattern for one gem. The version stops at the first `)` or `-`
- * and the optional platform group cannot overlap it, so the two parts never
- * compete over the same dashed text (no quadratic backtracking).
+ * Version group of a Gemfile.lock spec line. The version stops at the first
+ * `)` or `-`, and the optional platform group cannot overlap it, so the two
+ * parts never compete over the same dashed text (no quadratic backtracking).
+ * RubyGems prerelease segments are dot-separated (`1.0.0.pre`), so a dash
+ * always starts a platform (`1.16.0-x86_64-linux` → `1.16.0`).
+ */
+const GEMFILE_SPEC_VERSION = String.raw`(\d[^)-]*)(?:-[^)]*)?`;
+
+/**
+ * The spec-line pattern for one gem. Shares {@link GEMFILE_SPEC_VERSION} with
+ * the SBOM collector so a platform suffix is stripped the same way in both.
  */
 export function gemfileSpecPattern(name: string): RegExp {
-  return new RegExp(`^    ${escapeRegExp(name)} \\((\\d[^)-]*)(?:-[^)]*)?\\)`, 'm');
+  return new RegExp(`^    ${escapeRegExp(name)} \\(${GEMFILE_SPEC_VERSION}\\)`, 'm');
+}
+
+/** One resolved spec: four-space indent, `name (version[-platform])`. */
+const GEMFILE_SPEC_LINE = new RegExp(`^ {4}(\\S+) \\(${GEMFILE_SPEC_VERSION}\\)\\s*$`);
+
+/**
+ * True for Bundler's `remote: .` (the gem under development). A trailing
+ * slash and a leading `./` are the same directory. Other path and git remotes
+ * are real dependencies.
+ */
+function isBundlerProjectRemote(remote: string): boolean {
+  const value = remote.trim().replace(/^['"]|['"]$/g, '').replace(/\\/g, '/').replace(/\/+$/, '');
+  return value === '.' || value === './';
 }
 
 /** PHP `composer.lock` — JSON `packages` / `packages-dev` arrays of `{ name, version }`. */
@@ -319,8 +340,10 @@ export interface LockfileGraph {
  * *this* declared dependency resolve to") and stays a point lookup by
  * design. An SBOM needs the opposite shape: the whole installed graph, since
  * that is what a vulnerability scanner or supply-chain review actually
- * walks. Tries npm, then pnpm, then yarn; returns `undefined` when none is
- * present. A lockfile that exists but is truncated or invalid throws
+ * walks. Tries `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+ * `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, then `Gemfile.lock`, and
+ * returns `undefined` when none is present. A lockfile that exists but is
+ * truncated or invalid throws
  * {@link LockfileParseError} — a partial prefix is not a graph.
  */
 export function fullDependencyTree(root: string): LockfileComponent[] | undefined {
@@ -336,7 +359,8 @@ export function fullDependencyGraph(root: string): LockfileGraph | undefined {
     componentsOnly(cargoLockTree(root), 'rust') ??
     componentsOnly(goSumTree(root), 'go') ??
     componentsOnly(poetryLikeLockTree(root, 'poetry.lock'), 'pypi') ??
-    componentsOnly(poetryLikeLockTree(root, 'uv.lock'), 'pypi')
+    componentsOnly(poetryLikeLockTree(root, 'uv.lock'), 'pypi') ??
+    componentsOnly(gemfileLockTree(root), 'ruby')
   );
 }
 
@@ -669,6 +693,53 @@ function hasEditableOrVirtualSource(block: string): boolean {
   const subTable = /(?:^|\n)\s*\[\s*package\s*\.\s*source\s*\]/m.exec(block);
   if (!subTable) return false;
   return /(?:^|\n)\s*(?:editable|virtual)\s*=\s*"/m.test(block.slice(subTable.index + subTable[0].length));
+}
+
+/**
+ * `Gemfile.lock` — every resolved gem under `GEM`, `PATH`, and `GIT`
+ * `specs:` blocks. Spec lines are indented four spaces (`name (version)`);
+ * their dependency constraints are indented six spaces and are not versions,
+ * so this collector does not turn them into edges.
+ *
+ * A `PATH` or `GIT` source with `remote: .` is the project being locked, not
+ * a registry component, and is skipped. Other path and git gems are kept:
+ * they are installed dependencies, with the same `pkg:gem` identity as a
+ * rubygems.org gem. Platform suffixes are stripped with
+ * {@link GEMFILE_SPEC_VERSION}, matching {@link gemfileLock}.
+ */
+function gemfileLockTree(root: string): LockfileComponent[] | undefined {
+  const text = readCheckedText(root, 'Gemfile.lock');
+  if (text === undefined) return undefined;
+  const out = new Map<string, LockfileComponent>();
+  let section: 'GEM' | 'PATH' | 'GIT' | 'skip' = 'skip';
+  let remote = '';
+  let inSpecs = false;
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (/^\S/.test(line)) {
+      section = line === 'GEM' || line === 'PATH' || line === 'GIT' ? line : 'skip';
+      remote = '';
+      inSpecs = false;
+      continue;
+    }
+    if (section === 'skip') continue;
+    const remoteLine = /^ {2}remote:\s*(.*)$/.exec(line);
+    if (remoteLine) {
+      remote = remoteLine[1] ?? '';
+      inSpecs = false;
+      continue;
+    }
+    if (/^ {2}specs:\s*$/.test(line)) {
+      inSpecs = true;
+      continue;
+    }
+    if (!inSpecs) continue;
+    const spec = GEMFILE_SPEC_LINE.exec(line);
+    if (!spec) continue;
+    if ((section === 'PATH' || section === 'GIT') && isBundlerProjectRemote(remote)) continue;
+    rememberComponent(out, { package: spec[1]!, version: spec[2]! });
+  }
+  return out.size ? sortComponents(out) : undefined;
 }
 
 /**
