@@ -3348,7 +3348,7 @@ error: `vg verify` has moved to `vg build --verify`
 
 ### Maven and Gradle manifests
 
-`vg scan` and `vg build` read Java build files as text and XML. They do not run Maven or Gradle, and they do not decide which Maven profile is active. A profile that is `activeByDefault`, and a profile that is not, are treated the same: the dependencies inside `<profiles>` are left out of both outputs.
+`vg scan` and `vg build` read Java build files as text and XML. They do not run Maven or Gradle, and they do not decide which Maven profile is active. A profile that is `activeByDefault`, and a profile that is not, are treated the same. `vg scan` reads `<dependencies>` and `<dependencyManagement>` inside every `<profile>`. A profile-only production coordinate is `section` `optionalDependencies`. `vg build` still leaves those coordinates out of `import` edges.
 
 `vg scan` writes one dependency row per coordinate it keeps. The rows are `projects[].dependencies` in `vg scan --format json` and in `.vibgrate/scan_result.json`. `vg build` writes `import` edges in the code map (`graph.json`, or the file you pass to `vg build -o`). `vg show` lists call edges. On a POM-only tree its `calls` list stays empty even when `import` edges exist. Read the map file for those edges.
 
@@ -3358,7 +3358,7 @@ error: `vg verify` has moved to `vg build --verify`
 
 A code-map `import` edge runs from the POM's `package` node to an `external` node. The external name is `groupId:artifactId`. The edge fields are `kind: "import"`, `epistemic: "declared"`, `resolution: "heuristic"`, `confidence: 1`, `count: 1`. There is no version field and no scope field. The package node's qualified name is `groupId:artifactId` when the POM has its own `<groupId>`. When `<groupId>` is only on a parent POM, the qualified name is the `<artifactId>` alone.
 
-A scan row has `package` (`groupId:artifactId`), `section`, `currentSpec`, `resolvedVersion`, `latestStable`, `majorsBehind`, and `drift`. For a Maven coordinate, `section` is `devDependencies` when `<scope>` is `test` (trimmed, any letter case), including when `<optional>` is also true. It is `optionalDependencies` when `<optional>` is true and the scope is not test. `compile`, `runtime`, `provided`, `system`, `import`, a missing scope, and `<optional>false</optional>` stay `dependencies`. A Gradle `testImplementation`, `testRuntimeOnly`, or `testCompileOnly` coordinate is `devDependencies`. `implementation`, `api`, `compileOnly`, `runtimeOnly`, `annotationProcessor`, `kapt`, and a `platform` row stay `dependencies`. A coordinate declared on a production configuration and a test configuration stays `dependencies`, and the production declaration supplies the version. Scope and the Gradle configuration name are not their own fields. A missing resolved version is `null`, and a missing major lag is `null`.
+A scan row has `package` (`groupId:artifactId`), `section`, `currentSpec`, `resolvedVersion`, `latestStable`, `majorsBehind`, and `drift`. For a Maven coordinate, `section` is `devDependencies` when `<scope>` is `test` (trimmed, any letter case), including when `<optional>` is also true. It is `optionalDependencies` when `<optional>` is true and the scope is not test. `compile`, `runtime`, `provided`, `system`, `import`, a missing scope, and `<optional>false</optional>` stay `dependencies`. A coordinate that appears only inside `<profiles>` uses those same scope rules, and a row that would be `dependencies` is stored as `optionalDependencies`. Test scope inside a profile stays `devDependencies`. A Gradle `testImplementation`, `testRuntimeOnly`, or `testCompileOnly` coordinate is `devDependencies`. `implementation`, `api`, `compileOnly`, `runtimeOnly`, `annotationProcessor`, `kapt`, and a `platform` row stay `dependencies`. A coordinate declared on a production configuration and a test configuration stays `dependencies`, and the production declaration supplies the version. Scope and the Gradle configuration name are not their own fields. A missing resolved version is `null`, and a missing major lag is `null`.
 
 `resolvedVersion` is the declared version when that string converts to a semantic version, with a missing patch padded (`1.2` becomes `1.2.0`). `32.1.3-jre` is kept. `1.2.3+build.7` stays `1.2.3+build.7`. `1.2.3-SNAPSHOT` and a Maven range such as `[1.0,2.0)` stay in `currentSpec` and set `resolvedVersion` to `null`. With `--offline`, `latestStable` is `null` and `drift` is `unknown`. A run that can reach Maven Central fills `latestStable` and `drift` from that registry.
 
@@ -3374,7 +3374,7 @@ A scan row has `package` (`groupId:artifactId`), `section`, `currentSpec`, `reso
 | `${…}` that is not a `<properties>` entry in the same file, including `${project.version}` | Included. | Omitted. The unsubstituted text contains `${`. |
 | `<dependencyManagement>` entry in the same file with `groupId`, `artifactId`, and `<version>` (a BOM `<scope>import</scope>` included) | Omitted. | Included when `<dependencies>` does not already name that coordinate. The direct entry is stored first and wins, including its section and version. A pin that is emitted uses the same scope and optional rules. `<scope>import</scope>` stays `section` `dependencies`. |
 | `<dependencyManagement>` entry with no `<version>` | Omitted. | Omitted. |
-| `<dependencies>` or `<dependencyManagement>` inside `<profiles>`, whether or not the profile is `activeByDefault` | Omitted. | Omitted. |
+| `<dependencies>` or `<dependencyManagement>` inside `<profiles>`, whether or not the profile is `activeByDefault` | Omitted. The code map does not read profile blocks. | Included when the entry has a version the scan can keep (a literal, or `${name}` defined in this file's `<properties>`). `<scope>test</scope>` is `section` `devDependencies`. Any other profile-only row is `section` `optionalDependencies`, including `<optional>false</optional>` and a versioned management pin, because activation is not evaluated. A coordinate already present from the top-level `<dependencies>` or `<dependencyManagement>` keeps that top-level row. The same coordinate in a later profile does not replace it. |
 | Version that exists only on a parent POM's `<dependencyManagement>` | Edge from the child POM when the child lists the coordinate under its own top-level `<dependencies>`. The parent's management block is not an edge. | Omitted on the child. The parent file can still have its own row for a versioned management entry in that parent file. |
 | `<dependencies>` nested under a `<plugin>` | Omitted. | Omitted. |
 
@@ -3402,7 +3402,7 @@ A directory that contains both `pom.xml` and `build.gradle` (or `build.gradle.kt
 
 #### Gaps
 
-- Profile activation is not evaluated. Active and inactive profile dependencies are both omitted from `vg scan` and from `vg build`.
+- Profile activation is not evaluated. A profile that is `activeByDefault` and a profile that is not are read the same way. `vg scan` keeps a coordinate from `<dependencies>` or `<dependencyManagement>` inside `<profiles>`. A coordinate already declared at the top level keeps that top-level row. A coordinate that appears in more than one profile is stored once, from the first versioned entry in the file. A profile-only row whose scope is `test` is `devDependencies`. Any other profile-only row, including a production scope and a versioned management pin, is `optionalDependencies`. `vg build` still omits those coordinates from `import` edges.
 - `import` edges never carry a version or a scope, including when the POM has both.
 - Gradle dependencies never become `import` edges. `gradle.lockfile` is not read by `vg build`.
 - A Maven `<scope>test</scope>` row is `section: "devDependencies"`. `<optional>true</optional>` is `section: "optionalDependencies"`. Test scope wins when both are set. Other Maven scopes stay `section: "dependencies"`. Gradle `testImplementation`, `testRuntimeOnly`, and `testCompileOnly` are `section: "devDependencies"`. A coordinate also declared on `implementation`, `api`, `compileOnly`, `runtimeOnly`, `annotationProcessor`, `kapt`, or `platform` stays `section: "dependencies"`. The configuration name is not a scan field.
@@ -3414,7 +3414,7 @@ A directory that contains both `pom.xml` and `build.gradle` (or `build.gradle.kt
 
 #### Recover a missing version
 
-**Maven, scan row missing.** Put a literal `<version>` on the `<dependency>` in that same `pom.xml`, or use `${name}` with `<name>` defined in that file's `<properties>`. A versioned `<dependencyManagement>` entry in that same file also creates the row. Move a profile coordinate you need scored into the top-level `<dependencies>` or into that file's `<dependencyManagement>`, with a version. Repeat a parent-managed or BOM-managed version in this file. Replace `${project.version}` with a literal or with a `<properties>` entry in this file.
+**Maven, scan row missing.** Put a literal `<version>` on the `<dependency>` in that same `pom.xml`, or use `${name}` with `<name>` defined in that file's `<properties>`. A versioned `<dependencyManagement>` entry in that same file also creates the row, including one inside `<profiles>`. A profile coordinate with a version is already a scan row. It is `optionalDependencies` unless its scope is `test`. Declare it in the top-level `<dependencies>` when it should be a required production row. Repeat a parent-managed or BOM-managed version in this file. Replace `${project.version}` with a literal or with a `<properties>` entry in this file.
 
 **Gradle, scan row missing.** Declare `group:artifact:version` on `implementation`, `api`, `compileOnly`, `runtimeOnly`, `testImplementation`, `testRuntimeOnly`, `testCompileOnly`, `annotationProcessor`, or `kapt`, or use `implementation platform('g:a:v')` / `api(platform("g:a:v"))`. A declaration with no version stays omitted; add the version on that line. `gradle.lockfile` then supplies `resolvedVersion` for a dynamic declared version (`1.+`) and leaves `currentSpec` as the text you wrote. Generate the lockfile with Gradle's dependency locking so the line is `group:artifact:version=configurations`, and keep it next to the build file. For a custom configuration or a version-catalog alias, declare the same coordinate again on one of the configurations above. Delete a commented-out coordinate if it should not be a row.
 
@@ -3502,7 +3502,7 @@ vg scan --offline --format json --out scan.json --no-graph
 
 `com.squareup.okhttp3:okhttp` and `com.google.code.gson:gson` were not edges. `vg show demo --json` reported `calls` and `calledBy` as empty arrays.
 
-`vg scan --offline` wrote these rows (`latestStable` and `majorsBehind` are `null`, `drift` is `unknown`, because the run did not ask Maven Central). `org.slf4j:slf4j-api` and `gson` are absent:
+`vg scan --offline` wrote these rows (`latestStable` and `majorsBehind` are `null`, `drift` is `unknown`, because the run did not ask Maven Central). `org.slf4j:slf4j-api` is absent because it has no `<version>`:
 
 ```json
 [
@@ -3511,6 +3511,15 @@ vg scan --offline --format json --out scan.json --no-graph
     "section": "dependencies",
     "currentSpec": "2.17.0",
     "resolvedVersion": "2.17.0",
+    "latestStable": null,
+    "majorsBehind": null,
+    "drift": "unknown"
+  },
+  {
+    "package": "com.google.code.gson:gson",
+    "section": "optionalDependencies",
+    "currentSpec": "2.10.1",
+    "resolvedVersion": "2.10.1",
     "latestStable": null,
     "majorsBehind": null,
     "drift": "unknown"
@@ -3545,7 +3554,7 @@ vg scan --offline --format json --out scan.json --no-graph
 ]
 ```
 
-The test-scoped JUnit row uses `section: "devDependencies"`. OkHttp is a row because `<dependencyManagement>` in this file carries a version, and that pin has no test scope and no optional flag, so its section is `dependencies`. Gson stays out because it lives in a profile, including one marked `activeByDefault`.
+The test-scoped JUnit row uses `section: "devDependencies"`. OkHttp is a row because `<dependencyManagement>` in this file carries a version, and that pin has no test scope and no optional flag, so its section is `dependencies`. Gson is a row because it lives in a profile. The profile is marked `activeByDefault`, and that flag is not read. The coordinate is not declared at the top level and its scope is not `test`, so its section is `optionalDependencies`. `vg build` still has no `import` edge for Gson.
 
 #### Example: Gradle
 
