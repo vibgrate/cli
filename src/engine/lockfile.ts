@@ -24,6 +24,7 @@ import {
 } from '../core-open/utils/lockfile-unknown.js';
 import {
   digestFromCargoChecksum,
+  digestFromComposerShasum,
   digestFromGoSumHash,
   digestsFromHashLabels,
   digestsFromSri,
@@ -200,7 +201,7 @@ function composerLock(root: string, name: string): string | undefined {
     const arr = data[section];
     if (!Array.isArray(arr)) continue;
     const p = arr.find((x) => x && x.name === name);
-    if (p && typeof p.version === 'string') return p.version.replace(/^v/, '');
+    if (p && typeof p.version === 'string') return composerVersion(p.version);
   }
   return undefined;
 }
@@ -288,6 +289,13 @@ export interface LockfileComponent {
    * Omitted when it recorded none. Sorted by algorithm name, then value.
    */
   digests?: ComponentDigest[];
+  /**
+   * Set when the lockfile lists this package only as a development dependency
+   * (`composer.lock` `packages-dev`). The same name and version in `packages`
+   * clears it. The SBOM writes a lockfile-only component with this flag as a
+   * development row.
+   */
+  development?: boolean;
 }
 
 /**
@@ -319,8 +327,8 @@ export interface LockfileGraph {
  * *this* declared dependency resolve to") and stays a point lookup by
  * design. An SBOM needs the opposite shape: the whole installed graph, since
  * that is what a vulnerability scanner or supply-chain review actually
- * walks. Tries npm, then pnpm, then yarn; returns `undefined` when none is
- * present. A lockfile that exists but is truncated or invalid throws
+ * walks. Tries each lockfile in `fullDependencyGraph`'s order and returns
+ * `undefined` when none is present. A lockfile that exists but is truncated or invalid throws
  * {@link LockfileParseError} — a partial prefix is not a graph.
  */
 export function fullDependencyTree(root: string): LockfileComponent[] | undefined {
@@ -336,7 +344,8 @@ export function fullDependencyGraph(root: string): LockfileGraph | undefined {
     componentsOnly(cargoLockTree(root), 'rust') ??
     componentsOnly(goSumTree(root), 'go') ??
     componentsOnly(poetryLikeLockTree(root, 'poetry.lock'), 'pypi') ??
-    componentsOnly(poetryLikeLockTree(root, 'uv.lock'), 'pypi')
+    componentsOnly(poetryLikeLockTree(root, 'uv.lock'), 'pypi') ??
+    componentsOnly(composerLockTree(root), 'php')
   );
 }
 
@@ -694,6 +703,70 @@ function poetryLikeLockTree(root: string, file: string): LockfileComponent[] | u
     rememberComponent(out, { package: nm[1], version: ver[1], ...(digests.length ? { digests } : {}) });
   }
   return out.size ? sortComponents(out) : undefined;
+}
+
+/**
+ * Composer writes a leading `v` on tagged versions (`v6.4.1`). The installed
+ * version, `lockfileVersion`, and the purl omit that one prefix. A branch
+ * version such as `dev-main` is kept as written.
+ */
+function composerVersion(version: string): string {
+  return version.replace(/^v/, '');
+}
+
+/**
+ * `composer.lock` — every `packages` and `packages-dev` entry's `name` and
+ * `version`. `packages-dev` rows are development components. `dist.shasum`
+ * is the dist archive's SHA-1 when it is 40 hex characters. `require` is
+ * not an edge: the map is a constraint, not the resolved package it selected.
+ * A truncated or invalid file throws {@link LockfileParseError} from
+ * `readCheckedJson`, the same as every other JSON lockfile.
+ */
+function composerLockTree(root: string): LockfileComponent[] | undefined {
+  const parsed = readCheckedJson(root, 'composer.lock');
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'composer.lock', (rel, notes) => noteComposerLock(parsed, rel, notes));
+  const data = parsed as { packages?: unknown; 'packages-dev'?: unknown };
+  const out = new Map<string, LockfileComponent>();
+  collectComposerSection(data.packages, false, out);
+  collectComposerSection(data['packages-dev'], true, out);
+  return out.size ? sortComponents(out) : undefined;
+}
+
+function collectComposerSection(entries: unknown, development: boolean, out: Map<string, LockfileComponent>): void {
+  if (!Array.isArray(entries)) return;
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const pkg = entry as { name?: unknown; version?: unknown; dist?: unknown };
+    if (typeof pkg.name !== 'string' || pkg.name === '' || typeof pkg.version !== 'string') continue;
+    const version = composerVersion(pkg.version);
+    if (version === '') continue;
+    const digests = digestFromComposerShasum(composerDistShasum(pkg.dist));
+    rememberComposerComponent(out, { package: pkg.name, version, ...(digests.length ? { digests } : {}) }, development);
+  }
+}
+
+function composerDistShasum(dist: unknown): string | undefined {
+  if (!dist || typeof dist !== 'object') return undefined;
+  const shasum = (dist as { shasum?: unknown }).shasum;
+  return typeof shasum === 'string' ? shasum : undefined;
+}
+
+/**
+ * One row per name and version. `packages` is applied first, so a package
+ * that also appears under `packages-dev` stays a production component.
+ * Digests from both rows are kept and ordered.
+ */
+function rememberComposerComponent(out: Map<string, LockfileComponent>, component: LockfileComponent, development: boolean): void {
+  const key = `${component.package}@${component.version}`;
+  const existing = out.get(key);
+  const digests = orderComponentDigests([...(existing?.digests ?? []), ...(component.digests ?? [])]);
+  const next: LockfileComponent = { package: component.package, version: component.version };
+  if (digests.length) next.digests = digests;
+  // `packages` is not a development row. A later `packages-dev` copy of the
+  // same name and version does not turn it into one.
+  if (existing ? existing.development && development : development) next.development = true;
+  out.set(key, next);
 }
 
 /** npm `package-lock.json` — JSON, deterministic, no dependency. */
