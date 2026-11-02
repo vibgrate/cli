@@ -8,7 +8,7 @@ import { recordedSemver } from '../utils/recorded-semver.js';
 import { assertLockfileText, LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { lockfileWarningPath, notePubspecLockText, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
-import { PubCache } from './pub-cache.js';
+import { PubCache, type PubDevMeta } from './pub-cache.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
 
@@ -96,6 +96,20 @@ interface DartDependency {
 }
 
 /**
+ * A production declaration wins over a development declaration of the same
+ * name, whichever section is listed first. The winning declaration supplies
+ * the version. SDK entries are not rows in either section.
+ */
+function dedupeDartDeps(deps: DartDependency[]): DartDependency[] {
+  const byName = new Map<string, DartDependency>();
+  for (const dep of deps) {
+    const kept = byName.get(dep.name);
+    if (!kept || (kept.isDev && !dep.isDev)) byName.set(dep.name, dep);
+  }
+  return [...byName.values()];
+}
+
+/**
  * Parse pubspec.yaml to extract dependencies.
  * 
  * Example YAML:
@@ -110,6 +124,11 @@ interface DartDependency {
  *     flutter_test:
  *       sdk: flutter
  *     mockito: ^5.4.0
+ *
+ * `dependencies` and `dev_dependencies` are both kept. An SDK entry
+ * (`flutter: { sdk: flutter }`, a nested `sdk: flutter`, or `sdk: flutter`
+ * on the same line) is skipped in either section. A name listed in both
+ * sections is stored once, as a production dependency.
  */
 function parsePubspecYaml(content: string): {
   dartVersion?: string;
@@ -169,7 +188,7 @@ function parsePubspecYaml(content: string): {
     }
   }
 
-  return { dartVersion, deps };
+  return { dartVersion, deps: dedupeDartDeps(deps) };
 }
 
 /**
@@ -313,8 +332,9 @@ async function scanOneDartProject(
     rethrowLockfileParseError(err);
   }
   
-  // Filter out dev dependencies for main analysis
-  const prodDeps = allDeps.filter(d => !d.isDev);
+  // pub.dev lookups and drift buckets stay on production rows. A name in
+  // both sections is already one production row (`parsePubspecYaml`).
+  // Development rows are still emitted.
   
   // Determine Dart runtime version lag
   let runtimeMajorsBehind: number | undefined;
@@ -343,19 +363,36 @@ async function scanOneDartProject(
   const frameworks: DetectedFramework[] = [];
   const buckets = { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 };
 
-  // Fetch all metadata in parallel
-  const metaPromises = prodDeps.map(async (dep) => {
+  // Fetch production metadata in parallel. Development packages are not looked up.
+  const metaByName = new Map<string, PubDevMeta>();
+  const metaPromises = allDeps.filter((dep) => !dep.isDev).map(async (dep) => {
     const meta = await pubCache.get(dep.name);
-    return { dep, meta };
+    return { name: dep.name, meta };
   });
+  for (const { name, meta } of await Promise.all(metaPromises)) {
+    metaByName.set(name, meta);
+  }
 
-  const resolved = await Promise.all(metaPromises);
-
-  for (const { dep, meta } of resolved) {
+  for (const dep of allDeps) {
     // Use resolved version if available
     const resolvedVersionStr = resolvedVersions.get(dep.name);
     const resolvedVersion = resolvedVersionStr ? recordedSemver(resolvedVersionStr) : null;
-    const latestStable = meta.latestStableOverall;
+    const section = dep.isDev ? 'devDependencies' as const : 'dependencies' as const;
+
+    if (dep.isDev) {
+      dependencies.push({
+        package: dep.name,
+        section,
+        currentSpec: dep.version,
+        resolvedVersion,
+        latestStable: null,
+        majorsBehind: null,
+        drift: 'unknown',
+      });
+      continue;
+    }
+
+    const latestStable = metaByName.get(dep.name)?.latestStableOverall ?? null;
 
     let majorsBehind: number | null = null;
     let drift: DependencyRow['drift'] = 'unknown';
@@ -380,8 +417,6 @@ async function scanOneDartProject(
       buckets.unknown++;
     }
 
-    const section = dep.isDev ? 'devDependencies' as const : 'dependencies' as const;
-
     dependencies.push({
       package: dep.name,
       section,
@@ -392,7 +427,7 @@ async function scanOneDartProject(
       drift,
     });
 
-    // Detect known frameworks
+    // Development packages are not production frameworks.
     if (dep.name in KNOWN_DART_FRAMEWORKS) {
       frameworks.push({
         name: KNOWN_DART_FRAMEWORKS[dep.name]!,
