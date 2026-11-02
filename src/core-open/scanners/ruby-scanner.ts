@@ -153,11 +153,43 @@ const KNOWN_RUBY_FRAMEWORKS: Record<string, string> = {
 
 // Latest Ruby major.minor is resolved at scan time — see runtime-baselines.ts
 
+type RubyGemGroup = 'default' | 'development' | 'test';
+
 interface RubyDependency {
   name: string;
   spec: string;
   /** Group: :default, :development, :test */
-  group: 'default' | 'development' | 'test';
+  group: RubyGemGroup;
+}
+
+/**
+ * Bundler group symbols from a group list.
+ *
+ * `group :development, :test do` and `group [:development, :test] do`
+ * both yield `['development', 'test']`. The same list text is what an
+ * inline `group:` keyword carries (`group: :development` or
+ * `group: [:development, :test]`). Callers decide how to classify it.
+ */
+function gemfileGroupSymbols(value: string): string[] {
+  const names: string[] = [];
+  for (const match of value.matchAll(/:(\w+)/g)) {
+    names.push(match[1]!);
+  }
+  return names;
+}
+
+/**
+ * A `group ... do` block is development or test only when every symbol is
+ * `:development`, `:dev`, or `:test`. Any other symbol (`:default`,
+ * `:production`, or a custom group) means the gems ship, so the block is
+ * the production default.
+ */
+function classifyGemfileGroupBlock(names: string[]): RubyGemGroup {
+  const lowered = names.map((name) => name.toLowerCase());
+  const devOrTest = (name: string) => name === 'development' || name === 'dev' || name === 'test';
+  if (lowered.length === 0 || !lowered.every(devOrTest)) return 'default';
+  if (lowered.every((name) => name === 'test')) return 'test';
+  return 'development';
 }
 
 /**
@@ -225,19 +257,21 @@ function rubyVersionToSemver(ver: string): string | null {
  */
 function parseGemfile(content: string): RubyDependency[] {
   const deps: RubyDependency[] = [];
-  let currentGroup: 'default' | 'development' | 'test' = 'default';
-  const groupStack: Array<'default' | 'development' | 'test'> = [];
+  let currentGroup: RubyGemGroup = 'default';
+  const groupStack: RubyGemGroup[] = [];
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
 
-    // Track group blocks
-    const groupMatch = trimmed.match(/^\s*group\s+:(\w+)/);
-    if (groupMatch) {
-      groupStack.push(currentGroup);
-      const g = groupMatch[1]!.toLowerCase();
-      if (g === 'development' || g === 'dev') currentGroup = 'development';
-      else if (g === 'test') currentGroup = 'test';
+    // Track group blocks. Read every symbol on the line (`:a, :b` and
+    // `[:a, :b]`); the stack and `end` pop stay as they are.
+    const groupHeader = trimmed.match(/^group\s+(.+)$/);
+    if (groupHeader) {
+      const names = gemfileGroupSymbols(groupHeader[1]!);
+      if (names.length > 0) {
+        groupStack.push(currentGroup);
+        currentGroup = classifyGemfileGroupBlock(names);
+      }
     }
 
     if (trimmed === 'end' && groupStack.length > 0) {
