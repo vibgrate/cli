@@ -5,7 +5,13 @@ import { pathExists, readJsonFile, writeTextFile } from '../utils/fs.js';
 import type { DependencyRow, DepSection, Finding, ProjectScan, ScanArtifact } from '../types.js';
 import { LICENSE_PARSE_FAILED } from '../../core-open/licenses/diagnostic.js';
 import { digestIdentity, orderComponentDigests, toCycloneHashes, toSpdxChecksums, type ComponentDigest } from '../../engine/component-digests.js';
-import { fullDependencyGraph, type LockfileComponent, type LockfileGraph } from '../../engine/lockfile.js';
+import {
+  fullDependencyGraph,
+  mergeLockScopes,
+  type LockfileComponent,
+  type LockfileGraph,
+  type LockfileInstallScope,
+} from '../../engine/lockfile.js';
 import { ECOSYSTEMS, type Ecosystem } from '../../engine/drift.js';
 import { componentLicense, extractedLicensingInfos, type ComponentLicense } from './sbom-license.js';
 import { vexCommand } from './vex.js';
@@ -49,6 +55,11 @@ interface FlattenedDependency {
   mergeWarnings: string[];
   /** Lockfile digests for this component, already sorted. Empty when none were recorded. */
   digests: ComponentDigest[];
+  /**
+   * npm v2/v3 install mark for a lockfile-only row. Omitted on a manifest
+   * row and on a production lockfile-only row. Not written as `vibgrate:scope`.
+   */
+  lockScope?: LockfileInstallScope;
 }
 
 /**
@@ -506,7 +517,7 @@ function addManifestSection(row: FlattenedDependency, section: DepSection): void
  * a dev-only optional package. Optional wins over a production listing,
  * because an optional package is often recorded in both sections. Production
  * outranks development. Peer alone is unmarked. A lockfile-only row has no
- * section and stays unmarked.
+ * section; `lockScope` supplies its mark.
  */
 function dependencyMark(sections: readonly DepSection[]): 'dev' | 'optional' | undefined {
   const has = (section: DepSection): boolean => sections.includes(section);
@@ -530,6 +541,25 @@ function spdxManifestRelationship(sections: readonly DepSection[]): 'DEV_DEPENDE
   return undefined;
 }
 
+/**
+ * Manifest sections win. A lockfile-only row uses `lockScope`: `dev` (including
+ * `devOptional`) is `excluded` / `DEV_DEPENDENCY_OF`, and `optional` is
+ * `optional` / `OPTIONAL_DEPENDENCY_OF`.
+ */
+function cycloneScopeFor(dep: FlattenedDependency): 'excluded' | 'optional' | undefined {
+  if (dep.manifestSections.length) return cycloneComponentScope(dep.manifestSections);
+  if (dep.lockScope === 'dev') return 'excluded';
+  if (dep.lockScope === 'optional') return 'optional';
+  return undefined;
+}
+
+function spdxRelationshipKind(dep: FlattenedDependency): 'DEV_DEPENDENCY_OF' | 'OPTIONAL_DEPENDENCY_OF' | undefined {
+  if (dep.manifestSections.length) return spdxManifestRelationship(dep.manifestSections);
+  if (dep.lockScope === 'dev') return 'DEV_DEPENDENCY_OF';
+  if (dep.lockScope === 'optional') return 'OPTIONAL_DEPENDENCY_OF';
+  return undefined;
+}
+
 /** Stable seed for the document id: format + root + the ordered dependency set + any dependency graph. */
 function sbomSerialSeed(format: string, artifact: ScanArtifact, deps: FlattenedDependency[], graph?: LockfileGraph): string {
   const edgeLines = graph?.edges
@@ -544,7 +574,7 @@ function sbomSerialSeed(format: string, artifact: ScanArtifact, deps: FlattenedD
     artifact.vibgrateVersion ?? '',
     ...deps.map(
       (d) =>
-        `${d.ecosystem}|${d.package}|${d.version}|${d.currentSpec}|${d.project}|${d.projects.join(',')}|${d.drift}|${d.majorsBehind ?? ''}|${d.scope}|${dependencyMark(d.manifestSections) ?? ''}|${d.license?.raw ?? ''}|${d.license?.spdxId ?? ''}|${d.mergeWarnings.join(',')}|${digestIdentity(d.digests)}`,
+        `${d.ecosystem}|${d.package}|${d.version}|${d.currentSpec}|${d.project}|${d.projects.join(',')}|${d.drift}|${d.majorsBehind ?? ''}|${d.scope}|${dependencyMark(d.manifestSections) ?? ''}|${d.lockScope ?? ''}|${d.license?.raw ?? ''}|${d.license?.spdxId ?? ''}|${d.mergeWarnings.join(',')}|${digestIdentity(d.digests)}`,
     ),
     ...(graph?.rootDependsOn.length ? [`root>${uniqSorted(graph.rootDependsOn).join(',')}`] : []),
     ...edgeLines,
@@ -594,7 +624,7 @@ function spdxRelationships(
   dependencies.forEach((dep, i) => {
     const identity = componentIdentity(dep.ecosystem, dep.package, dep.version);
     spdxIdOf.set(identity, `SPDXRef-Package-${i + 1}`);
-    const kind = spdxManifestRelationship(dep.manifestSections);
+    const kind = spdxRelationshipKind(dep);
     if (kind) kindOf.set(identity, kind);
   });
   const spdxIdFor = (key: string, ecosystem: Ecosystem): string | undefined => {
@@ -749,6 +779,7 @@ export function flattenDependencies(
       ecosystem,
       mergeWarnings: [],
       digests: orderComponentDigests(dep.digests ?? []),
+      ...(dep.lockScope ? { lockScope: dep.lockScope } : {}),
     };
     if (dep.mergeWarnings?.length) addMergeWarnings(row, dep.mergeWarnings);
     index.set(key, row);
@@ -774,6 +805,8 @@ interface MergedComponentAcc {
   edges: string[] | undefined;
   edgeProjects: string[];
   mergeWarnings: string[];
+  /** True once an npm v2/v3 lockfile has contributed this identity. */
+  installScopeKnown: boolean;
 }
 
 /**
@@ -784,12 +817,14 @@ interface MergedComponentAcc {
  *
  * Components are keyed by ecosystem + name + version. Direct rows are applied
  * later, in `flattenDependencies`; here, lockfiles are visited in code-unit
- * project-path order and the first occurrence wins. A later lockfile that
- * repeats the same identity adds its project names. A later lockfile with a
- * different dependency list is not applied — that drop is a warning on the
- * component. Each component keeps the ecosystem of the lockfile that
- * contributed it, so a Python sub-project is not labeled npm because the
- * root lockfile was.
+ * project-path order and the first occurrence wins the dependency list. A
+ * later lockfile that repeats the same identity adds its project names. A
+ * later lockfile with a different dependency list is not applied — that drop
+ * is a warning on the component. npm v2/v3 install scope is the exception:
+ * once two lockfiles both record it, the least restrictive mark is kept
+ * (production, then optional, then dev). Each component keeps the ecosystem
+ * of the lockfile that contributed it, so a Python sub-project is not labeled
+ * npm because the root lockfile was.
  *
  * `rootDependsOn` is the scan-root lockfile's direct edges (the first project
  * path that has a lockfile, when the root has none). It is not copied onto
@@ -801,6 +836,25 @@ function copyLockfileComponent(component: LockfileComponent): LockfileComponent 
     package: component.package,
     version: component.version,
     ...(digests.length ? { digests } : {}),
+    ...(component.lockScope ? { lockScope: component.lockScope } : {}),
+  };
+}
+
+/**
+ * Apply an npm v2/v3 install mark onto a merged component. A lockfile that
+ * does not record flags leaves the kept mark alone. Once two recording
+ * lockfiles have both been seen, production (no `lockScope`) beats `optional`,
+ * which beats `dev`.
+ */
+function applyMergedLockScope(acc: MergedComponentAcc, incoming: LockfileInstallScope | undefined, records: boolean): void {
+  if (!records) return;
+  const next = acc.installScopeKnown ? mergeLockScopes(acc.component.lockScope, incoming) : incoming;
+  acc.installScopeKnown = true;
+  acc.component = {
+    package: acc.component.package,
+    version: acc.component.version,
+    ...(acc.component.digests?.length ? { digests: acc.component.digests } : {}),
+    ...(next ? { lockScope: next } : {}),
   };
 }
 
@@ -809,6 +863,7 @@ function unionLockfileDigests(kept: LockfileComponent, incoming: LockfileCompone
     package: kept.package,
     version: kept.version,
     digests: [...(kept.digests ?? []), ...(incoming.digests ?? [])],
+    ...(kept.lockScope ? { lockScope: kept.lockScope } : {}),
   });
 }
 
@@ -858,7 +913,7 @@ export function collectLockfileGraph(artifact: ScanArtifact, root: string): Lock
         for (const project of guessedProjects) {
           mergeWarnings.push(describeUnknownEcosystem(project.type, project.name, component.package, component.version));
         }
-        byIdentity.set(key, {
+        const acc: MergedComponentAcc = {
           component: copyLockfileComponent(component),
           ecosystem,
           projects: new Set(names),
@@ -866,10 +921,14 @@ export function collectLockfileGraph(artifact: ScanArtifact, root: string): Lock
           edges: incoming,
           edgeProjects: names,
           mergeWarnings,
-        });
+          installScopeKnown: false,
+        };
+        applyMergedLockScope(acc, component.lockScope, entry.graph.recordsInstallScope === true);
+        byIdentity.set(key, acc);
         continue;
       }
       if (component.digests?.length) existing.component = unionLockfileDigests(existing.component, component);
+      applyMergedLockScope(existing, component.lockScope, entry.graph.recordsInstallScope === true);
       for (const name of names) existing.projects.add(name);
       for (const project of guessedProjects) {
         const warning = describeUnknownEcosystem(project.type, project.name, component.package, component.version);
@@ -900,6 +959,7 @@ export function collectLockfileGraph(artifact: ScanArtifact, root: string): Lock
       package: acc.component.package,
       version: acc.component.version,
       ...(acc.component.digests?.length ? { digests: acc.component.digests } : {}),
+      ...(acc.component.lockScope ? { lockScope: acc.component.lockScope } : {}),
       ecosystem: acc.ecosystem,
       projects: sortedUnique(acc.projects),
       winningProject: acc.winningProject,
@@ -1013,7 +1073,7 @@ export function toCycloneDx(artifact: ScanArtifact, graph?: LockfileGraph): Reco
         properties.push({ name: MAVEN_GROUP_WARNING_PROPERTY, value: groupWarning });
         pushWarningCode(properties, groupWarning);
       }
-      const componentScope = cycloneComponentScope(dep.manifestSections);
+      const componentScope = cycloneScopeFor(dep);
       return {
         type: 'library',
         'bom-ref': purl ?? componentBomRef(dep.ecosystem, dep.package, dep.version),
