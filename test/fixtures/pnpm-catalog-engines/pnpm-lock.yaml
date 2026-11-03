@@ -14,9 +14,9 @@ importers:
       react:
         specifier: 'catalog:'
         version: 19.0.0
-      left-pad:
-        specifier: 1.3.0
-        version: 1.3.0
+      ms:
+        specifier: 2.1.3
+        version: 2.1.3
     devDependencies:
       typescript:
         specifier: ^5.6.0
@@ -33,8 +33,8 @@ packages:
     engines: {node: '>=0.10.0'}
     dev: true
 
-  left-pad@1.3.0:
-    resolution: {integrity: sha512-XI5MPzVNApdAy3RvCx1F6T8SB8lZqK8RZ7h00V1iW6iC4BR0v0QER2bHlG2G1EjJXxJ8/I8xqPq4j6ZJ5vYQ==}
+  ms@2.1.3:
+    resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
     engines: {node: '>=0.10.0'}
     dev: false
 
@@ -46,9 +46,9 @@ packages:
 snapshots:
   react@19.0.0:
     dependencies:
-      left-pad: 1.3.0
+      ms: 2.1.3
 
-  left-pad@1.3.0: {}
+  ms@2.1.3: {}
 
   '@types/react@19.0.0': {}
 
