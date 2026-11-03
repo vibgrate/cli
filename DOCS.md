@@ -2730,12 +2730,14 @@ The suffix stays on the recorded version. `v2.0.0+incompatible` matches a range 
 
 ##### `replace` and `exclude`
 
-`replace` and `exclude` are not applied before the match.
+`vg scan` applies `replace` after the whole `go.mod` is read, so a directive may sit above or below its `require`. A version on the left (`old v1.2.0 => …`) applies only to that version and wins over a versionless replace of the same module.
 
-- The module path and version on the `require` line are what get matched. A `replace` to a fork, another version, or a local directory does not change that target. A `replace` with no `require` adds nothing.
+- A replacement that names a module and a version is reported as that module and version. The original module path stays on the row as `replacedFrom`. Drift and vulnerability matching use the replacement, not the upstream path.
+- A replacement that is a local path (`./…`, `../…`, or an absolute path) keeps the required module and version, and the scan does not look that module up. The row's drift is `unknown`, so it is not counted as behind. A quoted path (`"../My Lib"`) is a local path too.
+- A `replace` with no `require` adds nothing.
 - An `exclude` line does not add a module, and it does not drop a version that is also required.
 
-The code graph records those same `require` paths, including lines marked `// indirect`, and skips `replace` and `exclude`. The graph does not store the version. Vulnerability matching still skips `// indirect`.
+The code graph records the `require` paths, including lines marked `// indirect`, and does not apply `replace` or `exclude`. The graph does not store the version. Vulnerability matching still skips `// indirect`. The local `replace` in the example below keeps `example.com/replaced-mod` at `v1.0.0` and does not query the module proxy for it.
 
 ##### Check it locally
 
