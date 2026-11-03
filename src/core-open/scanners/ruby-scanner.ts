@@ -201,6 +201,7 @@ function classifyGemfileGroupBlock(names: string[]): RubyGemGroup {
  *   gem "puma", "~> 6.0"
  *   gem 'sidekiq'
  *   gem 'rspec-rails', group: :development
+ *   gem 'rspec-rails', groups: [:development, :test]
  */
 function parseGemfileLine(line: string): { name: string; spec: string } | null {
   const trimmed = line.trim();
@@ -282,13 +283,31 @@ function parseGemfile(content: string): RubyDependency[] {
     const parsed = parseGemfileLine(trimmed);
     if (!parsed) continue;
 
-    // Check for inline group specification
+    // Inline group. `group:` keeps the substring check. `groups:` (symbol or
+    // array) is development/test only when every listed symbol is
+    // :development, :dev, or :test; any other symbol is production.
     let group = currentGroup;
-    const inlineGroupMatch = trimmed.match(/group:\s*(?::(\w+)|\[([^\]]+)\])/);
+    const inlineGroupMatch = trimmed.match(/(groups?):\s*(?::(\w+)|\[([^\]]+)\])/);
     if (inlineGroupMatch) {
-      const g = (inlineGroupMatch[1] ?? inlineGroupMatch[2] ?? '').toLowerCase();
-      if (g.includes('development') || g.includes('dev')) group = 'development';
-      else if (g.includes('test')) group = 'test';
+      const key = inlineGroupMatch[1]!;
+      const symbol = inlineGroupMatch[2];
+      const arrayBody = inlineGroupMatch[3];
+      if (key === 'group') {
+        const g = (symbol ?? arrayBody ?? '').toLowerCase();
+        if (g.includes('development') || g.includes('dev')) group = 'development';
+        else if (g.includes('test')) group = 'test';
+      } else {
+        const listed = symbol
+          ? [symbol.toLowerCase()]
+          : [...(arrayBody ?? '').matchAll(/:(\w+)/g)].map((match) => match[1]!.toLowerCase());
+        const devOrTest = (name: string) =>
+          name === 'development' || name === 'dev' || name === 'test';
+        if (listed.length > 0 && listed.every(devOrTest)) {
+          group = listed.every((name) => name === 'test') ? 'test' : 'development';
+        } else if (listed.length > 0) {
+          group = 'default';
+        }
+      }
     }
 
     deps.push({
