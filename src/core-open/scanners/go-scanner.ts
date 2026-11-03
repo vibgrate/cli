@@ -99,20 +99,23 @@ interface GoDependency {
 }
 
 /**
- * Parse go.mod to extract dependencies and Go version.
- * 
+ * Parse go.mod to extract dependencies, tool package paths, and Go version.
+ *
  * Example:
  *   module github.com/example/project
- *   go 1.21
+ *   go 1.24
+ *   tool golang.org/x/tools/cmd/stringer
  *   require (
  *     github.com/gin-gonic/gin v1.9.1
  *     github.com/stretchr/testify v1.8.4 // indirect
  *   )
  */
-function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[] } {
+function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[]; tools: string[] } {
   const deps: GoDependency[] = [];
+  const tools: string[] = [];
   let goVersion: string | undefined;
   let inRequireBlock = false;
+  let inToolBlock = false;
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -121,6 +124,29 @@ function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[]
     if (trimmed.startsWith('go ')) {
       const match = trimmed.match(/^go\s+(\d+\.\d+)/);
       if (match) goVersion = match[1];
+      continue;
+    }
+
+    // Track tool blocks. A one-line `tool ( … )` is a tool, not a block.
+    if (!inRequireBlock && /^tool\s*\(/.test(trimmed) && !/^tool\s*\(.*\)\s*$/.test(trimmed)) {
+      inToolBlock = true;
+      continue;
+    }
+
+    if (trimmed === ')' && inToolBlock) {
+      inToolBlock = false;
+      continue;
+    }
+
+    if (inToolBlock || (!inRequireBlock && (/^tool\s*\(.*\)\s*$/.test(trimmed) || trimmed.startsWith('tool ')))) {
+      let toolLine = trimmed;
+      if (!inToolBlock && /^tool\s*\(.*\)\s*$/.test(trimmed)) {
+        toolLine = trimmed.replace(/^tool\s*\(/, '').replace(/\)\s*$/, '');
+      } else if (!inToolBlock && trimmed.startsWith('tool ')) {
+        toolLine = trimmed.substring('tool '.length);
+      }
+      const toolPath = toolPackagePath(toolLine);
+      if (toolPath) tools.push(toolPath);
       continue;
     }
 
@@ -171,7 +197,29 @@ function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[]
     });
   }
 
-  return { goVersion, deps };
+  return { goVersion, deps, tools };
+}
+
+/** Package path from a `tool` line, ignoring a trailing comment. */
+function toolPackagePath(line: string): string | null {
+  const code = line.replace(/\/\/.*$/, '').trim();
+  if (!code || code === '(' || code === ')') return null;
+  const token = code.split(/\s+/)[0];
+  if (!token || !looksLikeGoModule(token)) return null;
+  return token;
+}
+
+/**
+ * Required module that provides `toolPath`: the longest module path that is
+ * the tool path itself or a `/`-bounded prefix of it.
+ */
+function moduleProvidingTool(toolPath: string, deps: GoDependency[]): string | null {
+  let best: string | null = null;
+  for (const dep of deps) {
+    if (toolPath !== dep.path && !toolPath.startsWith(`${dep.path}/`)) continue;
+    if (best === null || dep.path.length > best.length) best = dep.path;
+  }
+  return best;
 }
 
 function looksLikeGoModule(token: string): boolean {
@@ -182,7 +230,8 @@ function looksLikeGoModule(token: string): boolean {
     token === 'replace' ||
     token === 'exclude' ||
     token === 'retract' ||
-    token === 'toolchain'
+    token === 'toolchain' ||
+    token === 'tool'
   ) {
     return false;
   }
@@ -254,10 +303,20 @@ async function scanOneGoProject(
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
   
   const content = cache ? await cache.readTextFile(manifestFile) : await readTextFile(manifestFile);
-  const { goVersion, deps: allDeps } = parseGoMod(content);
-  
-  // Filter out indirect dependencies for main analysis
-  const directDeps = allDeps.filter(d => !d.indirect);
+  const { goVersion, deps: allDeps, tools } = parseGoMod(content);
+
+  // Indirect requires stay out of the scan unless they provide a `tool`
+  // package. Those modules are development dependencies. A module that is
+  // also a direct require stays in dependencies.
+  const toolProviders = new Set<string>();
+  for (const toolPath of tools) {
+    const provider = moduleProvidingTool(toolPath, allDeps);
+    if (provider) toolProviders.add(provider);
+  }
+  const directPaths = new Set(allDeps.filter((d) => !d.indirect).map((d) => d.path));
+  const directDeps = allDeps.filter(
+    (d) => !d.indirect || (toolProviders.has(d.path) && !directPaths.has(d.path)),
+  );
   
   // Determine Go runtime version lag
   let runtimeMajorsBehind: number | undefined;
@@ -327,7 +386,7 @@ async function scanOneGoProject(
 
     dependencies.push({
       package: dep.path,
-      section: 'dependencies',
+      section: dep.indirect ? 'devDependencies' : 'dependencies',
       // `*` is the existing marker for a dependency declared with no version
       // (same as an unpinned Python/Ruby requirement). A written range stays
       // the spec. Neither is promoted to resolvedVersion.

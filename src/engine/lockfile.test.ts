@@ -336,6 +336,79 @@ describe('fullDependencyGraph', () => {
     expect(graph?.rootDependsOn).toEqual(['string-width@4.2.3']);
   });
 
+  it('reads npm v2/v3 dev, optional, and devOptional flags, and leaves a production package unmarked', () => {
+    write(
+      'package-lock.json',
+      JSON.stringify({
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'app' },
+          'node_modules/nested-prod': { version: '1.0.0' },
+          'node_modules/nested-dev': { version: '1.0.0', dev: true },
+          'node_modules/fsevents': { version: '2.3.3', optional: true },
+          'node_modules/dev-optional-pkg': { version: '1.2.3', dev: true, optional: true, devOptional: true },
+          'node_modules/dev-optional-only': { version: '1.0.0', devOptional: true },
+          'node_modules/explicit-false': { version: '1.0.0', dev: false, optional: false, devOptional: false },
+        },
+      }),
+    );
+    const graph = fullDependencyGraph(root);
+    const scopeOf = (name: string): string | undefined => graph?.components.find((row) => row.package === name)?.lockScope;
+    expect(graph?.recordsInstallScope).toBe(true);
+    expect(scopeOf('nested-prod')).toBeUndefined();
+    expect(scopeOf('nested-dev')).toBe('dev');
+    expect(scopeOf('fsevents')).toBe('optional');
+    expect(scopeOf('dev-optional-pkg')).toBe('dev');
+    expect(scopeOf('dev-optional-only')).toBe('dev');
+    expect(scopeOf('explicit-false')).toBeUndefined();
+  });
+
+  it('keeps the least restrictive npm install mark across paths, independent of path order', () => {
+    const packages = (devFirst: boolean): Record<string, unknown> => {
+      const devPath = { version: '1.0.0', dev: true };
+      const prodPath = { version: '1.0.0' };
+      const optionalPath = { version: '1.0.0', optional: true };
+      const fromDev = devFirst
+        ? { 'node_modules/from-dev': devPath, 'node_modules/widget/node_modules/from-dev': prodPath }
+        : { 'node_modules/widget/node_modules/from-dev': prodPath, 'node_modules/from-dev': devPath };
+      const fromOpt = devFirst
+        ? { 'node_modules/from-opt': devPath, 'node_modules/widget/node_modules/from-opt': optionalPath }
+        : { 'node_modules/widget/node_modules/from-opt': optionalPath, 'node_modules/from-opt': { ...devPath } };
+      return { '': { name: 'app' }, ...fromDev, ...fromOpt };
+    };
+    const scopeOf = (name: string): string | undefined =>
+      fullDependencyGraph(root)?.components.find((row) => row.package === name)?.lockScope;
+
+    write('package-lock.json', JSON.stringify({ lockfileVersion: 3, packages: packages(true) }));
+    expect(scopeOf('from-dev')).toBeUndefined();
+    expect(scopeOf('from-opt')).toBe('optional');
+
+    write('package-lock.json', JSON.stringify({ lockfileVersion: 3, packages: packages(false) }));
+    expect(scopeOf('from-dev')).toBeUndefined();
+    expect(scopeOf('from-opt')).toBe('optional');
+  });
+
+  it('leaves v1 dev and optional flags unread', () => {
+    write(
+      'package-lock.json',
+      JSON.stringify({
+        dependencies: {
+          'nested-dev': { version: '1.0.0', dev: true },
+          'nested-prod': { version: '1.0.0' },
+          fsevents: { version: '2.3.3', optional: true },
+        },
+      }),
+    );
+    const graph = fullDependencyGraph(root);
+    expect(graph?.recordsInstallScope).toBeUndefined();
+    expect(graph?.edges).toBeUndefined();
+    expect(graph?.components).toEqual([
+      { package: 'fsevents', version: '2.3.3' },
+      { package: 'nested-dev', version: '1.0.0' },
+      { package: 'nested-prod', version: '1.0.0' },
+    ]);
+  });
+
   it('reads the full transitive set from Cargo.lock, go.sum, poetry.lock and uv.lock, tagging the ecosystem', () => {
     write(
       'Cargo.lock',

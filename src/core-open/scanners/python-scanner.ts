@@ -365,17 +365,13 @@ function skipTomlInlineTable(text: string, start: number): number {
   return text.length;
 }
 
-function collectQuotedStrings(body: string, out: string[], skipInlineTables = false): void {
+function collectQuotedStrings(body: string, out: string[]): void {
   let i = 0;
   while (i < body.length) {
     const ch = body[i]!;
     if (ch === '#') {
       const nl = body.indexOf('\n', i);
       i = nl === -1 ? body.length : nl + 1;
-      continue;
-    }
-    if (skipInlineTables && ch === '{') {
-      i = skipTomlInlineTable(body, i);
       continue;
     }
     if (ch === '"' || ch === "'") {
@@ -411,13 +407,9 @@ function collectQuotedStrings(body: string, out: string[], skipInlineTables = fa
 /**
  * Requirement strings from every array in a TOML table body.
  * A `]` inside a quoted requirement (an extra marker) does not end the array.
- * Comments are skipped. When `skipInlineTables` is set, a `{...}` entry is
- * not a requirement: PEP 735 `{include-group = "..."}` is skipped and is not
- * expanded. The quoted group name inside that table is not a package name.
- * Packages written in the included group's own array are still collected
- * when that array is walked.
+ * Comments are skipped.
  */
-function requirementStringsFromTomlArrays(section: string, skipInlineTables = false): string[] {
+function requirementStringsFromTomlArrays(section: string): string[] {
   const out: string[] = [];
   let i = 0;
   while (i < section.length) {
@@ -434,13 +426,286 @@ function requirementStringsFromTomlArrays(section: string, skipInlineTables = fa
     if (ch === '[') {
       const end = indexOfClosingBracket(section, i + 1);
       if (end === -1) break;
-      collectQuotedStrings(section.slice(i + 1, end), out, skipInlineTables);
+      collectQuotedStrings(section.slice(i + 1, end), out);
       i = end + 1;
       continue;
     }
     i++;
   }
   return out;
+}
+
+/**
+ * PEP 735 group names: lowercase, and each run of `-`, `_`, or `.` becomes
+ * one `-`. `Dev_Tools` and `dev-tools` are the same group.
+ */
+function normaliseDependencyGroupName(name: string): string {
+  return name.trim().toLowerCase().replace(/[-_.]+/g, '-');
+}
+
+function skipTomlWsAndComments(text: string, start: number): number {
+  let i = start;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+      i++;
+      continue;
+    }
+    if (ch === '#') {
+      const nl = text.indexOf('\n', i);
+      i = nl === -1 ? text.length : nl + 1;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+/** A TOML basic or literal string starting at `start`. `next` is past the closer. */
+function readTomlStringAt(text: string, start: number): { value: string; next: number } | null {
+  const quote = text[start];
+  if (quote !== '"' && quote !== "'") return null;
+  if (text.startsWith(quote + quote + quote, start)) {
+    const end = text.indexOf(quote + quote + quote, start + 3);
+    if (end === -1) return { value: text.slice(start + 3), next: text.length };
+    return { value: text.slice(start + 3, end), next: end + 3 };
+  }
+  let j = start + 1;
+  let value = '';
+  while (j < text.length) {
+    if (quote === '"' && text[j] === '\\') {
+      const escaped = text[j + 1];
+      if (escaped === undefined) break;
+      value += escaped;
+      j += 2;
+      continue;
+    }
+    if (text[j] === quote) return { value, next: j + 1 };
+    if (text[j] === '\n') break;
+    value += text[j]!;
+    j++;
+  }
+  return { value, next: j };
+}
+
+function readBareTomlKey(text: string, start: number): { value: string; next: number } | null {
+  let j = start;
+  while (j < text.length) {
+    const ch = text[j]!;
+    const ok =
+      (ch >= 'A' && ch <= 'Z') ||
+      (ch >= 'a' && ch <= 'z') ||
+      (ch >= '0' && ch <= '9') ||
+      ch === '_' ||
+      ch === '-';
+    if (!ok) break;
+    j++;
+  }
+  if (j === start) return null;
+  return { value: text.slice(start, j), next: j };
+}
+
+/** Group name at `start`: a bare key, a quoted key, or dotted segments of those. */
+function readDependencyGroupKey(text: string, start: number): { raw: string; next: number } | null {
+  const parts: string[] = [];
+  let i = start;
+  while (i < text.length) {
+    i = skipTomlWsAndComments(text, i);
+    if (i >= text.length) break;
+    const ch = text[i]!;
+    let segment: string;
+    if (ch === '"' || ch === "'") {
+      const read = readTomlStringAt(text, i);
+      if (!read) return null;
+      segment = read.value;
+      i = read.next;
+    } else {
+      const bare = readBareTomlKey(text, i);
+      if (!bare) break;
+      segment = bare.value;
+      i = bare.next;
+    }
+    parts.push(segment);
+    const after = skipTomlWsAndComments(text, i);
+    if (text[after] === '.') {
+      i = after + 1;
+      continue;
+    }
+    return { raw: parts.join('.'), next: i };
+  }
+  return null;
+}
+
+/** Inner text of an inline table whose `{` is at `openBrace`. */
+function inlineTableInner(text: string, openBrace: number): { inner: string; next: number } | null {
+  const next = skipTomlInlineTable(text, openBrace);
+  if (next <= openBrace + 1 || text[next - 1] !== '}') return null;
+  return { inner: text.slice(openBrace + 1, next - 1), next };
+}
+
+/** The string value of `include-group` in an inline table body, if that key is set. */
+function includeGroupTarget(inner: string): string | null {
+  let i = 0;
+  while (i < inner.length) {
+    i = skipTomlWsAndComments(inner, i);
+    if (i >= inner.length) return null;
+    const ch = inner[i]!;
+    if (ch === '"' || ch === "'") {
+      const read = readTomlStringAt(inner, i);
+      if (!read || read.next <= i) return null;
+      i = read.next;
+      continue;
+    }
+    const bare = readBareTomlKey(inner, i);
+    if (!bare) {
+      i++;
+      continue;
+    }
+    let j = skipTomlWsAndComments(inner, bare.next);
+    if (inner[j] !== '=') {
+      i = bare.next;
+      continue;
+    }
+    j = skipTomlWsAndComments(inner, j + 1);
+    if (inner[j] === '"' || inner[j] === "'") {
+      const read = readTomlStringAt(inner, j);
+      if (!read) return null;
+      if (bare.value === 'include-group') return read.value;
+      i = read.next;
+      continue;
+    }
+    i = j > bare.next ? j : bare.next;
+  }
+  return null;
+}
+
+interface DependencyGroupEntry {
+  kind: 'requirement' | 'include';
+  value: string;
+}
+
+/** Items of a dependency-group array whose `[` is at `openBracket`. */
+function parseDependencyGroupArray(
+  text: string,
+  openBracket: number,
+): { entries: DependencyGroupEntry[]; next: number } {
+  const entries: DependencyGroupEntry[] = [];
+  let i = openBracket + 1;
+  while (i < text.length) {
+    const before = i;
+    i = skipTomlWsAndComments(text, i);
+    if (i >= text.length) break;
+    const ch = text[i]!;
+    if (ch === ']') return { entries, next: i + 1 };
+    if (ch === ',') {
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const read = readTomlStringAt(text, i);
+      if (!read || read.next <= i) break;
+      if (read.value.trim()) entries.push({ kind: 'requirement', value: read.value });
+      i = read.next;
+      continue;
+    }
+    if (ch === '{') {
+      const table = inlineTableInner(text, i);
+      if (!table) break;
+      const include = includeGroupTarget(table.inner);
+      if (include !== null && include.trim()) entries.push({ kind: 'include', value: include });
+      i = table.next;
+      continue;
+    }
+    // Unrecognised token. Step forward so whitespace before it cannot spin.
+    i = i > before ? i + 1 : before + 1;
+  }
+  return { entries, next: i };
+}
+
+/**
+ * `[dependency-groups]` assignments in file order. Names are normalised.
+ * A repeated normalised name appends its entries, so both spellings contribute.
+ */
+function parseDependencyGroupTable(section: string): { order: string[]; groups: Map<string, DependencyGroupEntry[]> } {
+  const groups = new Map<string, DependencyGroupEntry[]>();
+  const order: string[] = [];
+  let i = 0;
+  while (i < section.length) {
+    const start = skipTomlWsAndComments(section, i);
+    if (start >= section.length) break;
+    const named = readDependencyGroupKey(section, start);
+    if (!named) {
+      i = start + 1;
+      continue;
+    }
+    let j = skipTomlWsAndComments(section, named.next);
+    if (section[j] !== '=') {
+      i = j > start ? j : start + 1;
+      continue;
+    }
+    j = skipTomlWsAndComments(section, j + 1);
+    if (section[j] !== '[') {
+      i = j > start ? j : start + 1;
+      continue;
+    }
+    const array = parseDependencyGroupArray(section, j);
+    const norm = normaliseDependencyGroupName(named.raw);
+    if (norm) {
+      const list = groups.get(norm);
+      if (list) list.push(...array.entries);
+      else {
+        groups.set(norm, [...array.entries]);
+        order.push(norm);
+      }
+    }
+    i = array.next > start ? array.next : start + 1;
+  }
+  return { order, groups };
+}
+
+/**
+ * Requirement strings for every dependency group, with `{include-group}`
+ * expanded in place. Names are normalised before lookup. A cycle stops at
+ * the repeated group and writes one warning for that cycle; the groups'
+ * own requirement strings are still returned. The include is not a package.
+ */
+function dependencyGroupRequirementStrings(section: string): string[] {
+  const { order, groups } = parseDependencyGroupTable(section);
+  const memo = new Map<string, string[]>();
+  const warned = new Set<string>();
+
+  function expand(name: string, stack: string[]): string[] {
+    const norm = normaliseDependencyGroupName(name);
+    if (!norm) return [];
+    const seenAt = stack.indexOf(norm);
+    if (seenAt !== -1) {
+      const key = stack.slice(seenAt).sort(compareCodeUnits).join(', ');
+      if (!warned.has(key)) {
+        warned.add(key);
+        console.warn(
+          `[dependency-groups] include cycle detected (${key}); the repeated include was not followed`,
+        );
+      }
+      return [];
+    }
+    const cached = memo.get(norm);
+    if (cached) return cached;
+    const entries = groups.get(norm);
+    if (!entries) return [];
+    stack.push(norm);
+    const out: string[] = [];
+    for (const entry of entries) {
+      if (entry.kind === 'requirement') out.push(entry.value);
+      else out.push(...expand(entry.value, stack));
+    }
+    stack.pop();
+    memo.set(norm, out);
+    return out;
+  }
+
+  const requirements: string[] = [];
+  for (const name of order) requirements.push(...expand(name, []));
+  return requirements;
 }
 
 /**
@@ -520,8 +785,10 @@ function appendPoetryDependencyTable(
  * [tool.poetry.group.<name>.dependencies],
  * and the legacy [tool.poetry.dev-dependencies] table.
  *
- * `{include-group = "..."}` is skipped, not expanded. A `python` key is not
- * a package. We don't pull in a full TOML parser to keep deps minimal.
+ * `{include-group = "..."}` expands to that group's requirements in this
+ * file. Group names are normalised (lowercase; runs of `-`, `_`, and `.`
+ * collapse to `-`). An include cycle stops with one warning. A `python`
+ * key is not a package. We don't pull in a full TOML parser to keep deps minimal.
  */
 function parsePyprojectToml(content: string): PyProjectToml {
   const result: PyProjectToml = { dependencies: [] };
@@ -563,11 +830,11 @@ function parsePyprojectToml(content: string): PyProjectToml {
     }
   }
 
-  // PEP 735. `{include-group = "..."}` is skipped; the included group's
-  // own requirement strings are read when that group is declared here.
+  // PEP 735. `{include-group}` is expanded in this file. Each group's own
+  // requirement strings are still read. A cycle warns once and stops.
   const groupSection = tomlTableBody(content, 'dependency-groups');
   if (groupSection) {
-    for (const requirement of requirementStringsFromTomlArrays(groupSection, true)) {
+    for (const requirement of dependencyGroupRequirementStrings(groupSection)) {
       const dep = parseRequirementLine(requirement);
       if (dep) rows.push({ ...dep, section: 'devDependencies' });
     }

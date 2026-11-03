@@ -476,7 +476,7 @@ vg why lodash                   # who added a dependency, every version since, a
 vg bisect lodash 4.17.21        # the commit where lodash crossed a version line (e.g. reached the fix)
 ```
 
-Detection and attribution span the whole npm ecosystem (npm, pnpm, yarn) plus pip/poetry, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle — read from each project's lockfile, so it works whatever you build in. Go is matched from direct `require` lines in `go.mod`. Pseudo-versions and `+incompatible` tags are compared as described in [DOCS.md](./DOCS.md#go-modules-pseudo-versions-and-incompatible).
+Detection and attribution span the whole npm ecosystem (npm, pnpm, yarn) plus pip/poetry, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle — read from each project's lockfile, so it works whatever you build in. Go is matched from direct `require` lines in `go.mod`, and from an `// indirect` module that provides a Go 1.24 `tool` package. Pseudo-versions and `+incompatible` tags are compared as described in [DOCS.md](./DOCS.md#go-modules-pseudo-versions-and-incompatible).
 
 Your AI assistant sees this too: `vg serve` exposes `list_vulnerabilities`, `vuln_attribution`, and an `upgrade_impact` tool that tells an agent what an upgrade will cost — version distance, how many files import the package, the vulnerabilities it fixes, and (online, opt in) the breaking-change notes between your version and the latest.
 
