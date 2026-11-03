@@ -48,6 +48,22 @@ require rsc.io/quote v1.5.2 // indirect
     ]);
   });
 
+  it('matches a tool to its required module when that module is replaced', async () => {
+    const rows = await scan(`module example.com/app
+
+go 1.24
+
+tool golang.org/x/tools/cmd/stringer
+
+require golang.org/x/tools v0.30.0 // indirect
+
+replace golang.org/x/tools => example.com/tools-fork v0.31.0
+`);
+    expect(rows).toEqual([
+      { package: 'example.com/tools-fork', section: 'devDependencies', currentSpec: 'v0.31.0' },
+    ]);
+  });
+
   it('reads a tool block and keeps each providing module', async () => {
     const rows = await scan(`module example.com/app
 

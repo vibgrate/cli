@@ -129,6 +129,12 @@ export interface DependencyLicense {
 
 export interface DependencyRow {
   package: string;
+  /**
+   * Module path a go.mod `replace` rewrote into `package`, when the row is
+   * reported under the replacement module. Absent for an ordinary requirement
+   * and for a local-path replacement (those keep the original module path).
+   */
+  replacedFrom?: string;
   section: DepSection;
   currentSpec: string;
   resolvedVersion: string | null;
