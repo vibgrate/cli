@@ -34,7 +34,7 @@ describe('pnpm v9 lockfile with catalogs and engines keys (#211)', () => {
   it('resolves catalog-pinned and plain dependencies from importers', () => {
     const root = projectFromFixture();
     expect(lockfileVersion(root, 'npm', 'react')).toBe('19.0.0');
-    expect(lockfileVersion(root, 'npm', 'left-pad')).toBe('1.3.0');
+    expect(lockfileVersion(root, 'npm', 'ms')).toBe('2.1.3');
   });
 
   it('extracts the full packages graph without dropping engines-keyed packages', () => {
@@ -43,7 +43,7 @@ describe('pnpm v9 lockfile with catalogs and engines keys (#211)', () => {
     expect(components).toBeDefined();
     expect(components!.map((c) => `${c.package}@${c.version}`)).toEqual([
       '@types/react@19.0.0',
-      'left-pad@1.3.0',
+      'ms@2.1.3',
       'react@19.0.0',
       'typescript@5.6.3',
     ]);
