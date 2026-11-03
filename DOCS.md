@@ -2040,6 +2040,7 @@ Two other strings in the same file are easy to misread as package digests. `vcs.
 | `Cargo.lock` | `checksum` | The SHA-256 hex of the crate. |
 | `poetry.lock`, `uv.lock` | `hash` | Each labeled hash on that package block (`sha256:…`). |
 | `go.sum` | `h1:` on `<module> <version>` | The module zip, as SHA-256. |
+| `packages.lock.json` | `contentHash` | The nupkg SHA-512, as base64. |
 
 **Several digests, one component.** A lockfile can list more than one digest for one package. The export still writes one component for that ecosystem, name, and version. It does not add a row per digest. `hashes` and `checksums` list every accepted digest on that component. The array is sorted by algorithm name, then by the digest value. The comparison is code-point order, so it does not follow the lockfile text, the install path, or the order of projects. The same digests produce the same array on every run. An identical algorithm and value is written once.
 
@@ -2260,7 +2261,7 @@ is omitted on every package.
 | Source | Where it is written | CycloneDX `type` | SPDX `primaryPackagePurpose` |
 | --- | --- | --- | --- |
 | Scan root (the artifact's root directory name) | CycloneDX `metadata.component` only. It is not copied into `components`. SPDX has no package for the root. | `application` | Omitted. There is no package to carry the field. |
-| Lockfile package (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`), including a package that only the lockfile lists | One CycloneDX component and one SPDX package | `library` | Omitted |
+| Lockfile package (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `packages.lock.json`), including a package that only the lockfile lists | One CycloneDX component and one SPDX package | `library` | Omitted |
 | Manifest dependency from a scanned project (Node, Python, Rust, Go, Java, Kotlin, Scala, Ruby, PHP, .NET, Swift, Dart, and any other project the scan records) | One CycloneDX component and one SPDX package | `library` | Omitted |
 | Container image named by a `Dockerfile` `FROM` or a Compose `image:` line | The same kind of row. A Docker Hub image with no namespace is named `library/<image>`. The tag is the version. | `library` | Omitted |
 | Helm chart dependency (`Chart.yaml` `dependencies`) | The same kind of row. The chart itself is not a row. | `library` | Omitted |

@@ -161,3 +161,16 @@ export function digestFromGoSumHash(hash: string | undefined): ComponentDigest[]
   if (!isPackageDigestContent(content)) return [];
   return [{ alg: 'SHA-256', content }];
 }
+
+/**
+ * NuGet `packages.lock.json` `contentHash`. NuGet records the nupkg's
+ * SHA-512 as standard base64. A value that is not 64 bytes of base64 is
+ * left out: a token or a truncated string is not a digest.
+ */
+export function digestFromNugetContentHash(contentHash: string | undefined): ComponentDigest[] {
+  if (!contentHash) return [];
+  const content = contentHash.trim();
+  if (!isPackageDigestContent(content)) return [];
+  if (Buffer.from(content, 'base64').length !== 64) return [];
+  return [{ alg: 'SHA-512', content }];
+}
