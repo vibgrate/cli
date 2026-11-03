@@ -34,7 +34,14 @@ export function registerCode(program: Command): void {
     .command('code')
     .description('graph-grounded coding agent (guided mode with no instruction; every edit and command is approved)')
     .argument('[instruction...]', 'what to change, in plain language (omit for guided interactive mode)')
-    .option('--provider <id>', 'backend: vibgrate-relay (Vibgrate Relay), ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp')
+    .option('--provider <id>', 'backend: vibgrate-relay (Vibgrate Relay), ollama, lmstudio, foundry-local, openrouter, litellm, openai, together, llama-cpp, or grok-build (drive `grok agent stdio` over ACP)')
+    .option('--acp-command <cmd>', 'run the turn on an external Agent Client Protocol agent instead of the native loop, e.g. "grok agent stdio" (same host protocol, approvals and Changes card)')
+    .option('--inject-capsule', 'ACP backend: prepend the code-graph context for the task to the first prompt')
+    .option('--no-acp-mcp', 'ACP backend: do not offer the local `vg serve` graph tools to the agent as an MCP server')
+    .option('--profile', 'print a one-line profile after each turn (steps, wall time, stop reason, tools, changes, visible activity lines) to stderr')
+    .option('--profile-out <file>', 'append one JSON profile record per turn to <file> (JSONL; also VG_CODE_PROFILE_OUT)')
+    .option('--trace-out <file>', 'append every protocol frame, timestamped and redacted, to <file> (NDJSON audit trace; also VG_CODE_TRACE_OUT)')
+    .option('--acp-log <file>', 'ACP backend: append the raw JSON-RPC wire, redacted, to <file> (also VG_CODE_ACP_LOG)')
     .option('--model <id>', 'model id (or set VG_CODE_MODEL). No model is hard-coded — pick the current best.')
     .option('--mode <mode>', 'Code Mode: spark | flow | forge (preferred over raw model names; auto-fits when omitted and no --model)')
     .option('--model-path <gguf>', 'gguf path for --provider llama-cpp (weights are never auto-downloaded)')
@@ -91,6 +98,13 @@ export function registerCode(program: Command): void {
         securityTier?: string;
         mock?: string;
         out?: string;
+        acpCommand?: string;
+        injectCapsule?: boolean;
+        acpMcp?: boolean;
+        profile?: boolean;
+        profileOut?: string;
+        traceOut?: string;
+        acpLog?: string;
       },
     ) {
       const global = readGlobal(this);
@@ -297,7 +311,20 @@ export function registerCode(program: Command): void {
       /** True when this run is a Code Mode (spark|flow|forge) on the Vibgrate manager. */
       let codeModeActive = false;
       /** True when the user (or config) explicitly chose a non-mode provider/model. */
-      const customSelection = !!(opts.provider || opts.model || opts.modelPath || config.provider || config.model);
+      // ACP backend (`--provider grok-build` / `--acp-command`): the turn runs on
+      // an external agent, so Code Mode and model routing are skipped entirely.
+      const { resolveAcpTarget } = await import('./code-acp.js');
+      const acpTarget = resolveAcpTarget({ provider: opts.provider ?? config.provider, acpCommand: opts.acpCommand });
+      const { resolveProfileSwitches } = await import('../code/profile.js');
+      const profileSwitches = resolveProfileSwitches(opts);
+      const customSelection = !!(
+        acpTarget ||
+        opts.provider ||
+        opts.model ||
+        opts.modelPath ||
+        config.provider ||
+        config.model
+      );
       // Code Mode only when the user did not pick a custom provider/model (flags or config).
       if (!customSelection && (modeFlag || (!provider && !model))) {
         try {
@@ -409,6 +436,9 @@ export function registerCode(program: Command): void {
       // Exception: a --stream-json --session host may start with no argv task and
       // send the first turn as a `submit` frame (so it can carry mode/attachments).
       const stdinFirstTurn = !instruction && !!opts.streamJson && !!opts.session;
+      if (acpTarget && !instruction && !stdinFirstTurn) {
+        throw usageError(`say what to change, e.g. \`vg code --provider ${acpTarget.providerId === 'grok-build' ? 'grok-build' : 'acp'} "add a --timeout flag to the scan command"\` (or drive it from a host with --stream-json --session)`);
+      }
       if (!instruction && !opts.mock && !stdinFirstTurn) {
         if (!(process.stdin.isTTY && process.stdout.isTTY)) {
           throw usageError('say what to change, e.g. `vg code "add a --timeout flag to the scan command"` (guided mode needs an interactive terminal)');
@@ -490,6 +520,33 @@ export function registerCode(program: Command): void {
         } catch {
           throw new CliError(`couldn't read the --mock file: ${opts.mock}`, ExitCode.USAGE_ERROR);
         }
+      }
+
+      if (acpTarget && !opts.mock) {
+        const { runCodeAcp } = await import('./code-acp.js');
+        const { VERSION } = await import('../version.js');
+        await runCodeAcp({
+          target: acpTarget,
+          root,
+          mainRoot,
+          graph,
+          instruction,
+          streamJson: !!opts.streamJson,
+          session: !!opts.session,
+          auto: !!auto,
+          continueSession: opts.continue,
+          files: opts.file ?? [],
+          budget: Number(opts.budget) || 3000,
+          injectCapsule: !!opts.injectCapsule,
+          acpMcp: opts.acpMcp !== false,
+          denyCommands: config.denyCommands,
+          json: !!global.json,
+          quiet: !!global.quiet,
+          profile: profileSwitches,
+          engineVersion: VERSION,
+          worktree: activeWorktree ? { path: activeWorktree.path, base: activeWorktree.base } : undefined,
+        });
+        return;
       }
 
       const route = resolveProviders(
@@ -593,8 +650,17 @@ export function registerCode(program: Command): void {
             tier,
             !!auto,
           );
+          const { ProfileRecorder, profilingEnabled } = await import('../code/profile.js');
+          const profiler = profilingEnabled(profileSwitches)
+            ? new ProfileRecorder(profileSwitches, {
+                backend: 'native',
+                provider: primarySlug ?? route.providers[0]?.id ?? 'unknown',
+                model: route.providers[0]?.model ?? 'unknown',
+              })
+            : null;
           const emitAndRecord = (line: unknown): void => {
             runOutcome.observe(line as Parameters<typeof runOutcome.observe>[0]);
+            profiler?.observe(line as Record<string, unknown>);
             emitStream(line);
           };
           if (runtime.socketPath && git.ref) {
@@ -825,6 +891,7 @@ export function registerCode(program: Command): void {
               // rather than through the result because attachments are the
               // host's input to the turn, not the agent's output from it.
               let lastTurnAttachments: import('../code/session-store.js').SessionAttachment[] | undefined;
+              let sessionReader: import('node:readline').Interface | undefined;
               await runCodeStreamJsonSession({
                 emit: emitAndRecord,
                 auto: !!auto,
@@ -862,6 +929,7 @@ export function registerCode(program: Command): void {
                     });
                   };
                   const rl = readline.createInterface({ input: process.stdin });
+                  sessionReader = rl;
                   rl.on('line', (raw) => {
                     const msg = parseHostMessage(raw);
                     if (!msg) return;
@@ -871,7 +939,15 @@ export function registerCode(program: Command): void {
                     }
                     else if (msg.kind === 'answer') session.submitAnswer(msg.id, msg.answer);
                     else if (msg.kind === 'submit')
-                      pushTurn({ instruction: msg.instruction, agentMode: msg.agentMode, images: msg.images });
+                      // v5 fields ride along: per-turn reasoning effort and
+                      // attachment metadata for the session record.
+                      pushTurn({
+                        instruction: msg.instruction,
+                        agentMode: msg.agentMode,
+                        images: msg.images,
+                        reasoningEffort: msg.reasoningEffort,
+                        attachments: msg.attachments,
+                      });
                     else if (msg.kind === 'restore') {
                       // Undo an approved change. Scoped to the files that change
                       // touched — never a sweeping restore of the tree.
@@ -930,6 +1006,7 @@ export function registerCode(program: Command): void {
                   const priorSummary = summarizeSession(record) || undefined;
                   turnIndex++;
                   runOutcome.beginRun(turnRunId(record.id, turnIndex), turnInstruction);
+                  profiler?.beginTurn(turnInstruction);
                   const plan = agentMode === 'plan';
                   // Project MCP tools go through the same per-turn posture:
                   // plan denies mutating external tools engine-side.
@@ -957,6 +1034,7 @@ export function registerCode(program: Command): void {
                   });
                 },
                 onTurnEnd: (turn) => {
+                  profiler?.endTurn();
                   // Persist the prompt + final answer for History reload; never
                   // file bodies or tool transcripts. Caps live in recordTask.
                   record = recordTask(
@@ -975,8 +1053,13 @@ export function registerCode(program: Command): void {
                   return summarizeSession(record);
                 },
               });
+              // `end` (or the host closing stdin) finished the session: release
+              // stdin so the process exits now instead of waiting to be killed.
+              sessionReader?.close();
+              process.stdin.destroy();
             } else {
               runOutcome.beginRun(newOneShotRunId(), instruction);
+              profiler?.beginTurn(instruction);
               await runCodeStreamJson({
                 ...baseAgentOptions,
                 instruction,
@@ -1001,6 +1084,7 @@ export function registerCode(program: Command): void {
                   rl.on('close', () => runOutcome.cancelPending());
                 },
               });
+              profiler?.endTurn();
             }
           } finally {
             await disposeMcpStream?.();
@@ -1110,6 +1194,15 @@ export function registerCode(program: Command): void {
             gitRef: git.ref || null,
             socketPath: runtime.socketPath,
           });
+          const { ProfileRecorder, profilingEnabled } = await import('../code/profile.js');
+          const ttyProfiler = profilingEnabled(profileSwitches)
+            ? new ProfileRecorder(profileSwitches, {
+                backend: 'native',
+                provider: primarySlug ?? route.providers[0]?.id ?? 'unknown',
+                model: route.providers[0]?.model ?? 'unknown',
+              })
+            : null;
+          ttyProfiler?.beginTurn(instruction);
           try {
             const agentResult = await agentTask({
               root,
@@ -1138,7 +1231,12 @@ export function registerCode(program: Command): void {
               graphBackend,
               modelProfile,
               llmCompaction: true,
+              observe: ttyProfiler ? (e) => ttyProfiler.observe({ event: 'event', ...e }) : undefined,
             });
+            if (ttyProfiler) {
+              ttyProfiler.observe({ event: 'done', result: agentResult });
+              ttyProfiler.endTurn();
+            }
             if (global.json) json(agentResult);
             if (agentResult.stopped === 'error') process.exitCode = ExitCode.ERROR;
           } finally {
