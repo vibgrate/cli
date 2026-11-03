@@ -634,6 +634,9 @@ describe('Python lockfiles', () => {
 
     fs.rmSync(path.join(root, 'uv.lock'));
     expect(lockfileVersion(root, 'pypi', 'click')).toBe('8.0.0');
+    expect(fullDependencyGraph(root)?.ecosystem).toBe('pypi');
+    expect(fullDependencyGraph(root)?.components).toEqual([{ package: 'click', version: '8.0.0' }]);
+    expect(fullDependencyGraph(root)?.edges).toBeUndefined();
   });
 
   it('matches PEP 503 normalised names across separators and case', () => {
@@ -655,6 +658,77 @@ describe('Python lockfiles', () => {
       }),
     );
     expect(lockfileVersion(root, 'pypi', 'pytest')).toBe('8.0.0');
+  });
+
+  it('exports Pipfile.lock default and develop packages, and skips editable and path entries', () => {
+    const wheel = 'a'.repeat(64);
+    const sdist = 'b'.repeat(64);
+    const coverage = 'c'.repeat(64);
+    const sharedDefault = 'd'.repeat(64);
+    const sharedDevelop = 'e'.repeat(64);
+    const secret = 'super-secret-token';
+    // `develop` is listed first so section order cannot decide the mark.
+    write(
+      'Pipfile.lock',
+      JSON.stringify({
+        develop: {
+          'Some_Pkg': { version: '==1.0.0' },
+          coverage: { version: '==7.6.0', hashes: [`sha256:${coverage}`, `sha256:${secret}`] },
+          shared: { version: '==9.9.9', hashes: [`sha256:${sharedDevelop}`] },
+          'editable-dev': { version: '==0.0.1', editable: true, path: './tools' },
+          gitpkg: { git: 'https://example.invalid/repo.git', ref: 'main' },
+        },
+        default: {
+          requests: { version: '==2.31.0', hashes: [`sha256:${sdist}`, `sha256:${wheel}`] },
+          shared: { version: '==1.2.0', hashes: [`sha256:${sharedDefault}`] },
+          'some-pkg': { version: '==1.0.0' },
+          localpkg: { version: '==0.1.0', editable: true, path: '.' },
+          vendor: { version: '==1.0.0', path: './vendor/pkg' },
+        },
+      }),
+    );
+    const graph = fullDependencyGraph(root);
+    expect(graph?.ecosystem).toBe('pypi');
+    expect(graph?.edges).toBeUndefined();
+    const byId = new Map((graph?.components ?? []).map((row) => [`${row.package}@${row.version}`, row]));
+    expect([...byId.keys()].sort()).toEqual([
+      'Some_Pkg@1.0.0',
+      'coverage@7.6.0',
+      'requests@2.31.0',
+      'shared@1.2.0',
+      'shared@9.9.9',
+      'some-pkg@1.0.0',
+    ]);
+    expect(byId.get('coverage@7.6.0')).toEqual({
+      package: 'coverage',
+      version: '7.6.0',
+      lockScope: 'dev',
+      digests: [{ alg: 'SHA-256', content: coverage }],
+    });
+    expect(byId.get('requests@2.31.0')).toEqual({
+      package: 'requests',
+      version: '2.31.0',
+      digests: [
+        { alg: 'SHA-256', content: wheel },
+        { alg: 'SHA-256', content: sdist },
+      ],
+    });
+    expect(byId.get('shared@1.2.0')).toEqual({
+      package: 'shared',
+      version: '1.2.0',
+      digests: [{ alg: 'SHA-256', content: sharedDefault }],
+    });
+    expect(byId.get('shared@9.9.9')?.lockScope).toBeUndefined();
+    expect(byId.get('Some_Pkg@1.0.0')?.lockScope).toBeUndefined();
+    expect(byId.get('some-pkg@1.0.0')?.lockScope).toBeUndefined();
+    expect(JSON.stringify(graph)).not.toContain(secret);
+  });
+
+  it('rejects a truncated Pipfile.lock instead of a partial component list', () => {
+    write('Pipfile.lock', '{"default": {"requests": {"version": "==2.31.0"}');
+    expect(() => fullDependencyGraph(root)).toThrow(LockfileParseError);
+    expect(() => fullDependencyGraph(root)).toThrow(/Pipfile\.lock/);
+    expect(() => fullDependencyGraph(root)).toThrow(/truncated or invalid JSON/);
   });
 
   it('returns undefined for Pipfile path and git entries', () => {

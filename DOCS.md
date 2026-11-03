@@ -2039,6 +2039,7 @@ Two other strings in the same file are easy to misread as package digests. `vcs.
 | `yarn.lock` | `integrity` | The same tokens. |
 | `Cargo.lock` | `checksum` | The SHA-256 hex of the crate. |
 | `poetry.lock`, `uv.lock` | `hash` | Each labeled hash on that package block (`sha256:…`). |
+| `Pipfile.lock` | `hashes` | Each `sha256:…` label on that package. An editable or path entry is not a component. |
 | `go.sum` | `h1:` on `<module> <version>` | The module zip, as SHA-256. |
 | `packages.lock.json` | `contentHash` | The nupkg SHA-512, as base64. |
 | `composer.lock` | `dist.shasum` | The dist archive's SHA-1 hex, when the value is 40 hexadecimal characters. A missing `dist`, an empty `shasum`, or any other value is omitted. |
@@ -2056,7 +2057,7 @@ That order is the same when the lockfile listed `sha512` before `sha256`. SPDX w
 
 Component order stays the order in [Several versions of one package](#several-versions-of-one-package): Package URL when the component has one, otherwise the package name, then the version. Digest text is not part of that sort. It is part of the document id. A lockfile edit that changes only those digest strings changes `serialNumber`, `documentNamespace`, and the hash arrays, and leaves the component order in place.
 
-`go.sum` lists a module twice: `<module> <version> h1:…` and `<module> <version>/go.mod h1:…`. The `/go.mod` line is not a second component, and its hash is not a second digest of the module. A `uv.lock` or `poetry.lock` package block can carry more than one `hash`. Those values stay on the one component, in the order above. An npm or pnpm integrity string that names more than one algorithm is read the same way. `--no-transitive` does not read the lockfile, so the hash arrays are omitted with the lockfile-only rows.
+`go.sum` lists a module twice: `<module> <version> h1:…` and `<module> <version>/go.mod h1:…`. The `/go.mod` line is not a second component, and its hash is not a second digest of the module. A `uv.lock` or `poetry.lock` package block can carry more than one `hash`. A `Pipfile.lock` package can carry more than one `hashes` entry. Those values stay on the one component, in the order above. An npm or pnpm integrity string that names more than one algorithm is read the same way. `--no-transitive` does not read the lockfile, so the hash arrays are omitted with the lockfile-only rows.
 
 ```bash
 vg scan --offline --no-graph --format json --out scan.json
@@ -2262,7 +2263,7 @@ is omitted on every package.
 | Source | Where it is written | CycloneDX `type` | SPDX `primaryPackagePurpose` |
 | --- | --- | --- | --- |
 | Scan root (the artifact's root directory name) | CycloneDX `metadata.component` only. It is not copied into `components`. SPDX has no package for the root. | `application` | Omitted. There is no package to carry the field. |
-| Lockfile package (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `Gemfile.lock`, `composer.lock`, `packages.lock.json`), including a package that only the lockfile lists | One CycloneDX component and one SPDX package | `library` | Omitted |
+| Lockfile package (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `Gemfile.lock`, `composer.lock`, `packages.lock.json`), including a package that only the lockfile lists | One CycloneDX component and one SPDX package | `library` | Omitted |
 | Manifest dependency from a scanned project (Node, Python, Rust, Go, Java, Kotlin, Scala, Ruby, PHP, .NET, Swift, Dart, and any other project the scan records) | One CycloneDX component and one SPDX package | `library` | Omitted |
 | Container image named by a `Dockerfile` `FROM` or a Compose `image:` line | The same kind of row. A Docker Hub image with no namespace is named `library/<image>`. The tag is the version. | `library` | Omitted |
 | Helm chart dependency (`Chart.yaml` `dependencies`) | The same kind of row. The chart itself is not a row. | `library` | Omitted |
