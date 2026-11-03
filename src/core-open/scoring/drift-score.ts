@@ -2,7 +2,7 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import * as crypto from 'node:crypto';
-import type { ProjectScan, DriftScore, Finding, RiskLevel, VibgrateConfig } from '../types.js';
+import type { DependencyRow, ProjectScan, DriftScore, Finding, RiskLevel, VibgrateConfig } from '../types.js';
 import { licenseParseDiagnostic } from '../licenses/diagnostic.js';
 import { dedupeLicenseFindings, licenseFindingEqualityKey, setLicenseFindingKey } from '../licenses/dedupe-findings.js';
 import { WARNING_CODES } from '../warnings.js';
@@ -159,6 +159,18 @@ function coverageConfidence(projects: ProjectScan[]): number | null {
 }
 
 /**
+ * Development rows a scanner did not resolve against a registry are exported
+ * for SBOM scope and are left out of age buckets. They are not a drift signal:
+ * a zero from an unlooked-up row would pull DriftScore toward "current".
+ * Rows that were resolved, including development rows in ecosystems that look
+ * them up, still count.
+ */
+function countsTowardDrift(dep: DependencyRow): boolean {
+  if (dep.section !== 'devDependencies') return true;
+  return dep.latestStable != null || dep.majorsBehind != null || dep.drift !== 'unknown';
+}
+
+/**
  * Compute the workspace DriftScore.
  *
  * Methodology `driftscore-2.0`: the score runs 0–100 where **0 means no drift
@@ -178,7 +190,7 @@ export function computeDriftScore(projects: ProjectScan[]): DriftScore {
   // The former standalone freshness pillar folds in here — the time term IS the
   // libyear signal.
   const depAgg = aggregateDependencyDrift(
-    projects.flatMap((p) => p.dependencies),
+    projects.flatMap((p) => p.dependencies.filter((dep) => countsTowardDrift(dep))),
     // Per-dependency context for the v3 floors: an unsupported/deprecated major
     // floors drift at 70, an abandoned ("no pulse") package at 50. Threaded from
     // the row where the ecosystem scanner set it; absent → the floor doesn't

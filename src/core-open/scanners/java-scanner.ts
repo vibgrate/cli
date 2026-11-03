@@ -191,15 +191,14 @@ function parsePom(xml: string, filePath: string): PomData {
     }
   }
 
-  // Extract dependencies
-  const depContainer = project.dependencies;
-  const rawDeps = depContainer?.dependency
-    ? (Array.isArray(depContainer.dependency) ? depContainer.dependency : [depContainer.dependency])
-    : [];
-
-  const dependencies: PomDependency[] = rawDeps
-    .filter((d: Record<string, unknown>) => d.groupId && d.artifactId)
-    .map((d: Record<string, unknown>) => readPomDependency(d, properties));
+  // Extract dependencies. Top-level blocks are stored first. The scan
+  // keeps the first versioned coordinate, so a later profile entry does not
+  // replace a top-level row.
+  const dependencies: PomDependency[] = [];
+  appendPomDependencies(dependencies, project.dependencies, properties, {
+    requireVersion: false,
+    profileOnly: false,
+  });
 
   // `<dependencyManagement>` is a version pin, not a declaration that this
   // project uses the artifact. A versioned pin is still emitted as its own
@@ -208,15 +207,29 @@ function parsePom(xml: string, filePath: string): PomData {
   // optional on the pin use the same section rules, so a test or optional
   // pin is not recorded as a production dependency. `<scope>import</scope>`
   // (a BOM) is not test, so that pin stays `dependencies`.
-  const mgmt = project.dependencyManagement?.dependencies;
-  const mgmtDeps = mgmt?.dependency
-    ? (Array.isArray(mgmt.dependency) ? mgmt.dependency : [mgmt.dependency])
-    : [];
+  appendPomDependencies(dependencies, project.dependencyManagement?.dependencies, properties, {
+    requireVersion: true,
+    profileOnly: false,
+  });
 
-  for (const d of mgmtDeps) {
-    if (d.groupId && d.artifactId && d.version) {
-      dependencies.push(readPomDependency(d as Record<string, unknown>, properties));
-    }
+  // `<profiles><profile>` may be one object or an array. Activation is not
+  // evaluated: `activeByDefault` and an inactive profile are both read.
+  // Profile `<dependencies>` and `<dependencyManagement>` use the same scope
+  // and optional rules. A profile-only production row is marked optional,
+  // because that coordinate applies only when the profile is active.
+  for (const profile of xmlList<{
+    dependencies?: unknown;
+    dependencyManagement?: { dependencies?: unknown };
+  }>(project.profiles?.profile)) {
+    if (!profile || typeof profile !== 'object') continue;
+    appendPomDependencies(dependencies, profile.dependencies, properties, {
+      requireVersion: false,
+      profileOnly: true,
+    });
+    appendPomDependencies(dependencies, profile.dependencyManagement?.dependencies, properties, {
+      requireVersion: true,
+      profileOnly: true,
+    });
   }
 
   // Modules
@@ -246,6 +259,41 @@ function parsePom(xml: string, filePath: string): PomData {
     parent,
     properties,
   };
+}
+
+/** One XML child is an object; several children are an array. */
+function xmlList<T>(value: T | T[] | undefined | null): T[] {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function appendPomDependencies(
+  dependencies: PomDependency[],
+  container: unknown,
+  properties: Record<string, string>,
+  options: { requireVersion: boolean; profileOnly: boolean },
+): void {
+  if (!container || typeof container !== 'object') return;
+  const nodes = xmlList<Record<string, unknown>>(
+    (container as { dependency?: Record<string, unknown> | Record<string, unknown>[] }).dependency,
+  );
+  for (const d of nodes) {
+    if (!d || typeof d !== 'object' || !d.groupId || !d.artifactId) continue;
+    if (options.requireVersion && !d.version) continue;
+    const dep = readPomDependency(d, properties);
+    dependencies.push(options.profileOnly ? markProfileOnlyDependency(dep) : dep);
+  }
+}
+
+/**
+ * Profile activation is not evaluated. A profile-only row that would be a
+ * production dependency is optional. `<scope>test</scope>` stays a dev row
+ * and still wins over optional.
+ */
+function markProfileOnlyDependency(dep: PomDependency): PomDependency {
+  if (dep.scope?.trim().toLowerCase() === 'test') return dep;
+  if (dep.optional) return dep;
+  return { ...dep, optional: true };
 }
 
 function resolveProperty(value: string, properties: Record<string, string>): string {
