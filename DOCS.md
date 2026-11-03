@@ -3841,7 +3841,10 @@ With no `--provider`, `vg code` chooses from what you have already configured, b
 | Flag | Default | Description |
 |------|---------|-------------|
 | `<instruction>` | — | What to change, in plain language. Omit it at a TTY for guided mode. |
-| `--provider <id>` | auto | `vibgrate-relay`, `ollama`, `lmstudio`, `foundry-local`, `openrouter`, `litellm`, `openai`, `together`, `llama-cpp` |
+| `--provider <id>` | auto | `vibgrate-relay`, `ollama`, `lmstudio`, `foundry-local`, `openrouter`, `litellm`, `openai`, `together`, `llama-cpp`, or `grok-build` (run the task on Grok Build over ACP, see below) |
+| `--acp-command <cmd>` | — | Run the task on an external Agent Client Protocol (ACP) agent instead of VG Code's own loop, e.g. `"grok agent stdio"` |
+| `--inject-capsule` | — | ACP agents: add the code graph's context for the task to the first prompt |
+| `--no-acp-mcp` | — | ACP agents: do not offer the local `vg serve` graph tools to the agent |
 | `--model <id>` | — | Model id (or set `VG_CODE_MODEL`) |
 | `--mode <mode>` | auto-fit | Code Mode: `spark` \| `flow` \| `forge` — preferred over raw model names |
 | `--model-path <gguf>` | — | GGUF path for `--provider llama-cpp` (weights are never auto-downloaded) |
@@ -3865,9 +3868,37 @@ With no `--provider`, `vg code` chooses from what you have already configured, b
 | `--session` | — | With `--stream-json`: stay open for further turns instead of exiting after one |
 | `--mock <file>` | — | Use a scripted reply instead of a model (offline; tests/CI/benchmarks) |
 | `-o, --out <file>` | — | Write the JSON result to a file (for CI/benchmarks) |
+| `--profile` | — | Print a one-line profile after each turn to stderr (steps, wall time, stop reason, tool calls, changes, visible activity lines) |
+| `--profile-out <file>` | — | Append one JSON profile record per turn to `<file>` (JSONL) |
+| `--trace-out <file>` | — | Append every protocol event, timestamped, to `<file>` (NDJSON audit trace) |
+| `--acp-log <file>` | — | ACP agents: append the raw protocol messages to `<file>` |
 | `--local` (global) | — | On-device model backends only — never a hosted model. Implies `--offline` |
 
 `--stream-json` is the protocol **Vibgrate for VS Code** speaks to the CLI: the panel renders the agent's steps, approves or denies each mutating tool call over stdin, and with `--session` keeps one warm graph across turns. It is a supported surface for any host UI, not just ours.
+
+Protocol version 6 adds two summary events so a host can keep the transcript short. An `activity` event folds a burst of tool calls into one line, such as `Explored 4 items · Edited 2 files · +18 −7`, and updates that line in place as the burst grows. A `changes-summary` event closes a turn that changed files with one card: each file with its net lines added and removed. The per-call events still arrive, so a host can show them in a debug view, and a host built for version 5 keeps working unchanged.
+
+#### Use Grok Build as the agent
+
+`vg code --provider grok-build "add a --timeout flag to the scan command"` runs the task on Grok Build (`grok agent stdio`) over the Agent Client Protocol (ACP) instead of VG Code's own loop. The rules around the agent stay the same:
+
+- Each edit and command still asks for your approval, or runs under `--auto` with the command denylist. Standing allow rules from `.vibgrate/code-approvals.json` apply.
+- Approved edits are checkpointed, so they can be undone.
+- Plan mode stays read-only: VG Code refuses every write and asks the agent to switch to its own plan mode when it has one.
+- File reads and writes the agent asks VG Code for stay inside the repository.
+- `--stream-json` and `--session` send the same events as the built-in loop, so the VS Code panel shows the same approval cards, activity lines, and Changes card.
+
+Install Grok Build and sign in first (`npm install -g @xai-official/grok`, then `grok login`). Grok Build signs in by itself, and the credential never passes through `vg`. For each session, VG Code offers the agent the local code graph tools (`vg serve`) as an MCP server. Pass `--no-acp-mcp` to skip that, or `--inject-capsule` to also add the graph's context for the task to the first prompt. `--acp-command "<cmd>"` runs any other ACP agent the same way.
+
+#### Profile a turn
+
+`--profile` prints one line per turn to stderr:
+
+```
+profile: steps=<n> stop=<reason> wall=<seconds>s tools=<n> changes=<n> activity=<lines> cards=<n> ttft=<seconds>s clean=yes|no backend=<id>
+```
+
+`activity` and `cards` count what a host following the default rendering rules shows: activity lines and Changes cards. `--profile-out <file>` appends the full record for each turn as JSON lines. `--trace-out <file>` appends every protocol event with its time offset, for auditing a run after the fact. `--acp-log <file>` records the raw messages exchanged with an ACP agent. Hosts that start `vg` for you can set `VG_CODE_PROFILE=1`, `VG_CODE_PROFILE_OUT`, `VG_CODE_TRACE_OUT`, and `VG_CODE_ACP_LOG` instead. These files stay on your machine, and credential-shaped values are masked before anything is written.
 
 Add `--json` for the full machine-readable result (proposed changes, diffs, and the verification summary), or `--out <file>` to write it for CI. Requires a map — run `vg` first if you have not built one.
 
