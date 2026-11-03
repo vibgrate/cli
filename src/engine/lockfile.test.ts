@@ -742,6 +742,86 @@ describe('Gemfile.lock and composer.lock edge cases', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
+  it('collects GEM, PATH, and GIT specs and drops the project gem', () => {
+    write(
+      'Gemfile.lock',
+      [
+        'PATH',
+        '  remote: .',
+        '  specs:',
+        '    myapp (0.1.0)',
+        '      rails (~> 7.1)',
+        '',
+        'GIT',
+        '  remote: .',
+        '  revision: abcdef',
+        '  specs:',
+        '    local-git-app (0.0.1)',
+        '',
+        'GIT',
+        '  remote: https://github.com/example/devise.git',
+        '  revision: 0123456789abcdef0123456789abcdef01234567',
+        '  specs:',
+        '    devise (4.9.3)',
+        '      bcrypt (~> 3.0)',
+        '',
+        'PATH',
+        '  remote: vendor/gems',
+        '  specs:',
+        '    billing (0.1.0)',
+        '',
+        'GEM',
+        '  remote: https://rubygems.org/',
+        '  specs:',
+        '    bcrypt (3.1.20)',
+        '    nokogiri (1.16.0-x86_64-linux)',
+        '      racc (~> 1.4)',
+        '    nokogiri (1.16.0-aarch64-linux)',
+        '    racc (1.7.3)',
+        '    rails (7.1.3)',
+        '      actionpack (= 7.1.3)',
+        '    actionpack (7.1.3)',
+        '    rspec (1.0.0.pre)',
+        '',
+        'PLATFORMS',
+        '  ruby',
+        '  x86_64-linux',
+        '',
+        'DEPENDENCIES',
+        '  rails (~> 7.1)',
+        '  devise!',
+        '  billing!',
+        '',
+        'BUNDLED WITH',
+        '  2.5.3',
+        '',
+      ].join('\n'),
+    );
+    const graph = fullDependencyGraph(root);
+    expect(graph?.ecosystem).toBe('ruby');
+    expect(graph?.edges).toBeUndefined();
+    expect(graph?.rootDependsOn).toEqual([]);
+    expect(graph?.components).toEqual([
+      { package: 'actionpack', version: '7.1.3' },
+      { package: 'bcrypt', version: '3.1.20' },
+      { package: 'billing', version: '0.1.0' },
+      { package: 'devise', version: '4.9.3' },
+      { package: 'nokogiri', version: '1.16.0' },
+      { package: 'racc', version: '1.7.3' },
+      { package: 'rails', version: '7.1.3' },
+      { package: 'rspec', version: '1.0.0.pre' },
+    ]);
+    // The point lookup and the collector share one version pattern.
+    expect(lockfileVersion(root, 'ruby', 'nokogiri')).toBe('1.16.0');
+    expect(graph?.components.map((row) => row.package)).not.toContain('myapp');
+    expect(graph?.components.map((row) => row.package)).not.toContain('local-git-app');
+  });
+
+  it('returns undefined when Gemfile.lock lists only the project gem', () => {
+    write('Gemfile.lock', ['PATH', '  remote: .', '  specs:', '    myapp (0.1.0)', ''].join('\n'));
+    expect(fullDependencyGraph(root)).toBeUndefined();
+  });
+
   it('php: packages-dev entries resolve', () => {
     write(
       'composer.lock',
