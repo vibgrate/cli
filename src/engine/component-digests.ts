@@ -154,6 +154,15 @@ export function digestFromCargoChecksum(checksum: string | undefined): Component
   return [{ alg: 'SHA-256', content: checksum }];
 }
 
+/**
+ * `composer.lock` `dist.shasum`, the SHA-1 hex of the dist archive.
+ * Anything else (empty, a token, a SHA-256) is not a Composer dist digest.
+ */
+export function digestFromComposerShasum(shasum: string | undefined): ComponentDigest[] {
+  if (!shasum || !/^[a-fA-F0-9]{40}$/.test(shasum)) return [];
+  return [{ alg: 'SHA-1', content: shasum }];
+}
+
 /** go.sum `h1:` value for the module zip. The `/go.mod` line is not passed here. */
 export function digestFromGoSumHash(hash: string | undefined): ComponentDigest[] {
   if (!hash?.startsWith('h1:')) return [];

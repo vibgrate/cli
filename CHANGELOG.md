@@ -14,6 +14,13 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` expands PEP 735 `{include-group}` entries in `[dependency-groups]`.**
+  An include pulls in that group's requirements from the same `pyproject.toml`.
+  Group names are normalised (lowercase; runs of `-`, `_`, and `.` collapse to
+  `-`), so `Dev_Tools` and `dev-tools` are one group. An include cycle stops
+  at the repeated group and writes one warning. Production and optional
+  section precedence is unchanged.
+
 - **`vg scan` reads `dev-requirements.txt`.** Python requirements-file discovery
   and parsing now use the same filename check, so dependencies declared only in
   `dev-requirements.txt` are included in the scan (#523).
@@ -43,8 +50,8 @@ backward compatible.
   is also in `[project] dependencies` or a required
   `[tool.poetry.dependencies]` entry stays a production row. A package in a
   dev group and an optional extra, with no production row, stays a
-  development row. A `{include-group = "..."}` entry is not expanded. The
-  `python` key is still not a dependency.
+  development row. A `{include-group = "..."}` entry expands to that group's
+  requirements. The `python` key is still not a dependency.
 - **`vg sbom export` marks Gradle test configurations as development dependencies.** A `testImplementation`, `testRuntimeOnly`, or `testCompileOnly` dependency in `build.gradle` or `build.gradle.kts` is stored as section `devDependencies`. CycloneDX component `scope` is `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. `implementation`, `api`, `compileOnly`, `runtimeOnly`, and `platform` stay section `dependencies`. A coordinate declared on a production configuration and a test configuration stays a production dependency, and the production declaration supplies the version. `vibgrate:scope` stays `direct`.
 
 - **`vg scan --vulns` JSON keeps one finding when CVE, GHSA, and OSV ids are aliases.** Linked ids, including a chain through a third id, collapse to one group. The group id is the lowest CVE in the group, or the lowest advisory id when there is no CVE. A single advisory keeps its own id. Alias lists are sorted, and the same tree with the same `--package-manifest` writes the same group on every run. SARIF still writes one result per advisory id.
