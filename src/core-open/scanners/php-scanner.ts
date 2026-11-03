@@ -96,7 +96,7 @@ async function parseComposerJson(filePath: string, cache?: FileCache): Promise<{
     ? await cache.readJsonFile(filePath)
     : await readJsonFile(filePath) as any;
   
-  const deps: PhpDependency[] = [];
+  const deps = new Map<string, PhpDependency>();
   let phpVersion: string | undefined;
 
   // Extract PHP version requirement
@@ -104,31 +104,38 @@ async function parseComposerJson(filePath: string, cache?: FileCache): Promise<{
     phpVersion = data.require.php;
   }
 
-  // Extract dependencies
+  // Production rows are recorded first. A name that also appears in
+  // `require-dev` stays a production row, and this declaration supplies the spec.
   if (data.require && typeof data.require === 'object') {
     for (const [name, version] of Object.entries(data.require)) {
-      if (name === 'php' || name.startsWith('ext-')) continue;
-      deps.push({
-        name,
-        version: String(version),
-        isDev: false,
-      });
+      rememberComposerDep(deps, name, version, false);
     }
   }
 
-  // Extract dev dependencies
   if (data['require-dev'] && typeof data['require-dev'] === 'object') {
     for (const [name, version] of Object.entries(data['require-dev'])) {
-      if (name === 'php' || name.startsWith('ext-')) continue;
-      deps.push({
-        name,
-        version: String(version),
-        isDev: true,
-      });
+      rememberComposerDep(deps, name, version, true);
     }
   }
 
-  return { phpVersion, deps };
+  return { phpVersion, deps: [...deps.values()] };
+}
+
+/** Skip platform requirements. A name in both tables is stored once, as production. */
+function rememberComposerDep(
+  deps: Map<string, PhpDependency>,
+  name: string,
+  version: unknown,
+  isDev: boolean,
+): void {
+  if (name === 'php' || name.startsWith('ext-')) return;
+  const row: PhpDependency = { name, version: String(version), isDev };
+  const existing = deps.get(name);
+  if (!existing) {
+    deps.set(name, row);
+    return;
+  }
+  if (existing.isDev && !isDev) deps.set(name, row);
 }
 
 /**
@@ -260,7 +267,8 @@ async function scanOnePhpProject(
     rethrowLockfileParseError(err);
   }
   
-  // Filter out dev dependencies for main analysis
+  // Packagist lookups and drift buckets stay on production rows.
+  // Development rows are still emitted, and they do not change those buckets.
   const prodDeps = allDeps.filter(d => !d.isDev);
   
   // Determine PHP runtime version lag
@@ -327,11 +335,9 @@ async function scanOnePhpProject(
       buckets.unknown++;
     }
 
-    const section = dep.isDev ? 'devDependencies' as const : 'dependencies' as const;
-
     dependencies.push({
       package: dep.name,
-      section,
+      section: 'dependencies',
       currentSpec: dep.version,
       resolvedVersion,
       latestStable,
@@ -339,7 +345,7 @@ async function scanOnePhpProject(
       drift,
     });
 
-    // Detect known frameworks
+    // Development packages are not production frameworks.
     if (dep.name in KNOWN_PHP_FRAMEWORKS) {
       frameworks.push({
         name: KNOWN_PHP_FRAMEWORKS[dep.name]!,
@@ -348,6 +354,21 @@ async function scanOnePhpProject(
         majorsBehind,
       });
     }
+  }
+
+  for (const dep of allDeps) {
+    if (!dep.isDev) continue;
+    const resolvedVersionStr = resolvedVersions.get(dep.name);
+    const resolvedVersion = resolvedVersionStr ? recordedSemver(resolvedVersionStr) : null;
+    dependencies.push({
+      package: dep.name,
+      section: 'devDependencies',
+      currentSpec: dep.version,
+      resolvedVersion,
+      latestStable: null,
+      majorsBehind: null,
+      drift: 'unknown',
+    });
   }
 
   // Sort: worst drift first
