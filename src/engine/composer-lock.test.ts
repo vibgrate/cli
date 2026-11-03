@@ -66,7 +66,7 @@ describe('composer.lock SBOM graph', () => {
     expect(graph?.edges).toBeUndefined();
     expect(graph?.rootDependsOn).toEqual([]);
     expect(graph?.components).toEqual([
-      { package: 'acme/local', version: 'dev-main', development: true },
+      { package: 'acme/local', version: 'dev-main', lockScope: 'dev' },
       {
         package: 'monolog/monolog',
         version: '3.5.0',
@@ -79,7 +79,7 @@ describe('composer.lock SBOM graph', () => {
         package: 'phpunit/phpunit',
         version: '10.5.0',
         digests: [{ alg: 'SHA-1', content: 'b'.repeat(40) }],
-        development: true,
+        lockScope: 'dev',
       },
       { package: 'psr/log', version: '3.0.0' },
       { package: 'vendor/no-shasum', version: '1.2.3' },
@@ -97,8 +97,8 @@ describe('composer.lock SBOM graph', () => {
       }),
     );
     expect(fullDependencyGraph(root)?.components).toEqual([
-      { package: 'phpunit/phpunit', version: '10.5.0', development: true },
-      { package: 'vendor/sha256', version: '1.0.0', development: true },
+      { package: 'phpunit/phpunit', version: '10.5.0', lockScope: 'dev' },
+      { package: 'vendor/sha256', version: '1.0.0', lockScope: 'dev' },
     ]);
   });
 

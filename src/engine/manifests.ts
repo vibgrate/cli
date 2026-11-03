@@ -292,7 +292,8 @@ function looksLikeGoModule(token: string): boolean {
     token === 'replace' ||
     token === 'exclude' ||
     token === 'retract' ||
-    token === 'toolchain'
+    token === 'toolchain' ||
+    token === 'tool'
   ) {
     return false;
   }

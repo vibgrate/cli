@@ -1,8 +1,8 @@
 /**
  * `vg sbom export` expands `composer.lock`. Production `packages` are
  * transitive when the scan did not declare them. `packages-dev` are
- * development rows. `require-dev` stays out of the scan, so `--no-transitive`
- * (no lockfile graph) omits those rows.
+ * development rows. A `require-dev` package is a direct development row, so
+ * `--no-transitive` (no lockfile graph) still keeps it.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -130,7 +130,7 @@ describe('sbom export: composer.lock', () => {
     const first = await scanned();
     expect(first.again).toBe(JSON.stringify(first.cdx));
     expect(first.projects).toHaveLength(1);
-    expect(first.projects[0]!.dependencies.map((dep) => dep.package)).toEqual(['monolog/monolog']);
+    expect(first.projects[0]!.dependencies.map((dep) => dep.package)).toEqual(['monolog/monolog', 'phpunit/phpunit']);
     expect(first.projects[0]!.dependencies[0]).toMatchObject({
       section: 'dependencies',
       resolvedVersion: '3.5.0',
@@ -155,8 +155,9 @@ describe('sbom export: composer.lock', () => {
     expect(byName.get('psr/log')?.scope).toBeUndefined();
     expect(vibScope(first.cdx, 'psr/log')).toBe('transitive');
 
+    expect(vibScope(first.cdx, 'phpunit/phpunit')).toBe('direct');
+    expect(vibScope(first.cdx, 'sebastian/comparator')).toBe('transitive');
     for (const name of ['phpunit/phpunit', 'sebastian/comparator']) {
-      expect(vibScope(first.cdx, name)).toBe('transitive');
       expect(byName.get(name)?.scope).toBe('excluded');
     }
     expect(byName.get('phpunit/phpunit')?.purl).toBe('pkg:composer/phpunit/phpunit@10.5.0');
@@ -172,7 +173,7 @@ describe('sbom export: composer.lock', () => {
     );
 
     const manifestOnly = toCycloneDx(artifact(first.projects)) as Cdx;
-    expect(manifestOnly.components.map((row) => row.name)).toEqual(['monolog/monolog']);
+    expect(manifestOnly.components.map((row) => row.name)).toEqual(['monolog/monolog', 'phpunit/phpunit']);
   });
 
   it('fails the export when composer.lock is truncated', async () => {

@@ -330,6 +330,136 @@ describe('sbom helpers', () => {
     );
   });
 
+  it('marks lockfile-only npm rows from dev, optional, and devOptional, and keeps manifest rows', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-sbom-scope-'));
+    try {
+      fs.writeFileSync(
+        path.join(root, 'package-lock.json'),
+        JSON.stringify({
+          name: 'scope-fixture',
+          lockfileVersion: 3,
+          packages: {
+            '': {
+              name: 'scope-fixture',
+              dependencies: { 'left-pad': '1.3.0', shared: '1.0.0' },
+              devDependencies: { typescript: '5.4.5' },
+              optionalDependencies: { fsevents: '2.3.3' },
+            },
+            'node_modules/left-pad': { version: '1.3.0', dependencies: { 'nested-prod': '1.0.0' } },
+            'node_modules/nested-prod': { version: '1.0.0' },
+            'node_modules/typescript': { version: '5.4.5', optional: true, dependencies: { 'nested-dev': '1.0.0' } },
+            'node_modules/nested-dev': { version: '1.0.0', dev: true },
+            'node_modules/fsevents': { version: '2.3.3', optional: true },
+            'node_modules/dev-optional-pkg': { version: '1.2.3', dev: true, optional: true, devOptional: true },
+            'node_modules/shared': { version: '1.0.0', dev: true },
+          },
+        }),
+      );
+      const artifact = makeArtifact('1.3.0', 90);
+      artifact.projects[0]!.name = 'scope-fixture';
+      artifact.projects[0]!.dependencies = [
+        row('left-pad', '1.3.0', 'dependencies'),
+        row('shared', '1.0.0', 'dependencies'),
+        row('typescript', '5.4.5', 'devDependencies'),
+        row('fsevents', '2.3.3', 'optionalDependencies'),
+      ];
+      const graph = collectLockfileGraph(artifact, root);
+      expect(graph?.components.find((component) => component.package === 'nested-prod')?.lockScope).toBeUndefined();
+      expect(graph?.components.find((component) => component.package === 'nested-dev')?.lockScope).toBe('dev');
+      expect(graph?.components.find((component) => component.package === 'dev-optional-pkg')?.lockScope).toBe('dev');
+
+      const cdx = toCycloneDx(artifact, graph) as {
+        components: Array<{ name: string; scope?: string; properties: Array<{ name: string; value: string }> }>;
+        dependencies: Array<{ ref: string; dependsOn: string[] }>;
+      };
+      const byName = new Map(cdx.components.map((component) => [component.name, component]));
+      const vibScope = (name: string): string | undefined =>
+        byName.get(name)?.properties.find((property) => property.name === 'vibgrate:scope')?.value;
+      expect(byName.get('nested-prod')?.scope).toBeUndefined();
+      expect(byName.get('nested-dev')?.scope).toBe('excluded');
+      expect(byName.get('dev-optional-pkg')?.scope).toBe('excluded');
+      expect(byName.get('fsevents')?.scope).toBe('optional');
+      expect(byName.get('typescript')?.scope).toBe('excluded');
+      expect(byName.get('left-pad')?.scope).toBeUndefined();
+      expect(byName.get('shared')?.scope).toBeUndefined();
+      expect(vibScope('nested-dev')).toBe('transitive');
+      expect(vibScope('dev-optional-pkg')).toBe('transitive');
+      expect(vibScope('nested-prod')).toBe('transitive');
+      expect(vibScope('typescript')).toBe('direct');
+      expect(vibScope('shared')).toBe('direct');
+      expect(cdx.dependencies[0]).toEqual({
+        ref: 'vibgrate-root',
+        dependsOn: ['pkg:npm/fsevents@2.3.3', 'pkg:npm/left-pad@1.3.0', 'pkg:npm/shared@1.0.0'],
+      });
+
+      const spdx = toSpdx(artifact, graph) as {
+        packages: Array<{ name: string; annotations: Array<{ comment: string }> }>;
+        relationships: Array<{ spdxElementId: string; relatedSpdxElementId: string; relationshipType: string }>;
+      };
+      const annotation = (name: string): string => spdx.packages.find((pkg) => pkg.name === name)!.annotations[0]!.comment;
+      expect(annotation('nested-dev')).toContain('scope=transitive');
+      expect(annotation('nested-prod')).toContain('scope=transitive');
+      expect(annotation('dev-optional-pkg')).toContain('scope=transitive');
+      expect(spdx.packages.map((pkg) => pkg.name)).toEqual([
+        'dev-optional-pkg',
+        'fsevents',
+        'left-pad',
+        'nested-dev',
+        'nested-prod',
+        'shared',
+        'typescript',
+      ]);
+      expect(spdx.relationships).toEqual([
+        { spdxElementId: 'SPDXRef-Package-2', relatedSpdxElementId: 'SPDXRef-DOCUMENT', relationshipType: 'OPTIONAL_DEPENDENCY_OF' },
+        { spdxElementId: 'SPDXRef-DOCUMENT', relatedSpdxElementId: 'SPDXRef-Package-3', relationshipType: 'DEPENDS_ON' },
+        { spdxElementId: 'SPDXRef-DOCUMENT', relatedSpdxElementId: 'SPDXRef-Package-6', relationshipType: 'DEPENDS_ON' },
+        { spdxElementId: 'SPDXRef-Package-1', relatedSpdxElementId: 'SPDXRef-DOCUMENT', relationshipType: 'DEV_DEPENDENCY_OF' },
+        { spdxElementId: 'SPDXRef-Package-4', relatedSpdxElementId: 'SPDXRef-DOCUMENT', relationshipType: 'DEV_DEPENDENCY_OF' },
+        { spdxElementId: 'SPDXRef-Package-7', relatedSpdxElementId: 'SPDXRef-DOCUMENT', relationshipType: 'DEV_DEPENDENCY_OF' },
+        { spdxElementId: 'SPDXRef-Package-3', relatedSpdxElementId: 'SPDXRef-Package-5', relationshipType: 'DEPENDS_ON' },
+        { spdxElementId: 'SPDXRef-Package-7', relatedSpdxElementId: 'SPDXRef-Package-4', relationshipType: 'DEPENDS_ON' },
+      ]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('merges npm install scope across projects with production beating optional beating dev', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-sbom-scope-merge-'));
+    const writeLock = (dir: string, packages: Record<string, unknown>): void => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages }));
+    };
+    try {
+      writeLock(path.join(root, 'a'), {
+        '': { name: 'a' },
+        'node_modules/pkg': { version: '1.0.0', dev: true },
+        'node_modules/mixed': { version: '1.0.0', dev: true },
+      });
+      writeLock(path.join(root, 'b'), {
+        '': { name: 'b' },
+        'node_modules/pkg': { version: '1.0.0' },
+        'node_modules/mixed': { version: '1.0.0', optional: true },
+      });
+      const artifact = makeArtifact('1.0.0', 90);
+      const base = artifact.projects[0]!;
+      artifact.projects = [
+        { ...base, path: 'a', name: 'a', dependencies: [] },
+        { ...base, path: 'b', name: 'b', dependencies: [] },
+      ];
+      const graph = collectLockfileGraph(artifact, root);
+      const scopeOf = (name: string): string | undefined => graph?.components.find((component) => component.package === name)?.lockScope;
+      expect(scopeOf('pkg')).toBeUndefined();
+      expect(scopeOf('mixed')).toBe('optional');
+
+      const cdx = toCycloneDx(artifact, graph) as { components: Array<{ name: string; scope?: string }> };
+      expect(cdx.components.find((component) => component.name === 'pkg')?.scope).toBeUndefined();
+      expect(cdx.components.find((component) => component.name === 'mixed')?.scope).toBe('optional');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('produces a deterministic serialNumber for identical content', () => {
     const a = toCycloneDx(makeArtifact('5.3.0', 90)) as { serialNumber: string };
     const b = toCycloneDx(makeArtifact('5.3.0', 90)) as { serialNumber: string };
