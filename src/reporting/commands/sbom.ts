@@ -38,7 +38,9 @@ interface FlattenedDependency {
   scope: 'direct' | 'transitive';
   /**
    * Manifest sections that declared this direct identity, sorted.
-   * Empty on a lockfile-only row. Not written as `vibgrate:scope`.
+   * Empty on a lockfile-only row, except a `Pipfile.lock` package that
+   * appears only in `develop`, which is recorded as `devDependencies` so
+   * the export marks it as a development row. Not written as `vibgrate:scope`.
    */
   manifestSections: DepSection[];
   /** Which package registry this dependency resolves against — picks the purl scheme. */
@@ -745,7 +747,7 @@ export function flattenDependencies(
       drift: 'unknown',
       majorsBehind: null,
       scope: 'transitive',
-      manifestSections: [],
+      manifestSections: dep.development ? ['devDependencies'] : [],
       ecosystem,
       mergeWarnings: [],
       digests: orderComponentDigests(dep.digests ?? []),
@@ -801,6 +803,7 @@ function copyLockfileComponent(component: LockfileComponent): LockfileComponent 
     package: component.package,
     version: component.version,
     ...(digests.length ? { digests } : {}),
+    ...(component.development ? { development: true } : {}),
   };
 }
 
@@ -809,6 +812,7 @@ function unionLockfileDigests(kept: LockfileComponent, incoming: LockfileCompone
     package: kept.package,
     version: kept.version,
     digests: [...(kept.digests ?? []), ...(incoming.digests ?? [])],
+    ...(kept.development ? { development: true } : {}),
   });
 }
 
@@ -900,6 +904,7 @@ export function collectLockfileGraph(artifact: ScanArtifact, root: string): Lock
       package: acc.component.package,
       version: acc.component.version,
       ...(acc.component.digests?.length ? { digests: acc.component.digests } : {}),
+      ...(acc.component.development ? { development: true } : {}),
       ecosystem: acc.ecosystem,
       projects: sortedUnique(acc.projects),
       winningProject: acc.winningProject,

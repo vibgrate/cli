@@ -288,6 +288,13 @@ export interface LockfileComponent {
    * Omitted when it recorded none. Sorted by algorithm name, then value.
    */
   digests?: ComponentDigest[];
+  /**
+   * Set when this lockfile lists the package only as a development dependency.
+   * `Pipfile.lock` sets it for a name that appears in `develop` and not in
+   * `default`. The same name in `default` leaves it unset. A lockfile-only
+   * SBOM row with this flag is a development dependency.
+   */
+  development?: boolean;
 }
 
 /**
@@ -336,7 +343,8 @@ export function fullDependencyGraph(root: string): LockfileGraph | undefined {
     componentsOnly(cargoLockTree(root), 'rust') ??
     componentsOnly(goSumTree(root), 'go') ??
     componentsOnly(poetryLikeLockTree(root, 'poetry.lock'), 'pypi') ??
-    componentsOnly(poetryLikeLockTree(root, 'uv.lock'), 'pypi')
+    componentsOnly(poetryLikeLockTree(root, 'uv.lock'), 'pypi') ??
+    componentsOnly(pipfileLockTree(root), 'pypi')
   );
 }
 
@@ -694,6 +702,86 @@ function poetryLikeLockTree(root: string, file: string): LockfileComponent[] | u
     rememberComponent(out, { package: nm[1], version: ver[1], ...(digests.length ? { digests } : {}) });
   }
   return out.size ? sortComponents(out) : undefined;
+}
+
+/**
+ * `Pipfile.lock` — JSON `default` and `develop` maps. Versions are written
+ * `==1.2.3`; the leading `==` is not part of the installed version. `hashes`
+ * are `sha256:<hex>` labels and become component digests. An editable install
+ * and a path entry are local trees, not PyPI packages, and are skipped (they
+ * have no registry version). A name that appears only under `develop` is a
+ * development component. The same name under `default` stays production,
+ * whichever section is listed first. No edges: the file does not record which
+ * package required which.
+ */
+function pipfileLockTree(root: string): LockfileComponent[] | undefined {
+  const parsed = readCheckedJson(root, 'Pipfile.lock');
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'Pipfile.lock', (rel, notes) => notePipfileLock(parsed, rel, notes));
+  const data = parsed as Record<string, unknown>;
+  const out = new Map<string, LockfileComponent>();
+  const productionNames = new Set<string>();
+  collectPipfileSection(data.default, false, out, productionNames);
+  collectPipfileSection(data.develop, true, out, productionNames);
+  return out.size ? sortComponents(out) : undefined;
+}
+
+function collectPipfileSection(
+  section: unknown,
+  develop: boolean,
+  out: Map<string, LockfileComponent>,
+  productionNames: Set<string>,
+): void {
+  if (!section || typeof section !== 'object' || Array.isArray(section)) return;
+  const deps = section as Record<string, unknown>;
+  for (const name of Object.keys(deps).sort()) {
+    const entry = deps[name];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const version = pipfileRegistryVersion(record);
+    if (!version) continue;
+    const normalised = pep503(name);
+    if (!develop) productionNames.add(normalised);
+    const digests = pipfileDigests(record.hashes);
+    const development = develop && !productionNames.has(normalised);
+    rememberPipfileComponent(out, { package: name, version, ...(digests.length ? { digests } : {}) }, development);
+  }
+}
+
+/** Registry pin from one Pipfile.lock entry. Editable and path installs are not pins. */
+function pipfileRegistryVersion(entry: Record<string, unknown>): string | undefined {
+  if (entry.editable === true) return undefined;
+  if (typeof entry.path === 'string') return undefined;
+  if (typeof entry.version !== 'string') return undefined;
+  const version = entry.version.replace(/^==/, '').trim();
+  return version.length > 0 ? version : undefined;
+}
+
+/** `hashes: ["sha256:<hex>", ...]` — the same label shape poetry.lock stores on `hash`. */
+function pipfileDigests(hashes: unknown): ComponentDigest[] {
+  if (!Array.isArray(hashes)) return [];
+  const lines: string[] = [];
+  for (const hash of hashes) {
+    if (typeof hash !== 'string' || hash.includes('"') || hash.includes('\n')) continue;
+    lines.push(`hash = "${hash}"`);
+  }
+  return digestsFromHashLabels(lines.join('\n'));
+}
+
+/**
+ * One row per name and version. `default` is applied first, so a later
+ * `develop` copy of that name and version does not become a development row.
+ * A `develop` copy whose name is already in `default` at another version is
+ * passed with `development` false. Digests from both rows are kept and ordered.
+ */
+function rememberPipfileComponent(out: Map<string, LockfileComponent>, component: LockfileComponent, development: boolean): void {
+  const key = `${component.package}@${component.version}`;
+  const existing = out.get(key);
+  const digests = orderComponentDigests([...(existing?.digests ?? []), ...(component.digests ?? [])]);
+  const next: LockfileComponent = { package: component.package, version: component.version };
+  if (digests.length) next.digests = digests;
+  if (existing ? existing.development === true && development : development) next.development = true;
+  out.set(key, next);
 }
 
 /** npm `package-lock.json` — JSON, deterministic, no dependency. */
