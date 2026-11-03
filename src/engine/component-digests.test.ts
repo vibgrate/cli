@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   digestFromCargoChecksum,
+  digestFromComposerShasum,
   digestFromGoSumHash,
   digestsFromHashLabels,
   digestsFromSri,
@@ -58,6 +59,8 @@ describe('orderComponentDigests', () => {
     expect(digestsFromSri('sha512-super-secret-token')).toEqual([]);
     expect(digestsFromSri(`sha512-${SHA512} sha256-not-a-digest`)).toEqual([{ alg: 'SHA-512', content: SHA512 }]);
     expect(digestFromCargoChecksum('super-secret-token')).toEqual([]);
+    expect(digestFromComposerShasum('super-secret-token')).toEqual([]);
+    expect(digestFromComposerShasum('a'.repeat(64))).toEqual([]);
     expect(digestFromGoSumHash('h1:abc=')).toEqual([]);
     expect(digestsFromHashLabels('hash = "sha256:super-secret-token"')).toEqual([]);
   });

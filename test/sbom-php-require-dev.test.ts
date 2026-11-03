@@ -229,11 +229,16 @@ describe('composer.json require-dev rows', () => {
     expect(vibScope(cdx, 'monolog/monolog')).toBe('direct');
     expect(scopeOf(cdx, 'monolog/monolog')).toBeUndefined();
     expect(scopeOf(cdx, 'guzzlehttp/guzzle')).toBeUndefined();
-    expect(cdx.components.some((row) => row.name === 'only-in-lock/prod' || row.name === 'only-in-lock/dev')).toBe(false);
+    // composer.lock is expanded: lockfile-only packages are transitive rows,
+    // and a `packages-dev` entry keeps its development mark.
+    expect(vibScope(cdx, 'only-in-lock/prod')).toBe('transitive');
+    expect(scopeOf(cdx, 'only-in-lock/prod')).toBeUndefined();
+    expect(vibScope(cdx, 'only-in-lock/dev')).toBe('transitive');
+    expect(scopeOf(cdx, 'only-in-lock/dev')).toBe('excluded');
     expect(cdx.components.some((row) => row.name === 'php' || row.name.startsWith('ext-'))).toBe(false);
     expect(cdx.dependencies).toBeUndefined();
 
-    expect(devRels(spdx).sort()).toEqual(['phpstan/phpstan', 'phpunit/phpunit']);
+    expect(devRels(spdx).sort()).toEqual(['only-in-lock/dev', 'phpstan/phpstan', 'phpunit/phpunit']);
     expect(spdx.relationships.some((rel) => rel.relationshipType === 'DEV_DEPENDENCY_OF' && rel.relatedSpdxElementId !== 'SPDXRef-DOCUMENT')).toBe(false);
     expect(spdx.relationships.some((rel) => rel.relationshipType === 'DEPENDS_ON')).toBe(false);
     expect(spdx.packages.some((pkg) => pkg.name === 'monolog/monolog')).toBe(true);
