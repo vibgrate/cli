@@ -1,6 +1,7 @@
 /**
  * PEP 735 `[dependency-groups]` and Poetry dependency groups are development
- * manifest rows. `{include-group = "..."}` is skipped, not expanded.
+ * manifest rows. `{include-group = "..."}` expands to that group's requirements.
+ * Group names are normalised. An include cycle warns once and stops.
  * A name also declared as a production requirement stays production.
  * A name in a dev group and an optional extra, with no production row, stays
  * a development dependency. A name in all three stays optional.
@@ -8,7 +9,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PyPICache } from '../src/core-open/scanners/pypi-cache.js';
 import { scanPythonProjects } from '../src/core-open/scanners/python-scanner.js';
 import { Semaphore } from '../src/core-open/utils/semaphore.js';
@@ -253,5 +254,96 @@ describe('sbom export: Python dependency groups', () => {
     for (const rel of exported.spdx.relationships.filter((row) => row.relationshipType === 'DEV_DEPENDENCY_OF')) {
       expect(rel.relatedSpdxElementId).toBe('SPDXRef-DOCUMENT');
     }
+  });
+
+  it('expands an included group, including a requirement listed only there', async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-pyproject-include-group-'));
+    fs.writeFileSync(
+      path.join(root, 'pyproject.toml'),
+      `[project]
+name = "app"
+dependencies = ["httpx>=0.27"]
+
+[dependency-groups]
+dev = [
+  {include-group = 'lint'},
+  "ruff>=9",
+]
+lint = [
+  {include-group = "typing"},
+  "ruff==1.0.0",
+  "only-via-include>=2",
+  "httpx==1.0.0",
+]
+typing = ["mypy>=1.8"]
+`,
+    );
+    const projects = await scan(root);
+    const byPackage = new Map(projects[0]!.dependencies.map((dep) => [dep.package, dep]));
+    // The include is expanded before the later direct requirement, so the
+    // included spec is the one kept. Walking arrays and skipping the include
+    // would keep ruff>=9 instead.
+    expect(byPackage.get('ruff')?.section).toBe('devDependencies');
+    expect(byPackage.get('ruff')?.currentSpec).toBe('==1.0.0');
+    expect(byPackage.get('only-via-include')?.section).toBe('devDependencies');
+    expect(byPackage.get('only-via-include')?.currentSpec).toBe('>=2');
+    expect(byPackage.get('mypy')?.section).toBe('devDependencies');
+    expect(byPackage.get('mypy')?.currentSpec).toBe('>=1.8');
+    expect(byPackage.has('lint')).toBe(false);
+    expect(byPackage.has('typing')).toBe(false);
+    expect(byPackage.get('httpx')?.section).toBe('dependencies');
+    expect(byPackage.get('httpx')?.currentSpec).toBe('>=0.27');
+  });
+
+  it('stops an include cycle after one warning', async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-pyproject-include-cycle-'));
+    fs.writeFileSync(
+      path.join(root, 'pyproject.toml'),
+      `[project]
+name = "app"
+
+[dependency-groups]
+a = ["alpha>=1", {include-group = "b"}]
+b = ["beta>=1", {include-group = "a"}]
+`,
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const projects = await scan(root);
+      const byPackage = new Map(projects[0]!.dependencies.map((dep) => [dep.package, dep]));
+      expect(byPackage.get('alpha')?.section).toBe('devDependencies');
+      expect(byPackage.get('beta')?.section).toBe('devDependencies');
+      expect(byPackage.has('a')).toBe(false);
+      expect(byPackage.has('b')).toBe(false);
+      const cycles = warn.mock.calls.filter((args) => String(args[0]).includes('include cycle detected'));
+      expect(cycles).toHaveLength(1);
+      expect(String(cycles[0]![0])).toContain('a, b');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('normalises dependency group names when resolving include-group', async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-pyproject-include-normalise-'));
+    fs.writeFileSync(
+      path.join(root, 'pyproject.toml'),
+      `[project]
+name = "app"
+
+[dependency-groups]
+dev = [
+  {include-group = "Dev_Tools"},
+  "ruff>=0.9",
+]
+"dev-tools" = ["ruff==0.6.0", "from-dev-tools>=1"]
+`,
+    );
+    const projects = await scan(root);
+    const byPackage = new Map(projects[0]!.dependencies.map((dep) => [dep.package, dep]));
+    expect(byPackage.get('ruff')?.section).toBe('devDependencies');
+    expect(byPackage.get('ruff')?.currentSpec).toBe('==0.6.0');
+    expect(byPackage.get('from-dev-tools')?.section).toBe('devDependencies');
+    expect(byPackage.has('Dev_Tools')).toBe(false);
+    expect(byPackage.has('dev-tools')).toBe(false);
   });
 });

@@ -153,11 +153,43 @@ const KNOWN_RUBY_FRAMEWORKS: Record<string, string> = {
 
 // Latest Ruby major.minor is resolved at scan time — see runtime-baselines.ts
 
+type RubyGemGroup = 'default' | 'development' | 'test';
+
 interface RubyDependency {
   name: string;
   spec: string;
   /** Group: :default, :development, :test */
-  group: 'default' | 'development' | 'test';
+  group: RubyGemGroup;
+}
+
+/**
+ * Bundler group symbols from a group list.
+ *
+ * `group :development, :test do` and `group [:development, :test] do`
+ * both yield `['development', 'test']`. The same list text is what an
+ * inline `group:` keyword carries (`group: :development` or
+ * `group: [:development, :test]`). Callers decide how to classify it.
+ */
+function gemfileGroupSymbols(value: string): string[] {
+  const names: string[] = [];
+  for (const match of value.matchAll(/:(\w+)/g)) {
+    names.push(match[1]!);
+  }
+  return names;
+}
+
+/**
+ * A `group ... do` block is development or test only when every symbol is
+ * `:development`, `:dev`, or `:test`. Any other symbol (`:default`,
+ * `:production`, or a custom group) means the gems ship, so the block is
+ * the production default.
+ */
+function classifyGemfileGroupBlock(names: string[]): RubyGemGroup {
+  const lowered = names.map((name) => name.toLowerCase());
+  const devOrTest = (name: string) => name === 'development' || name === 'dev' || name === 'test';
+  if (lowered.length === 0 || !lowered.every(devOrTest)) return 'default';
+  if (lowered.every((name) => name === 'test')) return 'test';
+  return 'development';
 }
 
 /**
@@ -169,6 +201,7 @@ interface RubyDependency {
  *   gem "puma", "~> 6.0"
  *   gem 'sidekiq'
  *   gem 'rspec-rails', group: :development
+ *   gem 'rspec-rails', groups: [:development, :test]
  */
 function parseGemfileLine(line: string): { name: string; spec: string } | null {
   const trimmed = line.trim();
@@ -251,20 +284,20 @@ function opensNonGroupBlock(trimmed: string): boolean {
  */
 function parseGemfile(content: string): RubyDependency[] {
   const deps: RubyDependency[] = [];
-  let currentGroup: 'default' | 'development' | 'test' = 'default';
-  const groupStack: Array<'default' | 'development' | 'test'> = [];
+  let currentGroup: RubyGemGroup = 'default';
+  const groupStack: RubyGemGroup[] = [];
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
 
-    // Track group blocks. Nested `do` / `if` / `unless` blocks push the
-    // current group unchanged so their `end` does not close the group.
-    const groupMatch = trimmed.match(/^\s*group\s+:(\w+)/);
-    if (groupMatch) {
+    // Track group blocks. Read every symbol on the line (`:a, :b` and
+    // `[:a, :b]`). Nested `do` / `if` / `unless` blocks push the current
+    // group unchanged so their `end` does not close the group.
+    const groupHeader = trimmed.match(/^group\s+(.+)$/);
+    const groupNames = groupHeader ? gemfileGroupSymbols(groupHeader[1]!) : [];
+    if (groupNames.length > 0) {
       groupStack.push(currentGroup);
-      const g = groupMatch[1]!.toLowerCase();
-      if (g === 'development' || g === 'dev') currentGroup = 'development';
-      else if (g === 'test') currentGroup = 'test';
+      currentGroup = classifyGemfileGroupBlock(groupNames);
     } else if (opensNonGroupBlock(trimmed)) {
       groupStack.push(currentGroup);
     }
@@ -277,13 +310,31 @@ function parseGemfile(content: string): RubyDependency[] {
     const parsed = parseGemfileLine(trimmed);
     if (!parsed) continue;
 
-    // Check for inline group specification
+    // Inline group. `group:` keeps the substring check. `groups:` (symbol or
+    // array) is development/test only when every listed symbol is
+    // :development, :dev, or :test; any other symbol is production.
     let group = currentGroup;
-    const inlineGroupMatch = trimmed.match(/group:\s*(?::(\w+)|\[([^\]]+)\])/);
+    const inlineGroupMatch = trimmed.match(/(groups?):\s*(?::(\w+)|\[([^\]]+)\])/);
     if (inlineGroupMatch) {
-      const g = (inlineGroupMatch[1] ?? inlineGroupMatch[2] ?? '').toLowerCase();
-      if (g.includes('development') || g.includes('dev')) group = 'development';
-      else if (g.includes('test')) group = 'test';
+      const key = inlineGroupMatch[1]!;
+      const symbol = inlineGroupMatch[2];
+      const arrayBody = inlineGroupMatch[3];
+      if (key === 'group') {
+        const g = (symbol ?? arrayBody ?? '').toLowerCase();
+        if (g.includes('development') || g.includes('dev')) group = 'development';
+        else if (g.includes('test')) group = 'test';
+      } else {
+        const listed = symbol
+          ? [symbol.toLowerCase()]
+          : [...(arrayBody ?? '').matchAll(/:(\w+)/g)].map((match) => match[1]!.toLowerCase());
+        const devOrTest = (name: string) =>
+          name === 'development' || name === 'dev' || name === 'test';
+        if (listed.length > 0 && listed.every(devOrTest)) {
+          group = listed.every((name) => name === 'test') ? 'test' : 'development';
+        } else if (listed.length > 0) {
+          group = 'default';
+        }
+      }
     }
 
     deps.push({

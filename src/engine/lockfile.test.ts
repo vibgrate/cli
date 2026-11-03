@@ -336,6 +336,79 @@ describe('fullDependencyGraph', () => {
     expect(graph?.rootDependsOn).toEqual(['string-width@4.2.3']);
   });
 
+  it('reads npm v2/v3 dev, optional, and devOptional flags, and leaves a production package unmarked', () => {
+    write(
+      'package-lock.json',
+      JSON.stringify({
+        lockfileVersion: 3,
+        packages: {
+          '': { name: 'app' },
+          'node_modules/nested-prod': { version: '1.0.0' },
+          'node_modules/nested-dev': { version: '1.0.0', dev: true },
+          'node_modules/fsevents': { version: '2.3.3', optional: true },
+          'node_modules/dev-optional-pkg': { version: '1.2.3', dev: true, optional: true, devOptional: true },
+          'node_modules/dev-optional-only': { version: '1.0.0', devOptional: true },
+          'node_modules/explicit-false': { version: '1.0.0', dev: false, optional: false, devOptional: false },
+        },
+      }),
+    );
+    const graph = fullDependencyGraph(root);
+    const scopeOf = (name: string): string | undefined => graph?.components.find((row) => row.package === name)?.lockScope;
+    expect(graph?.recordsInstallScope).toBe(true);
+    expect(scopeOf('nested-prod')).toBeUndefined();
+    expect(scopeOf('nested-dev')).toBe('dev');
+    expect(scopeOf('fsevents')).toBe('optional');
+    expect(scopeOf('dev-optional-pkg')).toBe('dev');
+    expect(scopeOf('dev-optional-only')).toBe('dev');
+    expect(scopeOf('explicit-false')).toBeUndefined();
+  });
+
+  it('keeps the least restrictive npm install mark across paths, independent of path order', () => {
+    const packages = (devFirst: boolean): Record<string, unknown> => {
+      const devPath = { version: '1.0.0', dev: true };
+      const prodPath = { version: '1.0.0' };
+      const optionalPath = { version: '1.0.0', optional: true };
+      const fromDev = devFirst
+        ? { 'node_modules/from-dev': devPath, 'node_modules/widget/node_modules/from-dev': prodPath }
+        : { 'node_modules/widget/node_modules/from-dev': prodPath, 'node_modules/from-dev': devPath };
+      const fromOpt = devFirst
+        ? { 'node_modules/from-opt': devPath, 'node_modules/widget/node_modules/from-opt': optionalPath }
+        : { 'node_modules/widget/node_modules/from-opt': optionalPath, 'node_modules/from-opt': { ...devPath } };
+      return { '': { name: 'app' }, ...fromDev, ...fromOpt };
+    };
+    const scopeOf = (name: string): string | undefined =>
+      fullDependencyGraph(root)?.components.find((row) => row.package === name)?.lockScope;
+
+    write('package-lock.json', JSON.stringify({ lockfileVersion: 3, packages: packages(true) }));
+    expect(scopeOf('from-dev')).toBeUndefined();
+    expect(scopeOf('from-opt')).toBe('optional');
+
+    write('package-lock.json', JSON.stringify({ lockfileVersion: 3, packages: packages(false) }));
+    expect(scopeOf('from-dev')).toBeUndefined();
+    expect(scopeOf('from-opt')).toBe('optional');
+  });
+
+  it('leaves v1 dev and optional flags unread', () => {
+    write(
+      'package-lock.json',
+      JSON.stringify({
+        dependencies: {
+          'nested-dev': { version: '1.0.0', dev: true },
+          'nested-prod': { version: '1.0.0' },
+          fsevents: { version: '2.3.3', optional: true },
+        },
+      }),
+    );
+    const graph = fullDependencyGraph(root);
+    expect(graph?.recordsInstallScope).toBeUndefined();
+    expect(graph?.edges).toBeUndefined();
+    expect(graph?.components).toEqual([
+      { package: 'fsevents', version: '2.3.3' },
+      { package: 'nested-dev', version: '1.0.0' },
+      { package: 'nested-prod', version: '1.0.0' },
+    ]);
+  });
+
   it('reads the full transitive set from Cargo.lock, go.sum, poetry.lock and uv.lock, tagging the ecosystem', () => {
     write(
       'Cargo.lock',
@@ -667,6 +740,86 @@ describe('Gemfile.lock and composer.lock edge cases', () => {
     const started = Date.now();
     expect(gemfileSpecPattern('nokogiri').test(hostile)).toBe(false);
     expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('collects GEM, PATH, and GIT specs and drops the project gem', () => {
+    write(
+      'Gemfile.lock',
+      [
+        'PATH',
+        '  remote: .',
+        '  specs:',
+        '    myapp (0.1.0)',
+        '      rails (~> 7.1)',
+        '',
+        'GIT',
+        '  remote: .',
+        '  revision: abcdef',
+        '  specs:',
+        '    local-git-app (0.0.1)',
+        '',
+        'GIT',
+        '  remote: https://github.com/example/devise.git',
+        '  revision: 0123456789abcdef0123456789abcdef01234567',
+        '  specs:',
+        '    devise (4.9.3)',
+        '      bcrypt (~> 3.0)',
+        '',
+        'PATH',
+        '  remote: vendor/gems',
+        '  specs:',
+        '    billing (0.1.0)',
+        '',
+        'GEM',
+        '  remote: https://rubygems.org/',
+        '  specs:',
+        '    bcrypt (3.1.20)',
+        '    nokogiri (1.16.0-x86_64-linux)',
+        '      racc (~> 1.4)',
+        '    nokogiri (1.16.0-aarch64-linux)',
+        '    racc (1.7.3)',
+        '    rails (7.1.3)',
+        '      actionpack (= 7.1.3)',
+        '    actionpack (7.1.3)',
+        '    rspec (1.0.0.pre)',
+        '',
+        'PLATFORMS',
+        '  ruby',
+        '  x86_64-linux',
+        '',
+        'DEPENDENCIES',
+        '  rails (~> 7.1)',
+        '  devise!',
+        '  billing!',
+        '',
+        'BUNDLED WITH',
+        '  2.5.3',
+        '',
+      ].join('\n'),
+    );
+    const graph = fullDependencyGraph(root);
+    expect(graph?.ecosystem).toBe('ruby');
+    expect(graph?.edges).toBeUndefined();
+    expect(graph?.rootDependsOn).toEqual([]);
+    expect(graph?.components).toEqual([
+      { package: 'actionpack', version: '7.1.3' },
+      { package: 'bcrypt', version: '3.1.20' },
+      { package: 'billing', version: '0.1.0' },
+      { package: 'devise', version: '4.9.3' },
+      { package: 'nokogiri', version: '1.16.0' },
+      { package: 'racc', version: '1.7.3' },
+      { package: 'rails', version: '7.1.3' },
+      { package: 'rspec', version: '1.0.0.pre' },
+    ]);
+    // The point lookup and the collector share one version pattern.
+    expect(lockfileVersion(root, 'ruby', 'nokogiri')).toBe('1.16.0');
+    expect(graph?.components.map((row) => row.package)).not.toContain('myapp');
+    expect(graph?.components.map((row) => row.package)).not.toContain('local-git-app');
+  });
+
+  it('returns undefined when Gemfile.lock lists only the project gem', () => {
+    write('Gemfile.lock', ['PATH', '  remote: .', '  specs:', '    myapp (0.1.0)', ''].join('\n'));
+    expect(fullDependencyGraph(root)).toBeUndefined();
   });
 
   it('php: packages-dev entries resolve', () => {
