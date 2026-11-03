@@ -221,6 +221,32 @@ function rubyVersionToSemver(ver: string): string | null {
 }
 
 /**
+ * Code of a Gemfile line with quoted strings and a trailing comment removed,
+ * so a keyword check does not see text inside `'...'`, `"..."`, or `# ...`.
+ */
+function gemfileCode(trimmed: string): string {
+  const noQuotes = trimmed.replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g, '""');
+  const hash = noQuotes.indexOf('#');
+  return (hash === -1 ? noQuotes : noQuotes.slice(0, hash)).trim();
+}
+
+/**
+ * A block closed by a later bare `end` that does not change the group:
+ * a `do` opener (`platforms`, `install_if -> { ... } do`, `source ... do`)
+ * or a statement-form `if` / `unless`. A modifier (`gem 'x' if cond`) does
+ * not open a block. A same-line `end` closes the block here, so it takes
+ * no stack frame. `:end` is a symbol, not the keyword.
+ */
+function opensNonGroupBlock(trimmed: string): boolean {
+  const code = gemfileCode(trimmed);
+  if (!code) return false;
+  const closedHere = /(?:^|[\s;])end\s*$/.test(code) && !/:end\s*$/.test(code);
+  if (closedHere) return false;
+  if (/^(?:if|unless)\b/.test(code)) return true;
+  return /\bdo\b/.test(code);
+}
+
+/**
  * Parse a Gemfile to extract dependencies.
  */
 function parseGemfile(content: string): RubyDependency[] {
@@ -231,13 +257,16 @@ function parseGemfile(content: string): RubyDependency[] {
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
 
-    // Track group blocks
+    // Track group blocks. Nested `do` / `if` / `unless` blocks push the
+    // current group unchanged so their `end` does not close the group.
     const groupMatch = trimmed.match(/^\s*group\s+:(\w+)/);
     if (groupMatch) {
       groupStack.push(currentGroup);
       const g = groupMatch[1]!.toLowerCase();
       if (g === 'development' || g === 'dev') currentGroup = 'development';
       else if (g === 'test') currentGroup = 'test';
+    } else if (opensNonGroupBlock(trimmed)) {
+      groupStack.push(currentGroup);
     }
 
     if (trimmed === 'end' && groupStack.length > 0) {
