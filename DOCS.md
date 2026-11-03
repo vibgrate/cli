@@ -191,7 +191,7 @@ Vibgrate evaluates **upgrade drift** in depth for:
 - **Python** (`requirements.txt`, `pyproject.toml`-style manifests)
 - **Java** (`pom.xml`, Gradle-style manifests). Which Maven profiles, scopes, and Gradle configurations become a `vg scan` row or a `vg build` edge is in [Maven and Gradle manifests](#maven-and-gradle-manifests).
 
-**Known-vulnerability detection** (`--vulns`) and **dependency attribution** (`vg why`, exposure windows) additionally cover npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle, read from each project's lockfile. For npm, pnpm, and yarn, `--vulns` checks every package the lockfile resolves, not only the ones in `package.json`. A finding on a package pulled in by another dependency says `transitive` and names the shortest path from a dependency you declared. Other ecosystems are matched as described above. Go is matched from direct `require` lines in `go.mod`. Pseudo-versions and `+incompatible` tags follow [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).
+**Known-vulnerability detection** (`--vulns`) and **dependency attribution** (`vg why`, exposure windows) additionally cover npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle, read from each project's lockfile. For npm, pnpm, and yarn, `--vulns` checks every package the lockfile resolves, not only the ones in `package.json`. A finding on a package pulled in by another dependency says `transitive` and names the shortest path from a dependency you declared. Other ecosystems are matched as described above. Go is matched from direct `require` lines in `go.mod`, and from an `// indirect` module that provides a Go 1.24 `tool` package. Pseudo-versions and `+incompatible` tags follow [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).
 
 ### End-to-end workflow (recommended)
 
@@ -2680,7 +2680,7 @@ In a git repository the scan also attributes each finding: the commit, author, a
 
 The scan also reconstructs **closed** exposure windows from history — a vulnerable version that was later bumped out of the affected range or removed from the lockfile entirely — and reports real remediation time (MTTR) from them: measured, not estimated. Offline, a package-version manifest extends this to advisories that are fully fixed today, so a dependency that is clean now but was once vulnerable still counts toward your remediation record.
 
-Detection and attribution read each project's lockfile for npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle. Go is matched from direct `require` lines in `go.mod`. The pseudo-version and `+incompatible` rules are in [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).
+Detection and attribution read each project's lockfile for npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle. Go is matched from direct `require` lines in `go.mod`, and from an `// indirect` module that provides a Go 1.24 `tool` package. The pseudo-version and `+incompatible` rules are in [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).
 
 ```bash
 # Online detection against OSV
@@ -2699,12 +2699,12 @@ Go modules pin an untagged commit as a pseudo-version (`v0.0.0-20191109021931-da
 
 ##### Which version is compared
 
-The scan reads direct `require` lines in `go.mod`.
+The scan reads direct `require` lines in `go.mod`. A module that appears only as `// indirect` is included when a `tool` directive names a package that module provides: the longest required module path that equals the tool path or is a `/`-bounded prefix of it. That row is a development dependency (`section` `devDependencies`). A module that is also a direct require stays a production dependency. Any other `// indirect` require is left out.
 
 - A concrete `v` version that is valid semver after the leading `v` is removed is the recorded version. `v1.2.3` is recorded as `1.2.3`.
 - Build metadata stays. `v2.0.0+incompatible` is recorded as `2.0.0+incompatible`. The major stays 2. Range checks ignore the suffix.
 - A pseudo-version keeps its pre-release suffix. `v0.0.0-20191109021931-daa7c04131f5` is recorded as `0.0.0-20191109021931-daa7c04131f5`.
-- A bare module path, a range such as `>=1.4.0`, a line marked `// indirect`, and a token that is not a full semver (`v1.2`) are not matched against advisories.
+- A bare module path, a range such as `>=1.4.0`, a line marked `// indirect` that does not provide a `tool`, and a token that is not a full semver (`v1.2`) are not matched against advisories. An indirect module that provides a `tool` is recorded and matched.
 - `go.sum` is not the version source for this match.
 
 A range is half-open: the version matches from `introduced` up to, and not including, `fixed`. `introduced` of `0` means from the beginning. Before that check, the recorded version is reduced to `major.minor.patch`. The pre-release suffix and any build metadata are not ordered against the tag. An explicit `versions` list matches the recorded string exactly, so the list entry still has the pre-release suffix and any build metadata, and has no leading `v`.
@@ -2735,7 +2735,7 @@ The suffix stays on the recorded version. `v2.0.0+incompatible` matches a range 
 - The module path and version on the `require` line are what get matched. A `replace` to a fork, another version, or a local directory does not change that target. A `replace` with no `require` adds nothing.
 - An `exclude` line does not add a module, and it does not drop a version that is also required.
 
-The code graph records those same `require` paths, including lines marked `// indirect`, and skips `replace` and `exclude`. The graph does not store the version. Vulnerability matching still skips `// indirect`.
+The code graph records those same `require` paths, including lines marked `// indirect`, and skips `replace` and `exclude`. The graph does not store the version. Vulnerability matching still skips `// indirect` requires that do not provide a `tool`.
 
 ##### Check it locally
 
