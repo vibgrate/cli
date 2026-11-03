@@ -90,6 +90,11 @@ export interface CargoDependencyHeader {
   table: CargoDepTable;
   /** True for `[target.<spec>.…]`. The spec itself is not stored. */
   target: boolean;
+  /**
+   * Set for `[dependencies.<crate>]` and `[target.<spec>.<kind>.<crate>]`.
+   * Absent when the table lists each dependency as its own key.
+   */
+  crate?: string;
 }
 
 const CARGO_DEP_TABLES = new Set<string>(['dependencies', 'dev-dependencies', 'build-dependencies']);
@@ -137,8 +142,10 @@ function readTomlKey(input: string, index: number): { raw: string; next: number 
  * directly. `[target.<spec>.dependencies]`, `[target.<spec>.dev-dependencies]`,
  * and `[target.<spec>.build-dependencies]` map to those same tables.
  * `<spec>` may be a single-quoted cfg, a double-quoted cfg (escaped quotes
- * included), or a bare triple. Any other header, including
- * `[dependencies.<crate>]`, is not a dependency table.
+ * included), or a bare triple. `[dependencies.<crate>]`,
+ * `[dev-dependencies.<crate>]`, `[build-dependencies.<crate>]`, and the
+ * `[target.<spec>.<kind>.<crate>]` variants are the same tables with the
+ * crate name on the header. Any other header is not a dependency table.
  */
 export function cargoDependencyHeader(headerLine: string): CargoDependencyHeader | null {
   const trimmed = headerLine.trim();
@@ -157,8 +164,31 @@ export function cargoDependencyHeader(headerLine: string): CargoDependencyHeader
     i++;
   }
   if (keys.length === 1 && isCargoDepTable(keys[0]!)) return { table: keys[0], target: false };
+  if (keys.length === 2 && isCargoDepTable(keys[0]!) && keys[1]) {
+    return { table: keys[0], target: false, crate: keys[1] };
+  }
   if (keys.length === 3 && keys[0] === 'target' && isCargoDepTable(keys[2]!)) return { table: keys[2], target: true };
+  if (keys.length === 4 && keys[0] === 'target' && isCargoDepTable(keys[2]!) && keys[3]) {
+    return { table: keys[2], target: true, crate: keys[3] };
+  }
   return null;
+}
+
+/**
+ * Inline-table body (`version = "1.0", optional = true`) and the lines under
+ * `[dependencies.<crate>]`. `version` is the spec (`*` when absent).
+ * `optional = true` sets the flag. `path`, `git`, and `workspace` do not
+ * replace `version`, so a table that only sets one of them stays spec `*`.
+ */
+function parseCargoDepAttrs(attrs: string): { version: string; optional: boolean; features: string[] } {
+  const versionMatch = attrs.match(/version\s*=\s*"([^"]+)"/);
+  const version = versionMatch?.[1] ?? '*';
+  const optional = /optional\s*=\s*true/.test(attrs);
+  const featuresMatch = attrs.match(/features\s*=\s*\[([^\]]*)\]/);
+  const features = featuresMatch
+    ? featuresMatch[1]!.split(',').map(f => f.trim().replace(/"/g, ''))
+    : [];
+  return { version, optional, features };
 }
 
 interface RustDependency {
@@ -194,6 +224,19 @@ function dedupeCargoDeps(deps: RustDependency[]): RustDependency[] {
   return [...byName.values()];
 }
 
+function rustDep(name: string, header: CargoDependencyHeader, attrs: string): RustDependency {
+  const parsed = parseCargoDepAttrs(attrs);
+  return {
+    name,
+    version: parsed.version,
+    optional: parsed.optional,
+    features: parsed.features,
+    isDev: header.table !== 'dependencies',
+    table: header.table,
+    fromTarget: header.target,
+  };
+}
+
 /**
  * Parse Cargo.toml to extract dependencies.
  *
@@ -211,6 +254,16 @@ function dedupeCargoDeps(deps: RustDependency[]): RustDependency[] {
  *   [target.'cfg(windows)'.dependencies]
  *   winapi = "0.3"
  *
+ *   [dependencies.serde]
+ *   version = "1.0"
+ *   features = ["derive"]
+ *
+ *   [dev-dependencies.criterion]
+ *   version = "0.5"
+ *
+ * A `[dependencies.<crate>]` table, and the dev, build, and target variants,
+ * use the same attribute reader as an inline table. The pending sub-table is
+ * flushed when the next header starts and at the end of the file.
  * Dev and build tables, including the matching `target` tables, are kept.
  * A crate named in a production table and a dev or build table is one
  * production row. The winning declaration supplies the version.
@@ -218,22 +271,34 @@ function dedupeCargoDeps(deps: RustDependency[]): RustDependency[] {
 function parseCargoToml(content: string): RustDependency[] {
   const deps: RustDependency[] = [];
   let current: CargoDependencyHeader | null = null;
+  let subtableLines: string[] | null = null;
+
+  const flushSubtable = (): void => {
+    if (!current?.crate || subtableLines === null) return;
+    deps.push(rustDep(current.crate, current, subtableLines.join('\n')));
+    subtableLines = null;
+  };
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
 
     if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      flushSubtable();
       current = cargoDependencyHeader(trimmed);
+      subtableLines = current?.crate ? [] : null;
       continue;
     }
 
     if (!current) continue;
 
+    if (current.crate) {
+      if (trimmed && !trimmed.startsWith('#') && subtableLines) subtableLines.push(trimmed);
+      continue;
+    }
+
     // Parse dependency lines
     // Simple: serde = "1.0"
     // Complex: serde = { version = "1.0", features = ["derive"], optional = true }
-    const isDev = current.table !== 'dependencies';
-
     const simpleMatch = trimmed.match(/^([\w-]+)\s*=\s*"([^"]+)"/);
     if (simpleMatch) {
       deps.push({
@@ -241,7 +306,7 @@ function parseCargoToml(content: string): RustDependency[] {
         version: simpleMatch[2]!,
         optional: false,
         features: [],
-        isDev,
+        isDev: current.table !== 'dependencies',
         table: current.table,
         fromTarget: current.target,
       });
@@ -250,32 +315,11 @@ function parseCargoToml(content: string): RustDependency[] {
 
     const complexMatch = trimmed.match(/^([\w-]+)\s*=\s*\{([^}]+)\}/);
     if (complexMatch) {
-      const name = complexMatch[1]!;
-      const attrs = complexMatch[2]!;
-
-      const versionMatch = attrs.match(/version\s*=\s*"([^"]+)"/);
-      const version = versionMatch?.[1] ?? '*';
-
-      const optionalMatch = attrs.match(/optional\s*=\s*true/);
-      const optional = !!optionalMatch;
-
-      const featuresMatch = attrs.match(/features\s*=\s*\[([^\]]*)\]/);
-      const features = featuresMatch
-        ? featuresMatch[1]!.split(',').map(f => f.trim().replace(/"/g, ''))
-        : [];
-
-      deps.push({
-        name,
-        version,
-        optional,
-        features,
-        isDev,
-        table: current.table,
-        fromTarget: current.target,
-      });
+      deps.push(rustDep(complexMatch[1]!, current, complexMatch[2]!));
     }
   }
 
+  flushSubtable();
   return dedupeCargoDeps(deps);
 }
 
