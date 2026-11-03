@@ -6,6 +6,7 @@ import {
   LockfileParseError,
   parseLockfileJson,
 } from '../core-open/utils/lockfile-parse.js';
+import { compareCodeUnits } from '../core-open/utils/code-unit.js';
 import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
 import {
   emitUnknownOptionalLockfileWarnings,
@@ -26,6 +27,7 @@ import {
   digestFromCargoChecksum,
   digestFromComposerShasum,
   digestFromGoSumHash,
+  digestFromNugetContentHash,
   digestsFromHashLabels,
   digestsFromSri,
   orderComponentDigests,
@@ -376,8 +378,9 @@ export interface LockfileGraph {
  * design. An SBOM needs the opposite shape: the whole installed graph, since
  * that is what a vulnerability scanner or supply-chain review actually
  * walks. Tries `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
- * `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `Gemfile.lock`, then
- * `composer.lock`, and returns `undefined` when none is present. A lockfile that exists but is
+ * `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `Gemfile.lock`,
+ * `composer.lock`, then `packages.lock.json`, and returns `undefined` when
+ * none is present. A lockfile that exists but is
  * truncated or invalid throws
  * {@link LockfileParseError} — a partial prefix is not a graph.
  */
@@ -397,17 +400,18 @@ export function fullDependencyGraph(root: string): LockfileGraph | undefined {
     componentsOnly(poetryLikeLockTree(root, 'uv.lock'), 'pypi') ??
     pipfileLockGraph(root) ??
     componentsOnly(gemfileLockTree(root), 'ruby') ??
-    composerLockGraph(root)
+    composerLockGraph(root) ??
+    packagesLockGraph(root)
   );
 }
 
-/** `composer.lock` records `packages` vs `packages-dev`, so its rows carry an install mark. */
 /** `Pipfile.lock` components, with `develop`-only rows marked `lockScope: 'dev'`. */
 function pipfileLockGraph(root: string): LockfileGraph | undefined {
   const graph = componentsOnly(pipfileLockTree(root), 'pypi');
   return graph ? { ...graph, recordsInstallScope: true } : undefined;
 }
 
+/** `composer.lock` records `packages` vs `packages-dev`, so its rows carry an install mark. */
 function composerLockGraph(root: string): LockfileGraph | undefined {
   const graph = componentsOnly(composerLockTree(root), 'php');
   return graph ? { ...graph, recordsInstallScope: true } : undefined;
@@ -997,6 +1001,143 @@ function rememberComposerComponent(out: Map<string, LockfileComponent>, componen
   // same name and version does not turn it into one.
   if (existing ? existing.lockScope === 'dev' && development : development) next.lockScope = 'dev';
   out.set(key, next);
+}
+
+interface NugetLockEntry {
+  type?: unknown;
+  resolved?: unknown;
+  contentHash?: unknown;
+  dependencies?: unknown;
+}
+
+/** Code-unit minimum. Empty when `values` is empty. */
+function codeUnitMin(values: Iterable<string>): string {
+  let best: string | undefined;
+  for (const value of values) {
+    if (best === undefined || value < best) best = value;
+  }
+  return best ?? '';
+}
+
+/**
+ * A NuGet dependency spec that names a version already resolved in this
+ * lockfile. Exact versions are used as written. A range contributes its
+ * lower bound only when that bound is itself a resolved version here.
+ */
+function nugetDependencyVersion(spec: string, versions: ReadonlySet<string> | undefined): string | undefined {
+  if (!versions || versions.size === 0) return undefined;
+  const trimmed = spec.trim();
+  if (versions.has(trimmed)) return trimmed;
+  const exact = /^\[([^,\]\s]+)\]$/.exec(trimmed);
+  if (exact?.[1] && versions.has(exact[1])) return exact[1];
+  const lower = /^\[([^,\]\s]+)\s*,/.exec(trimmed);
+  if (lower?.[1] && versions.has(lower[1])) return lower[1];
+  return undefined;
+}
+
+/**
+ * NuGet `packages.lock.json` — every `Direct` and `Transitive` package under
+ * `dependencies.<framework>.<id>`. `Project` entries are project references,
+ * not registry packages, so they are skipped even when they carry a
+ * `resolved` string. The version is `resolved`. `contentHash` is the nupkg's
+ * base64 SHA-512.
+ *
+ * Package ids are case-insensitive. The same id and version under more than
+ * one target framework is one component. The kept spelling is the code-unit
+ * minimum of the spellings in the file, so framework order does not change
+ * the row. Two resolved versions stay two components.
+ *
+ * Each entry's `dependencies` map is an edge when the value is that
+ * package's resolved version, or a NuGet range whose lower bound is a
+ * resolved version in this file. A name that is not in the file is not an
+ * edge. `Direct` entries are the project's own dependencies (`rootDependsOn`).
+ */
+function packagesLockGraph(root: string): LockfileGraph | undefined {
+  const parsed = readCheckedJson(root, 'packages.lock.json');
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'packages.lock.json', (rel, notes) => noteNugetLock(parsed, rel, notes));
+  const frameworks = (parsed as { dependencies?: unknown }).dependencies;
+  if (!frameworks || typeof frameworks !== 'object' || Array.isArray(frameworks)) return undefined;
+
+  interface Acc {
+    ids: Set<string>;
+    direct: boolean;
+    digests: ComponentDigest[];
+    deps: Map<string, { id: string; spec: string }>;
+  }
+
+  const groups = new Map<string, Acc>();
+  for (const framework of Object.keys(frameworks).sort(compareCodeUnits)) {
+    const packages = (frameworks as Record<string, unknown>)[framework];
+    if (!packages || typeof packages !== 'object' || Array.isArray(packages)) continue;
+    for (const id of Object.keys(packages).sort(compareCodeUnits)) {
+      const entry = (packages as Record<string, NugetLockEntry>)[id];
+      if (!entry || typeof entry !== 'object') continue;
+      if (entry.type !== 'Direct' && entry.type !== 'Transitive') continue;
+      if (typeof entry.resolved !== 'string') continue;
+      const version = entry.resolved.trim();
+      if (!version) continue;
+      const key = `${id.toLowerCase()}\0${version}`;
+      let acc = groups.get(key);
+      if (!acc) {
+        acc = { ids: new Set(), direct: false, digests: [], deps: new Map() };
+        groups.set(key, acc);
+      }
+      acc.ids.add(id);
+      if (entry.type === 'Direct') acc.direct = true;
+      if (typeof entry.contentHash === 'string') acc.digests.push(...digestFromNugetContentHash(entry.contentHash));
+      const declared = entry.dependencies;
+      if (!declared || typeof declared !== 'object' || Array.isArray(declared)) continue;
+      for (const [depId, spec] of Object.entries(declared)) {
+        if (!depId || typeof spec !== 'string' || !spec.trim()) continue;
+        const depKey = `${depId.toLowerCase()}\0${spec.trim()}`;
+        if (!acc.deps.has(depKey)) acc.deps.set(depKey, { id: depId, spec: spec.trim() });
+      }
+    }
+  }
+  if (!groups.size) return undefined;
+
+  const versionsById = new Map<string, Set<string>>();
+  const nameByKey = new Map<string, string>();
+  for (const [key, acc] of groups) {
+    const name = codeUnitMin(acc.ids);
+    nameByKey.set(key, name);
+    const sep = key.indexOf('\0');
+    const lower = key.slice(0, sep);
+    const version = key.slice(sep + 1);
+    const versions = versionsById.get(lower) ?? new Set<string>();
+    versions.add(version);
+    versionsById.set(lower, versions);
+  }
+
+  const components = new Map<string, LockfileComponent>();
+  const edges = new Map<string, string[]>();
+  const rootDependsOn: string[] = [];
+  for (const key of [...groups.keys()].sort(compareCodeUnits)) {
+    const acc = groups.get(key)!;
+    const name = nameByKey.get(key)!;
+    const version = key.slice(key.indexOf('\0') + 1);
+    const digests = orderComponentDigests(acc.digests);
+    rememberComponent(components, { package: name, version, ...(digests.length ? { digests } : {}) });
+    const componentKey = `${name}@${version}`;
+    if (acc.direct) rootDependsOn.push(componentKey);
+    const childKeys: string[] = [];
+    for (const dep of acc.deps.values()) {
+      const resolved = nugetDependencyVersion(dep.spec, versionsById.get(dep.id.toLowerCase()));
+      if (!resolved) continue;
+      const depName = nameByKey.get(`${dep.id.toLowerCase()}\0${resolved}`);
+      if (!depName) continue;
+      childKeys.push(`${depName}@${resolved}`);
+    }
+    edges.set(componentKey, uniqSorted(childKeys));
+  }
+
+  return {
+    components: sortComponents(components),
+    edges,
+    rootDependsOn: uniqSorted(rootDependsOn),
+    ecosystem: 'dotnet',
+  };
 }
 
 /** npm `package-lock.json` — JSON, deterministic, no dependency. */
