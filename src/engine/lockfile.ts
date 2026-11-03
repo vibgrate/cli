@@ -280,6 +280,27 @@ function pipfileLock(root: string, name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Install mark from npm `package-lock.json` v2/v3 flags.
+ * `dev` covers `dev: true` and `devOptional: true` (CycloneDX `excluded`).
+ * `optional` is `optional: true` with neither of those set.
+ * Omitted on a production install and on lockfiles that do not record flags.
+ */
+export type LockfileInstallScope = 'dev' | 'optional';
+
+/**
+ * Least restrictive install mark. An omitted mark is production and beats
+ * `optional`, which beats `dev`. The two arguments are interchangeable.
+ */
+export function mergeLockScopes(
+  a: LockfileInstallScope | undefined,
+  b: LockfileInstallScope | undefined,
+): LockfileInstallScope | undefined {
+  if (a === undefined || b === undefined) return undefined;
+  if (a === 'optional' || b === 'optional') return 'optional';
+  return 'dev';
+}
+
 export interface LockfileComponent {
   package: string;
   version: string;
@@ -288,6 +309,12 @@ export interface LockfileComponent {
    * Omitted when it recorded none. Sorted by algorithm name, then value.
    */
   digests?: ComponentDigest[];
+  /**
+   * npm v2/v3 install mark for this name and version, after merging every
+   * install path. Omitted for production and for formats that do not record
+   * `dev` / `optional` / `devOptional`.
+   */
+  lockScope?: LockfileInstallScope;
 }
 
 /**
@@ -309,6 +336,13 @@ export interface LockfileGraph {
   rootDependsOn: string[];
   /** Which registry these components resolve against; `undefined` means the npm family (the historical default, still keyed by `npmLockGraph`/`pnpmLockTree`/`yarnLockTree`). */
   ecosystem?: DepRecord['ecosystem'];
+  /**
+   * True for npm `package-lock.json` v2/v3. Those entries record `dev`,
+   * `optional`, and `devOptional`, so a component with no `lockScope` is a
+   * production install. Other lockfiles leave this unset; a missing
+   * `lockScope` there means the format does not say.
+   */
+  recordsInstallScope?: boolean;
 }
 
 /**
@@ -352,14 +386,50 @@ function sortComponents(map: Map<string, LockfileComponent>): LockfileComponent[
  * One component per name and version. A second install path of the same
  * version adds its digests; it does not add a second row. Digests are
  * ordered here so a later reader does not depend on lockfile key order.
+ *
+ * `installScope` is set by the npm v2/v3 reader. `'production'` is an
+ * explicit path with no flags and clears a stricter mark from another path.
+ * Omitting it means this caller does not record flags, so a mark already
+ * stored on the component stays. The merge is least-restrictive, so path
+ * order does not change the result.
  */
-function rememberComponent(map: Map<string, LockfileComponent>, component: LockfileComponent): void {
+function rememberComponent(
+  map: Map<string, LockfileComponent>,
+  component: LockfileComponent,
+  installScope?: LockfileInstallScope | 'production',
+): void {
   const key = `${component.package}@${component.version}`;
   const existing = map.get(key);
   const digests = orderComponentDigests([...(existing?.digests ?? []), ...(component.digests ?? [])]);
   const next: LockfileComponent = { package: component.package, version: component.version };
   if (digests.length) next.digests = digests;
+  const scope = rememberedLockScope(Boolean(existing), existing?.lockScope, installScope);
+  if (scope) next.lockScope = scope;
   map.set(key, next);
+}
+
+function rememberedLockScope(
+  hasExisting: boolean,
+  existingScope: LockfileInstallScope | undefined,
+  installScope: LockfileInstallScope | 'production' | undefined,
+): LockfileInstallScope | undefined {
+  if (installScope === undefined) return existingScope;
+  const incoming = installScope === 'production' ? undefined : installScope;
+  if (!hasExisting) return incoming;
+  return mergeLockScopes(existingScope, incoming);
+}
+
+/**
+ * One `packages` entry. `dev: true` is the dev tree, including an optional
+ * dependency of a development dependency. `devOptional: true` is the same
+ * development mark: CycloneDX has no combined value, and a manifest row that
+ * is both dev and optional is already `excluded`. `optional: true` alone is
+ * the optional tree. Anything else is production.
+ */
+function npmPackageLockScope(entry: NpmV2Package): LockfileInstallScope | 'production' {
+  if (entry.dev === true || entry.devOptional === true) return 'dev';
+  if (entry.optional === true) return 'optional';
+  return 'production';
 }
 
 function uniqSorted(keys: string[]): string[] {
@@ -370,6 +440,9 @@ interface NpmV2Package {
   name?: string;
   version?: string;
   integrity?: string;
+  dev?: boolean;
+  optional?: boolean;
+  devOptional?: boolean;
   dependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
@@ -420,7 +493,7 @@ function npmLockGraph(root: string): LockfileGraph | undefined {
       const key = `${name}@${version}`;
       keyOf.set(p, key);
       const digests = digestsFromSri(typeof val?.integrity === 'string' ? val.integrity : undefined);
-      rememberComponent(components, { package: name, version, ...(digests.length ? { digests } : {}) });
+      rememberComponent(components, { package: name, version, ...(digests.length ? { digests } : {}) }, npmPackageLockScope(val));
     }
   }
   if (!components.size) return undefined;
@@ -454,7 +527,7 @@ function npmLockGraph(root: string): LockfileGraph | undefined {
     }
   }
 
-  return { components: sortComponents(components), edges, rootDependsOn };
+  return { components: sortComponents(components), edges, rootDependsOn, recordsInstallScope: true };
 }
 
 function walkNpmV1Tree(
