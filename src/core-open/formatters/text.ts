@@ -903,7 +903,8 @@ function generatePriorityActions(artifact: ScanArtifact): PriorityAction[] {
           if (shown >= 8) break;
           const current = dep.resolvedVersion ?? dep.currentSpec;
           const latest = dep.latestStable ?? '?';
-          depLines.push(`\n       ${dep.package}: ${current} → ${latest} (${dep.majorsBehind} major${dep.majorsBehind! > 1 ? 's' : ''} behind)`);
+          const label = dep.alias ? `${dep.package} (${dep.alias})` : dep.package;
+          depLines.push(`\n       ${label}: ${current} → ${latest} (${dep.majorsBehind} major${dep.majorsBehind! > 1 ? 's' : ''} behind)`);
           shown++;
         }
         const remaining = worstDeps.length - shown;
@@ -976,7 +977,8 @@ function generatePriorityActions(artifact: ScanArtifact): PriorityAction[] {
           if (shown >= 10) break;
           const ver = dep.resolvedVersion ?? dep.currentSpec;
           const label = bc.deprecatedPackages.includes(dep.package) ? 'deprecated' : 'polyfill';
-          fileLines.push(`\n       ${dep.package}: ${ver} (${label})`);
+          const name = dep.alias ? `${dep.package} (${dep.alias})` : dep.package;
+          fileLines.push(`\n       ${name}: ${ver} (${label})`);
           shown++;
         }
       }
