@@ -145,7 +145,7 @@ function parsePubspecYaml(content: string): {
     // (SDK dependencies inside dependency sections) cannot clobber the
     // environment constraint.
     if (trimmed.startsWith('sdk:')) {
-      const match = trimmed.match(/sdk:\s*['"]?>?=?\s*(\d[^<'"]*)/);
+      const match = trimmed.match(/sdk:\s*['"]?>?=?\s*[~^]?(\d[^<'"]*)/);
       if (match) dartVersion = match[1]!.trim();
       continue;
     }
