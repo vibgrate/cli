@@ -33,6 +33,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
     - [Unknown lockfile fields](#unknown-lockfile-fields)
     - [CDN and non-registry resolutions](./docs/non-registry-lockfile-resolutions.md)
     - [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest)
+    - [Docker and Compose manifests](#docker-and-compose-manifests)
     - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
       - [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible)
     - [Maven and Gradle manifests](#maven-and-gradle-manifests)
@@ -2470,6 +2471,34 @@ A truncated or syntactically invalid lockfile stops the scan before a dependency
 `vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once, as `warning [VG_WARN_SYMLINK_SKIPPED]`. See [Symlinks](#symlinks). Archive files (`.zip`, `.tar`, `.gz`, `.bz2`, `.7z`, `.rar`) are not opened during that walk.
 
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
+
+### Docker and Compose manifests
+
+`vg scan` reads container images from every Dockerfile and every Compose file that sits directly in a directory. Files in a subdirectory are a separate project. One image name with two tags is two rows. The same name and tag in more than one file in that directory is one row.
+
+Names are matched with the capitalisation below.
+
+Dockerfiles:
+
+| Name | Example |
+| --- | --- |
+| `Dockerfile` | `Dockerfile` |
+| `Containerfile` | `Containerfile` |
+| `Dockerfile.<suffix>` | `Dockerfile.prod`, `Dockerfile.dev` |
+| `<name>.Dockerfile` | `api.Dockerfile` |
+
+The suffix and the name are non-empty. `Dockerfile.` and `.Dockerfile` are not manifests.
+
+Compose files. A directory that contains more than one of these is parsed in full, including a base file next to an override:
+
+| Name | Example |
+| --- | --- |
+| `docker-compose.yml`, `docker-compose.yaml` | `docker-compose.yml` |
+| `compose.yml`, `compose.yaml` | `compose.yaml` |
+| `docker-compose.<name>.yml`, `docker-compose.<name>.yaml` | `docker-compose.override.yml`, `docker-compose.prod.yaml` |
+| `compose.<name>.yml`, `compose.<name>.yaml` | `compose.override.yaml`, `compose.ci.yml` |
+
+`<name>` may contain dots (`docker-compose.prod.override.yml`). A `FROM` line in a Dockerfile and an `image:` line in a Compose file each supply an image. A Docker Hub image with no namespace is named `library/<image>`. The tag is the version.
 
 ### Unknown lockfile fields
 
