@@ -13,6 +13,88 @@ interface HelmDependency {
   version: string;
   repository?: string;
   condition?: string;
+  /** True when `version` was read from this entry's own indented `version:` line. */
+  versionFromEntry: boolean;
+}
+
+function unquoteYamlScalar(value: string): string {
+  return value.trim().replace(/["']/g, '');
+}
+
+/** Column-0 YAML key (`maintainers:`, `version:`). List items and comments are not keys. */
+function isTopLevelYamlKey(line: string): boolean {
+  if (line.length === 0) return false;
+  const c = line[0];
+  if (c === ' ' || c === '\t' || c === '#' || c === '-' || c === '\r') return false;
+  return /^[A-Za-z0-9_"'][\w."'-]*\s*:/.test(line);
+}
+
+/**
+ * Content from `start` until the next top-level (unindented) key, exclusive.
+ * The opening key's own line is already behind `start`.
+ */
+function sliceYamlSection(content: string, start: number): string {
+  const lines = content.slice(start).split('\n');
+  const kept: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    if (i > 0 && isTopLevelYamlKey(line)) break;
+    kept.push(line);
+  }
+  return kept.join('\n');
+}
+
+/**
+ * Dependency entries inside one YAML section. `version`, `repository`, and
+ * `condition` are taken only from lines indented under that entry, so a later
+ * sibling list (`maintainers:`) or the chart's own `version:` cannot leak in.
+ */
+function parseHelmDependencyList(section: string): HelmDependency[] {
+  const dependencies: HelmDependency[] = [];
+  let current: HelmDependency | null = null;
+  let entryIndent = 0;
+
+  const pushCurrent = () => {
+    if (current) dependencies.push(current);
+    current = null;
+  };
+
+  for (const rawLine of section.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
+
+    const item = /^([ \t]*)-\s+name:\s*(.*)$/.exec(line);
+    if (item) {
+      pushCurrent();
+      entryIndent = item[1]?.length ?? 0;
+      current = {
+        name: unquoteYamlScalar(item[2] ?? ''),
+        version: '*',
+        versionFromEntry: false,
+      };
+      continue;
+    }
+
+    if (!current) continue;
+
+    const field = /^([ \t]+)(version|repository|condition):\s*(.*)$/.exec(line);
+    if (!field) continue;
+    const fieldIndent = field[1]?.length ?? 0;
+    if (fieldIndent <= entryIndent) continue;
+
+    const value = unquoteYamlScalar(field[3] ?? '');
+    if (field[2] === 'version') {
+      current.version = value;
+      current.versionFromEntry = true;
+    } else if (field[2] === 'repository') {
+      current.repository = value;
+    } else {
+      current.condition = value;
+    }
+  }
+
+  pushCurrent();
+  return dependencies;
 }
 
 const HELM_MANIFEST_FILES = new Set(['Chart.yaml', 'Chart.yml']);
@@ -53,45 +135,17 @@ async function parseChartYaml(filePath: string, cache?: FileCache): Promise<{
     appVersion = appVersionMatch[1].trim().replace(/["']/g, '');
   }
 
-  // Parse dependencies section
+  // Parse dependencies section, and stop at the next top-level key.
   // dependencies:
   //   - name: chart-name
   //     version: "~1.0.0"
   //     repository: "https://..."
+  // maintainers:        <-- not part of the dependency list
+  //   - name: Jane Doe
   const depsMatch = content.match(/^dependencies:\s*$/m);
-  if (depsMatch) {
-    const depsStart = depsMatch.index! + depsMatch[0].length;
-    const remainingContent = content.substring(depsStart);
-    
-    // Find each dependency block
-    const depRegex = /^\s*-\s+name:\s*(.+)$/gm;
-    let match: RegExpExecArray | null;
-
-    while ((match = depRegex.exec(remainingContent)) !== null) {
-      const name = match[1].trim().replace(/["']/g, '');
-      const blockStart = match.index;
-      
-      // Find the next dependency or end of file
-      const nextMatch = depRegex.exec(remainingContent);
-      const blockEnd = nextMatch ? nextMatch.index : remainingContent.length;
-      depRegex.lastIndex = blockStart + 1; // Reset for next iteration
-      
-      const block = remainingContent.substring(blockStart, blockEnd);
-      
-      // Extract version
-      const versionMatch = block.match(/version:\s*(.+)$/m);
-      const version = versionMatch ? versionMatch[1].trim().replace(/["']/g, '') : '*';
-      
-      // Extract repository
-      const repoMatch = block.match(/repository:\s*(.+)$/m);
-      const repository = repoMatch ? repoMatch[1].trim().replace(/["']/g, '') : undefined;
-      
-      // Extract condition
-      const conditionMatch = block.match(/condition:\s*(.+)$/m);
-      const condition = conditionMatch ? conditionMatch[1].trim().replace(/["']/g, '') : undefined;
-      
-      dependencies.push({ name, version, repository, condition });
-    }
+  if (depsMatch && depsMatch.index !== undefined) {
+    const depsStart = depsMatch.index + depsMatch[0].length;
+    dependencies.push(...parseHelmDependencyList(sliceYamlSection(content, depsStart)));
   }
 
   return { chartName, chartVersion, appVersion, dependencies };
@@ -108,25 +162,17 @@ async function parseChartLock(filePath: string, cache?: FileCache): Promise<Map<
       ? await cache.readTextFile(filePath)
       : await readTextFile(filePath);
     
-    // Chart.lock has dependencies section with name and version
-    const depRegex = /^\s*-\s+name:\s*(.+)$/gm;
-    let match: RegExpExecArray | null;
-
-    while ((match = depRegex.exec(content)) !== null) {
-      const name = match[1].trim().replace(/["']/g, '');
-      const blockStart = match.index;
-      
-      // Find version in the same block
-      const nextMatch = depRegex.exec(content);
-      const blockEnd = nextMatch ? nextMatch.index : content.length;
-      depRegex.lastIndex = blockStart + 1;
-      
-      const block = content.substring(blockStart, blockEnd);
-      const versionMatch = block.match(/version:\s*(.+)$/m);
-      
-      if (versionMatch) {
-        const version = versionMatch[1].trim().replace(/["']/g, '');
-        resolved.set(name, version);
+    // Same bound as Chart.yaml: only the dependencies section, and only an
+    // indented version that belongs to that entry. A later top-level `version:`
+    // (or a `- name:` under maintainers) must not become a resolved row.
+    const depsMatch = content.match(/^dependencies:\s*$/m);
+    if (depsMatch && depsMatch.index !== undefined) {
+      const depsStart = depsMatch.index + depsMatch[0].length;
+      const section = sliceYamlSection(content, depsStart);
+      for (const dep of parseHelmDependencyList(section)) {
+        if (dep.versionFromEntry) {
+          resolved.set(dep.name, dep.version);
+        }
       }
     }
   } catch {
