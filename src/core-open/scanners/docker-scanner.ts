@@ -15,30 +15,172 @@ interface DockerImage {
 
 const DOCKER_MANIFEST_FILES = new Set(['Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']);
 
-/**
- * Parse Dockerfile to extract base images from FROM statements.
- */
-async function parseDockerfile(filePath: string, cache?: FileCache): Promise<DockerImage[]> {
-  const content = cache 
-    ? await cache.readTextFile(filePath)
-    : await readTextFile(filePath);
-  
-  const images: DockerImage[] = [];
-  
-  // Match FROM statements (including multi-stage builds)
-  // FROM [--platform=<platform>] <image>[:<tag>] [AS <name>]
-  const fromRegex = /^FROM\s+(?:--platform=[^\s]+\s+)?([^\s]+)/gm;
-  let match: RegExpExecArray | null;
+const DOCKER_ARG_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** A `$NAME` or `${...}` that substitution did not resolve. */
+const UNRESOLVED_DOCKER_ARG = /\$\{[^}]*\}|\$[A-Za-z_]/;
 
-  while ((match = fromRegex.exec(content)) !== null) {
-    const imageRef = match[1];
-    
-    // Skip scratch
-    if (imageRef === 'scratch') {
+/**
+ * Drop an unquoted `#` comment. A `#` inside quotes stays part of the value.
+ */
+function stripDockerfileComment(line: string): string {
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"' && i + 1 < line.length) {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '#') return line.slice(0, i);
+  }
+  return line;
+}
+
+/** Split words on unquoted whitespace and drop the surrounding quotes. */
+function splitDockerfileWords(input: string): string[] {
+  const words: string[] = [];
+  let i = 0;
+  while (i < input.length) {
+    while (i < input.length && /\s/.test(input[i])) i += 1;
+    if (i >= input.length) break;
+    let buf = '';
+    let quote: '"' | "'" | null = null;
+    while (i < input.length) {
+      const ch = input[i];
+      if (quote) {
+        if (ch === quote) {
+          quote = null;
+          i += 1;
+          continue;
+        }
+        buf += ch;
+        i += 1;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        i += 1;
+        continue;
+      }
+      if (/\s/.test(ch)) break;
+      buf += ch;
+      i += 1;
+    }
+    if (buf.length > 0) words.push(buf);
+  }
+  return words;
+}
+
+function parseArgAssignments(rest: string): Array<{ name: string; value?: string }> {
+  const assignments: Array<{ name: string; value?: string }> = [];
+  for (const token of splitDockerfileWords(rest)) {
+    if (token.startsWith('--')) continue;
+    const eq = token.indexOf('=');
+    const name = eq >= 0 ? token.slice(0, eq) : token;
+    if (!DOCKER_ARG_NAME.test(name)) continue;
+    if (eq < 0) assignments.push({ name });
+    else assignments.push({ name, value: token.slice(eq + 1) });
+  }
+  return assignments;
+}
+
+/**
+ * Replace `$NAME` and `${NAME}` from ARG defaults already in scope.
+ * `$$` is a literal dollar. Returns null when a name has no default, or when
+ * `${...}` text would remain.
+ */
+function substituteDockerArgs(input: string, args: ReadonlyMap<string, string>): string | null {
+  const pieces = input.split('$$');
+  const resolved: string[] = [];
+  for (const piece of pieces) {
+    const expanded = expandDockerArgPiece(piece, args);
+    if (expanded === null) return null;
+    resolved.push(expanded);
+  }
+  const joined = resolved.join('$');
+  if (UNRESOLVED_DOCKER_ARG.test(joined)) return null;
+  return joined;
+}
+
+function expandDockerArgPiece(piece: string, args: ReadonlyMap<string, string>): string | null {
+  let current = piece;
+  for (let depth = 0; depth < 8; depth++) {
+    let missing = false;
+    const next = current.replace(
+      /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+      (_match, braced: string | undefined, bare: string | undefined) => {
+        const name = braced ?? bare ?? '';
+        if (!args.has(name)) {
+          missing = true;
+          return '';
+        }
+        return args.get(name) ?? '';
+      },
+    );
+    if (missing) return null;
+    if (next === current) return current;
+    current = next;
+  }
+  return null;
+}
+
+/** Record `ARG name=default` values. A bare `ARG name` keeps any earlier default. */
+function recordDockerfileArgs(rest: string, args: Map<string, string>): void {
+  for (const assignment of parseArgAssignments(rest)) {
+    if (assignment.value === undefined) continue;
+    const resolved = substituteDockerArgs(assignment.value, args);
+    if (resolved === null) args.delete(assignment.name);
+    else args.set(assignment.name, resolved);
+  }
+}
+
+/** `FROM [--platform=…] <image>`, quotes around the image removed. */
+function fromImageRef(line: string): string | null {
+  const match = /^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)/i.exec(line);
+  if (!match?.[1]) return null;
+  const ref = match[1];
+  if (ref.length >= 2) {
+    const quote = ref[0];
+    if ((quote === '"' || quote === "'") && ref.endsWith(quote)) return ref.slice(1, -1);
+  }
+  return ref;
+}
+
+/**
+ * Base images named by FROM. ARG defaults that appear before a FROM are
+ * substituted into that reference, including defaults that themselves use
+ * earlier ARGs (`ARG BASE=node:${NODE_VERSION}-alpine`). A reference that
+ * still depends on a variable with no default is omitted.
+ */
+function imagesFromDockerfile(content: string): DockerImage[] {
+  const images: DockerImage[] = [];
+  const args = new Map<string, string>();
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = stripDockerfileComment(rawLine).trim();
+    if (!line) continue;
+
+    const arg = /^ARG\s+([\s\S]+)$/i.exec(line);
+    if (arg?.[1]) {
+      recordDockerfileArgs(arg[1], args);
       continue;
     }
 
-    const parsed = parseDockerImage(imageRef);
+    const imageRef = fromImageRef(line);
+    if (imageRef === null) continue;
+
+    const resolved = substituteDockerArgs(imageRef, args);
+    if (resolved === null || resolved === '' || resolved === 'scratch') continue;
+    if (/\s/.test(resolved) || resolved.includes('$')) continue;
+
+    const parsed = parseDockerImage(resolved);
     images.push({
       name: `${parsed.namespace || 'library'}/${parsed.image}`,
       currentTag: parsed.tag || 'latest',
@@ -46,6 +188,17 @@ async function parseDockerfile(filePath: string, cache?: FileCache): Promise<Doc
   }
 
   return images;
+}
+
+/**
+ * Parse Dockerfile to extract base images from FROM statements.
+ */
+async function parseDockerfile(filePath: string, cache?: FileCache): Promise<DockerImage[]> {
+  const content = cache
+    ? await cache.readTextFile(filePath)
+    : await readTextFile(filePath);
+
+  return imagesFromDockerfile(content);
 }
 
 /**
