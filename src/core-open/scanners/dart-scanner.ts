@@ -109,9 +109,73 @@ function dedupeDartDeps(deps: DartDependency[]): DartDependency[] {
   return [...byName.values()];
 }
 
+/** Leading indent. A tab counts as two spaces so space- and tab-indented pubspecs compare. */
+function indentWidth(line: string): number {
+  let width = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === ' ') width += 1;
+    else if (ch === '\t') width += 2;
+    else break;
+  }
+  return width;
+}
+
+/** Unquote a YAML scalar and drop an unquoted trailing comment. */
+function yamlScalar(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  const quoted = trimmed.match(/^(['"])([\s\S]*?)\1\s*(?:#.*)?$/);
+  if (quoted) return quoted[2] ?? '';
+  const comment = trimmed.search(/\s+#/);
+  return (comment === -1 ? trimmed : trimmed.slice(0, comment)).trim();
+}
+
+/**
+ * A map-form dependency (`http:` then nested keys). Path and git sources
+ * have no pub version constraint. They are stored as `path:<path>` or
+ * `git:<url>` (`git:<url>#<ref>` when a ref is set) so the package is kept
+ * and those nested keys are not reported as packages. A nested `version:`
+ * is the constraint and wins over path or git. `sdk: flutter` drops the entry.
+ */
+interface OpenPubDep {
+  name: string;
+  indent: number;
+  isDev: boolean;
+  version?: string;
+  path?: string;
+  gitUrl?: string;
+  gitRef?: string;
+  nestedKey?: string;
+  nestedIndent?: number;
+  skip: boolean;
+}
+
+function pubDepSpec(open: OpenPubDep): string | undefined {
+  if (open.skip) return undefined;
+  if (open.version) return open.version;
+  if (open.path) return `path:${open.path}`;
+  if (open.gitUrl) return open.gitRef ? `git:${open.gitUrl}#${open.gitRef}` : `git:${open.gitUrl}`;
+  return undefined;
+}
+
+function takeOpenDep(deps: DartDependency[], open: OpenPubDep | null): void {
+  if (!open) return;
+  const version = pubDepSpec(open);
+  if (!version) return;
+  deps.push({ name: open.name, version, isDev: open.isDev });
+}
+
+function flowField(body: string, key: string): string | undefined {
+  const match = body.match(new RegExp(`(?:^|[{,\\s])${key}:\\s*([^,}]+)`));
+  if (!match) return undefined;
+  const scalar = yamlScalar(match[1] ?? '');
+  return scalar || undefined;
+}
+
 /**
  * Parse pubspec.yaml to extract dependencies.
- * 
+ *
  * Example YAML:
  *   name: my_app
  *   environment:
@@ -119,6 +183,10 @@ function dedupeDartDeps(deps: DartDependency[]): DartDependency[] {
  *   dependencies:
  *     flutter:
  *       sdk: flutter
+ *     http:
+ *       version: ^1.2.0
+ *     shared:
+ *       path: ../shared
  *     provider: ^6.1.0
  *   dev_dependencies:
  *     flutter_test:
@@ -127,8 +195,10 @@ function dedupeDartDeps(deps: DartDependency[]): DartDependency[] {
  *
  * `dependencies` and `dev_dependencies` are both kept. An SDK entry
  * (`flutter: { sdk: flutter }`, a nested `sdk: flutter`, or `sdk: flutter`
- * on the same line) is skipped in either section. A name listed in both
- * sections is stored once, as a production dependency.
+ * on the same line) is skipped in either section. A key with no value at
+ * the dependency indent opens one package; deeper keys belong to it and
+ * are never emitted as packages. A name listed in both sections is stored
+ * once, as a production dependency.
  */
 function parsePubspecYaml(content: string): {
   dartVersion?: string;
@@ -137,57 +207,127 @@ function parsePubspecYaml(content: string): {
   const deps: DartDependency[] = [];
   let dartVersion: string | undefined;
   let currentSection: 'dependencies' | 'dev_dependencies' | null = null;
+  let childIndent: number | null = null;
+  let open: OpenPubDep | null = null;
+
+  const flush = () => {
+    takeOpenDep(deps, open);
+    open = null;
+  };
+
+  const enterSection = (section: 'dependencies' | 'dev_dependencies') => {
+    flush();
+    currentSection = section;
+    childIndent = null;
+  };
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const indent = indentWidth(line);
 
     // Extract Dart SDK version. Require a digit so `sdk: flutter` lines
     // (SDK dependencies inside dependency sections) cannot clobber the
-    // environment constraint.
+    // environment constraint. Caret and tilde forms (`^3.5.0`, `~3.4.1`)
+    // count the same as an explicit `>=` range.
     if (trimmed.startsWith('sdk:')) {
       const match = trimmed.match(/sdk:\s*['"]?>?=?\s*[~^]?(\d[^<'"]*)/);
       if (match) dartVersion = match[1]!.trim();
+      else if (open && /sdk:\s*flutter\b/.test(trimmed)) open.skip = true;
       continue;
     }
 
-    // Track sections. Only an unindented key ends the current section —
-    // testing the trimmed line here would match every indented dependency
-    // line and reset the section before the dependency is captured.
     if (trimmed === 'dependencies:') {
-      currentSection = 'dependencies';
+      enterSection('dependencies');
       continue;
-    } else if (trimmed === 'dev_dependencies:') {
-      currentSection = 'dev_dependencies';
+    }
+    if (trimmed === 'dev_dependencies:') {
+      enterSection('dev_dependencies');
       continue;
-    } else if (/^\w+:/.test(line)) {
+    }
+    // Only an unindented key ends the current section — testing the trimmed
+    // line here would match every indented dependency line and reset the
+    // section before the dependency is captured.
+    if (indent === 0 && /^\w+:/.test(line)) {
+      flush();
       currentSection = null;
+      childIndent = null;
       continue;
     }
 
     if (!currentSection) continue;
 
-    // Parse dependency lines
-    // Simple: provider: ^6.1.0
-    // SDK: flutter: { sdk: flutter }
-    
-    const simpleMatch = trimmed.match(/^([\w_]+):\s*([^\s{]+)/);
-    if (simpleMatch) {
-      const name = simpleMatch[1]!;
-      const version = simpleMatch[2]!;
-      
-      // Skip SDK dependencies (flutter, flutter_test from SDK)
-      if (version === 'sdk:' || trimmed.includes('sdk: flutter')) {
+    if (childIndent === null) {
+      if (indent === 0) continue;
+      childIndent = indent;
+    }
+
+    if (indent < childIndent) {
+      flush();
+      currentSection = null;
+      childIndent = null;
+      continue;
+    }
+
+    if (indent === childIndent) {
+      flush();
+      const isDev = currentSection === 'dev_dependencies';
+      // One-line: provider: ^6.1.0. The value token is kept exactly,
+      // including quotes, so existing manifests do not change spec text.
+      const simpleMatch = trimmed.match(/^([\w_]+):\s*([^\s{]+)/);
+      if (simpleMatch) {
+        const name = simpleMatch[1]!;
+        const version = simpleMatch[2]!;
+        if (version === 'sdk:' || trimmed.includes('sdk: flutter')) continue;
+        deps.push({ name, version, isDev });
         continue;
       }
-      
-      deps.push({
-        name,
-        version,
-        isDev: currentSection === 'dev_dependencies',
-      });
+
+      const bare = trimmed.match(/^([\w_]+):\s*(.*)$/);
+      if (!bare) continue;
+      const name = bare[1]!;
+      const rest = (bare[2] ?? '').trim();
+      if (rest.startsWith('{')) {
+        if (/sdk:\s*flutter\b/.test(rest)) continue;
+        const version = flowField(rest, 'version');
+        const pathSpec = flowField(rest, 'path');
+        const gitUrl = flowField(rest, 'git');
+        let spec: string | undefined;
+        if (version) spec = version;
+        else if (pathSpec) spec = `path:${pathSpec}`;
+        else if (gitUrl) spec = `git:${gitUrl}`;
+        if (spec) deps.push({ name, version: spec, isDev });
+        continue;
+      }
+
+      // Bare key: the following deeper lines belong to this package.
+      open = { name, indent, isDev, skip: false };
+      continue;
+    }
+
+    if (!open || indent <= open.indent) continue;
+    const keyMatch = trimmed.match(/^([\w_]+):\s*(.*)$/);
+    if (!keyMatch) continue;
+    const key = keyMatch[1]!;
+    const value = yamlScalar(keyMatch[2] ?? '');
+    const direct = open.nestedIndent === undefined || indent <= open.nestedIndent;
+    if (direct) {
+      open.nestedKey = key;
+      open.nestedIndent = indent;
+      if (key === 'version' && value) open.version = value;
+      else if (key === 'path' && value) open.path = value;
+      else if (key === 'sdk' && value === 'flutter') open.skip = true;
+      else if (key === 'git' && value) open.gitUrl = value;
+      continue;
+    }
+    if (open.nestedKey === 'git') {
+      if (key === 'url' && value) open.gitUrl = value;
+      else if (key === 'ref' && value) open.gitRef = value;
     }
   }
 
+  flush();
   return { dartVersion, deps: dedupeDartDeps(deps) };
 }
 
