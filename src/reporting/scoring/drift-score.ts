@@ -284,7 +284,7 @@ export function generateFindings(
         findings.push({
           ruleId: 'vibgrate/dependency-major-lag',
           level: 'error',
-          message: `${dep.package} is ${dep.majorsBehind} major versions behind (spec: ${dep.currentSpec}, latest: ${dep.latestStable}).`,
+          message: `${dep.alias ? `${dep.package} (${dep.alias})` : dep.package} is ${dep.majorsBehind} major versions behind (spec: ${dep.currentSpec}, latest: ${dep.latestStable}).`,
           location: project.path,
         });
       }

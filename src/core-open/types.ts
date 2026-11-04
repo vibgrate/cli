@@ -135,6 +135,13 @@ export interface DependencyRow {
    * and for a local-path replacement (those keep the original module path).
    */
   replacedFrom?: string;
+  /**
+   * Helm `alias:` for this dependency. `package` stays the chart name so
+   * registry lookups still use it; the alias separates two dependencies on
+   * the same chart (for example redis aliased as cache and queue). Absent
+   * when the manifest entry has no alias.
+   */
+  alias?: string;
   section: DepSection;
   currentSpec: string;
   resolvedVersion: string | null;
