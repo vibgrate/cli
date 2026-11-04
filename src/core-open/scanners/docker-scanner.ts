@@ -24,25 +24,30 @@ async function parseDockerfile(filePath: string, cache?: FileCache): Promise<Doc
     : await readTextFile(filePath);
   
   const images: DockerImage[] = [];
-  
-  // Match FROM statements (including multi-stage builds)
+  // Stage names declared earlier in this file. Docker matches them
+  // case-insensitively, and only a name already seen counts: an image that
+  // shares a name with a stage declared later is still a real dependency.
+  const stages = new Set<string>();
+
   // FROM [--platform=<platform>] <image>[:<tag>] [AS <name>]
-  const fromRegex = /^FROM\s+(?:--platform=[^\s]+\s+)?([^\s]+)/gm;
+  // The AS keyword is case-insensitive. The captured name is the stage.
+  const fromRegex = /^FROM\s+(?:--platform=[^\s]+\s+)?([^\s]+)(?:\s+[Aa][Ss]\s+(\S+))?/gm;
   let match: RegExpExecArray | null;
 
   while ((match = fromRegex.exec(content)) !== null) {
     const imageRef = match[1];
-    
-    // Skip scratch
-    if (imageRef === 'scratch') {
-      continue;
+    const stageName = match[2];
+
+    // Skip scratch and a FROM whose target is an earlier stage (`FROM build`).
+    if (imageRef !== 'scratch' && !stages.has(imageRef.toLowerCase())) {
+      const parsed = parseDockerImage(imageRef);
+      images.push({
+        name: `${parsed.namespace || 'library'}/${parsed.image}`,
+        currentTag: parsed.tag || 'latest',
+      });
     }
 
-    const parsed = parseDockerImage(imageRef);
-    images.push({
-      name: `${parsed.namespace || 'library'}/${parsed.image}`,
-      currentTag: parsed.tag || 'latest',
-    });
+    if (stageName) stages.add(stageName.toLowerCase());
   }
 
   return images;
