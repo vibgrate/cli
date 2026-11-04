@@ -115,6 +115,13 @@ function calculateDrift(
   }
 }
 
+/** Stable order: image name, then tag. Code-point compare, not locale. */
+function compareDockerImage(a: DockerImage, b: DockerImage): number {
+  if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+  if (a.currentTag !== b.currentTag) return a.currentTag < b.currentTag ? -1 : 1;
+  return 0;
+}
+
 /**
  * Scan a directory for Docker manifests.
  */
@@ -156,24 +163,31 @@ export async function scanDocker(
     return null;
   }
 
-  // Deduplicate images by name
-  const uniqueImages = new Map<string, string>();
+  // Deduplicate on name and tag. golang:1.21 and golang:1.23 are two rows;
+  // the same name:tag twice is one. Order is name, then tag.
+  const seen = new Set<string>();
+  const uniqueImages: DockerImage[] = [];
   for (const img of allImages) {
-    if (!uniqueImages.has(img.name)) {
-      uniqueImages.set(img.name, img.currentTag);
-    }
+    const key = `${img.name}\0${img.currentTag}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueImages.push(img);
   }
+  uniqueImages.sort(compareDockerImage);
 
-  // Fetch latest versions
-  const imageRefs = Array.from(uniqueImages.keys());
+  // One registry lookup per image name. Each tag computes its own drift.
+  const imageRefs: string[] = [];
+  for (const img of uniqueImages) {
+    if (imageRefs[imageRefs.length - 1] !== img.name) imageRefs.push(img.name);
+  }
   const latestVersions = await fetchDockerVersionsBulk(imageRefs, manifest, offline);
 
   // Build dependency list with drift analysis
   const dependencies: DependencyRow[] = [];
   const buckets = { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 };
 
-  for (const name of imageRefs) {
-    const currentTag = uniqueImages.get(name)!;
+  for (const img of uniqueImages) {
+    const { name, currentTag } = img;
     const latestVersion = latestVersions.get(name);
     const drift = latestVersion ? calculateDrift(currentTag, latestVersion) : 'unknown';
     
