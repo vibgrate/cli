@@ -12,8 +12,14 @@ import { SwiftCache } from './swift-cache.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
 
-/** Well-known Swift frameworks / libraries to track */
-const KNOWN_SWIFT_FRAMEWORKS: Record<string, string> = {
+/**
+ * Well-known Swift frameworks / libraries to track.
+ *
+ * Keys are the repository names as they appear in package URLs, lowercased
+ * (`https://github.com/apple/swift-log.git` -> `swift-log`), because lookups
+ * are done with `dep.name.toLowerCase()`.
+ */
+export const KNOWN_SWIFT_FRAMEWORKS: Record<string, string> = {
   // ── Server-Side Frameworks ──
   'vapor': 'Vapor',
   'hummingbird': 'Hummingbird',
@@ -44,10 +50,10 @@ const KNOWN_SWIFT_FRAMEWORKS: Record<string, string> = {
   // ── Testing ──
   'quick': 'Quick',
   'nimble': 'Nimble',
-  'snapshotTesting': 'SnapshotTesting',
+  'swift-snapshot-testing': 'SnapshotTesting',
 
   // ── Logging ──
-  'swiftlog': 'SwiftLog',
+  'swift-log': 'SwiftLog',
   'cocoalumberjack': 'CocoaLumberjack',
 
   // ── Dependency Injection ──
