@@ -152,3 +152,67 @@ describe('scanDocker tag dedup', () => {
     expect(shape(b!)).toEqual(shape(a!));
   });
 });
+
+describe('scanDocker multi-stage Dockerfiles', () => {
+  const dirs: string[] = [];
+
+  beforeEach(() => {
+    fetchDockerVersionsBulk.mockClear();
+  });
+
+  afterEach(async () => {
+    await Promise.all(dirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  const cases: Array<{
+    name: string;
+    dockerfile: string;
+    rows: Array<{ package: string; currentSpec: string }>;
+  }> = [
+    {
+      name: 'uppercase AS',
+      dockerfile: [
+        'FROM node:20 AS build',
+        'RUN npm ci && npm run build',
+        'FROM build AS test',
+        'RUN npm test',
+        '',
+      ].join('\n'),
+      rows: [{ package: 'library/node', currentSpec: '20' }],
+    },
+    {
+      name: 'lowercase as',
+      dockerfile: [
+        'FROM node:20 as build',
+        'RUN npm ci && npm run build',
+        'FROM build as test',
+        'RUN npm test',
+        '',
+      ].join('\n'),
+      rows: [{ package: 'library/node', currentSpec: '20' }],
+    },
+    {
+      name: 'image that shares a name with a later stage',
+      dockerfile: [
+        'FROM build',
+        'FROM node:20 AS build',
+        '',
+      ].join('\n'),
+      rows: [
+        { package: 'library/build', currentSpec: 'latest' },
+        { package: 'library/node', currentSpec: '20' },
+      ],
+    },
+  ];
+
+  it.each(cases)('$name', async ({ dockerfile, rows }) => {
+    const dir = await writeProject({ Dockerfile: dockerfile });
+    dirs.push(dir);
+
+    const scan = await scanDocker(dir, undefined, undefined, true);
+    expect(scan).not.toBeNull();
+    expect(
+      scan!.dependencies.map((row) => ({ package: row.package, currentSpec: row.currentSpec })),
+    ).toEqual(rows);
+  });
+});
