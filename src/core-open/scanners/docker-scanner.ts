@@ -1,7 +1,7 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
-import { fetchDockerVersionsBulk, parseDockerImage } from './docker-cache.js';
+import { fetchDockerVersionsBulk, parseDockerImage, recordedDockerImageName } from './docker-cache.js';
 import { gt, SemVer } from 'semver';
 import type { ProjectScan, DependencyRow } from '../types.js';
 import { readTextFile, pathExists, FileCache } from '../utils/fs.js';
@@ -40,7 +40,7 @@ async function parseDockerfile(filePath: string, cache?: FileCache): Promise<Doc
 
     const parsed = parseDockerImage(imageRef);
     images.push({
-      name: `${parsed.namespace || 'library'}/${parsed.image}`,
+      name: recordedDockerImageName(parsed),
       currentTag: parsed.tag || 'latest',
     });
   }
@@ -68,7 +68,7 @@ async function parseDockerCompose(filePath: string, cache?: FileCache): Promise<
     
     const parsed = parseDockerImage(imageRef);
     images.push({
-      name: `${parsed.namespace || 'library'}/${parsed.image}`,
+      name: recordedDockerImageName(parsed),
       currentTag: parsed.tag || 'latest',
     });
   }
@@ -176,6 +176,9 @@ export async function scanDocker(
   uniqueImages.sort(compareDockerImage);
 
   // One registry lookup per image name. Each tag computes its own drift.
+  // A non-Hub name keeps its registry host. The lookup queries Docker Hub
+  // only for Hub names and leaves every other registry unknown unless the
+  // package-version manifest already lists that exact name.
   const imageRefs: string[] = [];
   for (const img of uniqueImages) {
     if (imageRefs[imageRefs.length - 1] !== img.name) imageRefs.push(img.name);
