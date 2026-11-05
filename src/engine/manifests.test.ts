@@ -117,6 +117,25 @@ serde = "1"
     expect(out.deps).toBe(1);
   });
 
+  it('extracts a Gemfile and its dependencies', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-manifest-'));
+    write(
+      dir,
+      'Gemfile',
+      `source 'https://rubygems.org'
+gem 'rails', '~> 7.1'
+gem 'rubocop', group: :development
+gem 'rspec', group: [:development, :test]
+`,
+    );
+    const out = extractManifests(dir);
+    const pkg = out.nodes.find((n) => n.kind === 'package');
+    expect(pkg?.lang).toBe('ruby');
+    expect(out.deps).toBe(3);
+    const extNames = out.nodes.filter((n) => n.kind === 'external').map((n) => n.name).sort();
+    expect(extNames).toEqual(['rails', 'rspec', 'rubocop']);
+  });
+
   it('gives each ecosystem its own package node in a mixed-ecosystem tree', () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-manifest-'));
     write(dir, 'services/api/package.json', JSON.stringify({ name: 'api' }));
