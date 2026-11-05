@@ -1,0 +1,12 @@
+[versions]
+jackson = "2.17.2"
+slf4j = "2.0.16"
+
+[libraries]
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+jackson-annotations = { group = "com.fasterxml.jackson.core", name = "jackson-annotations", version.ref = "jackson" }
+jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
+slf4j-api = "org.slf4j:slf4j-api:2.0.16"
+
+[bundles]
+jackson = ["jackson-core", "jackson-databind"]
