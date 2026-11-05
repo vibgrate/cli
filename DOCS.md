@@ -3176,7 +3176,7 @@ The map's dependency edges come from the manifest. An `external` node is the pac
 |------|---------|-------------|
 | `[paths...]` | `.` | Folders or files to map. A directory outside the working directory is mapped as its own project |
 | `--only <langs>` | — | Restrict to languages (e.g. `ts,py,go`) |
-| `--exclude <glob>` | — | Extra ignore glob (repeatable) |
+| `--exclude <glob>` | — | Extra ignore glob (repeatable). Empty and whitespace-only values are skipped |
 | `--jobs <n>` | auto | Worker count (`1` = single-threaded) |
 | `--scip <file>` | auto-detect | Ingest a SCIP index for precise resolution |
 | `--no-scip` | — | Ignore any SCIP index |
@@ -5667,6 +5667,13 @@ The warning names each file, the `driftBudget` value in that file, and which
 file is the config in use (the first one in the lookup order). The other
 files are not read. The same settings in a different key order do not warn.
 Only the `driftBudget` value is printed, not the rest of the file.
+
+An empty or whitespace-only `exclude` entry is skipped, and so is a blank
+`.gitignore` line — including a file whose only content is a carriage return,
+or a carriage return left after the last newline. A blank entry never hides
+the project. A real pattern written next to one still applies, for both
+`vg build` and `vg scan`, including the lockfile check those commands run
+before they read source.
 
 ### Drift budget
 

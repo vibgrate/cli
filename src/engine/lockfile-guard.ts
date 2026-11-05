@@ -3,7 +3,9 @@ import * as path from 'node:path';
 import ignore from 'ignore';
 import { parse as parseToml } from 'smol-toml';
 import { parse as parseYaml } from 'yaml';
+import { gitignoreWithoutBlankLines } from '../core-open/utils/glob.js';
 import { assertSafeWalkRoot } from '../core-open/utils/root-safety.js';
+import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
 import { readDirectory, type DirectoryReader } from './dir-reader.js';
 import { isSkippedDirName, SKIP_FILES } from './discover.js';
 
@@ -79,10 +81,18 @@ export function assertLockfilesValid(root: string, readDir: DirectoryReader = re
 
 function findLockfiles(root: string, readDir: DirectoryReader): string[] {
   const ig = ignore();
+  // Same blank-line rule as source discovery. `ignore` compiles a carriage
+  // return that is not part of CRLF into an empty expression, and that
+  // expression matches every path. A blank or whitespace-only line is not a
+  // rule: it must not hide the lockfiles in the tree.
   const gitignorePath = path.join(root, '.gitignore');
   if (fs.existsSync(gitignorePath)) {
     try {
-      ig.add(fs.readFileSync(gitignorePath, 'utf8'));
+      const inspected = inspectUtf8(fs.readFileSync(gitignorePath));
+      if (inspected.ok) {
+        const rules = gitignoreWithoutBlankLines(inspected.text);
+        if (rules) ig.add(rules);
+      }
     } catch {
       // Unreadable ignore file: still walk, and skip the usual dependency dirs.
     }
