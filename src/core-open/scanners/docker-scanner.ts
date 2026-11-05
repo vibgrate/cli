@@ -27,7 +27,7 @@ async function parseDockerfile(filePath: string, cache?: FileCache): Promise<Doc
   
   // Match FROM statements (including multi-stage builds)
   // FROM [--platform=<platform>] <image>[:<tag>] [AS <name>]
-  const fromRegex = /^FROM\s+(?:--platform=[^\s]+\s+)?([^\s]+)/gm;
+  const fromRegex = /^\s*FROM\s+(?:--platform=[^\s]+\s+)?([^\s]+)/gim;
   let match: RegExpExecArray | null;
 
   while ((match = fromRegex.exec(content)) !== null) {
