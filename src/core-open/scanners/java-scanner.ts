@@ -10,6 +10,7 @@ import { withTimeout } from '../utils/timeout.js';
 import { MavenCache } from './maven-cache.js';
 import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { loadGradleLockIndex, type GradleLockIndex } from './gradle-lockfile.js';
+import { librariesForAccessor, loadGradleVersionCatalog, type GradleVersionCatalog } from './gradle-version-catalog.js';
 import type { LockfileIo } from './npm-lockfile.js';
 import { latestLts, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
@@ -393,7 +394,11 @@ function considerGradleDep(deps: GradleDependency[], dep: GradleDependency): voi
   }
 }
 
-export function parseGradleBuild(content: string, filePath: string): GradleData {
+export function parseGradleBuild(
+  content: string,
+  filePath: string,
+  catalog?: GradleVersionCatalog | null,
+): GradleData {
   const deps: GradleDependency[] = [];
   const projectName = path.basename(path.dirname(filePath));
 
@@ -454,7 +459,41 @@ export function parseGradleBuild(content: string, filePath: string): GradleData 
     }
   }
 
+  if (catalog) appendGradleCatalogDeps(content, configNames, catalog, deps);
+
   return { javaVersion, dependencies: deps, projectName };
+}
+
+/**
+ * `implementation(libs.jackson.databind)` and `implementation libs.jackson.databind`.
+ * The catalog version is the declared version. A later `gradle.lockfile` pin
+ * still wins for `resolvedVersion`. Bundles expand to their member libraries.
+ */
+function appendGradleCatalogDeps(
+  content: string,
+  configNames: string,
+  catalog: GradleVersionCatalog,
+  deps: GradleDependency[],
+): void {
+  const accessor = 'libs(?:\\.[A-Za-z_][A-Za-z0-9_]*)+';
+  const patterns = [
+    new RegExp(`(?:${configNames})\\s*\\(\\s*(${accessor})(?:\\s*\\.\\s*get\\s*\\(\\s*\\))?\\s*\\)`, 'g'),
+    new RegExp(`(?:${configNames})\\s+(${accessor})\\b`, 'g'),
+  ];
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(content)) !== null) {
+      const configuration = bareGradleConfiguration(match[0]!);
+      for (const lib of librariesForAccessor(catalog, match[1]!)) {
+        considerGradleDep(deps, {
+          groupId: lib.groupId,
+          artifactId: lib.artifactId,
+          version: lib.version,
+          configuration,
+        });
+      }
+    }
+  }
 }
 
 /**
@@ -550,6 +589,15 @@ async function scanOneJavaProject(
   const allDeps = new Map<string, { groupId: string; artifactId: string; version: string; scope?: string; optional?: boolean; configuration?: string }>();
   const projectReferences: ProjectReference[] = [];
 
+  const lockIo: LockfileIo = {
+    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
+    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
+    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
+  };
+  // `libs.*` aliases resolve against gradle/libs.versions.toml (or a settings
+  // `from(files("…"))` path). Absent catalog → aliases stay unresolved.
+  const versionCatalog = await loadGradleVersionCatalog(dir, rootDir, lockIo);
+
   // Parse manifests — prefer pom.xml over Gradle
   for (const f of manifestFiles) {
     const fileName = path.basename(f);
@@ -576,7 +624,7 @@ async function scanOneJavaProject(
         });
       }
     } else if (fileName === 'build.gradle' || fileName === 'build.gradle.kts') {
-      const gradle = parseGradleBuild(content, f);
+      const gradle = parseGradleBuild(content, f, versionCatalog);
       if (gradle.projectName) projectName = gradle.projectName;
       if (gradle.javaVersion) javaVersion = gradle.javaVersion;
 
@@ -621,13 +669,8 @@ async function scanOneJavaProject(
   }
 
   // Gradle's optional dependency locking pins exact resolved versions in gradle.lockfile (beside
-  // build.gradle). Prefer it over the declared/BOM-supplied version. Maven projects have no such
-  // file, so this is a no-op there.
-  const lockIo: LockfileIo = {
-    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
-    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
-    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
-  };
+  // build.gradle). Prefer it over the declared, catalog, or BOM-supplied version. Maven projects
+  // have no such file, so this is a no-op there.
   const lockIndex: GradleLockIndex | null = await loadGradleLockIndex(dir, lockIo).catch((err: unknown) => {
     rethrowLockfileParseError(err);
     return null;
