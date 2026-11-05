@@ -1,0 +1,21 @@
+[workspace]
+members = ["crates/app"]
+resolver = "2"
+
+[workspace.dependencies]
+serde = "1.0"
+tokio = { version = "1.35", features = ["full"], optional = true }
+anyhow = { version = "1.0.86", features = ["backtrace"] }
+regex = { version = "1.10", features = ["unicode"], optional = true }
+local-pin = { version = "0.9", features = ["extra"], optional = false }
+path-only = { path = "crates/path-only" }
+git-only = { git = "https://example.com/git-only.git" }
+criterion = { version = "0.5.1", features = ["html_reports"], optional = true }
+cc = "1.0.97"
+winapi = "0.3.9"
+shared-path = "9.9.9"
+shared-git = { version = "4.0", features = ["a"], optional = true }
+
+[workspace.dependencies.serde_json]
+version = "1.0.108"
+features = ["raw_value"]

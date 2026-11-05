@@ -1,0 +1,13 @@
+[package]
+name = "self-workspace"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[workspace.dependencies]
+serde = "1.4.0"
+
+[dependencies]
+serde = { workspace = true }
+path-dep = { path = "../path-dep" }
