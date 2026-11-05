@@ -9,6 +9,9 @@ import { LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile
 import { lockfileWarningPath, noteComposerLock, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
 import { ComposerCache } from './composer-cache.js';
+import { latestStable } from '../runtimes/catalog.js';
+import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
+import type { RuntimeCatalog } from '../runtimes/types.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
 
@@ -75,9 +78,6 @@ const KNOWN_PHP_FRAMEWORKS: Record<string, string> = {
   'friendsofphp/php-cs-fixer': 'PHP CS Fixer',
   'squizlabs/php_codesniffer': 'PHP_CodeSniffer',
 };
-
-/** Latest PHP major.minor (as of 2026) */
-const LATEST_PHP = { major: 8, minor: 4 };
 
 interface PhpDependency {
   name: string;
@@ -207,6 +207,7 @@ export async function scanPhpProjects(
   composerCache: ComposerCache,
   cache?: FileCache,
   projectScanTimeout?: number,
+  catalog: RuntimeCatalog = BUNDLED_RUNTIME_CATALOG,
 ): Promise<ProjectScan[]> {
   // Find composer.json files
   const manifestFiles = cache
@@ -219,7 +220,7 @@ export async function scanPhpProjects(
   for (const manifestFile of manifestFiles) {
     const dir = path.dirname(manifestFile);
     try {
-      const scanPromise = scanOnePhpProject(dir, manifestFile, rootDir, composerCache, cache);
+      const scanPromise = scanOnePhpProject(dir, manifestFile, rootDir, composerCache, cache, catalog);
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
         results.push(result.value);
@@ -251,7 +252,8 @@ async function scanOnePhpProject(
   manifestFile: string,
   rootDir: string,
   composerCache: ComposerCache,
-  cache?: FileCache,
+  cache: FileCache | undefined,
+  catalog: RuntimeCatalog,
 ): Promise<ProjectScan> {
   const relDir = path.relative(rootDir, dir) || '.';
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
@@ -283,12 +285,15 @@ async function scanOnePhpProject(
       if (verMatch) {
         const reqMajor = parseInt(verMatch[1]!, 10);
         const reqMinor = parseInt(verMatch[2]!, 10);
-        if (reqMajor === LATEST_PHP.major) {
-          runtimeMajorsBehind = Math.max(0, LATEST_PHP.minor - reqMinor);
-        } else if (reqMajor < LATEST_PHP.major) {
-          runtimeMajorsBehind = LATEST_PHP.minor + (LATEST_PHP.major - reqMajor) * 10;
+        const latestPhp = latestStable(catalog, 'php');
+        if (latestPhp) {
+          if (reqMajor === latestPhp.major) {
+            runtimeMajorsBehind = Math.max(0, latestPhp.minor - reqMinor);
+          } else if (reqMajor < latestPhp.major) {
+            runtimeMajorsBehind = latestPhp.minor + (latestPhp.major - reqMajor) * 10;
+          }
+          runtimeLatest = `${latestPhp.major}.${latestPhp.minor}`;
         }
-        runtimeLatest = `${LATEST_PHP.major}.${LATEST_PHP.minor}`;
       }
     }
   }

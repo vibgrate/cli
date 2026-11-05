@@ -9,6 +9,9 @@ import { parseLockfileJson, rethrowLockfileParseError } from '../utils/lockfile-
 import { lockfileWarningPath, notePackageResolved, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
 import { SwiftCache } from './swift-cache.js';
+import { latestStable } from '../runtimes/catalog.js';
+import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
+import type { RuntimeCatalog } from '../runtimes/types.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
 
@@ -59,9 +62,6 @@ const KNOWN_SWIFT_FRAMEWORKS: Record<string, string> = {
   'promisekit': 'PromiseKit',
   'then': 'Then',
 };
-
-/** Latest Swift version (as of 2026) */
-const LATEST_SWIFT = { major: 6, minor: 0 };
 
 interface SwiftDependency {
   name: string;
@@ -291,6 +291,7 @@ export async function scanSwiftProjects(
   swiftCache: SwiftCache,
   cache?: FileCache,
   projectScanTimeout?: number,
+  catalog: RuntimeCatalog = BUNDLED_RUNTIME_CATALOG,
 ): Promise<ProjectScan[]> {
   // Find Package.swift files
   const manifestFiles = cache
@@ -303,7 +304,7 @@ export async function scanSwiftProjects(
   for (const manifestFile of manifestFiles) {
     const dir = path.dirname(manifestFile);
     try {
-      const scanPromise = scanOneSwiftProject(dir, manifestFile, rootDir, swiftCache, cache);
+      const scanPromise = scanOneSwiftProject(dir, manifestFile, rootDir, swiftCache, cache, catalog);
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
         results.push(result.value);
@@ -335,7 +336,8 @@ async function scanOneSwiftProject(
   manifestFile: string,
   rootDir: string,
   swiftCache: SwiftCache,
-  cache?: FileCache,
+  cache: FileCache | undefined,
+  catalog: RuntimeCatalog,
 ): Promise<ProjectScan> {
   const relDir = path.relative(rootDir, dir) || '.';
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
@@ -364,12 +366,15 @@ async function scanOneSwiftProject(
     if (verMatch) {
       const reqMajor = parseInt(verMatch[1]!, 10);
       const reqMinor = parseInt(verMatch[2]!, 10);
-      if (reqMajor === LATEST_SWIFT.major) {
-        runtimeMajorsBehind = Math.max(0, LATEST_SWIFT.minor - reqMinor);
-      } else if (reqMajor < LATEST_SWIFT.major) {
-        runtimeMajorsBehind = (LATEST_SWIFT.major - reqMajor) * 10 + LATEST_SWIFT.minor;
+      const latestSwift = latestStable(catalog, 'swift');
+      if (latestSwift) {
+        if (reqMajor === latestSwift.major) {
+          runtimeMajorsBehind = Math.max(0, latestSwift.minor - reqMinor);
+        } else if (reqMajor < latestSwift.major) {
+          runtimeMajorsBehind = (latestSwift.major - reqMajor) * 10 + latestSwift.minor;
+        }
+        runtimeLatest = `${latestSwift.major}.${latestSwift.minor}`;
       }
-      runtimeLatest = `${LATEST_SWIFT.major}.${LATEST_SWIFT.minor}`;
     }
   }
 
