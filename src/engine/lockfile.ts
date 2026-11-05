@@ -95,9 +95,10 @@ function reportLockfileFields(root: string, file: string, fill: (rel: string, no
  * A file that exists but is truncated or syntactically invalid throws
  * {@link LockfileParseError} instead of pretending the pin is absent.
  *
- * npm covers `package-lock.json` (v1/v2/v3), `pnpm-lock.yaml` (v6/v9) and
- * `yarn.lock`. Other ecosystems follow the same shape and return `undefined`
- * until their parser lands — honest degradation, no false mismatch.
+ * npm covers `package-lock.json` and `npm-shrinkwrap.json` (v1/v2/v3, same JSON),
+ * `pnpm-lock.yaml` (v6/v9) and `yarn.lock`. `package-lock.json` is preferred when
+ * both npm JSON lockfiles are present. Other ecosystems follow the same shape and
+ * return `undefined` until their parser lands — honest degradation, no false mismatch.
  */
 export function lockfileVersion(root: string, ecosystem: DepRecord['ecosystem'], name: string): string | undefined {
   if (ecosystem === 'npm') return packageLockVersion(root, name) ?? pnpmLockVersion(root, name) ?? yarnLockVersion(root, name);
@@ -377,7 +378,8 @@ export interface LockfileGraph {
  * *this* declared dependency resolve to") and stays a point lookup by
  * design. An SBOM needs the opposite shape: the whole installed graph, since
  * that is what a vulnerability scanner or supply-chain review actually
- * walks. Tries `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+ * walks. Tries `package-lock.json` (or `npm-shrinkwrap.json` when that file is
+ * absent), `pnpm-lock.yaml`, `yarn.lock`,
  * `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `Gemfile.lock`,
  * `composer.lock`, then `packages.lock.json`, and returns `undefined` when
  * none is present. A lockfile that exists but is
@@ -492,7 +494,18 @@ interface NpmV2Package {
 }
 
 /**
- * npm `package-lock.json` v2/v3 `packages` map, falling back to v1's nested
+ * npm JSON lockfile to read. `package-lock.json` wins when it is present, including
+ * when it has no usable versions; `npm-shrinkwrap.json` is the same document under
+ * the filename npm publishes with a package.
+ */
+function npmPackageLockFile(root: string): 'package-lock.json' | 'npm-shrinkwrap.json' | undefined {
+  if (fs.existsSync(path.join(root, 'package-lock.json'))) return 'package-lock.json';
+  if (fs.existsSync(path.join(root, 'npm-shrinkwrap.json'))) return 'npm-shrinkwrap.json';
+  return undefined;
+}
+
+/**
+ * npm `package-lock.json` / `npm-shrinkwrap.json` v2/v3 `packages` map, falling back to v1's nested
  * `dependencies` tree (which carries no resolvable edges — see
  * `LockfileGraph.edges`).
  *
@@ -505,9 +518,11 @@ interface NpmV2Package {
  * `packages` encodes without needing a second (real) install.
  */
 function npmLockGraph(root: string): LockfileGraph | undefined {
-  const parsed = readCheckedJson(root, 'package-lock.json');
+  const file = npmPackageLockFile(root);
+  if (!file) return undefined;
+  const parsed = readCheckedJson(root, file);
   if (!parsed || typeof parsed !== 'object') return undefined;
-  reportLockfileFields(root, 'package-lock.json', (rel, notes) => notePackageLock(parsed, rel, notes));
+  reportLockfileFields(root, file, (rel, notes) => notePackageLock(parsed, rel, notes));
   const data = parsed as {
     packages?: Record<string, NpmV2Package>;
     dependencies?: Record<string, { version?: string; dependencies?: Record<string, unknown> }>;
@@ -1140,11 +1155,13 @@ function packagesLockGraph(root: string): LockfileGraph | undefined {
   };
 }
 
-/** npm `package-lock.json` — JSON, deterministic, no dependency. */
+/** npm `package-lock.json` or `npm-shrinkwrap.json` — JSON, deterministic, no dependency. */
 function packageLockVersion(root: string, name: string): string | undefined {
-  const parsed = readCheckedJson(root, 'package-lock.json');
+  const file = npmPackageLockFile(root);
+  if (!file) return undefined;
+  const parsed = readCheckedJson(root, file);
   if (!parsed || typeof parsed !== 'object') return undefined;
-  reportLockfileFields(root, 'package-lock.json', (rel, notes) => notePackageLock(parsed, rel, notes));
+  reportLockfileFields(root, file, (rel, notes) => notePackageLock(parsed, rel, notes));
   const data = parsed as { packages?: Record<string, { version?: string }>; dependencies?: Record<string, { version?: string }> };
   // v2/v3: packages keyed by install path; the top-level dep is "node_modules/<name>".
   const top = data.packages?.[`node_modules/${name}`]?.version;
