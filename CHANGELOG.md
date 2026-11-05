@@ -14,6 +14,15 @@ backward compatible.
 
 ### Fixed
 
+- **A blank `.gitignore` line no longer hides lockfiles.** `vg build` and
+  `vg scan` already skipped empty and whitespace-only exclude patterns and
+  blank ignore lines while discovering source. The lockfile check read
+  `.gitignore` raw, so a carriage return that was not part of a CRLF pair —
+  including a file that contains only `\r`, or a real rule followed by a bare
+  `\r` — was compiled as a pattern that matches every path. Lockfiles were
+  then skipped and a truncated lockfile did not fail the command. Those lines
+  are dropped. A real pattern next to a blank one still applies.
+
 - **`vg scan` expands PEP 735 `{include-group}` entries in `[dependency-groups]`.**
   An include pulls in that group's requirements from the same `pyproject.toml`.
   Group names are normalised (lowercase; runs of `-`, `_`, and `.` collapse to
