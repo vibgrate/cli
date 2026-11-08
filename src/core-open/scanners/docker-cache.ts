@@ -82,6 +82,25 @@ export function parseDockerImage(imageRef: string): DockerImageRef {
   return { registry, namespace, image, tag, digest };
 }
 
+/** Registry hosts that mean Docker Hub. They never appear in a row name. */
+const DOCKER_HUB_ALIASES = new Set(['docker.io', 'index.docker.io', 'registry-1.docker.io']);
+
+/**
+ * The row name for a parsed reference.
+ *
+ * Docker Hub (and its aliases) keeps the documented `library/<image>` /
+ * `<namespace>/<image>` shape. Any other registry keeps its host, so
+ * `ghcr.io/acme/api` is never looked up on Docker Hub as `acme/api`, and two
+ * images with the same path on different registries stay two rows.
+ */
+export function dockerRowName(parsed: DockerImageRef): string {
+  const imagePath = `${parsed.namespace || 'library'}/${parsed.image}`;
+  if (parsed.registry && !DOCKER_HUB_ALIASES.has(parsed.registry.toLowerCase())) {
+    return `${parsed.registry}/${imagePath}`;
+  }
+  return imagePath;
+}
+
 /**
  * Fetch available tags for a Docker Hub image.
  */
@@ -175,7 +194,7 @@ export async function fetchDockerLatestVersion(
   offline = false,
 ): Promise<string | null> {
   const parsed = parseDockerImage(imageRef);
-  const key = `${parsed.namespace || 'library'}/${parsed.image}`;
+  const key = dockerRowName(parsed);
 
   // Check manifest first
   const manifestEntry = getManifestEntry(manifest, 'docker', key);
@@ -188,7 +207,7 @@ export async function fetchDockerLatestVersion(
   }
 
   // Only support Docker Hub for now (GHCR and ECR require auth)
-  if (parsed.registry && parsed.registry !== 'docker.io') {
+  if (parsed.registry && !DOCKER_HUB_ALIASES.has(parsed.registry.toLowerCase())) {
     return null;
   }
 
