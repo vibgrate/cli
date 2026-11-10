@@ -397,7 +397,9 @@ export async function scanTerraform(
     allModules.push(...modules);
   }
 
-  // Deduplicate providers and modules
+  // A provider requirement is one constraint per source. Terraform rejects
+  // two versions of the same provider in one configuration, and a later file
+  // that repeats the source must not mint a second drift row.
   const uniqueProviders = new Map<string, string | undefined>();
   for (const p of allProviders) {
     if (!uniqueProviders.has(p.source)) {
@@ -405,12 +407,28 @@ export async function scanTerraform(
     }
   }
 
-  const uniqueModules = new Map<string, string | undefined>();
+  // A registry module is pinned per call site. Separate roots in one scan
+  // (envs/staging on 4.0.2, envs/prod on 5.8.1) routinely require different
+  // versions of the same source. Keying on source alone kept the first
+  // version and dropped the other pin's drift. The same source at the same
+  // version is still one row. Rows are emitted in source, then version,
+  // order so the report does not follow filesystem walk order.
+  const uniqueModules = new Map<string, TerraformModule>();
   for (const m of allModules) {
-    if (!uniqueModules.has(m.source)) {
-      uniqueModules.set(m.source, m.version);
+    const key = `${m.source}\0${m.version ?? ''}`;
+    if (!uniqueModules.has(key)) {
+      uniqueModules.set(key, { source: m.source, version: m.version });
     }
   }
+  const modulePins = [...uniqueModules.values()].sort((a, b) => {
+    if (a.source < b.source) return -1;
+    if (a.source > b.source) return 1;
+    const left = a.version ?? '';
+    const right = b.version ?? '';
+    if (left < right) return -1;
+    if (left > right) return 1;
+    return 0;
+  });
 
   // Read lock file for exact versions
   const lockPath = `${projectPath}/.terraform.lock.hcl`;
@@ -424,8 +442,11 @@ export async function scanTerraform(
     itemsToFetch.push({ type: 'provider', namespace, name });
   }
 
-  for (const [source] of uniqueModules) {
-    const parts = source.split('/');
+  const moduleSourcesSeen = new Set<string>();
+  for (const pin of modulePins) {
+    if (moduleSourcesSeen.has(pin.source)) continue;
+    moduleSourcesSeen.add(pin.source);
+    const parts = pin.source.split('/');
     if (parts.length === 3) {
       const [namespace, name, provider] = parts;
       itemsToFetch.push({ type: 'module', namespace, name, provider });
@@ -474,7 +495,7 @@ export async function scanTerraform(
     else buckets.unknown++;
   }
 
-  for (const [source, constraintVersion] of uniqueModules) {
+  for (const { source, version: constraintVersion } of modulePins) {
     const currentVersion = constraintVersion || 'unknown';
     const latestVersion = latestVersions.get(source);
     const drift = (latestVersion && currentVersion !== 'unknown') ? calculateDrift(currentVersion, latestVersion) : 'unknown';
