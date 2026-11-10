@@ -304,6 +304,15 @@ function stripDotnetProjectExtension(filePath: string): string {
 const CENTRAL_PACKAGE_PROPS = 'Directory.Packages.props';
 
 /**
+ * MSBuild `Directory.Build.props`. The nearest one between a project and the
+ * scan root (both included) supplies `TargetFramework` / `TargetFrameworks`
+ * when the project file sets neither. A value in the project file wins. The
+ * nearest props file wins; imports inside it are not followed. A value that
+ * contains `$(` is an unresolved property reference and is not a framework.
+ */
+const DIRECTORY_BUILD_PROPS = 'Directory.Build.props';
+
+/**
  * A `PackageReference` whose version is not on the element, not in
  * `VersionOverride`, and not in `Directory.Packages.props`. Scan and SBOM
  * keep the row and say the version is unknown.
@@ -429,22 +438,101 @@ function resolvePackageVersion(row: PackageReferenceRow, central: ReadonlyMap<st
   return central.get(row.name.toLowerCase()) ?? UNKNOWN_PACKAGE_VERSION;
 }
 
-async function nearestDirectoryPackagesProps(
-  projectDir: string,
+async function nearestAncestorFile(
+  startDir: string,
   rootDir: string,
+  fileName: string,
   exists: (filePath: string) => Promise<boolean>,
 ): Promise<string | null> {
-  let current = path.resolve(projectDir);
+  let current = path.resolve(startDir);
   const root = path.resolve(rootDir);
   for (;;) {
     if (!isWithinRoot(current, root)) return null;
-    const candidate = path.join(current, CENTRAL_PACKAGE_PROPS);
+    const candidate = path.join(current, fileName);
     if (await exists(candidate)) return candidate;
     if (current === root) return null;
     const parent = path.dirname(current);
     if (parent === current) return null;
     current = parent;
   }
+}
+
+async function nearestDirectoryPackagesProps(
+  projectDir: string,
+  rootDir: string,
+  exists: (filePath: string) => Promise<boolean>,
+): Promise<string | null> {
+  return nearestAncestorFile(projectDir, rootDir, CENTRAL_PACKAGE_PROPS, exists);
+}
+
+/**
+ * Monikers from one property value. Semicolon-separated lists are split.
+ * A token that contains `$(` is an MSBuild property reference (`$(DefaultTfm)`)
+ * and is dropped rather than reported as a framework.
+ */
+function concreteTargetFrameworks(raw: string): string[] {
+  if (!raw) return [];
+  const frameworks: string[] = [];
+  for (const part of raw.split(';')) {
+    const tfm = part.trim();
+    if (!tfm || tfm.includes('$(')) continue;
+    frameworks.push(tfm);
+  }
+  return frameworks;
+}
+
+/**
+ * `TargetFramework`, then `TargetFrameworks`, from each `PropertyGroup`.
+ * Element names match without regard to case. The first concrete moniker
+ * for a repeated value wins.
+ */
+function targetFrameworksInProject(project: unknown): string[] {
+  const targetFrameworks: string[] = [];
+  for (const projectNode of asRecords(project)) {
+    for (const group of asRecords(childValue(projectNode, 'PropertyGroup'))) {
+      targetFrameworks.push(...concreteTargetFrameworks(xmlScalar(group, 'TargetFramework')));
+      targetFrameworks.push(...concreteTargetFrameworks(xmlScalar(group, 'TargetFrameworks')));
+    }
+  }
+  return [...new Set(targetFrameworks)];
+}
+
+/**
+ * Target frameworks from a `Directory.Build.props`. A missing, empty, or
+ * malformed file yields an empty list so the project is still scanned.
+ */
+function parseDirectoryBuildProps(xml: string): string[] {
+  if (!xml.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = parser.parse(xml);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== 'object') return [];
+  return targetFrameworksInProject(childValue(parsed as Record<string, unknown>, 'Project'));
+}
+
+async function directoryBuildTargetFrameworks(
+  projectDir: string,
+  rootDir: string,
+  cache: FileCache | undefined,
+  parsed: Map<string, string[]>,
+): Promise<string[]> {
+  const exists = (filePath: string) => (cache ? cache.pathExists(filePath) : pathExists(filePath));
+  const readText = (filePath: string) => (cache ? cache.readTextFile(filePath) : readTextFile(filePath));
+  const propsPath = await nearestAncestorFile(projectDir, rootDir, DIRECTORY_BUILD_PROPS, exists);
+  if (!propsPath) return [];
+  const cached = parsed.get(propsPath);
+  if (cached) return cached.slice();
+  let frameworks: string[] = [];
+  try {
+    frameworks = parseDirectoryBuildProps(await readText(propsPath));
+  } catch {
+    frameworks = [];
+  }
+  parsed.set(propsPath, frameworks);
+  return frameworks.slice();
 }
 
 async function centralPackageVersions(
@@ -516,21 +604,7 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
     return { targetFrameworks: [], packageReferences: [], projectReferences: [], projectName: stripDotnetProjectExtension(filePath) };
   }
 
-  // Extract target frameworks
-  const propertyGroups = Array.isArray(project.PropertyGroup)
-    ? project.PropertyGroup
-    : project.PropertyGroup ? [project.PropertyGroup] : [];
-
-  const targetFrameworks: string[] = [];
-  for (const pg of propertyGroups) {
-    if (pg.TargetFramework) {
-      targetFrameworks.push(String(pg.TargetFramework));
-    }
-    if (pg.TargetFrameworks) {
-      const tfms = String(pg.TargetFrameworks).split(';').map((s: string) => s.trim()).filter(Boolean);
-      targetFrameworks.push(...tfms);
-    }
-  }
+  const targetFrameworks = targetFrameworksInProject(project);
 
   // Extract package references and project references
   const itemGroups = Array.isArray(project.ItemGroup)
@@ -650,12 +724,21 @@ export async function scanDotnetProjects(rootDir: string, nugetCache?: NuGetCach
   const allCsprojFiles = new Set([...projectFiles, ...slnProjectPaths]);
   const results: ProjectScan[] = [];
   const centralVersions = new Map<string, Map<string, string>>();
+  const buildPropsFrameworks = new Map<string, string[]>();
 
   const STUCK_TIMEOUT_MS = projectScanTimeout ?? cache?.projectScanTimeout ?? 180_000;
 
   for (const csprojPath of allCsprojFiles) {
     try {
-      const scanPromise = scanOneDotnetProjectFile(csprojPath, rootDir, nugetCache, cache, catalog, centralVersions);
+      const scanPromise = scanOneDotnetProjectFile(
+        csprojPath,
+        rootDir,
+        nugetCache,
+        cache,
+        catalog,
+        centralVersions,
+        buildPropsFrameworks,
+      );
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
         results.push(result.value);
@@ -686,12 +769,19 @@ async function scanOneDotnetProjectFile(
   cache: FileCache | undefined,
   catalog: RuntimeCatalog,
   centralVersions: Map<string, Map<string, string>>,
+  buildPropsFrameworks: Map<string, string[]>,
 ): Promise<ProjectScan> {
   const xml = cache
     ? await cache.readTextFile(csprojPath)
     : await readTextFile(csprojPath);
   const data = parseDotnetProjectFile(xml, csprojPath);
   const csprojDir = path.dirname(csprojPath);
+  // A concrete moniker in the project file wins. Otherwise take the nearest
+  // Directory.Build.props, which is where many solutions set TargetFramework
+  // once for every project.
+  if (data.targetFrameworks.length === 0) {
+    data.targetFrameworks = await directoryBuildTargetFrameworks(csprojDir, rootDir, cache, buildPropsFrameworks);
+  }
   const central = await centralPackageVersions(csprojDir, rootDir, cache, centralVersions);
   for (const row of data.packageReferences) {
     row.version = resolvePackageVersion(row, central);
