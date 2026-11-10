@@ -161,7 +161,8 @@ interface PythonDependency {
  *   package ; python_version >= "3.8"
  */
 function parseRequirementLine(line: string): PythonDependency | null {
-  const trimmed = line.trim();
+  // pip comments start after whitespace; URL fragments such as #egg= remain part of the spec.
+  const trimmed = line.replace(/\s+#.*$/, '').trim();
   if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('-')) return null;
 
   // Strip environment markers (after ;)

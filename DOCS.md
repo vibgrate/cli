@@ -189,7 +189,7 @@ Vibgrate evaluates **upgrade drift** in depth for:
 
 - **Node.js / TypeScript** (`package.json`, lockfiles)
 - **.NET** (`.sln`, `.csproj`)
-- **Python** (`requirements.txt`, `pyproject.toml`-style manifests)
+- **Python** (`requirements.txt`, `pyproject.toml`-style manifests). Requirements comments introduced by whitespace then `#` are ignored; URL fragments such as `#egg=` are preserved.
 - **Java** (`pom.xml`, Gradle-style manifests). Which Maven profiles, scopes, and Gradle configurations become a `vg scan` row or a `vg build` edge is in [Maven and Gradle manifests](#maven-and-gradle-manifests).
 
 **Known-vulnerability detection** (`--vulns`) and **dependency attribution** (`vg why`, exposure windows) additionally cover npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle, read from each project's lockfile. For npm, pnpm, and yarn, `--vulns` checks every package the lockfile resolves, not only the ones in `package.json`. A finding on a package pulled in by another dependency says `transitive` and names the shortest path from a dependency you declared. Other ecosystems are matched as described above. Go is matched from direct `require` lines in `go.mod`, and from an `// indirect` module that provides a Go 1.24 `tool` package. Pseudo-versions and `+incompatible` tags follow [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).

@@ -16,6 +16,33 @@ describe('Python requirements file discovery and parsing', () => {
 
   for (const cached of [false, true]) {
     describe(cached ? 'with FileCache' : 'without FileCache', () => {
+      it('strips whitespace comments while preserving URL fragments and markers', async () => {
+        root = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-python-requirements-'));
+        fs.writeFileSync(path.join(root, 'requirements.txt'), [
+          '# full-line comment',
+          'django>=4.2,<5  # LTS line',
+          'celery  # unpinned on purpose',
+          'requests==2.31.0\t# pinned',
+          'pkg @ https://example.com/pkg.tar.gz#egg=pkg  # archive',
+          'flask>=2; python_version >= "3.8" # marker',
+          'numpy==1.26.4',
+        ].join('\n'));
+        const cache = cached ? new FileCache() : undefined;
+        const pypi = new PyPICache(new Semaphore(1), undefined, true);
+
+        const projects = await scanPythonProjects(root, pypi, cache);
+        expect(projects).toHaveLength(1);
+        expect(projects[0]!.dependencies.map(({ package: name, currentSpec }) => [name, currentSpec])).toEqual([
+          ['celery', '*'], // The scanner represents an empty/unpinned spec as '*'.
+          ['django', '>=4.2,<5'],
+          ['flask', '>=2'],
+          ['numpy', '==1.26.4'],
+          ['pkg', '@ https://example.com/pkg.tar.gz#egg=pkg'],
+          ['requests', '==2.31.0'],
+        ]);
+        expect(await scanPythonProjects(root, pypi, cache)).toEqual(projects);
+      });
+
       it.each([
         'dev-requirements.txt',
         'requirements.txt',
