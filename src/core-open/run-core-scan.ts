@@ -309,11 +309,11 @@ export async function runCoreScan(
   const pythonProjectsP = timePromise(scanPythonProjects(rootDir, pypiCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
   const javaProjectsP = timePromise(scanJavaProjects(rootDir, mavenCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
   const rubyProjectsP = timePromise(scanRubyProjects(rootDir, rubygemsCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
-  const swiftProjectsP = timePromise(scanSwiftProjects(rootDir, swiftCache, fileCache, projectScanTimeoutMs));
+  const swiftProjectsP = timePromise(scanSwiftProjects(rootDir, swiftCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
   const goProjectsP = timePromise(scanGoProjects(rootDir, goCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
   const rustProjectsP = timePromise(scanRustProjects(rootDir, cargoCache, fileCache, projectScanTimeoutMs));
-  const phpProjectsP = timePromise(scanPhpProjects(rootDir, composerCache, fileCache, projectScanTimeoutMs));
-  const dartProjectsP = timePromise(scanDartProjects(rootDir, pubCache, fileCache, projectScanTimeoutMs));
+  const phpProjectsP = timePromise(scanPhpProjects(rootDir, composerCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
+  const dartProjectsP = timePromise(scanDartProjects(rootDir, pubCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
   const elixirProjectsP = timePromise(scanElixirProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode));
   const dockerProjectsP = timePromise(scanDockerProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode));
   const helmProjectsP = timePromise(scanHelmProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode));

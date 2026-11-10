@@ -1,11 +1,13 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
-import { fetchDockerVersionsBulk, parseDockerImage } from './docker-cache.js';
+import { fetchDockerVersionsBulk, parseDockerImage, recordedDockerImageName } from './docker-cache.js';
 import { gt, SemVer } from 'semver';
 import type { ProjectScan, DependencyRow } from '../types.js';
-import { readTextFile, pathExists, FileCache } from '../utils/fs.js';
+import { readTextFile, findFiles, FileCache } from '../utils/fs.js';
 import type { PackageVersionManifest } from '../package-version-manifest.js';
+import * as fs from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import * as path from 'node:path';
 
 interface DockerImage {
@@ -13,7 +15,40 @@ interface DockerImage {
   currentTag: string;
 }
 
-const DOCKER_MANIFEST_FILES = new Set(['Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']);
+/**
+ * `Dockerfile`, `Containerfile`, `Dockerfile.<suffix>` (suffix non-empty),
+ * or `<name>.Dockerfile` (name non-empty). Matched with this capitalisation.
+ */
+function isDockerfileName(fileName: string): boolean {
+  if (fileName === 'Dockerfile' || fileName === 'Containerfile') return true;
+  if (fileName.startsWith('Dockerfile.') && fileName.length > 'Dockerfile.'.length) return true;
+  if (
+    fileName.endsWith('.Dockerfile')
+    && fileName.length > '.Dockerfile'.length
+    && !fileName.startsWith('.')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * `compose.yml` / `compose.yaml`, `docker-compose.yml` / `docker-compose.yaml`,
+ * and overrides `compose.<name>.yml` / `.yaml` and `docker-compose.<name>.yml` / `.yaml`.
+ * `<name>` may contain dots (`compose.prod.override.yaml`).
+ */
+const COMPOSE_MANIFEST = /^(?:docker-)?compose(?:\..+)?\.ya?ml$/;
+
+function isComposeManifest(fileName: string): boolean {
+  return COMPOSE_MANIFEST.test(fileName);
+}
+
+/** Code-point order. Not locale order, so the walk is stable across machines. */
+function compareCodePoint(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
 
 /**
  * Parse Dockerfile to extract base images from FROM statements.
@@ -25,9 +60,10 @@ async function parseDockerfile(filePath: string, cache?: FileCache): Promise<Doc
   
   const images: DockerImage[] = [];
   
-  // Match FROM statements (including multi-stage builds)
+  // Match FROM statements (including multi-stage builds). Dockerfile
+  // instructions are case-insensitive and may be indented.
   // FROM [--platform=<platform>] <image>[:<tag>] [AS <name>]
-  const fromRegex = /^FROM\s+(?:--platform=[^\s]+\s+)?([^\s]+)/gm;
+  const fromRegex = /^[\t ]*from\s+(?:--platform=[^\s]+\s+)?([^\s]+)/gmi;
   let match: RegExpExecArray | null;
 
   while ((match = fromRegex.exec(content)) !== null) {
@@ -40,7 +76,7 @@ async function parseDockerfile(filePath: string, cache?: FileCache): Promise<Doc
 
     const parsed = parseDockerImage(imageRef);
     images.push({
-      name: `${parsed.namespace || 'library'}/${parsed.image}`,
+      name: recordedDockerImageName(parsed),
       currentTag: parsed.tag || 'latest',
     });
   }
@@ -68,7 +104,7 @@ async function parseDockerCompose(filePath: string, cache?: FileCache): Promise<
     
     const parsed = parseDockerImage(imageRef);
     images.push({
-      name: `${parsed.namespace || 'library'}/${parsed.image}`,
+      name: recordedDockerImageName(parsed),
       currentTag: parsed.tag || 'latest',
     });
   }
@@ -133,30 +169,15 @@ export async function scanDocker(
 ): Promise<ProjectScan | null> {
   const allImages: DockerImage[] = [];
 
-  // Check for Dockerfile
-  const dockerfilePath = `${projectPath}/Dockerfile`;
-  const hasDockerfile = cache 
-    ? await cache.pathExists(dockerfilePath)
-    : await pathExists(dockerfilePath);
-
-  if (hasDockerfile) {
-    const images = await parseDockerfile(dockerfilePath, cache);
+  // Every Dockerfile and every Compose file in this directory. Nested
+  // directories are their own projects (scanDockerProjects groups by parent).
+  const manifestPaths = await dockerManifestsInDir(projectPath, cache);
+  for (const manifestPath of manifestPaths) {
+    const name = path.basename(manifestPath);
+    const images = isComposeManifest(name)
+      ? await parseDockerCompose(manifestPath, cache)
+      : await parseDockerfile(manifestPath, cache);
     allImages.push(...images);
-  }
-
-  // Check for docker-compose files
-  const composeFiles = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
-  for (const file of composeFiles) {
-    const composePath = `${projectPath}/${file}`;
-    const hasCompose = cache 
-      ? await cache.pathExists(composePath)
-      : await pathExists(composePath);
-
-    if (hasCompose) {
-      const images = await parseDockerCompose(composePath, cache);
-      allImages.push(...images);
-      break; // Only parse one compose file
-    }
   }
 
   if (allImages.length === 0) {
@@ -176,6 +197,9 @@ export async function scanDocker(
   uniqueImages.sort(compareDockerImage);
 
   // One registry lookup per image name. Each tag computes its own drift.
+  // A non-Hub name keeps its registry host. The lookup queries Docker Hub
+  // only for Hub names and leaves every other registry unknown unless the
+  // package-version manifest already lists that exact name.
   const imageRefs: string[] = [];
   for (const img of uniqueImages) {
     if (imageRefs[imageRefs.length - 1] !== img.name) imageRefs.push(img.name);
@@ -231,9 +255,42 @@ export async function scanDocker(
 
 /**
  * Check if a file is a Docker manifest file.
+ *
+ * Dockerfiles: `Dockerfile`, `Containerfile`, `Dockerfile.<suffix>`,
+ * `<name>.Dockerfile`. Compose: `docker-compose.yml` / `.yaml`, `compose.yml`
+ * / `.yaml`, and `docker-compose.<name>.yml` / `.yaml` and `compose.<name>.yml`
+ * / `.yaml` overrides. The match is case-sensitive.
  */
 export function isDockerManifest(fileName: string): boolean {
-  return DOCKER_MANIFEST_FILES.has(fileName);
+  return isDockerfileName(fileName) || isComposeManifest(fileName);
+}
+
+/**
+ * Manifest paths that sit directly in `projectPath`, in code-point order.
+ * A file in a child directory belongs to that child project.
+ */
+async function dockerManifestsInDir(projectPath: string, cache?: FileCache): Promise<string[]> {
+  if (cache) {
+    const files = await cache.findFiles(projectPath, isDockerManifest);
+    const direct = files.filter((file) => path.dirname(file) === projectPath);
+    direct.sort(compareCodePoint);
+    return direct;
+  }
+
+  let entries: Dirent[];
+  try {
+    entries = await fs.readdir(projectPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (!isDockerManifest(entry.name)) continue;
+    names.push(entry.name);
+  }
+  names.sort(compareCodePoint);
+  return names.map((name) => path.join(projectPath, name));
 }
 
 /**
@@ -246,10 +303,9 @@ export async function scanDockerProjects(
   projectScanTimeout?: number,
   offline = false,
 ): Promise<ProjectScan[]> {
-  // Find Docker manifest files
   const manifestFiles = cache
-    ? await cache.findFiles(rootDir, (name) => DOCKER_MANIFEST_FILES.has(name))
-    : [];
+    ? await cache.findFiles(rootDir, isDockerManifest)
+    : await findFiles(rootDir, isDockerManifest);
 
   // Group manifests by directory to form "projects"
   const projectDirs = new Map<string, string[]>();
@@ -261,7 +317,8 @@ export async function scanDockerProjects(
 
   const results: ProjectScan[] = [];
 
-  for (const [dir] of projectDirs) {
+  const dirs = [...projectDirs.keys()].sort(compareCodePoint);
+  for (const dir of dirs) {
     try {
       const scan = await scanDocker(dir, cache, manifest, offline);
       if (scan) {

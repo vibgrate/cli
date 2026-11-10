@@ -10,9 +10,10 @@
  * This module parses the npm-family lockfiles into a name → installed-version index the node scanner
  * prefers over the registry guess.
  *
- * Clean-room: formats are read from their public, documented shapes (npm package-lock v1/v2/v3 JSON;
- * Yarn classic + Berry text; pnpm-lock v5/v6/v9 YAML) — no third-party (AGPL or otherwise) parser is
- * used or ported. The only dependency is the `yaml` package, for the genuinely-YAML pnpm lockfile.
+ * Clean-room: formats are read from their public, documented shapes (npm package-lock v1/v2/v3 JSON,
+ * including the same JSON under the `npm-shrinkwrap.json` filename; Yarn classic + Berry text;
+ * pnpm-lock v5/v6/v9 YAML) — no third-party (AGPL or otherwise) parser is used or ported. The only
+ * dependency is the `yaml` package, for the genuinely-YAML pnpm lockfile.
  */
 import * as path from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -226,14 +227,41 @@ export interface LockfileIo {
 }
 
 /**
+ * Read one npm JSON lockfile (`package-lock.json` or `npm-shrinkwrap.json`) with
+ * {@link parsePackageLock}. Returns null when the file is absent or has no resolved
+ * versions. Invalid JSON throws {@link LockfileParseError} and does not fall through.
+ */
+async function loadPackageLockFile(lockPath: string, io: LockfileIo): Promise<NpmLockIndex | null> {
+  if (!(await io.exists(lockPath).catch(() => false))) return null;
+  let json: unknown;
+  try {
+    json = await io.readJson<unknown>(lockPath);
+  } catch (err) {
+    rethrowLockfileParseError(err);
+    throw new LockfileParseError(lockPath, 'JSON');
+  }
+  const map = parsePackageLock(json, lockPath);
+  if (!map.size) return null;
+  return {
+    source: 'package-lock',
+    size: map.size,
+    resolve: (name) => map.get(name) ?? null,
+    graph: memoGraph(() => parsePackageLockGraph(json)),
+  };
+}
+
+/**
  * Build the lockfile index for a directory. Prefers the lockfile that matches the resolved package
- * manager (npm → package-lock, yarn → yarn) but falls back to whichever is present. Returns null when
- * no supported lockfile exists (the scanner then keeps using the registry-resolved version).
+ * manager (npm → package-lock, yarn → yarn) but falls back to whichever is present. `package-lock.json`
+ * wins over `npm-shrinkwrap.json` when both exist; the shrinkwrap is the same JSON and is read only
+ * when `package-lock.json` is absent. Returns null when no supported lockfile exists (the scanner then
+ * keeps using the registry-resolved version).
  */
 export async function loadNpmLockIndex(dir: string, io: LockfileIo): Promise<NpmLockIndex | null> {
   const pnpmPath = path.join(dir, 'pnpm-lock.yaml');
   const yarnPath = path.join(dir, 'yarn.lock');
   const lockPath = path.join(dir, 'package-lock.json');
+  const shrinkwrapPath = path.join(dir, 'npm-shrinkwrap.json');
 
   // pnpm first (its lockfile is the most explicit about installed versions).
   // A file that exists but is truncated or invalid is an error — do not fall
@@ -253,19 +281,15 @@ export async function loadNpmLockIndex(dir: string, io: LockfileIo): Promise<Npm
       return { source: 'pnpm', size: map.size, resolve: (name) => map.get(name) ?? null, graph: memoGraph(() => parsePnpmLockGraph(doc)) };
     }
   }
-  // package-lock next: structured JSON and unambiguous.
-  if (await io.exists(lockPath).catch(() => false)) {
-    let json: unknown;
-    try {
-      json = await io.readJson<unknown>(lockPath);
-    } catch (err) {
-      rethrowLockfileParseError(err);
-      throw new LockfileParseError(lockPath, 'JSON');
-    }
-    const map = parsePackageLock(json, lockPath);
-    if (map.size) {
-      return { source: 'package-lock', size: map.size, resolve: (name) => map.get(name) ?? null, graph: memoGraph(() => parsePackageLockGraph(json)) };
-    }
+  // package-lock next: structured JSON and unambiguous. A present file is preferred
+  // over npm-shrinkwrap.json (same parser) even when it yields no versions.
+  const packageLockPresent = await io.exists(lockPath).catch(() => false);
+  if (packageLockPresent) {
+    const index = await loadPackageLockFile(lockPath, io);
+    if (index) return index;
+  } else {
+    const shrinkwrap = await loadPackageLockFile(shrinkwrapPath, io);
+    if (shrinkwrap) return shrinkwrap;
   }
   if (await io.exists(yarnPath).catch(() => false)) {
     const text = await io.readText(yarnPath);

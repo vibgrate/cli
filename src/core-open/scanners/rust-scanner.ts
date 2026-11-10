@@ -175,20 +175,187 @@ export function cargoDependencyHeader(headerLine: string): CargoDependencyHeader
 }
 
 /**
+ * `[workspace.dependencies]` or `[workspace.dependencies.<crate>]`.
+ * Any other header, including `[workspace]`, is not that table.
+ */
+function workspaceDependencyHeader(headerLine: string): { crate?: string } | null {
+  const trimmed = headerLine.trim();
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']') || trimmed.startsWith('[[')) return null;
+  const inner = trimmed.slice(1, -1);
+  const keys: string[] = [];
+  let i = 0;
+  while (i < inner.length) {
+    const key = readTomlKey(inner, i);
+    if (!key) return null;
+    keys.push(key.raw);
+    i = key.next;
+    while (inner[i] === ' ' || inner[i] === '\t') i++;
+    if (i >= inner.length) break;
+    if (inner[i] !== '.') return null;
+    i++;
+  }
+  if (keys[0] !== 'workspace' || keys[1] !== 'dependencies') return null;
+  if (keys.length === 2) return {};
+  if (keys.length === 3 && keys[2]) return { crate: keys[2] };
+  return null;
+}
+
+/** A `[workspace]` or `[workspace.*]` header marks the workspace root manifest. */
+function hasWorkspaceTable(content: string): boolean {
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('[') || trimmed.startsWith('[[') || !trimmed.endsWith(']')) continue;
+    const inner = trimmed.slice(1, -1).replace(/\s+/g, '');
+    if (inner === 'workspace' || inner.startsWith('workspace.')) return true;
+  }
+  return false;
+}
+
+/**
+ * One `[workspace.dependencies]` entry.
+ * Absent `version` means the pin is path-only or git-only.
+ * Absent `optional` or `features` means the workspace table did not set that key.
+ */
+export interface CargoWorkspacePin {
+  version?: string;
+  optional?: boolean;
+  features?: string[];
+}
+
+interface DeclaredCargoDep extends CargoWorkspacePin {
+  inherit: boolean;
+}
+
+/** Drop `#` comments, leaving quoted text alone so a `#` inside a string stays. */
+function stripTomlComments(attrs: string): string {
+  return attrs.split('\n').map((line) => {
+    let quote: '"' | "'" | null = null;
+    let out = '';
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]!;
+      if (quote) {
+        out += ch;
+        if (ch === '\\' && quote === '"') {
+          i++;
+          if (i < line.length) out += line[i]!;
+          continue;
+        }
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        out += ch;
+        continue;
+      }
+      if (ch === '#') break;
+      out += ch;
+    }
+    return out;
+  }).join('\n');
+}
+
+function readFeatureList(body: string): string[] {
+  return body.split(',')
+    .map((feature) => feature.trim().replace(/"/g, ''))
+    .filter((feature) => feature.length > 0);
+}
+
+function readDeclaredCargoDep(attrs: string): DeclaredCargoDep {
+  const cleaned = stripTomlComments(attrs);
+  const versionMatch = /version\s*=\s*"([^"]+)"/.exec(cleaned);
+  const optionalMatch = /optional\s*=\s*(true|false)\b/.exec(cleaned);
+  const featuresMatch = /features\s*=\s*\[([^\]]*)\]/.exec(cleaned);
+  // Quoted text can contain `workspace = true` (a git URL, a feature name).
+  const unquoted = cleaned.replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '""');
+  const declared: DeclaredCargoDep = {
+    inherit: /(?:^|[\s,{])workspace\s*=\s*true\b/.test(unquoted),
+  };
+  if (versionMatch) declared.version = versionMatch[1];
+  if (optionalMatch) declared.optional = optionalMatch[1] === 'true';
+  if (featuresMatch) declared.features = readFeatureList(featuresMatch[1]!);
+  return declared;
+}
+
+function workspacePinFromAttrs(attrs: string): CargoWorkspacePin {
+  const declared = readDeclaredCargoDep(attrs);
+  const pin: CargoWorkspacePin = {};
+  if (declared.version !== undefined) pin.version = declared.version;
+  if (declared.optional !== undefined) pin.optional = declared.optional;
+  if (declared.features !== undefined) pin.features = declared.features;
+  return pin;
+}
+
+/**
+ * `[workspace.dependencies]` from a workspace root Cargo.toml.
+ * String form (`serde = "1.0"`) and table form (`serde = { version = "1.0" }`)
+ * are both pins. `[workspace.dependencies.<crate>]` is the same pin.
+ * A path-only or git-only table is stored with no `version`.
+ */
+export function parseWorkspaceDependencies(content: string): Map<string, CargoWorkspacePin> {
+  const deps = new Map<string, CargoWorkspacePin>();
+  let inTable = false;
+  let subcrate: string | null = null;
+  let sublines: string[] = [];
+
+  const flush = (): void => {
+    if (!subcrate) return;
+    deps.set(subcrate, workspacePinFromAttrs(sublines.join('\n')));
+    subcrate = null;
+    sublines = [];
+  };
+
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('[') && trimmed.endsWith(']') && !trimmed.startsWith('[[')) {
+      flush();
+      const header = workspaceDependencyHeader(trimmed);
+      if (header?.crate) {
+        subcrate = header.crate;
+        inTable = false;
+      } else {
+        inTable = header !== null;
+      }
+      continue;
+    }
+    if (subcrate) {
+      if (trimmed && !trimmed.startsWith('#')) sublines.push(trimmed);
+      continue;
+    }
+    if (!inTable || !trimmed || trimmed.startsWith('#')) continue;
+    const simple = /^([A-Za-z0-9_-]+)\s*=\s*"([^"]+)"/.exec(trimmed);
+    if (simple) {
+      deps.set(simple[1]!, { version: simple[2]! });
+      continue;
+    }
+    const complex = /^([A-Za-z0-9_-]+)\s*=\s*\{([^}]*)\}/.exec(trimmed);
+    if (complex) deps.set(complex[1]!, workspacePinFromAttrs(complex[2]!));
+  }
+  flush();
+  return deps;
+}
+
+/**
  * Inline-table body (`version = "1.0", optional = true`) and the lines under
  * `[dependencies.<crate>]`. `version` is the spec (`*` when absent).
- * `optional = true` sets the flag. `path`, `git`, and `workspace` do not
- * replace `version`, so a table that only sets one of them stays spec `*`.
+ * `path` and `git` do not invent a version.
+ * `workspace = true` with no local `version` uses `workspace.version` from
+ * the matching `[workspace.dependencies]` pin (string or `version = "…"`).
+ * A local `version` wins. `features` and `optional` come from that pin only
+ * when the local table does not set them. A missing pin, or a path-only or
+ * git-only pin, leaves the spec `*`.
  */
-function parseCargoDepAttrs(attrs: string): { version: string; optional: boolean; features: string[] } {
-  const versionMatch = attrs.match(/version\s*=\s*"([^"]+)"/);
-  const version = versionMatch?.[1] ?? '*';
-  const optional = /optional\s*=\s*true/.test(attrs);
-  const featuresMatch = attrs.match(/features\s*=\s*\[([^\]]*)\]/);
-  const features = featuresMatch
-    ? featuresMatch[1]!.split(',').map(f => f.trim().replace(/"/g, ''))
-    : [];
-  return { version, optional, features };
+export function parseCargoDepAttrs(
+  attrs: string,
+  workspace?: CargoWorkspacePin | null,
+): { version: string; optional: boolean; features: string[] } {
+  const declared = readDeclaredCargoDep(attrs);
+  const inherited = declared.inherit && workspace ? workspace : undefined;
+  return {
+    version: declared.version ?? inherited?.version ?? '*',
+    optional: declared.optional ?? inherited?.optional ?? false,
+    features: declared.features ?? (inherited?.features !== undefined ? [...inherited.features] : []),
+  };
 }
 
 interface RustDependency {
@@ -224,8 +391,13 @@ function dedupeCargoDeps(deps: RustDependency[]): RustDependency[] {
   return [...byName.values()];
 }
 
-function rustDep(name: string, header: CargoDependencyHeader, attrs: string): RustDependency {
-  const parsed = parseCargoDepAttrs(attrs);
+function rustDep(
+  name: string,
+  header: CargoDependencyHeader,
+  attrs: string,
+  workspaceDeps: ReadonlyMap<string, CargoWorkspacePin>,
+): RustDependency {
+  const parsed = parseCargoDepAttrs(attrs, workspaceDeps.get(name));
   return {
     name,
     version: parsed.version,
@@ -267,15 +439,20 @@ function rustDep(name: string, header: CargoDependencyHeader, attrs: string): Ru
  * Dev and build tables, including the matching `target` tables, are kept.
  * A crate named in a production table and a dev or build table is one
  * production row. The winning declaration supplies the version.
+ * `workspace = true` reads the crate's pin from `workspaceDeps`, the workspace
+ * root `[workspace.dependencies]` table. A local version still wins.
  */
-function parseCargoToml(content: string): RustDependency[] {
+function parseCargoToml(
+  content: string,
+  workspaceDeps: ReadonlyMap<string, CargoWorkspacePin> = new Map(),
+): RustDependency[] {
   const deps: RustDependency[] = [];
   let current: CargoDependencyHeader | null = null;
   let subtableLines: string[] | null = null;
 
   const flushSubtable = (): void => {
     if (!current?.crate || subtableLines === null) return;
-    deps.push(rustDep(current.crate, current, subtableLines.join('\n')));
+    deps.push(rustDep(current.crate, current, subtableLines.join('\n'), workspaceDeps));
     subtableLines = null;
   };
 
@@ -315,7 +492,7 @@ function parseCargoToml(content: string): RustDependency[] {
 
     const complexMatch = trimmed.match(/^([\w-]+)\s*=\s*\{([^}]+)\}/);
     if (complexMatch) {
-      deps.push(rustDep(complexMatch[1]!, current, complexMatch[2]!));
+      deps.push(rustDep(complexMatch[1]!, current, complexMatch[2]!, workspaceDeps));
     }
   }
 
@@ -388,6 +565,44 @@ async function findRustManifests(rootDir: string): Promise<string[]> {
   return findFiles(rootDir, (name) => RUST_MANIFEST_FILES.has(name));
 }
 
+async function readCargoManifestAt(
+  manifestPath: string,
+  readText: (filePath: string) => Promise<string>,
+  exists: (filePath: string) => Promise<boolean>,
+): Promise<string | null> {
+  if (!(await exists(manifestPath))) return null;
+  return readText(manifestPath);
+}
+
+/**
+ * Cargo.toml of the nearest workspace root at `dir` or an ancestor inside
+ * `rootDir`. The root is the manifest that contains `[workspace]` (or
+ * `[workspace.*]`). A member that sets `workspace = true` inherits pins from
+ * that file's `[workspace.dependencies]`.
+ */
+async function loadWorkspaceManifest(
+  dir: string,
+  rootDir: string,
+  ownText: string,
+  readText: (filePath: string) => Promise<string>,
+  exists: (filePath: string) => Promise<boolean>,
+): Promise<string | null> {
+  let current = path.resolve(dir);
+  const stop = path.resolve(rootDir);
+  const ownDir = path.resolve(dir);
+  for (;;) {
+    if (current !== stop && !current.startsWith(`${stop}${path.sep}`)) return null;
+    const text = current === ownDir
+      ? ownText
+      : await readCargoManifestAt(path.join(current, 'Cargo.toml'), readText, exists);
+    if (text && hasWorkspaceTable(text)) return text;
+    if (current === stop) return null;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
 async function scanOneRustProject(
   dir: string,
   manifestFile: string,
@@ -400,9 +615,12 @@ async function scanOneRustProject(
   
   const content = cache ? await cache.readTextFile(manifestFile) : await readTextFile(manifestFile);
   const rustEdition = extractRustEdition(content);
+  const readText = (filePath: string) => (cache ? cache.readTextFile(filePath) : readTextFile(filePath));
+  const exists = (filePath: string) => (cache ? cache.pathExists(filePath) : pathExists(filePath));
+  const workspaceText = await loadWorkspaceManifest(dir, rootDir, content, readText, exists);
   // Dev and build crates stay in this list. A name that is also production
   // is already a single production row (`parseCargoToml`).
-  const allDeps = parseCargoToml(content);
+  const allDeps = parseCargoToml(content, parseWorkspaceDependencies(workspaceText ?? ''));
 
   // Cargo.lock pins the exact resolved version of every crate. There is one per workspace, normally
   // beside this Cargo.toml; for a workspace member it lives at the root — so try the project dir then

@@ -1,0 +1,30 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+tokio = { workspace = true, optional = false, features = ["rt"] }
+anyhow = { workspace = true }
+regex = { workspace = true }
+local-pin = { workspace = true, version = "2.0", optional = true }
+path-dep = { path = "../path-dep" }
+git-dep = { git = "https://example.com/git-dep.git" }
+path-only = { workspace = true }
+git-only = { workspace = true }
+missing = { workspace = true }
+shared-path = { path = "../shared-path" }
+shared-git = { git = "https://example.com/shared.git" }
+
+[dependencies.serde_json]
+workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { workspace = true }
