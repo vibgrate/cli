@@ -10,6 +10,11 @@ import { withTimeout } from '../utils/timeout.js';
 import { MavenCache } from './maven-cache.js';
 import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { loadGradleLockIndex, type GradleLockIndex } from './gradle-lockfile.js';
+import {
+  gradleCatalogUses,
+  loadGradleVersionCatalog,
+  type GradleVersionCatalog,
+} from './gradle-version-catalog.js';
 import type { LockfileIo } from './npm-lockfile.js';
 import { latestLts, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
@@ -393,8 +398,32 @@ function considerGradleDep(deps: GradleDependency[], dep: GradleDependency): voi
   }
 }
 
-export function parseGradleBuild(content: string, filePath: string): GradleData {
-  const deps: GradleDependency[] = [];
+const GRADLE_CONFIG_NAMES = 'implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|testCompileOnly|annotationProcessor|kapt';
+
+interface GradleDepEvent {
+  index: number;
+  dep: GradleDependency;
+}
+
+function pushGradleCoord(events: GradleDepEvent[], index: number, notation: string, configuration: string): void {
+  const parts = notation.split(':');
+  if (parts.length < 2) return;
+  events.push({
+    index,
+    dep: {
+      groupId: parts[0]!,
+      artifactId: parts[1]!,
+      version: parts[2] ?? '',
+      configuration,
+    },
+  });
+}
+
+export function parseGradleBuild(
+  content: string,
+  filePath: string,
+  catalog?: GradleVersionCatalog | null,
+): GradleData {
   const projectName = path.basename(path.dirname(filePath));
 
   // Detect Java/JVM version
@@ -408,51 +437,45 @@ export function parseGradleBuild(content: string, filePath: string): GradleData 
   const toolchainMatch = content.match(/JavaLanguageVersion\.of\((\d+)\)/);
   if (toolchainMatch) javaVersion = toolchainMatch[1];
 
-  const configNames = 'implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|testCompileOnly|annotationProcessor|kapt';
+  const events: GradleDepEvent[] = [];
 
   // Parse dependencies: implementation 'group:artifact:version'
   // The optional parenthesis also matches Kotlin DSL `implementation("g:a:v")`.
-  const depRegex = new RegExp(`(?:${configNames})\\s*(?:\\(?\\s*)?['"]([^'"]+)['"]`, 'g');
+  const depRegex = new RegExp(`(?:${GRADLE_CONFIG_NAMES})\\s*(?:\\(?\\s*)?['"]([^'"]+)['"]`, 'g');
   let match: RegExpExecArray | null;
   while ((match = depRegex.exec(content)) !== null) {
-    const parts = match[1]!.split(':');
-    if (parts.length >= 2) {
-      considerGradleDep(deps, {
-        groupId: parts[0]!,
-        artifactId: parts[1]!,
-        version: parts[2] ?? '',
-        configuration: bareGradleConfiguration(match[0]!),
-      });
-    }
+    pushGradleCoord(events, match.index, match[1]!, bareGradleConfiguration(match[0]!));
   }
 
   // Parse Kotlin DSL: implementation("group:artifact:version")
-  const kotlinDepRegex = new RegExp(`(?:${configNames})\\s*\\(\\s*"([^"]+)"\\s*\\)`, 'g');
+  const kotlinDepRegex = new RegExp(`(?:${GRADLE_CONFIG_NAMES})\\s*\\(\\s*"([^"]+)"\\s*\\)`, 'g');
   while ((match = kotlinDepRegex.exec(content)) !== null) {
-    const parts = match[1]!.split(':');
-    if (parts.length >= 2) {
-      considerGradleDep(deps, {
-        groupId: parts[0]!,
-        artifactId: parts[1]!,
-        version: parts[2] ?? '',
-        configuration: bareGradleConfiguration(match[0]!),
-      });
-    }
+    pushGradleCoord(events, match.index, match[1]!, bareGradleConfiguration(match[0]!));
   }
 
   // Parse platform/BOM dependencies
   const platformRegex = /(?:implementation|api)\s*(?:\(?\s*)?platform\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   while ((match = platformRegex.exec(content)) !== null) {
-    const parts = match[1]!.split(':');
-    if (parts.length >= 2) {
-      considerGradleDep(deps, {
-        groupId: parts[0]!,
-        artifactId: parts[1]!,
-        version: parts[2] ?? '',
-        configuration: 'platform',
+    pushGradleCoord(events, match.index, match[1]!, 'platform');
+  }
+
+  if (catalog) {
+    for (const use of gradleCatalogUses(content, catalog, GRADLE_CONFIG_NAMES)) {
+      events.push({
+        index: use.index,
+        dep: {
+          groupId: use.groupId,
+          artifactId: use.artifactId,
+          version: use.version,
+          configuration: use.configuration,
+        },
       });
     }
   }
+
+  events.sort((a, b) => a.index - b.index);
+  const deps: GradleDependency[] = [];
+  for (const event of events) considerGradleDep(deps, event.dep);
 
   return { javaVersion, dependencies: deps, projectName };
 }
@@ -550,6 +573,15 @@ async function scanOneJavaProject(
   const allDeps = new Map<string, { groupId: string; artifactId: string; version: string; scope?: string; optional?: boolean; configuration?: string }>();
   const projectReferences: ProjectReference[] = [];
 
+  // Shared by the version catalog and gradle.lockfile. The lockfile is applied
+  // later and wins for resolvedVersion; the catalog only fills declared pins.
+  const lockIo: LockfileIo = {
+    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
+    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
+    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
+  };
+  const versionCatalog = await loadGradleVersionCatalog(dir, rootDir, lockIo);
+
   // Parse manifests — prefer pom.xml over Gradle
   for (const f of manifestFiles) {
     const fileName = path.basename(f);
@@ -576,7 +608,7 @@ async function scanOneJavaProject(
         });
       }
     } else if (fileName === 'build.gradle' || fileName === 'build.gradle.kts') {
-      const gradle = parseGradleBuild(content, f);
+      const gradle = parseGradleBuild(content, f, versionCatalog);
       if (gradle.projectName) projectName = gradle.projectName;
       if (gradle.javaVersion) javaVersion = gradle.javaVersion;
 
@@ -621,13 +653,9 @@ async function scanOneJavaProject(
   }
 
   // Gradle's optional dependency locking pins exact resolved versions in gradle.lockfile (beside
-  // build.gradle). Prefer it over the declared/BOM-supplied version. Maven projects have no such
-  // file, so this is a no-op there.
-  const lockIo: LockfileIo = {
-    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
-    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
-    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
-  };
+  // build.gradle). Prefer it over the declared version, a version-catalog pin, and a BOM-supplied
+  // version. currentSpec stays the declared or catalog text. Maven projects have no such file, so
+  // this is a no-op there.
   const lockIndex: GradleLockIndex | null = await loadGradleLockIndex(dir, lockIo).catch((err: unknown) => {
     rethrowLockfileParseError(err);
     return null;
