@@ -20,6 +20,170 @@ interface TerraformModule {
 }
 
 /**
+ * Where a Terraform module `source` is installed from.
+ *
+ * Only `registry` has a published version a drift scan can compare. The other
+ * kinds are pinned by a path, a commit, or the bytes at a URL.
+ */
+export type TerraformModuleSourceKind =
+  | 'registry'
+  | 'local'
+  | 'git'
+  | 'mercurial'
+  | 'http'
+  | 's3'
+  | 'gcs'
+  | 'remote';
+
+/** Namespace and module name: 1–64 ASCII letters, digits, dashes, or underscores; dashes and underscores are not the first or last character. */
+const REGISTRY_MODULE_NAME = /^[0-9A-Za-z](?:[0-9A-Za-z-_]{0,62}[0-9A-Za-z])?$/;
+/** Target system (the historical "provider" slot): 1–64 lowercase ASCII letters or digits. */
+const REGISTRY_TARGET_SYSTEM = /^[0-9a-z]{1,64}$/;
+/** Explicit registry hostname. A dot is required so a namespace is never read as a host. */
+const REGISTRY_HOSTNAME = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+/**
+ * These hosts are Git shorthands (`github.com/org/repo`, `bitbucket.org/org/repo`),
+ * not module registries, even when the path has three or four segments.
+ */
+const RESERVED_VCS_HOSTS = new Set(['github.com', 'bitbucket.org']);
+
+/**
+ * Classify a Terraform module `source` string.
+ *
+ * Registry addresses are `namespace/name/system` or `hostname/namespace/name/system`
+ * (a `//subdir` suffix is still the registry package). Everything else — local
+ * paths, `git::` / `hg::` / `s3::` / `gcs::`, GitHub and Bitbucket shorthands,
+ * `git@host:path`, and `http(s)` archives — has no registry version.
+ */
+export function classifyTerraformModuleSource(source: string): TerraformModuleSourceKind {
+  if (isLocalModuleSource(source)) return 'local';
+
+  const forced = /^([A-Za-z0-9]+)::/.exec(source);
+  if (forced) return kindForGetter(forced[1]);
+
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(source);
+  if (scheme) return kindForScheme(scheme[1]);
+
+  if (isScpGitSource(source)) return 'git';
+  if (isVcsHostShorthand(source)) return 'git';
+  if (isRegistryModuleSource(source)) return 'registry';
+  return 'remote';
+}
+
+function isLocalModuleSource(source: string): boolean {
+  return source.startsWith('./')
+    || source.startsWith('../')
+    || source.startsWith('.\\')
+    || source.startsWith('..\\');
+}
+
+function kindForGetter(protocol: string): TerraformModuleSourceKind {
+  switch (protocol.toLowerCase()) {
+    case 'git': return 'git';
+    case 'hg': return 'mercurial';
+    case 's3': return 's3';
+    case 'gcs': return 'gcs';
+    case 'http':
+    case 'https':
+      return 'http';
+    default:
+      return 'remote';
+  }
+}
+
+function kindForScheme(scheme: string): TerraformModuleSourceKind {
+  switch (scheme.toLowerCase()) {
+    case 'http':
+    case 'https':
+      return 'http';
+    case 'git':
+    case 'ssh':
+      return 'git';
+    case 'hg':
+      return 'mercurial';
+    default:
+      return 'remote';
+  }
+}
+
+/** `git@host:path` — the username `git` is what makes this a Git URL. */
+function isScpGitSource(source: string): boolean {
+  const match = /^(?:([^@/]+)@)([^:/]+):([^/].*)$/.exec(source);
+  return match !== null && match[1].toLowerCase() === 'git';
+}
+
+function isVcsHostShorthand(source: string): boolean {
+  const slash = source.indexOf('/');
+  if (slash <= 0) return false;
+  return RESERVED_VCS_HOSTS.has(source.slice(0, slash).toLowerCase());
+}
+
+function isRegistryModuleSource(source: string): boolean {
+  const { packageAddr, subDir } = splitModulePackageSubdir(source);
+  if (subDirEscapesPackage(subDir)) return false;
+  if (packageAddr.includes('?') || packageAddr.includes('#') || packageAddr.includes('::')) return false;
+
+  const parts = packageAddr.split('/');
+  if ((parts.length !== 3 && parts.length !== 4) || parts.some((part) => part.length === 0)) {
+    return false;
+  }
+
+  let nameParts = parts;
+  if (parts.length === 4) {
+    const host = parts[0].toLowerCase();
+    if (!REGISTRY_HOSTNAME.test(host) || RESERVED_VCS_HOSTS.has(host)) return false;
+    nameParts = parts.slice(1);
+  }
+
+  const [namespace, name, system] = nameParts;
+  return REGISTRY_MODULE_NAME.test(namespace)
+    && REGISTRY_MODULE_NAME.test(name)
+    && REGISTRY_TARGET_SYSTEM.test(system);
+}
+
+/**
+ * Split a module source on the package/subdir marker `//`, ignoring the `//`
+ * that belongs to a URL scheme. A query string stays on the package address.
+ */
+function splitModulePackageSubdir(source: string): { packageAddr: string; subDir: string } {
+  let stop = source.length;
+  const query = source.indexOf('?');
+  if (query !== -1) stop = query;
+
+  let offset = 0;
+  const scheme = source.slice(0, stop).indexOf('://');
+  if (scheme !== -1) offset = scheme + 3;
+
+  const relative = source.slice(offset, stop).indexOf('//');
+  if (relative === -1) return { packageAddr: source, subDir: '' };
+
+  const index = relative + offset;
+  let subDir = source.slice(index + 2);
+  let packageAddr = source.slice(0, index);
+  const queryInSubdir = subDir.indexOf('?');
+  if (queryInSubdir !== -1) {
+    packageAddr += subDir.slice(queryInSubdir);
+    subDir = subDir.slice(0, queryInSubdir);
+  }
+  return { packageAddr, subDir };
+}
+
+function subDirEscapesPackage(subDir: string): boolean {
+  if (!subDir) return false;
+  let depth = 0;
+  for (const part of subDir.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (depth === 0) return true;
+      depth -= 1;
+    } else {
+      depth += 1;
+    }
+  }
+  return false;
+}
+
+/**
  * Parse Terraform files to extract provider and module requirements.
  */
 async function parseTerraformFile(filePath: string, cache?: FileCache): Promise<{
@@ -104,10 +268,11 @@ export function extractTerraformRequirements(content: string): {
     if (block.type === 'module') {
       const source = hclStringAttribute(block.body, 'source');
       if (!source) continue;
-      // Local and git sources have no registry version to compare against.
-      if (source.startsWith('./') || source.startsWith('../') || source.startsWith('git::')) {
-        continue;
-      }
+      // A module row is a registry address (namespace/name/system, with or
+      // without a registry hostname). Local paths, Git, Mercurial, HTTP
+      // archives, and object-storage URLs are not versioned there, so they
+      // are not drift rows.
+      if (classifyTerraformModuleSource(source) !== 'registry') continue;
       modules.push({ source, version: hclStringAttribute(block.body, 'version') });
     }
   }
