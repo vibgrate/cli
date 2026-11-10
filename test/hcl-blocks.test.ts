@@ -179,11 +179,12 @@ provider "aws" { version = "~> 3.0" }
     expect(providers).toEqual([{ source: 'hashicorp/aws', version: '~> 5.0' }]);
   });
 
-  it('extracts registry modules and skips local and git sources', () => {
+  it('extracts registry modules and skips sources that are not registry addresses', () => {
     const { modules } = extractTerraformRequirements(`
 module "vpc"   { source = "terraform-aws-modules/vpc/aws"  version = "5.0.0" }
 module "local" { source = "./modules/thing" }
 module "git"   { source = "git::https://example.com/x.git" }
+module "github" { source = "github.com/acme/terraform-modules//vpc?ref=v1.2.0" }
 module "eks"   { source = "terraform-aws-modules/eks/aws" }
 `);
     expect(modules).toEqual([
