@@ -23,7 +23,8 @@ vi.mock('../src/core-open/scanners/docker-cache.js', async (importOriginal) => {
   return { ...actual, fetchDockerVersionsBulk };
 });
 
-import { scanDocker } from '../src/core-open/scanners/docker-scanner.js';
+import { isDockerManifest, scanDocker, scanDockerProjects } from '../src/core-open/scanners/docker-scanner.js';
+import { FileCache } from '../src/core-open/utils/fs.js';
 
 async function writeProject(files: Record<string, string>): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vibgrate-docker-scan-'));
@@ -150,5 +151,236 @@ describe('scanDocker tag dedup', () => {
       ['library/postgres', '16.0.0', 'current'],
     ]);
     expect(shape(b!)).toEqual(shape(a!));
+  });
+});
+
+describe('docker manifest names', () => {
+  const dirs: string[] = [];
+
+  beforeEach(() => {
+    fetchDockerVersionsBulk.mockClear();
+  });
+
+  afterEach(async () => {
+    await Promise.all(dirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  async function writeTree(files: Record<string, string>): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vibgrate-docker-scan-'));
+    dirs.push(dir);
+    for (const [name, body] of Object.entries(files)) {
+      const abs = path.join(dir, name);
+      await fs.mkdir(path.dirname(abs), { recursive: true });
+      await fs.writeFile(abs, body);
+    }
+    return dir;
+  }
+
+  function imageRows(scan: { dependencies: { package: string; currentSpec: string | null }[] }): string[] {
+    return scan.dependencies.map((row) => `${row.package}:${row.currentSpec}`);
+  }
+
+  it('recognises Dockerfiles, Containerfiles, and Compose overrides', () => {
+    const names = [
+      'Dockerfile',
+      'Containerfile',
+      'Dockerfile.prod',
+      'Dockerfile.dev',
+      'api.Dockerfile',
+      'docker-compose.yml',
+      'docker-compose.yaml',
+      'compose.yml',
+      'compose.yaml',
+      'docker-compose.override.yml',
+      'docker-compose.prod.yaml',
+      'compose.override.yaml',
+      'compose.ci.yml',
+      'docker-compose.prod.override.yml',
+    ];
+    for (const name of names) expect(isDockerManifest(name), name).toBe(true);
+
+    const skipped = [
+      'dockerfile',
+      'containerfile',
+      'Dockerfile.',
+      '.Dockerfile',
+      'Dockerfiles',
+      'compose.yml.bak',
+      'composer.yml',
+      'my-compose.yml',
+      'docker-compose',
+      'notes.md',
+    ];
+    for (const name of skipped) expect(isDockerManifest(name), name).toBe(false);
+  });
+
+  it('yields rows from Dockerfile.prod and Containerfile', async () => {
+    const dir = await writeTree({
+      'Dockerfile.prod': 'FROM node:20-alpine\nFROM golang:1.21\n',
+      Containerfile: 'FROM alpine:3.20\nFROM node:20-alpine\n',
+    });
+
+    const expected = [
+      'library/alpine:3.20',
+      'library/golang:1.21',
+      'library/node:20-alpine',
+    ];
+    const scan = await scanDocker(dir, undefined, undefined, true);
+    const cached = await scanDocker(dir, new FileCache(), undefined, true);
+    expect(imageRows(scan!)).toEqual(expected);
+    expect(imageRows(cached!)).toEqual(expected);
+  });
+
+  it('reads api.Dockerfile', async () => {
+    const dir = await writeTree({
+      'api.Dockerfile': 'FROM python:3.12\n',
+    });
+
+    const scan = await scanDocker(dir, undefined, undefined, true);
+    expect(imageRows(scan!)).toEqual(['library/python:3.12']);
+  });
+
+  it('yields images from compose.yaml and compose.override.yaml', async () => {
+    const dir = await writeTree({
+      'compose.yaml': [
+        'services:',
+        '  web:',
+        '    image: nginx:1.27',
+        '  cache:',
+        '    image: redis:7',
+        '',
+      ].join('\n'),
+      'compose.override.yaml': [
+        'services:',
+        '  web:',
+        '    image: nginx:1.27',
+        '  db:',
+        '    image: postgres:16',
+        '',
+      ].join('\n'),
+    });
+
+    const expected = [
+      'library/nginx:1.27',
+      'library/postgres:16',
+      'library/redis:7',
+    ];
+    const scan = await scanDocker(dir, undefined, undefined, true);
+    const cached = await scanDocker(dir, new FileCache(), undefined, true);
+    expect(imageRows(scan!)).toEqual(expected);
+    expect(imageRows(cached!)).toEqual(expected);
+  });
+
+  it('parses docker-compose.yml and compose.yaml in the same directory', async () => {
+    const dir = await writeTree({
+      'docker-compose.yml': 'services:\n  web:\n    image: nginx:1.25\n',
+      'compose.yaml': 'services:\n  edge:\n    image: traefik:3.0\n',
+    });
+
+    const scan = await scanDocker(dir, undefined, undefined, true);
+    expect(imageRows(scan!)).toEqual([
+      'library/nginx:1.25',
+      'library/traefik:3.0',
+    ]);
+  });
+
+  it('keeps one row when two manifests name the same image and tag', async () => {
+    const dir = await writeTree({
+      'Dockerfile.prod': 'FROM nginx:1.27\n',
+      'docker-compose.override.yml': 'services:\n  web:\n    image: nginx:1.27\n',
+    });
+
+    const scan = await scanDocker(dir, undefined, undefined, true);
+    expect(imageRows(scan!)).toEqual(['library/nginx:1.27']);
+  });
+
+  it('scans each directory that has a manifest and orders projects by path', async () => {
+    const dir = await writeTree({
+      'services/api/Dockerfile.prod': 'FROM node:20\n',
+      'Containerfile': 'FROM alpine:3.20\n',
+      'deploy/compose.override.yaml': 'services:\n  db:\n    image: postgres:16\n',
+    });
+
+    const cache = new FileCache();
+    const projects = await scanDockerProjects(dir, undefined, cache, undefined, true);
+    const uncached = await scanDockerProjects(dir, undefined, undefined, undefined, true);
+
+    const shape = (rows: typeof projects) =>
+      rows.map((project) => ({
+        path: project.path,
+        images: project.dependencies.map((row) => `${row.package}:${row.currentSpec}`),
+      }));
+
+    const expected = [
+      { path: '.', images: ['library/alpine:3.20'] },
+      { path: 'deploy', images: ['library/postgres:16'] },
+      { path: 'services/api', images: ['library/node:20'] },
+    ];
+    expect(shape(projects)).toEqual(expected);
+    expect(shape(uncached)).toEqual(expected);
+  });
+});
+
+describe('scanDocker multi-stage Dockerfiles', () => {
+  const dirs: string[] = [];
+
+  beforeEach(() => {
+    fetchDockerVersionsBulk.mockClear();
+  });
+
+  afterEach(async () => {
+    await Promise.all(dirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  const cases: Array<{
+    name: string;
+    dockerfile: string;
+    rows: Array<{ package: string; currentSpec: string }>;
+  }> = [
+    {
+      name: 'uppercase AS',
+      dockerfile: [
+        'FROM node:20 AS build',
+        'RUN npm ci && npm run build',
+        'FROM build AS test',
+        'RUN npm test',
+        '',
+      ].join('\n'),
+      rows: [{ package: 'library/node', currentSpec: '20' }],
+    },
+    {
+      name: 'lowercase as',
+      dockerfile: [
+        'FROM node:20 as build',
+        'RUN npm ci && npm run build',
+        'FROM build as test',
+        'RUN npm test',
+        '',
+      ].join('\n'),
+      rows: [{ package: 'library/node', currentSpec: '20' }],
+    },
+    {
+      name: 'image that shares a name with a later stage',
+      dockerfile: [
+        'FROM build',
+        'FROM node:20 AS build',
+        '',
+      ].join('\n'),
+      rows: [
+        { package: 'library/build', currentSpec: 'latest' },
+        { package: 'library/node', currentSpec: '20' },
+      ],
+    },
+  ];
+
+  it.each(cases)('$name', async ({ dockerfile, rows }) => {
+    const dir = await writeProject({ Dockerfile: dockerfile });
+    dirs.push(dir);
+
+    const scan = await scanDocker(dir, undefined, undefined, true);
+    expect(scan).not.toBeNull();
+    expect(
+      scan!.dependencies.map((row) => ({ package: row.package, currentSpec: row.currentSpec })),
+    ).toEqual(rows);
   });
 });
