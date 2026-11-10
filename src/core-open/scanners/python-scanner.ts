@@ -911,6 +911,94 @@ function parseSetupCfg(content: string): { deps: PythonDependency[]; pythonVersi
   return result;
 }
 
+/**
+ * A pyenv or asdf version token.
+ * `system`, `latest`, and a virtualenv name do not match, so they stay
+ * absent instead of being stored as a runtime.
+ * A leading `v` is dropped. `3.12.4` is kept as `3.12.4`.
+ */
+const PYTHON_PIN_VERSION = /^(?:v)?(\d+(?:\.\d+){0,3})((?:a|b|rc)\d+|t)?$/i;
+
+function pythonPinVersion(token: string): string | undefined {
+  const match = PYTHON_PIN_VERSION.exec(token);
+  if (!match) return undefined;
+  return `${match[1]}${match[2] ?? ''}`;
+}
+
+/** Non-blank, non-comment lines, with an end-of-line `#` comment removed. */
+function pinFileLines(content: string): string[] {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const lines: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+/**
+ * Runtime from a pyenv `.python-version` file.
+ * Only the first non-blank, non-comment line is read. A non-version value
+ * (`system`, a virtualenv name) yields no runtime.
+ */
+export function pythonVersionFromPythonVersionFile(content: string): string | undefined {
+  const line = pinFileLines(content)[0];
+  if (!line) return undefined;
+  return pythonPinVersion(line.split(/\s+/)[0]!);
+}
+
+/**
+ * Runtime from an asdf `.tool-versions` `python` entry.
+ * The first version token on that line wins (`python 3.12.4 3.11.9` →
+ * `3.12.4`). A non-version token such as `system` is skipped. A later
+ * `python` line is used only when the earlier one has no version token.
+ */
+export function pythonVersionFromToolVersions(content: string): string | undefined {
+  for (const line of pinFileLines(content)) {
+    const parts = line.split(/\s+/);
+    if (parts[0]!.toLowerCase() !== 'python') continue;
+    for (const part of parts.slice(1)) {
+      const pin = pythonPinVersion(part);
+      if (pin) return pin;
+    }
+  }
+  return undefined;
+}
+
+async function readOptionalProjectFile(
+  dir: string,
+  name: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const filePath = path.join(dir, name);
+  try {
+    const exists = cache ? await cache.pathExists(filePath) : await pathExists(filePath);
+    if (!exists) return undefined;
+    return cache ? await cache.readTextFile(filePath) : await readTextFile(filePath);
+  } catch {
+    // An optional pin file must not fail the project scan.
+    return undefined;
+  }
+}
+
+/**
+ * Interpreter pin for a project whose manifests do not declare one.
+ * `.python-version` wins over `.tool-versions`.
+ */
+async function pythonRuntimeFromPinFiles(
+  dir: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const pythonVersionFile = await readOptionalProjectFile(dir, '.python-version', cache);
+  if (pythonVersionFile !== undefined) {
+    const pinned = pythonVersionFromPythonVersionFile(pythonVersionFile);
+    if (pinned) return pinned;
+  }
+  const toolVersions = await readOptionalProjectFile(dir, '.tool-versions', cache);
+  if (toolVersions === undefined) return undefined;
+  return pythonVersionFromToolVersions(toolVersions);
+}
+
 // ── Python project file names ──
 
 const PYTHON_MANIFEST_FILES = new Set([
@@ -1028,6 +1116,14 @@ async function scanOnePythonProject(
   const allDeps = new Map<string, PythonDependency>();
   for (const dep of collapsePythonDeps(sourced.map((row) => row.dep))) {
     allDeps.set(dep.normalisedName, dep);
+  }
+
+  // requires-python, Poetry's python dependency, and setup.cfg
+  // python_requires already won above. A requirements-only project often
+  // pins the interpreter in pyenv's .python-version, or in asdf's
+  // .tool-versions, and otherwise reports no runtime and no runtime lag.
+  if (!pythonVersion) {
+    pythonVersion = await pythonRuntimeFromPinFiles(dir, cache);
   }
 
   // Determine Python runtime version lag
