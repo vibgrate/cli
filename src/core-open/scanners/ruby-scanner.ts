@@ -193,11 +193,54 @@ function classifyGemfileGroupBlock(names: string[]): RubyGemGroup {
 }
 
 /**
+ * Quoted string arguments that follow a gem or dependency name, stopped at
+ * the first argument that is not a string (`require:`, `group:`, a comment,
+ * a symbol). Joined with `, ` so `">= 7.0", "< 8"` stays `>= 7.0, < 8`.
+ * A line with no version string stays `*`.
+ */
+function quotedVersionConstraints(afterName: string): string {
+  const constraints: string[] = [];
+  let i = 0;
+  while (i < afterName.length) {
+    while (i < afterName.length && (afterName[i] === ' ' || afterName[i] === '\t' || afterName[i] === ',')) {
+      i++;
+    }
+    if (i >= afterName.length) break;
+    const quote = afterName[i];
+    if (quote !== "'" && quote !== '"') break;
+    i++;
+    let value = '';
+    let closed = false;
+    while (i < afterName.length) {
+      const ch = afterName[i]!;
+      if (ch === '\\' && i + 1 < afterName.length) {
+        value += afterName[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === quote) {
+        closed = true;
+        i++;
+        break;
+      }
+      value += ch;
+      i++;
+    }
+    if (!closed) break;
+    const trimmed = value.trim();
+    if (trimmed) constraints.push(trimmed);
+  }
+  return constraints.length > 0 ? constraints.join(', ') : '*';
+}
+
+/**
  * Parse a Gemfile line to extract gem name and version constraint.
  *
  * Handles:
  *   gem 'rails', '~> 7.1'
  *   gem 'pg', '>= 0.18', '< 2.0'
+ *   gem "rails", ">= 7.0", "< 8"
+ *   gem "pg", "~> 1.5", require: false
  *   gem "puma", "~> 6.0"
  *   gem 'sidekiq'
  *   gem 'rspec-rails', group: :development
@@ -207,14 +250,12 @@ function parseGemfileLine(line: string): { name: string; spec: string } | null {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith('#')) return null;
 
-  // Match gem 'name' or gem "name" possibly followed by version constraints
-  const match = trimmed.match(
-    /^\s*gem\s+['"]([^'"]+)['"]\s*(?:,\s*['"]([^'"]+)['"])?/,
-  );
+  // Match gem 'name' or gem "name", then every quoted constraint before a keyword.
+  const match = trimmed.match(/^\s*gem\s+['"]([^'"]+)['"]/);
   if (!match) return null;
 
   const name = match[1]!;
-  const spec = match[2] ?? '*';
+  const spec = quotedVersionConstraints(trimmed.slice(match[0].length));
 
   return { name, spec };
 }
@@ -352,6 +393,7 @@ function parseGemfile(content: string): RubyDependency[] {
  *
  * Handles:
  *   spec.add_dependency 'rails', '~> 7.1'
+ *   spec.add_dependency "rack", ">= 2.2", "< 4"
  *   spec.add_development_dependency 'rspec', '~> 3.12'
  *   s.add_runtime_dependency "pg"
  */
@@ -361,15 +403,16 @@ function parseGemspec(content: string): RubyDependency[] {
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
 
-    // Match add_dependency, add_runtime_dependency, add_development_dependency
+    // Match add_dependency, add_runtime_dependency, add_development_dependency,
+    // then every quoted constraint before a non-string argument.
     const match = trimmed.match(
-      /\.add_(runtime_|development_)?dependency\s+['"]([^'"]+)['"]\s*(?:,\s*['"]([^'"]+)['"])?/,
+      /\.add_(runtime_|development_)?dependency\s+['"]([^'"]+)['"]/,
     );
-    if (!match) continue;
+    if (!match || match.index === undefined) continue;
 
     const depType = match[1] ?? 'runtime_';
     const name = match[2]!;
-    const spec = match[3] ?? '*';
+    const spec = quotedVersionConstraints(trimmed.slice(match.index + match[0].length));
 
     deps.push({
       name,
