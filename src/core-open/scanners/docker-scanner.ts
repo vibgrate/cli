@@ -25,9 +25,10 @@ async function parseDockerfile(filePath: string, cache?: FileCache): Promise<Doc
   
   const images: DockerImage[] = [];
   
-  // Match FROM statements (including multi-stage builds)
+  // Match FROM statements (including multi-stage builds). Dockerfile
+  // instructions are case-insensitive and may be indented.
   // FROM [--platform=<platform>] <image>[:<tag>] [AS <name>]
-  const fromRegex = /^FROM\s+(?:--platform=[^\s]+\s+)?([^\s]+)/gm;
+  const fromRegex = /^[\t ]*from\s+(?:--platform=[^\s]+\s+)?([^\s]+)/gmi;
   let match: RegExpExecArray | null;
 
   while ((match = fromRegex.exec(content)) !== null) {
