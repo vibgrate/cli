@@ -1,11 +1,25 @@
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { discover } from './discover.js';
+import { loadNpmLockIndex, type LockfileIo } from '../core-open/scanners/npm-lockfile.js';
 import { LockfileParseError } from '../core-open/utils/lockfile-parse.js';
+import { pathExists, readJsonFile, readTextFile } from '../core-open/utils/fs.js';
 import { lockfileVersion, fullDependencyTree, fullDependencyGraph, gemfileSpecPattern } from './lockfile.js';
+
+const SHRINKWRAP_ONLY = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../test/fixtures/npm-shrinkwrap-only',
+);
+
+const diskLockIo: LockfileIo = {
+  exists: pathExists,
+  readText: readTextFile,
+  readJson: readJsonFile,
+};
 
 /**
  * The point of reading lockfiles at all is that `node_modules` is empty in CI
@@ -151,6 +165,76 @@ describe('lockfileVersion — npm precedence', () => {
   it('falls through to yarn.lock when neither of the others has the name', () => {
     write('yarn.lock', ['commander@^15.0.0:', '  version "15.2.1"', ''].join('\n'));
     expect(lockfileVersion(root, 'npm', 'commander')).toBe('15.2.1');
+  });
+
+  it('reads pinned versions from a fixture that only has npm-shrinkwrap.json', async () => {
+    expect(fs.readdirSync(SHRINKWRAP_ONLY).sort()).toEqual(['npm-shrinkwrap.json']);
+    expect(lockfileVersion(SHRINKWRAP_ONLY, 'npm', 'left-pad')).toBe('1.3.0');
+    expect(lockfileVersion(SHRINKWRAP_ONLY, 'npm', 'once')).toBe('1.4.0');
+    const graph = fullDependencyGraph(SHRINKWRAP_ONLY);
+    expect(graph?.components).toEqual([
+      { package: 'left-pad', version: '1.3.0' },
+      { package: 'once', version: '1.4.0' },
+    ]);
+    expect(graph?.rootDependsOn).toEqual(['left-pad@1.3.0']);
+    expect(graph?.edges?.get('left-pad@1.3.0')).toEqual(['once@1.4.0']);
+
+    const index = await loadNpmLockIndex(SHRINKWRAP_ONLY, diskLockIo);
+    expect(index?.source).toBe('package-lock');
+    expect(index?.resolve('left-pad')).toBe('1.3.0');
+    expect(index?.resolve('once')).toBe('1.4.0');
+    expect(index?.graph().edges.get('left-pad@1.3.0')).toEqual(['once@1.4.0']);
+  });
+
+  it('prefers package-lock.json over npm-shrinkwrap.json when both exist', async () => {
+    write('package-lock.json', JSON.stringify({ packages: { 'node_modules/left-pad': { version: '9.9.9' } } }));
+    write('npm-shrinkwrap.json', JSON.stringify({ packages: { 'node_modules/left-pad': { version: '1.3.0' } } }));
+    expect(lockfileVersion(root, 'npm', 'left-pad')).toBe('9.9.9');
+    expect(fullDependencyTree(root)).toEqual([{ package: 'left-pad', version: '9.9.9' }]);
+
+    const read = new Set<string>();
+    const io: LockfileIo = {
+      exists: pathExists,
+      async readText(p) {
+        read.add(path.basename(p));
+        return readTextFile(p);
+      },
+      async readJson<T>(p: string): Promise<T> {
+        read.add(path.basename(p));
+        return readJsonFile<T>(p);
+      },
+    };
+    const index = await loadNpmLockIndex(root, io);
+    expect(index?.resolve('left-pad')).toBe('9.9.9');
+    expect(read.has('package-lock.json')).toBe(true);
+    expect(read.has('npm-shrinkwrap.json')).toBe(false);
+  });
+
+  it('rejects a truncated npm-shrinkwrap.json on the same path as package-lock.json', async () => {
+    const secret = 'npm_CCCCCCCCCCCCCCCCCCCC';
+    write('npm-shrinkwrap.json', `{"lockfileVersion":3,"packages":{"node_modules/left-pad":{"version":"1.3.0","integrity":"${secret}"`);
+    expect(() => fullDependencyGraph(root)).toThrow(LockfileParseError);
+    try {
+      fullDependencyGraph(root);
+    } catch (err) {
+      const message = (err as Error).message;
+      expect(message).toContain(path.join(root, 'npm-shrinkwrap.json'));
+      expect(message).toContain('truncated or invalid JSON');
+      expect(message).not.toContain(secret);
+      expect(message).not.toContain('left-pad');
+    }
+    await expect(loadNpmLockIndex(root, diskLockIo)).rejects.toThrow(LockfileParseError);
+    await expect(loadNpmLockIndex(root, diskLockIo)).rejects.toThrow(/npm-shrinkwrap\.json/);
+    await expect(loadNpmLockIndex(root, diskLockIo)).rejects.toThrow(/truncated or invalid JSON/);
+  });
+
+  it('does not fall through to npm-shrinkwrap.json when package-lock.json is truncated', async () => {
+    write('package-lock.json', '{"lockfileVersion":3,"packages":{');
+    write('npm-shrinkwrap.json', JSON.stringify({ packages: { 'node_modules/left-pad': { version: '1.3.0' } } }));
+    expect(() => fullDependencyGraph(root)).toThrow(/package-lock\.json/);
+    expect(() => lockfileVersion(root, 'npm', 'left-pad')).toThrow(/package-lock\.json/);
+    await expect(loadNpmLockIndex(root, diskLockIo)).rejects.toThrow(/package-lock\.json/);
+    await expect(loadNpmLockIndex(root, diskLockIo)).rejects.toThrow(/truncated or invalid JSON/);
   });
 
   it('returns undefined when there is no lockfile at all', () => {

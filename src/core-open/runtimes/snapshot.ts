@@ -62,6 +62,7 @@ export const BUNDLED_RUNTIME_CATALOG: RuntimeCatalog = {
     php: {
       product: 'php',
       cycles: [
+        { cycle: '8.5', releaseDate: '2025-11-20', eol: '2029-12-31' },
         { cycle: '8.4', releaseDate: '2024-11-21', eol: '2028-12-31' },
         { cycle: '8.3', releaseDate: '2023-11-23', eol: '2027-12-31' },
         { cycle: '8.2', releaseDate: '2022-12-08', eol: '2026-12-31' },
@@ -86,6 +87,32 @@ export const BUNDLED_RUNTIME_CATALOG: RuntimeCatalog = {
         { cycle: '1.24', releaseDate: '2025-02-11', eol: false },
         { cycle: '1.23', releaseDate: '2024-08-13', eol: true },
         { cycle: '1.22', releaseDate: '2024-02-06', eol: true },
+      ],
+    },
+    // Swift and Dart are not published on endoflife.date. These cycles are the
+    // stable release lines (swift.org / dart.dev) so offline scans still have a
+    // latest version. `eol: false` means no end-of-life date is known.
+    swift: {
+      product: 'swift',
+      cycles: [
+        { cycle: '6.4', releaseDate: '2026-09-15', eol: false },
+        { cycle: '6.3', releaseDate: '2026-03-27', eol: false },
+        { cycle: '6.2', releaseDate: '2025-09-17', eol: false },
+        { cycle: '6.1', releaseDate: '2025-04-01', eol: false },
+        { cycle: '6.0', releaseDate: '2024-09-17', eol: false },
+      ],
+    },
+    dart: {
+      product: 'dart',
+      cycles: [
+        { cycle: '3.13', releaseDate: '2026-08-05', eol: false },
+        { cycle: '3.12', releaseDate: '2026-05-08', eol: false },
+        { cycle: '3.11', releaseDate: '2026-02-09', eol: false },
+        { cycle: '3.10', releaseDate: '2025-11-06', eol: false },
+        { cycle: '3.9', releaseDate: '2025-08-11', eol: false },
+        { cycle: '3.8', releaseDate: '2025-05-14', eol: false },
+        { cycle: '3.7', releaseDate: '2025-02-05', eol: false },
+        { cycle: '3.6', releaseDate: '2024-12-05', eol: false },
       ],
     },
   },

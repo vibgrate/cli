@@ -19,6 +19,38 @@ export interface DockerImageRef {
 }
 
 /**
+ * Docker Hub hosts. A reference with no registry is Hub too. Compared
+ * case-insensitively so `Docker.IO` is not recorded as a third-party registry.
+ */
+const DOCKER_HUB_REGISTRIES = new Set([
+  'docker.io',
+  'index.docker.io',
+  'registry-1.docker.io',
+]);
+
+/** True for an implicit Hub image and for the Hub host aliases. */
+export function isDockerHubRegistry(registry: string | undefined): boolean {
+  if (!registry) return true;
+  return DOCKER_HUB_REGISTRIES.has(registry.toLowerCase());
+}
+
+/**
+ * Name recorded for a parsed image.
+ *
+ * Docker Hub stays `library/<image>` or `<namespace>/<image>`. Any other
+ * registry keeps its host, so the same path on two registries cannot collapse
+ * into one row and get compared with Docker Hub.
+ */
+export function recordedDockerImageName(parsed: DockerImageRef): string {
+  if (parsed.registry && !isDockerHubRegistry(parsed.registry)) {
+    return parsed.namespace
+      ? `${parsed.registry}/${parsed.namespace}/${parsed.image}`
+      : `${parsed.registry}/${parsed.image}`;
+  }
+  return parsed.namespace ? `${parsed.namespace}/${parsed.image}` : `library/${parsed.image}`;
+}
+
+/**
  * A registry host is the first path segment when it contains `.` or `:`
  * (a domain or a port) or is exactly `localhost`.
  */
@@ -175,9 +207,10 @@ export async function fetchDockerLatestVersion(
   offline = false,
 ): Promise<string | null> {
   const parsed = parseDockerImage(imageRef);
-  const key = `${parsed.namespace || 'library'}/${parsed.image}`;
+  const key = recordedDockerImageName(parsed);
 
-  // Check manifest first
+  // Check manifest first. The key is the recorded name, so a Hub entry for
+  // `acme/api` is not applied to `ghcr.io/acme/api`.
   const manifestEntry = getManifestEntry(manifest, 'docker', key);
   if (manifestEntry?.latest) {
     return manifestEntry.latest;
@@ -187,8 +220,9 @@ export async function fetchDockerLatestVersion(
     return null;
   }
 
-  // Only support Docker Hub for now (GHCR and ECR require auth)
-  if (parsed.registry && parsed.registry !== 'docker.io') {
+  // Docker Hub is the only registry this client queries. Other registries
+  // stay unknown unless the manifest above already had an entry.
+  if (!isDockerHubRegistry(parsed.registry)) {
     return null;
   }
 

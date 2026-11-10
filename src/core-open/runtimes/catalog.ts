@@ -21,6 +21,8 @@ export function productForType(type: string): string | null {
     case 'php': return 'php';
     case 'ruby': return 'ruby';
     case 'go': return 'go';
+    case 'swift': return 'swift';
+    case 'dart': return 'dart';
     default: return null;
   }
 }
@@ -32,7 +34,9 @@ export function extractCycle(type: string, runtime: string | undefined | null): 
     case 'python':
     case 'php':
     case 'ruby':
-    case 'go': {
+    case 'go':
+    case 'swift':
+    case 'dart': {
       // major.minor cycles, e.g. "3.11"
       const m = runtime.match(/(\d+)\.(\d+)/);
       return m ? `${m[1]}.${m[2]}` : null;
@@ -193,4 +197,4 @@ export function buildCatalog(
 }
 
 /** Products the catalog is expected to carry. */
-export const RUNTIME_PRODUCTS = ['nodejs', 'python', 'dotnet', 'java', 'php', 'ruby', 'go'] as const;
+export const RUNTIME_PRODUCTS = ['nodejs', 'python', 'dotnet', 'java', 'php', 'ruby', 'go', 'swift', 'dart'] as const;
