@@ -14,6 +14,13 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` reads every Dockerfile and Compose file in a directory.**
+  `Containerfile`, `Dockerfile.<suffix>`, and `<name>.Dockerfile` are Dockerfiles.
+  `docker-compose.yml` / `.yaml`, `compose.yml` / `.yaml`, and
+  `docker-compose.<name>.yml` / `.yaml` and `compose.<name>.yml` / `.yaml`
+  overrides are Compose files. A directory that has more than one is parsed
+  in full. Image rows stay deduplicated on name and tag (#580).
+
 - **`vg scan` expands PEP 735 `{include-group}` entries in `[dependency-groups]`.**
   An include pulls in that group's requirements from the same `pyproject.toml`.
   Group names are normalised (lowercase; runs of `-`, `_`, and `.` collapse to
