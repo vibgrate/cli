@@ -2,9 +2,9 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { KNOWN_SWIFT_FRAMEWORKS, scanSwiftProjects } from './swift-scanner.js';
-import { SwiftCache } from './swift-cache.js';
-import { Semaphore } from '../utils/semaphore.js';
+import { KNOWN_SWIFT_FRAMEWORKS, scanSwiftProjects } from '../src/core-open/scanners/swift-scanner.js';
+import { SwiftCache } from '../src/core-open/scanners/swift-cache.js';
+import { Semaphore } from '../src/core-open/utils/semaphore.js';
 
 /**
  * Framework detection keys off the lowercased repository name taken from the
