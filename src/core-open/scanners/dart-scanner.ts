@@ -9,6 +9,9 @@ import { assertLockfileText, LockfileParseError, rethrowLockfileParseError } fro
 import { lockfileWarningPath, notePubspecLockText, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
 import { PubCache, type PubDevMeta } from './pub-cache.js';
+import { latestStable } from '../runtimes/catalog.js';
+import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
+import type { RuntimeCatalog } from '../runtimes/types.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
 
@@ -85,9 +88,6 @@ const KNOWN_DART_FRAMEWORKS: Record<string, string> = {
   'flutter_lints': 'Flutter Lints',
   'lint': 'Lint',
 };
-
-/** Latest Dart major.minor (as of 2026) */
-const LATEST_DART = { major: 3, minor: 6 };
 
 interface DartDependency {
   name: string;
@@ -411,6 +411,7 @@ export async function scanDartProjects(
   pubCache: PubCache,
   cache?: FileCache,
   projectScanTimeout?: number,
+  catalog: RuntimeCatalog = BUNDLED_RUNTIME_CATALOG,
 ): Promise<ProjectScan[]> {
   // Find pubspec.yaml files
   const manifestFiles = cache
@@ -423,7 +424,7 @@ export async function scanDartProjects(
   for (const manifestFile of manifestFiles) {
     const dir = path.dirname(manifestFile);
     try {
-      const scanPromise = scanOneDartProject(dir, manifestFile, rootDir, pubCache, cache);
+      const scanPromise = scanOneDartProject(dir, manifestFile, rootDir, pubCache, cache, catalog);
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
         results.push(result.value);
@@ -455,7 +456,8 @@ async function scanOneDartProject(
   manifestFile: string,
   rootDir: string,
   pubCache: PubCache,
-  cache?: FileCache,
+  cache: FileCache | undefined,
+  catalog: RuntimeCatalog,
 ): Promise<ProjectScan> {
   const relDir = path.relative(rootDir, dir) || '.';
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
@@ -488,12 +490,15 @@ async function scanOneDartProject(
       if (verMatch) {
         const reqMajor = parseInt(verMatch[1]!, 10);
         const reqMinor = parseInt(verMatch[2]!, 10);
-        if (reqMajor === LATEST_DART.major) {
-          runtimeMajorsBehind = Math.max(0, LATEST_DART.minor - reqMinor);
-        } else if (reqMajor < LATEST_DART.major) {
-          runtimeMajorsBehind = LATEST_DART.minor + (LATEST_DART.major - reqMajor) * 10;
+        const latestDart = latestStable(catalog, 'dart');
+        if (latestDart) {
+          if (reqMajor === latestDart.major) {
+            runtimeMajorsBehind = Math.max(0, latestDart.minor - reqMinor);
+          } else if (reqMajor < latestDart.major) {
+            runtimeMajorsBehind = latestDart.minor + (latestDart.major - reqMajor) * 10;
+          }
+          runtimeLatest = `${latestDart.major}.${latestDart.minor}`;
         }
-        runtimeLatest = `${LATEST_DART.major}.${LATEST_DART.minor}`;
       }
     }
   }
