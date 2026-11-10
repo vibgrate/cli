@@ -413,7 +413,7 @@ export const scanCommand = new Command('scan')
   .option('--changed-only', 'Only scan changed files')
   .option(
     '-e, --exclude <glob>',
-    'Exclude paths matching a glob pattern. Repeatable, and a single value may list several patterns separated by commas or semicolons (e.g. --exclude "legacy/**,vendor/**"). Merged with excludes from the config file.',
+    'Exclude paths matching a glob pattern. Repeatable, and a single value may list several patterns separated by commas or semicolons (e.g. --exclude "legacy/**,vendor/**"). Merged with excludes from the config file. Empty and whitespace-only values are skipped.',
     collectExcludes,
     [],
   )

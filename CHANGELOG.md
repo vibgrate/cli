@@ -14,6 +14,15 @@ backward compatible.
 
 ### Fixed
 
+- **A blank `.gitignore` line no longer hides lockfiles.** `vg build` and
+  `vg scan` already skipped empty and whitespace-only exclude patterns and
+  blank ignore lines while discovering source. The lockfile check read
+  `.gitignore` raw, so a carriage return that was not part of a CRLF pair —
+  including a file that contains only `\r`, or a real rule followed by a bare
+  `\r` — was compiled as a pattern that matches every path. Lockfiles were
+  then skipped and a truncated lockfile did not fail the command. Those lines
+  are dropped. A real pattern next to a blank one still applies.
+
 - **`vg scan` reads every Dockerfile and Compose file in a directory.**
   `Containerfile`, `Dockerfile.<suffix>`, and `<name>.Dockerfile` are Dockerfiles.
   `docker-compose.yml` / `.yaml`, `compose.yml` / `.yaml`, and
