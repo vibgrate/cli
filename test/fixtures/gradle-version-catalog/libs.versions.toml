@@ -1,0 +1,24 @@
+[versions]
+jackson = "2.17.0"
+jupiter = "5.10.0"
+assertj = "3.25.3"
+lombok = "1.18.32"
+
+[libraries]
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+junit-jupiter = { group = "org.junit.jupiter", name = "junit-jupiter", version.ref = "jupiter" }
+guava = "com.google.guava:guava:32.1.0"
+commons-lang3 = { module = "org.apache.commons:commons-lang3", version = "3.14.0" }
+# Same accessor as commons-lang3. The first library wins.
+commons_lang3 = "org.apache.commons:commons-lang3:9.9.9"
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+lombok = { module = "org.projectlombok:lombok", version.ref = "lombok" }
+jackson-bom = { module = "com.fasterxml.jackson:jackson-bom", version = { require = "2.17.0" } }
+missing-pin = { module = "com.example:missing" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "no-such-version" }
+
+[bundles]
+test-stack = ["junit-jupiter", "assertj-core", "not-a-library"]
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "jackson" }
