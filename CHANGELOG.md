@@ -14,6 +14,8 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` reads OpenTofu `.tofu` files for provider and module drift.** `required_providers`, `required_version`, and registry `module` blocks in a `.tofu` file are scored, including a tree that has no `.tf` file. When `x.tf` and `x.tofu` are in the same directory, only `x.tofu` is read. A `.tf` file with no `.tofu` sibling is unchanged. The file list used when there is no file index also includes `terraform.tf` and the `.tofu` names of the usual root files (#622).
+
 - **`vg scan` and `vg sbom export` include NuGet packages pinned in `Directory.Packages.props`.** A `<PackageReference>` with no `Version` takes the matching `<PackageVersion>` from the nearest `Directory.Packages.props` between the project and the scanned directory. The package id matches without regard to letter case. `VersionOverride` on the reference wins. A reference whose version cannot be resolved stays in the scan and the SBOM with version `unknown`.
 
 - **A blank `.gitignore` line no longer hides lockfiles.** `vg build` and
