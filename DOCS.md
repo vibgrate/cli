@@ -1913,7 +1913,7 @@ Direct and transitive scope, and the production, development, and optional signa
 How a declared license is copied into each format is in [Declared licenses](#declared-licenses).
 
 `vg sbom export` reports the full resolved dependency tree, not just what's declared
-in the manifest: it reads `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` (npm,
+in the manifest: it reads `package-lock.json` / `npm-shrinkwrap.json` / `pnpm-lock.yaml` / `yarn.lock` (npm,
 pnpm, and yarn) from `--root` (defaults to the current directory) and folds every
 transitive package in alongside the directly-scanned ones. Each component carries a
 `vibgrate:scope` property (`direct` or `transitive`) so consumers can still tell the
@@ -2264,7 +2264,7 @@ is omitted on every package.
 | Source | Where it is written | CycloneDX `type` | SPDX `primaryPackagePurpose` |
 | --- | --- | --- | --- |
 | Scan root (the artifact's root directory name) | CycloneDX `metadata.component` only. It is not copied into `components`. SPDX has no package for the root. | `application` | Omitted. There is no package to carry the field. |
-| Lockfile package (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `Gemfile.lock`, `composer.lock`, `packages.lock.json`), including a package that only the lockfile lists | One CycloneDX component and one SPDX package | `library` | Omitted |
+| Lockfile package (`package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `Gemfile.lock`, `composer.lock`, `packages.lock.json`), including a package that only the lockfile lists | One CycloneDX component and one SPDX package | `library` | Omitted |
 | Manifest dependency from a scanned project (Node, Python, Rust, Go, Java, Kotlin, Scala, Ruby, PHP, .NET, Swift, Dart, and any other project the scan records) | One CycloneDX component and one SPDX package | `library` | Omitted |
 | Container image named by a `Dockerfile` `FROM` or a Compose `image:` line | The same kind of row. A Docker Hub image with no namespace is named `library/<image>`; one with a namespace is named `<namespace>/<image>`. `docker.io`, `index.docker.io`, and `registry-1.docker.io` are Docker Hub and use those same names. An image on any other registry keeps that registry in the name (`ghcr.io/acme/api`). The tag is the version. Only Docker Hub names are looked up on Docker Hub; any other registry stays `unknown` unless a package-version manifest lists that exact name. | `library` | Omitted |
 | Helm chart dependency (`Chart.yaml` `dependencies`) | The same kind of row. The chart itself is not a row. | `library` | Omitted |
@@ -2466,7 +2466,7 @@ Switches (flags that take no value, such as `--vulns`, `--offline` or `--no-grap
 
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
-A truncated or syntactically invalid lockfile stops the scan before a dependency graph is built. The error names the file (for example `package-lock.json`, `pnpm-lock.yaml`, or `yarn.lock`) and tells you to regenerate it with your package manager. The message does not include the lockfile, and the process exits non-zero. A valid lockfile is scanned as before.
+A truncated or syntactically invalid lockfile stops the scan before a dependency graph is built. The error names the file (for example `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, or `yarn.lock`) and tells you to regenerate it with your package manager. The message does not include the lockfile, and the process exits non-zero. A valid lockfile is scanned as before.
 
 `vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once, as `warning [VG_WARN_SYMLINK_SKIPPED]`. See [Symlinks](#symlinks). Archive files (`.zip`, `.tar`, `.gz`, `.bz2`, `.7z`, `.rar`) are not opened during that walk.
 
@@ -4129,11 +4129,12 @@ The label uses the first version it can read:
 
 `--json` reports that choice as `source`: `lockfile`, `installed`, `declared`, or `unknown`.
 
-Readers open these filenames in the directory you run from (`-C` changes it). A lockfile that lives only in a subdirectory is left unread. For npm, the first file that contains the name wins.
+Readers open these filenames in the directory you run from (`-C` changes it). A lockfile that lives only in a subdirectory is left unread. For npm, the first file that contains the name wins. `package-lock.json` is preferred over `npm-shrinkwrap.json` when both are present.
 
 | Ecosystem | File | What is read |
 |-----------|------|----------------|
 | npm | `package-lock.json` | v2/v3: `packages["node_modules/<name>"].version`. v1: `dependencies.<name>.version`. |
+| npm | `npm-shrinkwrap.json` | The same fields as `package-lock.json`. Read when `package-lock.json` is absent. |
 | npm | `pnpm-lock.yaml` | The importer entry's `version`. A peer suffix such as `(zod@4.0.0)` is removed. |
 | npm | `yarn.lock` | The `version` line in the block whose header names the package. |
 | Python | `poetry.lock`, then `uv.lock` | `version` on the `[[package]]` table with that name. Matching ignores case and treats `-`, `_`, and `.` as the same character. |
@@ -4146,7 +4147,7 @@ Readers open these filenames in the directory you run from (`-C` changes it). A 
 | Dart | `pubspec.lock` | The `version` field on that package. |
 | Java | `gradle.lockfile` | The version in a `group:artifact:version=` line. Pass the name as `group:artifact`. |
 
-The pin lookup skips `go.sum` (Go keeps the version declared in `go.mod`), `pdm.lock`, `npm-shrinkwrap.json`, `bun.lock`, and Maven lockfiles. A Java dependency declared only in `pom.xml` uses that declared version.
+The pin lookup skips `go.sum` (Go keeps the version declared in `go.mod`), `pdm.lock`, `bun.lock`, and Maven lockfiles. A Java dependency declared only in `pom.xml` uses that declared version.
 
 The text is chosen separately from the label:
 
