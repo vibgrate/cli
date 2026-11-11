@@ -188,7 +188,7 @@ This section summarizes what the CLI supports today and how to use each capabili
 Vibgrate evaluates **upgrade drift** in depth for:
 
 - **Node.js / TypeScript** (`package.json`, lockfiles)
-- **.NET** (`.sln`, `.csproj`). A `<PackageReference>` with no `Version` takes its version from the nearest `Directory.Packages.props` between that project and the directory you scanned. The package id matches without regard to letter case. `VersionOverride` on the reference wins. A reference with no resolvable version stays in the result with version `unknown`.
+- **.NET** (`.sln`, `.csproj`). A `<PackageReference>` with no `Version` takes its version from the nearest `Directory.Packages.props` between that project and the directory you scanned. The package id matches without regard to letter case. `VersionOverride` on the reference wins. A reference with no resolvable version stays in the result with version `unknown`. A project that sets neither `TargetFramework` nor `TargetFrameworks` takes them from the nearest `Directory.Build.props` between that project and the directory you scanned. A value in the project file wins. A value that contains `$(` is not reported as a runtime.
 - **Python** (`requirements.txt`, `pyproject.toml`-style manifests)
 - **Java** (`pom.xml`, Gradle-style manifests). Which Maven profiles, scopes, and Gradle configurations become a `vg scan` row or a `vg build` edge is in [Maven and Gradle manifests](#maven-and-gradle-manifests).
 
