@@ -121,6 +121,19 @@ async function parseComposerJson(filePath: string, cache?: FileCache): Promise<{
   return { phpVersion, deps: [...deps.values()] };
 }
 
+/**
+ * Composer's platform packages, which are not on Packagist: `php` and its variants, `hhvm`,
+ * `ext-*`, `lib-*`, `composer`, `composer-plugin-api` and `composer-runtime-api`.
+ * Matches the same names as Composer's `PlatformRepository::PLATFORM_PACKAGE_REGEX`, written so the
+ * `ext-`/`lib-` part cannot backtrack: a separator is required between two runs of letters and digits.
+ */
+const COMPOSER_PLATFORM_PACKAGE =
+  /^(?:php(?:-64bit|-ipv6|-zts|-debug)?|hhvm|(?:ext|lib)-[a-z0-9]+(?:[_.-][a-z0-9]+)*|composer(?:-(?:plugin|runtime)-api)?)$/i;
+
+export function isComposerPlatformPackage(name: string): boolean {
+  return COMPOSER_PLATFORM_PACKAGE.test(name);
+}
+
 /** Skip platform requirements. A name in both tables is stored once, as production. */
 function rememberComposerDep(
   deps: Map<string, PhpDependency>,
@@ -128,7 +141,7 @@ function rememberComposerDep(
   version: unknown,
   isDev: boolean,
 ): void {
-  if (name === 'php' || name.startsWith('ext-')) return;
+  if (isComposerPlatformPackage(name)) return;
   const row: PhpDependency = { name, version: String(version), isDev };
   const existing = deps.get(name);
   if (!existing) {
