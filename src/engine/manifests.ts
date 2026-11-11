@@ -2,7 +2,7 @@
  * Deterministic package-manifest extraction.
  *
  * Pulls declared dependencies from package manifests (package.json, go.mod,
- * pom.xml, .csproj/.vbproj/.sqlproj, pyproject.toml, Cargo.toml) into the
+ * pom.xml, .csproj/.vbproj/.sqlproj, pyproject.toml, Cargo.toml, Gemfile) into the
  * code map as `package` nodes + `import` edges to external packages.
  * Complements source-level imports so hubs/impact/ask can see the
  * dependency surface without lockfile noise (lockfiles stay skipped by
@@ -112,6 +112,8 @@ export function extractManifests(
         deps += ingestPyproject(rel, abs, nodes, edges);
       } else if (base === 'Cargo.toml') {
         deps += ingestCargoToml(rel, abs, nodes, edges);
+      } else if (base === 'Gemfile') {
+        deps += ingestGemfile(rel, abs, nodes, edges, rootBase);
       }
     } catch {
       /* unreadable / invalid — skip */
@@ -471,6 +473,50 @@ function ingestCargoToml(
   return n;
 }
 
+/**
+ * Bundler `Gemfile`: every `gem 'name'` / `gem "name"` line, in any group.
+ * The package node is named after the directory that holds the Gemfile (the
+ * scanned root's own name for a root Gemfile), because a Gemfile has no
+ * project name of its own.
+ */
+function ingestGemfile(
+  rel: string,
+  abs: string,
+  nodes: Map<string, GraphNode>,
+  edges: Map<string, GraphEdge>,
+  rootBase: string,
+): number {
+  const text = fs.readFileSync(abs, 'utf8');
+  const dir = path.posix.dirname(rel);
+  const dirName = dir === '.' ? rootBase : dir.split('/').pop() || rootBase;
+
+  const localId = makePackageNode(nodes, edges, {
+    rel,
+    qualifiedName: dirName,
+    displayName: dirName,
+    lang: 'ruby',
+  });
+
+  const names = new Set<string>();
+  for (const rawLine of text.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const match = /^gem\s+['"]([^'"]+)['"]/.exec(trimmed);
+    if (match && match[1]) {
+      names.add(match[1]);
+    }
+  }
+
+  let n = 0;
+  for (const name of [...names].sort()) {
+    const extId = ensureExternal(nodes, name);
+    addEdge(edges, 'import', localId, extId, 1.0);
+    n++;
+  }
+  return n;
+}
+
 function isRecognizedManifest(base: string): boolean {
   return (
     base === 'package.json' ||
@@ -478,6 +524,7 @@ function isRecognizedManifest(base: string): boolean {
     base === 'pom.xml' ||
     base === 'pyproject.toml' ||
     base === 'Cargo.toml' ||
+    base === 'Gemfile' ||
     isDotnetProjectFile(base)
   );
 }

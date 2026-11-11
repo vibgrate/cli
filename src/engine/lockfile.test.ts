@@ -242,6 +242,49 @@ describe('lockfileVersion — npm precedence', () => {
   });
 });
 
+describe('Yarn Berry lockfile', () => {
+  it('skips workspace entries and resolves patch and alias descriptors', () => {
+    write(
+      'yarn.lock',
+      `
+__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"lodash@npm:^4.17.21":
+  version: 4.17.21
+  resolution: "lodash@npm:4.17.21"
+  languageName: node
+  linkType: hard
+
+"my-app@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "my-app@workspace:."
+  languageName: unknown
+  linkType: soft
+
+"resolve@patch:resolve@npm%3A^1.20.0#~builtin<compat/resolve>":
+  version: 1.22.8
+  resolution: "resolve@patch:resolve@npm%3A^1.20.0#~builtin<compat/resolve>"
+
+"string-width-cjs@npm:string-width@^4.2.3":
+  version: 4.2.3
+  resolution: "string-width-cjs@npm:string-width@^4.2.3"
+`.trimStart(),
+    );
+
+    const tree = fullDependencyTree(root);
+    const names = (tree ?? []).map((c) => c.package);
+
+    expect(names).toContain('lodash');
+    expect(names).not.toContain('my-app');
+    expect(names).not.toContain('__metadata');
+
+    expect(lockfileVersion(root, 'npm', 'resolve')).toBe('1.22.8');
+    expect(lockfileVersion(root, 'npm', 'string-width-cjs')).toBe('4.2.3');
+  });
+});
+
 describe('fullDependencyTree', () => {
   it('reads the full transitive graph from an npm v2/v3 package-lock.json, not just direct deps', () => {
     write(
