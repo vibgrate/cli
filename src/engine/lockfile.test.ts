@@ -274,7 +274,7 @@ __metadata:
     );
 
     const tree = fullDependencyTree(root);
-    const names = Object.keys(tree || {});
+    const names = (tree ?? []).map((c) => c.package);
 
     expect(names).toContain('lodash');
     expect(names).not.toContain('my-app');

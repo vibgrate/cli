@@ -113,7 +113,7 @@ export function extractManifests(
       } else if (base === 'Cargo.toml') {
         deps += ingestCargoToml(rel, abs, nodes, edges);
       } else if (base === 'Gemfile') {
-        deps += ingestGemfile(rel, abs, nodes, edges);
+        deps += ingestGemfile(rel, abs, nodes, edges, rootBase);
       }
     } catch {
       /* unreadable / invalid — skip */
@@ -185,6 +185,7 @@ function ingestPackageJson(
   };
   const declared = nonEmptyManifestString(raw.name);
   const dir = path.posix.dirname(rel);
+  // The root manifest has no directory segment. `.` is not an identity.
   const fallback = dir === '.' ? rootBase : dir || rootBase;
   const pkgName = declared || fallback || 'unnamed';
   const localId = makePackageNode(nodes, edges, {
@@ -229,6 +230,10 @@ function ingestGoMod(
     lang: 'go',
   });
 
+  // require blocks and single-line requires (ignore replace/exclude).
+  // A require with no `v` version — or a range instead of one — is still a
+  // direct dependency. The graph has no version field; dropping the line
+  // would hide the module. The version is not invented here.
   const reqNames = new Set<string>();
   let inRequire = false;
   for (const raw of text.split(/\r?\n/)) {
@@ -256,6 +261,12 @@ function ingestGoMod(
   return n;
 }
 
+/**
+ * Module path from a `require` line. Accepts `path v1.2.3`, a bare `path`
+ * (version inherited or not yet chosen), and `path >=1.2.0` (a range is not
+ * a Go module version). Returns null for comments, `replace`/`exclude`, and
+ * the `go`/`module` lines.
+ */
 function goRequireModule(line: string): string | null {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith('//')) return null;
@@ -291,6 +302,7 @@ function looksLikeGoModule(token: string): boolean {
   return token.includes('.') || token.includes('/');
 }
 
+/** `${groupId}:${artifactId}`, Maven's own coordinate format — matches how a reader would look it up. */
 function ingestPomXml(
   rel: string,
   abs: string,
@@ -398,10 +410,12 @@ function ingestPyproject(
   });
 
   const names = new Set<string>();
+  // PEP 621: dependencies = ["name>=1.0", ...]
   for (const dep of Array.isArray(project.dependencies) ? (project.dependencies as unknown[]) : []) {
     const name = pep508Name(String(dep));
     if (name) names.add(name);
   }
+  // Poetry: [tool.poetry.dependencies] name = "^1.0" | { version = "^1.0" }
   const poetryDeps = poetry.dependencies as Record<string, unknown> | undefined;
   if (poetryDeps && typeof poetryDeps === 'object') {
     for (const name of Object.keys(poetryDeps)) {
@@ -417,6 +431,7 @@ function ingestPyproject(
   return n;
 }
 
+/** The bare distribution name from a PEP 508 requirement string (`"flask>=2.0"` -> `"flask"`). */
 function pep508Name(spec: string): string | null {
   const m = /^\s*([A-Za-z0-9][A-Za-z0-9._-]*)/.exec(spec);
   return m ? m[1] : null;
@@ -458,14 +473,22 @@ function ingestCargoToml(
   return n;
 }
 
+/**
+ * Bundler `Gemfile`: every `gem 'name'` / `gem "name"` line, in any group.
+ * The package node is named after the directory that holds the Gemfile (the
+ * scanned root's own name for a root Gemfile), because a Gemfile has no
+ * project name of its own.
+ */
 function ingestGemfile(
   rel: string,
   abs: string,
   nodes: Map<string, GraphNode>,
   edges: Map<string, GraphEdge>,
+  rootBase: string,
 ): number {
   const text = fs.readFileSync(abs, 'utf8');
-  const dirName = path.posix.dirname(rel).split('/').pop() || 'ruby';
+  const dir = path.posix.dirname(rel);
+  const dirName = dir === '.' ? rootBase : dir.split('/').pop() || rootBase;
 
   const localId = makePackageNode(nodes, edges, {
     rel,
@@ -479,7 +502,7 @@ function ingestGemfile(
     const trimmed = rawLine.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
 
-    const match = trimmed.match(/^\s*gem\s+['"]([^'"]+)['"]/);
+    const match = /^gem\s+['"]([^'"]+)['"]/.exec(trimmed);
     if (match && match[1]) {
       names.add(match[1]);
     }

@@ -136,6 +136,25 @@ gem 'rspec', group: [:development, :test]
     expect(extNames).toEqual(['rails', 'rspec', 'rubocop']);
   });
 
+  it('names a nested Gemfile after its directory and skips commented gem lines', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-manifest-'));
+    write(
+      dir,
+      'services/web/Gemfile',
+      `source "https://rubygems.org"
+# gem "debug"
+gem "puma", ">= 6"
+  gem "sidekiq"
+`,
+    );
+    const out = extractManifests(dir);
+    const pkg = out.nodes.find((n) => n.kind === 'package');
+    expect(pkg?.name).toBe('web');
+    expect(out.deps).toBe(2);
+    const extNames = out.nodes.filter((n) => n.kind === 'external').map((n) => n.name).sort();
+    expect(extNames).toEqual(['puma', 'sidekiq']);
+  });
+
   it('gives each ecosystem its own package node in a mixed-ecosystem tree', () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-manifest-'));
     write(dir, 'services/api/package.json', JSON.stringify({ name: 'api' }));
