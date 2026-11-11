@@ -162,7 +162,8 @@ interface PythonDependency {
  *   package ; python_version >= "3.8"
  */
 function parseRequirementLine(line: string): PythonDependency | null {
-  const trimmed = line.trim();
+  // pip comments start after whitespace; URL fragments such as #egg= remain part of the spec.
+  const trimmed = line.replace(/\s+#.*$/, '').trim();
   // `-r` / `-c` (and their long forms) name other files. They are followed by
   // the requirements loader, not parsed as packages.
   if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('-')) return null;
