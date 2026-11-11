@@ -142,6 +142,58 @@ describe('scan --fail-on-epss', () => {
     expect(xml).not.toContain('<failure');
   }, 60_000);
 
+  function manyScored(count: number, start = 0): Array<Record<string, unknown>> {
+    return Array.from({ length: count }, (_, i) => ({
+      id: `GHSA-${String(start + i).padStart(3, '0')}`,
+      severity: 'high',
+      epss: 0.9,
+      ranges: [{ introduced: '0', fixed: '9.0.0' }],
+    }));
+  }
+
+  function advisoryRows(stream: string): string[] {
+    return stream
+      .split('\n')
+      .map((line) => line.replace(/\x1b\[[0-9;]*m/g, ''))
+      .filter((line) => /^  npm left-pad@1\.3\.0  GHSA-/.test(line));
+  }
+
+  it('caps breached advisory rows at 50 and prints the "… N more" line', async () => {
+    const manifest = writeManifest(manyScored(53));
+    await expect(run([
+      '--vulns', '--package-manifest', manifest, '--fail-on-epss', '0.5',
+    ])).rejects.toThrow('process.exit(2) called');
+    const rows = advisoryRows(stderr);
+    expect(rows).toHaveLength(50);
+    expect(rows[0]).toContain('GHSA-000');
+    expect(rows[49]).toContain('GHSA-049');
+    expect(stderr).toContain('… 3 more');
+    expect(stderr).not.toContain('GHSA-050');
+  }, 60_000);
+
+  it('prints exactly 50 rows and no overflow line at the cap', async () => {
+    const manifest = writeManifest(manyScored(50));
+    await expect(run([
+      '--vulns', '--package-manifest', manifest, '--fail-on-epss', '0.5',
+    ])).rejects.toThrow('process.exit(2) called');
+    const rows = advisoryRows(stderr);
+    expect(rows).toHaveLength(50);
+    expect(rows[0]).toContain('GHSA-000');
+    expect(rows[49]).toContain('GHSA-049');
+    expect(stderr).not.toMatch(/… \d+ more/);
+  }, 60_000);
+
+  it('prints rows in the same stable order as evaluateEpssGate breached refs', async () => {
+    const manifest = writeManifest(manyScored(50));
+    await expect(run([
+      '--vulns', '--package-manifest', manifest, '--fail-on-epss', '0.5',
+    ])).rejects.toThrow('process.exit(2) called');
+    const rows = advisoryRows(stderr);
+    const ids = rows.map((row) => row.match(/GHSA-\d{3}/)![0]);
+    expect(ids).toEqual([...ids].sort());
+    expect(ids).toEqual(Array.from({ length: 50 }, (_, i) => `GHSA-${String(i).padStart(3, '0')}`));
+  }, 60_000);
+
   it('rejects a threshold outside 0 to 1 before scanning', async () => {
     await expect(run(['--fail-on-epss', '2'])).rejects.toMatchObject({
       code: ExitCode.ERROR,

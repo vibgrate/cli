@@ -578,88 +578,14 @@ export async function agentTask(params: {
   extraPinnedFacts?: string[];
   /** Model-written checkpoint summaries on compaction (real-model hosts). */
   llmCompaction?: boolean;
+  /** Observer for every agent event (profiling); called before rendering. */
+  observe?: (e: AgentEvent) => void;
 }): Promise<AgentResult> {
-  const { prompter } = params;
-  const approve = async (action: MutatingAction): Promise<boolean> => {
-    if (params.auto) return true;
-    if (!prompter) return false; // non-interactive without --auto: refuse mutations
-    switch (action.kind) {
-      case 'edit':
-        out(action.diff);
-        return prompter.confirm(`Apply edit to ${action.file}?`, true);
-      case 'create':
-        return prompter.confirm(`Create ${action.file} (${action.bytes} bytes)?`, true);
-      case 'delete':
-        return prompter.confirm(`Delete ${action.file}?`, false);
-      case 'run':
-        return prompter.confirm(`Run \`${action.command}\`?`, false);
-      case 'tool':
-        return prompter.confirm(`Call ${action.name}(${briefArgs(action.args)})?`, false);
-      case 'patch': {
-        const n = action.files.length;
-        for (const f of action.files) {
-          if (f.diff) out(f.diff);
-          else out(`${f.op} ${f.file}`);
-        }
-        const names = action.files
-          .slice(0, 6)
-          .map((f) => f.file)
-          .join(', ');
-        const more = n > 6 ? ` (+${n - 6} more)` : '';
-        return prompter.confirm(`Apply patch to ${n} file(s): ${names}${more}?`, false);
-      }
-    }
-  };
-
-  // Event rendering, with live token streaming: raw tokens print inline; any
-  // other event first closes the streamed line so the layout stays clean.
-  let streaming = false;
-  const closeStream = (): void => {
-    if (streaming) {
-      process.stderr.write('\n');
-      streaming = false;
-    }
-  };
+  const approve = ttyApprover(params.auto, params.prompter);
+  const { onEvent: render, closeStream } = ttyEventRenderer();
   const onEvent = (e: AgentEvent): void => {
-    if (e.type === 'token') {
-      process.stderr.write(e.text);
-      streaming = true;
-      return;
-    }
-    closeStream();
-    if (e.type === 'assistant') {
-      if (e.text.trim()) info(e.text.trim());
-    } else if (e.type === 'tool-call') {
-      info(c.dim(`  → ${e.name}(${briefArgs(e.args)})`));
-    } else if (e.type === 'tool-result') {
-      const lines = toolResultLogLines(e.name, e.content);
-      info(c.dim(`    ${e.mutated ? c.green('✔ ') : ''}${lines[0] ?? ''}`));
-      for (const line of lines.slice(1)) info(c.dim(`    ${line}`));
-    } else if (e.type === 'compact') {
-      info(c.dim(`  · compacted context (${e.droppedRounds} earlier round(s) summarized)`));
-    } else if (e.type === 'verify') {
-      info(e.passed ? c.green(`  ✔ ${e.command} passed`) : c.yellow(`  ✗ ${e.command} failed — asking the model to fix it`));
-    } else if (e.type === 'ladder') {
-      info(e.ok ? c.green('  ✔ verification ladder passed') : c.yellow('  ✗ verification ladder failed — asking the model to fix it'));
-      if (!e.ok && e.summary.trim()) {
-        for (const line of e.summary.split('\n').slice(0, 6)) info(c.dim(`    ${line}`));
-      }
-    } else if (e.type === 'notice') {
-      info(c.dim(`  · ${e.text}`));
-    } else if (e.type === 'session-graph') {
-      info(c.dim(`  · session graph updated (${e.reparsed} reparsed, ${e.dirty} dirty)`));
-    } else if (e.type === 'capsule') {
-      info(c.dim(`  · Context Capsule · ${e.summary.primary.length} primary · ${e.summary.sourceSliceCount} source slice(s) · ~${e.summary.tokensEstimate} tokens`));
-      // Capsule transparency: show how the ask was read and which symbols that
-      // reached, before the model answers on top of it. Capped so a long
-      // session stays readable — the full block is in the capsule itself.
-      for (const line of capsuleTransparencyLines(e.summary)) info(c.dim(line));
-    } else if (e.type === 'failure-capsule') {
-      info(c.yellow(`  · Failure Capsule · ${e.capsule.failedStep.type}${e.capsule.failedStep.command ? ` · ${e.capsule.failedStep.command}` : ''}`));
-    } else if (e.type === 'metrics') {
-      const m = e.metrics;
-      info(c.dim(`  · metrics · discovery ${m.discoveryToolCalls} · mutations ${m.mutationToolCalls}${m.znsAt1 ? ' · ZNS@1' : ''}`));
-    }
+    params.observe?.(e);
+    render(e);
   };
 
   const result = await runAgent({
@@ -752,4 +678,104 @@ function shellRunner(root: string): (command: string) => ShellResult | Promise<S
     const stdout = (res.stdout ?? '') + (res.stderr ? `\n${res.stderr}` : '');
     return { stdout, exitCode: res.status ?? 1 };
   };
+}
+
+/**
+ * The terminal approval gate shared by the native loop and the ACP backend:
+ * auto-approve under `--auto`, otherwise confirm with the diff / command shown.
+ * Non-interactive without `--auto` refuses every mutation.
+ */
+export function ttyApprover(auto: boolean, prompter?: Prompter): (action: MutatingAction) => Promise<boolean> {
+  return async (action: MutatingAction): Promise<boolean> => {
+    if (auto) return true;
+    if (!prompter) return false; // non-interactive without --auto: refuse mutations
+    switch (action.kind) {
+      case 'edit':
+        out(action.diff);
+        return prompter.confirm(`Apply edit to ${action.file}?`, true);
+      case 'create':
+        return prompter.confirm(`Create ${action.file} (${action.bytes} bytes)?`, true);
+      case 'delete':
+        return prompter.confirm(`Delete ${action.file}?`, false);
+      case 'run':
+        return prompter.confirm(`Run \`${action.command}\`?`, false);
+      case 'tool':
+        return prompter.confirm(`Call ${action.name}(${briefArgs(action.args)})?`, false);
+      case 'patch': {
+        const n = action.files.length;
+        for (const f of action.files) {
+          if (f.diff) out(f.diff);
+          else out(`${f.op} ${f.file}`);
+        }
+        const names = action.files
+          .slice(0, 6)
+          .map((f) => f.file)
+          .join(', ');
+        const more = n > 6 ? ` (+${n - 6} more)` : '';
+        return prompter.confirm(`Apply patch to ${n} file(s): ${names}${more}?`, false);
+      }
+    }
+  };
+}
+
+/**
+ * Terminal event renderer, with live token streaming: raw tokens print inline;
+ * any other event first closes the streamed line so the layout stays clean.
+ */
+export function ttyEventRenderer(): { onEvent: (e: AgentEvent) => void; closeStream: () => void } {
+  let streaming = false;
+  const closeStream = (): void => {
+    if (streaming) {
+      process.stderr.write('\n');
+      streaming = false;
+    }
+  };
+  const onEvent = (e: AgentEvent): void => {
+    if (e.type === 'token') {
+      process.stderr.write(e.text);
+      streaming = true;
+      return;
+    }
+    closeStream();
+    if (e.type === 'assistant') {
+      if (e.text.trim()) info(e.text.trim());
+    } else if (e.type === 'tool-call') {
+      info(c.dim(`  → ${e.name}(${briefArgs(e.args)})`));
+    } else if (e.type === 'tool-result') {
+      const lines = toolResultLogLines(e.name, e.content);
+      info(c.dim(`    ${e.mutated ? c.green('✔ ') : ''}${lines[0] ?? ''}`));
+      for (const line of lines.slice(1)) info(c.dim(`    ${line}`));
+    } else if (e.type === 'compact') {
+      info(c.dim(`  · compacted context (${e.droppedRounds} earlier round(s) summarized)`));
+    } else if (e.type === 'verify') {
+      info(e.passed ? c.green(`  ✔ ${e.command} passed`) : c.yellow(`  ✗ ${e.command} failed — asking the model to fix it`));
+    } else if (e.type === 'ladder') {
+      info(e.ok ? c.green('  ✔ verification ladder passed') : c.yellow('  ✗ verification ladder failed — asking the model to fix it'));
+      if (!e.ok && e.summary.trim()) {
+        for (const line of e.summary.split('\n').slice(0, 6)) info(c.dim(`    ${line}`));
+      }
+    } else if (e.type === 'notice') {
+      info(c.dim(`  · ${e.text}`));
+    } else if (e.type === 'session-graph') {
+      info(c.dim(`  · session graph updated (${e.reparsed} reparsed, ${e.dirty} dirty)`));
+    } else if (e.type === 'capsule') {
+      info(c.dim(`  · Context Capsule · ${e.summary.primary.length} primary · ${e.summary.sourceSliceCount} source slice(s) · ~${e.summary.tokensEstimate} tokens`));
+      // Capsule transparency: show how the ask was read and which symbols that
+      // reached, before the model answers on top of it. Capped so a long
+      // session stays readable — the full block is in the capsule itself.
+      for (const line of capsuleTransparencyLines(e.summary)) info(c.dim(line));
+    } else if (e.type === 'failure-capsule') {
+      info(c.yellow(`  · Failure Capsule · ${e.capsule.failedStep.type}${e.capsule.failedStep.command ? ` · ${e.capsule.failedStep.command}` : ''}`));
+    } else if (e.type === 'changes-summary') {
+      info(c.bold(`  Changes · ${e.files.length} file(s) · ${c.green(`+${e.totalAdded}`)} ${c.red(`−${e.totalRemoved}`)}`));
+      for (const f of e.files.slice(0, 20)) {
+        info(`    ${f.status === 'created' ? 'A' : f.status === 'deleted' ? 'D' : 'M'} ${f.path}  ${c.green(`+${f.added}`)} ${c.red(`−${f.removed}`)}`);
+      }
+      if (e.files.length > 20) info(c.dim(`    … ${e.files.length - 20} more`));
+    } else if (e.type === 'metrics') {
+      const m = e.metrics;
+      info(c.dim(`  · metrics · discovery ${m.discoveryToolCalls} · mutations ${m.mutationToolCalls}${m.znsAt1 ? ' · ZNS@1' : ''}`));
+    }
+  };
+  return { onEvent, closeStream };
 }

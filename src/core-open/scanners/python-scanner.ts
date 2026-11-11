@@ -144,8 +144,10 @@ interface PythonDependency {
    * Manifest section. Omitted means `dependencies`.
    * PEP 621 extras and a Poetry inline table with `optional = true`
    * both set `optionalDependencies` on this field.
-   * PEP 735 dependency groups, Poetry dependency groups, and the legacy
-   * Poetry dev-dependencies table set `devDependencies`.
+   * PEP 735 dependency groups, Poetry dependency groups, the legacy
+   * Poetry dev-dependencies table, Pipfile `[dev-packages]`, and a
+   * requirements file whose name marks it as dev or test set
+   * `devDependencies`.
    */
   section?: DepSection;
 }
@@ -204,11 +206,30 @@ function pep440ToSemver(ver: string): string | null {
 
 // ── File parsers ──
 
-function parseRequirementsTxt(content: string): PythonDependency[] {
+/**
+ * Section for a requirements file, from its base name.
+ *
+ * Segments are split on `-`, `_`, and `.`. A `dev` or `test` segment is a
+ * development manifest: `requirements-dev.txt`, `requirements_dev.txt`,
+ * `requirements-test.txt`, and `dev-requirements.txt`. `requirements.txt`
+ * has neither segment and stays production. Which files are discovered or
+ * read is a separate decision; this only classifies a file once it is parsed.
+ */
+export function requirementsManifestSection(fileName: string): DepSection {
+  const base = path.basename(fileName).toLowerCase();
+  const stem = base.endsWith('.txt') ? base.slice(0, -'.txt'.length) : base;
+  for (const segment of stem.split(/[-_.]+/)) {
+    if (segment === 'dev' || segment === 'test') return 'devDependencies';
+  }
+  return 'dependencies';
+}
+
+function parseRequirementsTxt(content: string, section: DepSection = 'dependencies'): PythonDependency[] {
   const deps: PythonDependency[] = [];
   for (const line of content.split('\n')) {
     const dep = parseRequirementLine(line);
-    if (dep) deps.push(dep);
+    if (!dep) continue;
+    deps.push(section === 'dependencies' ? dep : { ...dep, section });
   }
   return deps;
 }
@@ -235,7 +256,9 @@ function declaredSection(dep: PythonDependency): DepSection {
  * same way an extra that repeats a production requirement does.
  * Two optional rows keep the code-unit-smaller spec, then the smaller raw
  * name, so extra order does not matter. Two rows in any other winning
- * section keep the first one parsed.
+ * section keep the first one in the list the caller passes. The project
+ * merge sorts that list by file path, so directory enumeration order does
+ * not choose the row.
  */
 function pickPythonDep(rows: PythonDependency[]): PythonDependency {
   if (rows.length === 1) return rows[0]!;
@@ -342,17 +365,13 @@ function skipTomlInlineTable(text: string, start: number): number {
   return text.length;
 }
 
-function collectQuotedStrings(body: string, out: string[], skipInlineTables = false): void {
+function collectQuotedStrings(body: string, out: string[]): void {
   let i = 0;
   while (i < body.length) {
     const ch = body[i]!;
     if (ch === '#') {
       const nl = body.indexOf('\n', i);
       i = nl === -1 ? body.length : nl + 1;
-      continue;
-    }
-    if (skipInlineTables && ch === '{') {
-      i = skipTomlInlineTable(body, i);
       continue;
     }
     if (ch === '"' || ch === "'") {
@@ -388,13 +407,9 @@ function collectQuotedStrings(body: string, out: string[], skipInlineTables = fa
 /**
  * Requirement strings from every array in a TOML table body.
  * A `]` inside a quoted requirement (an extra marker) does not end the array.
- * Comments are skipped. When `skipInlineTables` is set, a `{...}` entry is
- * not a requirement: PEP 735 `{include-group = "..."}` is skipped and is not
- * expanded. The quoted group name inside that table is not a package name.
- * Packages written in the included group's own array are still collected
- * when that array is walked.
+ * Comments are skipped.
  */
-function requirementStringsFromTomlArrays(section: string, skipInlineTables = false): string[] {
+function requirementStringsFromTomlArrays(section: string): string[] {
   const out: string[] = [];
   let i = 0;
   while (i < section.length) {
@@ -411,13 +426,286 @@ function requirementStringsFromTomlArrays(section: string, skipInlineTables = fa
     if (ch === '[') {
       const end = indexOfClosingBracket(section, i + 1);
       if (end === -1) break;
-      collectQuotedStrings(section.slice(i + 1, end), out, skipInlineTables);
+      collectQuotedStrings(section.slice(i + 1, end), out);
       i = end + 1;
       continue;
     }
     i++;
   }
   return out;
+}
+
+/**
+ * PEP 735 group names: lowercase, and each run of `-`, `_`, or `.` becomes
+ * one `-`. `Dev_Tools` and `dev-tools` are the same group.
+ */
+function normaliseDependencyGroupName(name: string): string {
+  return name.trim().toLowerCase().replace(/[-_.]+/g, '-');
+}
+
+function skipTomlWsAndComments(text: string, start: number): number {
+  let i = start;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+      i++;
+      continue;
+    }
+    if (ch === '#') {
+      const nl = text.indexOf('\n', i);
+      i = nl === -1 ? text.length : nl + 1;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+/** A TOML basic or literal string starting at `start`. `next` is past the closer. */
+function readTomlStringAt(text: string, start: number): { value: string; next: number } | null {
+  const quote = text[start];
+  if (quote !== '"' && quote !== "'") return null;
+  if (text.startsWith(quote + quote + quote, start)) {
+    const end = text.indexOf(quote + quote + quote, start + 3);
+    if (end === -1) return { value: text.slice(start + 3), next: text.length };
+    return { value: text.slice(start + 3, end), next: end + 3 };
+  }
+  let j = start + 1;
+  let value = '';
+  while (j < text.length) {
+    if (quote === '"' && text[j] === '\\') {
+      const escaped = text[j + 1];
+      if (escaped === undefined) break;
+      value += escaped;
+      j += 2;
+      continue;
+    }
+    if (text[j] === quote) return { value, next: j + 1 };
+    if (text[j] === '\n') break;
+    value += text[j]!;
+    j++;
+  }
+  return { value, next: j };
+}
+
+function readBareTomlKey(text: string, start: number): { value: string; next: number } | null {
+  let j = start;
+  while (j < text.length) {
+    const ch = text[j]!;
+    const ok =
+      (ch >= 'A' && ch <= 'Z') ||
+      (ch >= 'a' && ch <= 'z') ||
+      (ch >= '0' && ch <= '9') ||
+      ch === '_' ||
+      ch === '-';
+    if (!ok) break;
+    j++;
+  }
+  if (j === start) return null;
+  return { value: text.slice(start, j), next: j };
+}
+
+/** Group name at `start`: a bare key, a quoted key, or dotted segments of those. */
+function readDependencyGroupKey(text: string, start: number): { raw: string; next: number } | null {
+  const parts: string[] = [];
+  let i = start;
+  while (i < text.length) {
+    i = skipTomlWsAndComments(text, i);
+    if (i >= text.length) break;
+    const ch = text[i]!;
+    let segment: string;
+    if (ch === '"' || ch === "'") {
+      const read = readTomlStringAt(text, i);
+      if (!read) return null;
+      segment = read.value;
+      i = read.next;
+    } else {
+      const bare = readBareTomlKey(text, i);
+      if (!bare) break;
+      segment = bare.value;
+      i = bare.next;
+    }
+    parts.push(segment);
+    const after = skipTomlWsAndComments(text, i);
+    if (text[after] === '.') {
+      i = after + 1;
+      continue;
+    }
+    return { raw: parts.join('.'), next: i };
+  }
+  return null;
+}
+
+/** Inner text of an inline table whose `{` is at `openBrace`. */
+function inlineTableInner(text: string, openBrace: number): { inner: string; next: number } | null {
+  const next = skipTomlInlineTable(text, openBrace);
+  if (next <= openBrace + 1 || text[next - 1] !== '}') return null;
+  return { inner: text.slice(openBrace + 1, next - 1), next };
+}
+
+/** The string value of `include-group` in an inline table body, if that key is set. */
+function includeGroupTarget(inner: string): string | null {
+  let i = 0;
+  while (i < inner.length) {
+    i = skipTomlWsAndComments(inner, i);
+    if (i >= inner.length) return null;
+    const ch = inner[i]!;
+    if (ch === '"' || ch === "'") {
+      const read = readTomlStringAt(inner, i);
+      if (!read || read.next <= i) return null;
+      i = read.next;
+      continue;
+    }
+    const bare = readBareTomlKey(inner, i);
+    if (!bare) {
+      i++;
+      continue;
+    }
+    let j = skipTomlWsAndComments(inner, bare.next);
+    if (inner[j] !== '=') {
+      i = bare.next;
+      continue;
+    }
+    j = skipTomlWsAndComments(inner, j + 1);
+    if (inner[j] === '"' || inner[j] === "'") {
+      const read = readTomlStringAt(inner, j);
+      if (!read) return null;
+      if (bare.value === 'include-group') return read.value;
+      i = read.next;
+      continue;
+    }
+    i = j > bare.next ? j : bare.next;
+  }
+  return null;
+}
+
+interface DependencyGroupEntry {
+  kind: 'requirement' | 'include';
+  value: string;
+}
+
+/** Items of a dependency-group array whose `[` is at `openBracket`. */
+function parseDependencyGroupArray(
+  text: string,
+  openBracket: number,
+): { entries: DependencyGroupEntry[]; next: number } {
+  const entries: DependencyGroupEntry[] = [];
+  let i = openBracket + 1;
+  while (i < text.length) {
+    const before = i;
+    i = skipTomlWsAndComments(text, i);
+    if (i >= text.length) break;
+    const ch = text[i]!;
+    if (ch === ']') return { entries, next: i + 1 };
+    if (ch === ',') {
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const read = readTomlStringAt(text, i);
+      if (!read || read.next <= i) break;
+      if (read.value.trim()) entries.push({ kind: 'requirement', value: read.value });
+      i = read.next;
+      continue;
+    }
+    if (ch === '{') {
+      const table = inlineTableInner(text, i);
+      if (!table) break;
+      const include = includeGroupTarget(table.inner);
+      if (include !== null && include.trim()) entries.push({ kind: 'include', value: include });
+      i = table.next;
+      continue;
+    }
+    // Unrecognised token. Step forward so whitespace before it cannot spin.
+    i = i > before ? i + 1 : before + 1;
+  }
+  return { entries, next: i };
+}
+
+/**
+ * `[dependency-groups]` assignments in file order. Names are normalised.
+ * A repeated normalised name appends its entries, so both spellings contribute.
+ */
+function parseDependencyGroupTable(section: string): { order: string[]; groups: Map<string, DependencyGroupEntry[]> } {
+  const groups = new Map<string, DependencyGroupEntry[]>();
+  const order: string[] = [];
+  let i = 0;
+  while (i < section.length) {
+    const start = skipTomlWsAndComments(section, i);
+    if (start >= section.length) break;
+    const named = readDependencyGroupKey(section, start);
+    if (!named) {
+      i = start + 1;
+      continue;
+    }
+    let j = skipTomlWsAndComments(section, named.next);
+    if (section[j] !== '=') {
+      i = j > start ? j : start + 1;
+      continue;
+    }
+    j = skipTomlWsAndComments(section, j + 1);
+    if (section[j] !== '[') {
+      i = j > start ? j : start + 1;
+      continue;
+    }
+    const array = parseDependencyGroupArray(section, j);
+    const norm = normaliseDependencyGroupName(named.raw);
+    if (norm) {
+      const list = groups.get(norm);
+      if (list) list.push(...array.entries);
+      else {
+        groups.set(norm, [...array.entries]);
+        order.push(norm);
+      }
+    }
+    i = array.next > start ? array.next : start + 1;
+  }
+  return { order, groups };
+}
+
+/**
+ * Requirement strings for every dependency group, with `{include-group}`
+ * expanded in place. Names are normalised before lookup. A cycle stops at
+ * the repeated group and writes one warning for that cycle; the groups'
+ * own requirement strings are still returned. The include is not a package.
+ */
+function dependencyGroupRequirementStrings(section: string): string[] {
+  const { order, groups } = parseDependencyGroupTable(section);
+  const memo = new Map<string, string[]>();
+  const warned = new Set<string>();
+
+  function expand(name: string, stack: string[]): string[] {
+    const norm = normaliseDependencyGroupName(name);
+    if (!norm) return [];
+    const seenAt = stack.indexOf(norm);
+    if (seenAt !== -1) {
+      const key = stack.slice(seenAt).sort(compareCodeUnits).join(', ');
+      if (!warned.has(key)) {
+        warned.add(key);
+        console.warn(
+          `[dependency-groups] include cycle detected (${key}); the repeated include was not followed`,
+        );
+      }
+      return [];
+    }
+    const cached = memo.get(norm);
+    if (cached) return cached;
+    const entries = groups.get(norm);
+    if (!entries) return [];
+    stack.push(norm);
+    const out: string[] = [];
+    for (const entry of entries) {
+      if (entry.kind === 'requirement') out.push(entry.value);
+      else out.push(...expand(entry.value, stack));
+    }
+    stack.pop();
+    memo.set(norm, out);
+    return out;
+  }
+
+  const requirements: string[] = [];
+  for (const name of order) requirements.push(...expand(name, []));
+  return requirements;
 }
 
 /**
@@ -497,8 +785,10 @@ function appendPoetryDependencyTable(
  * [tool.poetry.group.<name>.dependencies],
  * and the legacy [tool.poetry.dev-dependencies] table.
  *
- * `{include-group = "..."}` is skipped, not expanded. A `python` key is not
- * a package. We don't pull in a full TOML parser to keep deps minimal.
+ * `{include-group = "..."}` expands to that group's requirements in this
+ * file. Group names are normalised (lowercase; runs of `-`, `_`, and `.`
+ * collapse to `-`). An include cycle stops with one warning. A `python`
+ * key is not a package. We don't pull in a full TOML parser to keep deps minimal.
  */
 function parsePyprojectToml(content: string): PyProjectToml {
   const result: PyProjectToml = { dependencies: [] };
@@ -540,11 +830,11 @@ function parsePyprojectToml(content: string): PyProjectToml {
     }
   }
 
-  // PEP 735. `{include-group = "..."}` is skipped; the included group's
-  // own requirement strings are read when that group is declared here.
+  // PEP 735. `{include-group}` is expanded in this file. Each group's own
+  // requirement strings are still read. A cycle warns once and stops.
   const groupSection = tomlTableBody(content, 'dependency-groups');
   if (groupSection) {
-    for (const requirement of requirementStringsFromTomlArrays(groupSection, true)) {
+    for (const requirement of dependencyGroupRequirementStrings(groupSection)) {
       const dep = parseRequirementLine(requirement);
       if (dep) rows.push({ ...dep, section: 'devDependencies' });
     }
@@ -565,37 +855,28 @@ function parsePyprojectToml(content: string): PyProjectToml {
   return result;
 }
 
+function parsePipfileTable(body: string, section?: DepSection): PythonDependency[] {
+  const deps: PythonDependency[] = [];
+  for (const line of body.split('\n')) {
+    const kv = line.match(/^\s*([A-Za-z0-9][-A-Za-z0-9_.]*)\s*=\s*(?:"([^"]+)"|{.*?version\s*=\s*"([^"]+)".*?}|\*|"[*]")/);
+    if (!kv) continue;
+    const name = kv[1]!;
+    const ver = kv[2] ?? kv[3] ?? '';
+    const normalisedName = name.toLowerCase().replace(/[_.]+/g, '-');
+    const dep: PythonDependency = { name, spec: ver || '*', normalisedName };
+    deps.push(section ? { ...dep, section } : dep);
+  }
+  return deps;
+}
+
 function parsePipfile(content: string): PythonDependency[] {
   const deps: PythonDependency[] = [];
-  // Find [packages] section
+  // [packages] is production. The pattern does not match `[dev-packages]`.
   const packagesMatch = content.match(/\[packages\]([\s\S]*?)(?=\n\s*\[|\n*$)/);
-  if (packagesMatch) {
-    const lines = packagesMatch[1]!.split('\n');
-    for (const line of lines) {
-      const kv = line.match(/^\s*([A-Za-z0-9][-A-Za-z0-9_.]*)\s*=\s*(?:"([^"]+)"|{.*?version\s*=\s*"([^"]+)".*?}|\*|"[*]")/);
-      if (kv) {
-        const name = kv[1]!;
-        const ver = kv[2] ?? kv[3] ?? '';
-        const normalisedName = name.toLowerCase().replace(/[_.]+/g, '-');
-        deps.push({ name, spec: ver || '*', normalisedName });
-      }
-    }
-  }
+  if (packagesMatch) deps.push(...parsePipfileTable(packagesMatch[1]!));
 
-  // Find [dev-packages] section
   const devMatch = content.match(/\[dev-packages\]([\s\S]*?)(?=\n\s*\[|\n*$)/);
-  if (devMatch) {
-    const lines = devMatch[1]!.split('\n');
-    for (const line of lines) {
-      const kv = line.match(/^\s*([A-Za-z0-9][-A-Za-z0-9_.]*)\s*=\s*(?:"([^"]+)"|{.*?version\s*=\s*"([^"]+)".*?}|\*|"[*]")/);
-      if (kv) {
-        const name = kv[1]!;
-        const ver = kv[2] ?? kv[3] ?? '';
-        const normalisedName = name.toLowerCase().replace(/[_.]+/g, '-');
-        deps.push({ name, spec: ver || '*', normalisedName });
-      }
-    }
-  }
+  if (devMatch) deps.push(...parsePipfileTable(devMatch[1]!, 'devDependencies'));
 
   return deps;
 }
@@ -630,6 +911,94 @@ function parseSetupCfg(content: string): { deps: PythonDependency[]; pythonVersi
   return result;
 }
 
+/**
+ * A pyenv or asdf version token.
+ * `system`, `latest`, and a virtualenv name do not match, so they stay
+ * absent instead of being stored as a runtime.
+ * A leading `v` is dropped. `3.12.4` is kept as `3.12.4`.
+ */
+const PYTHON_PIN_VERSION = /^(?:v)?(\d+(?:\.\d+){0,3})((?:a|b|rc)\d+|t)?$/i;
+
+function pythonPinVersion(token: string): string | undefined {
+  const match = PYTHON_PIN_VERSION.exec(token);
+  if (!match) return undefined;
+  return `${match[1]}${match[2] ?? ''}`;
+}
+
+/** Non-blank, non-comment lines, with an end-of-line `#` comment removed. */
+function pinFileLines(content: string): string[] {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const lines: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+/**
+ * Runtime from a pyenv `.python-version` file.
+ * Only the first non-blank, non-comment line is read. A non-version value
+ * (`system`, a virtualenv name) yields no runtime.
+ */
+export function pythonVersionFromPythonVersionFile(content: string): string | undefined {
+  const line = pinFileLines(content)[0];
+  if (!line) return undefined;
+  return pythonPinVersion(line.split(/\s+/)[0]!);
+}
+
+/**
+ * Runtime from an asdf `.tool-versions` `python` entry.
+ * The first version token on that line wins (`python 3.12.4 3.11.9` →
+ * `3.12.4`). A non-version token such as `system` is skipped. A later
+ * `python` line is used only when the earlier one has no version token.
+ */
+export function pythonVersionFromToolVersions(content: string): string | undefined {
+  for (const line of pinFileLines(content)) {
+    const parts = line.split(/\s+/);
+    if (parts[0]!.toLowerCase() !== 'python') continue;
+    for (const part of parts.slice(1)) {
+      const pin = pythonPinVersion(part);
+      if (pin) return pin;
+    }
+  }
+  return undefined;
+}
+
+async function readOptionalProjectFile(
+  dir: string,
+  name: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const filePath = path.join(dir, name);
+  try {
+    const exists = cache ? await cache.pathExists(filePath) : await pathExists(filePath);
+    if (!exists) return undefined;
+    return cache ? await cache.readTextFile(filePath) : await readTextFile(filePath);
+  } catch {
+    // An optional pin file must not fail the project scan.
+    return undefined;
+  }
+}
+
+/**
+ * Interpreter pin for a project whose manifests do not declare one.
+ * `.python-version` wins over `.tool-versions`.
+ */
+async function pythonRuntimeFromPinFiles(
+  dir: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const pythonVersionFile = await readOptionalProjectFile(dir, '.python-version', cache);
+  if (pythonVersionFile !== undefined) {
+    const pinned = pythonVersionFromPythonVersionFile(pythonVersionFile);
+    if (pinned) return pinned;
+  }
+  const toolVersions = await readOptionalProjectFile(dir, '.tool-versions', cache);
+  if (toolVersions === undefined) return undefined;
+  return pythonVersionFromToolVersions(toolVersions);
+}
+
 // ── Python project file names ──
 
 const PYTHON_MANIFEST_FILES = new Set([
@@ -644,6 +1013,11 @@ const PYTHON_MANIFEST_FILES = new Set([
   'Pipfile',
 ]);
 
+/** Keep requirements-file discovery and parsing in sync. */
+function isRequirementsFile(name: string): boolean {
+  return name === 'dev-requirements.txt' || /^requirements.*\.txt$/.test(name);
+}
+
 /**
  * Discover and scan all Python projects in the workspace.
  */
@@ -656,7 +1030,7 @@ export async function scanPythonProjects(
 ): Promise<ProjectScan[]> {
   // Find Python manifest files
   const manifestFiles = cache
-    ? await cache.findFiles(rootDir, (name) => PYTHON_MANIFEST_FILES.has(name) || /^requirements.*\.txt$/.test(name))
+    ? await cache.findFiles(rootDir, (name) => PYTHON_MANIFEST_FILES.has(name) || isRequirementsFile(name))
     : await findPythonManifests(rootDir);
 
   // Group manifests by directory to form "projects"
@@ -697,7 +1071,7 @@ export async function scanPythonProjects(
 async function findPythonManifests(rootDir: string): Promise<string[]> {
   // Import findFiles dynamically to avoid circular deps
   const { findFiles } = await import('../utils/fs.js');
-  return findFiles(rootDir, (name) => PYTHON_MANIFEST_FILES.has(name) || /^requirements.*\.txt$/.test(name));
+  return findFiles(rootDir, (name) => PYTHON_MANIFEST_FILES.has(name) || isRequirementsFile(name));
 }
 
 async function scanOnePythonProject(
@@ -711,9 +1085,11 @@ async function scanOnePythonProject(
   const relDir = path.relative(rootDir, dir) || '.';
   let projectName = path.basename(dir === rootDir ? rootDir : dir);
   let pythonVersion: string | undefined;
-  const allDeps = new Map<string, PythonDependency>();
+  // Every manifest row is kept until `pickPythonDep` chooses one per name.
+  // Path order, not directory enumeration order, decides which row of the
+  // winning section is first. Production beats development.
+  const sourced: Array<{ path: string; dep: PythonDependency }> = [];
 
-  // Parse each manifest file, preferring pyproject.toml > setup.cfg > requirements.txt
   for (const f of manifestFiles) {
     const fileName = path.basename(f);
     const content = cache ? await cache.readTextFile(f) : await readTextFile(f);
@@ -722,25 +1098,32 @@ async function scanOnePythonProject(
       const parsed = parsePyprojectToml(content);
       if (parsed.projectName) projectName = parsed.projectName;
       if (parsed.pythonVersion) pythonVersion = parsed.pythonVersion;
-      for (const dep of parsed.dependencies) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
+      for (const dep of parsed.dependencies) sourced.push({ path: f, dep });
     } else if (fileName === 'setup.cfg') {
       const parsed = parseSetupCfg(content);
       if (parsed.name) projectName = parsed.name;
       if (parsed.pythonVersion && !pythonVersion) pythonVersion = parsed.pythonVersion;
-      for (const dep of parsed.deps) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
+      for (const dep of parsed.deps) sourced.push({ path: f, dep });
     } else if (fileName === 'Pipfile') {
-      for (const dep of parsePipfile(content)) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
-    } else if (fileName.startsWith('requirements') && fileName.endsWith('.txt')) {
-      for (const dep of parseRequirementsTxt(content)) {
-        if (!allDeps.has(dep.normalisedName)) allDeps.set(dep.normalisedName, dep);
-      }
+      for (const dep of parsePipfile(content)) sourced.push({ path: f, dep });
+    } else if (isRequirementsFile(fileName)) {
+      const section = requirementsManifestSection(fileName);
+      for (const dep of parseRequirementsTxt(content, section)) sourced.push({ path: f, dep });
     }
+  }
+
+  sourced.sort((a, b) => compareCodeUnits(a.path, b.path));
+  const allDeps = new Map<string, PythonDependency>();
+  for (const dep of collapsePythonDeps(sourced.map((row) => row.dep))) {
+    allDeps.set(dep.normalisedName, dep);
+  }
+
+  // requires-python, Poetry's python dependency, and setup.cfg
+  // python_requires already won above. A requirements-only project often
+  // pins the interpreter in pyenv's .python-version, or in asdf's
+  // .tool-versions, and otherwise reports no runtime and no runtime lag.
+  if (!pythonVersion) {
+    pythonVersion = await pythonRuntimeFromPinFiles(dir, cache);
   }
 
   // Determine Python runtime version lag

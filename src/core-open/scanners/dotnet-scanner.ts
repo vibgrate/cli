@@ -4,7 +4,7 @@
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { XMLParser } from 'fast-xml-parser';
-import { findFiles, findSolutionFiles, readTextFile, FileCache } from '../utils/fs.js';
+import { findFiles, findSolutionFiles, pathExists, readTextFile, FileCache } from '../utils/fs.js';
 import { withTimeout } from '../utils/timeout.js';
 import { NuGetCache } from './nuget-cache.js';
 import { latestStable, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
@@ -297,11 +297,304 @@ function stripDotnetProjectExtension(filePath: string): string {
   return path.basename(filePath).replace(/\.(cs|vb|sql)proj$/i, '');
 }
 
+/**
+ * NuGet Central Package Management file. The nearest one between a project
+ * and the scan root supplies `PackageVersion` pins.
+ */
+const CENTRAL_PACKAGE_PROPS = 'Directory.Packages.props';
+
+/**
+ * MSBuild `Directory.Build.props`. The nearest one between a project and the
+ * scan root (both included) supplies `TargetFramework` / `TargetFrameworks`
+ * when the project file sets neither. A value in the project file wins. The
+ * nearest props file wins; imports inside it are not followed. A value that
+ * contains `$(` is an unresolved property reference and is not a framework.
+ */
+const DIRECTORY_BUILD_PROPS = 'Directory.Build.props';
+
+/**
+ * A `PackageReference` whose version is not on the element, not in
+ * `VersionOverride`, and not in `Directory.Packages.props`. Scan and SBOM
+ * keep the row and say the version is unknown.
+ */
+const UNKNOWN_PACKAGE_VERSION = 'unknown';
+
+interface PackageReferenceRow {
+  name: string;
+  /** Inline `Version`, or the resolved version after central lookup. */
+  version: string;
+  /** `VersionOverride` on the reference. Empty when the reference has none. */
+  versionOverride: string;
+  /**
+   * True only when every `PrivateAssets` value on this reference is `all`
+   * (trimmed, any letter case). A missing value, or any other value, is a
+   * production reference.
+   */
+  devOnly: boolean;
+}
+
 interface CsprojData {
   targetFrameworks: string[];
-  packageReferences: { name: string; version: string }[];
+  packageReferences: PackageReferenceRow[];
   projectReferences: string[];
   projectName: string;
+}
+
+function appendScalarText(raw: unknown, out: string[]): void {
+  if (raw == null) return;
+  if (Array.isArray(raw)) {
+    for (const item of raw) appendScalarText(item, out);
+    return;
+  }
+  if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
+    out.push(String(raw));
+    return;
+  }
+  if (typeof raw === 'object' && '#text' in raw) {
+    appendScalarText((raw as { '#text'?: unknown })['#text'], out);
+  }
+}
+
+function asRecords(raw: unknown): Record<string, unknown>[] {
+  if (raw == null) return [];
+  const list = Array.isArray(raw) ? raw : [raw];
+  return list.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item));
+}
+
+function childValue(node: Record<string, unknown>, name: string): unknown {
+  const target = name.toLowerCase();
+  for (const [key, value] of Object.entries(node)) {
+    if (key.startsWith('@_')) continue;
+    if (key.toLowerCase() === target) return value;
+  }
+  return undefined;
+}
+
+/** First non-empty attribute, then the first non-empty child element. Names match without regard to case. */
+function xmlScalar(node: Record<string, unknown>, name: string): string {
+  const target = name.toLowerCase();
+  const attributes: string[] = [];
+  const elements: string[] = [];
+  for (const [key, raw] of Object.entries(node)) {
+    const isAttr = key.startsWith('@_');
+    const bare = isAttr ? key.slice(2) : key;
+    if (bare.toLowerCase() !== target) continue;
+    appendScalarText(raw, isAttr ? attributes : elements);
+  }
+  for (const value of [...attributes, ...elements]) {
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
+}
+
+function isWithinRoot(dir: string, rootDir: string): boolean {
+  const current = path.resolve(dir);
+  const root = path.resolve(rootDir);
+  if (current === root) return true;
+  const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  return current.startsWith(prefix);
+}
+
+/**
+ * `PackageVersion` items from a `Directory.Packages.props`. The map key is
+ * the package id in lower case; the first item for that id wins. Element
+ * and attribute names match without regard to case. A bad file yields an
+ * empty map so the project is still scanned.
+ */
+function parseDirectoryPackagesProps(xml: string): Map<string, string> {
+  const versions = new Map<string, string>();
+  if (!xml.trim()) return versions;
+  let parsed: unknown;
+  try {
+    parsed = parser.parse(xml);
+  } catch {
+    return versions;
+  }
+  if (!parsed || typeof parsed !== 'object') return versions;
+  const project = childValue(parsed as Record<string, unknown>, 'Project');
+  for (const projectNode of asRecords(project)) {
+    for (const group of asRecords(childValue(projectNode, 'ItemGroup'))) {
+      for (const item of asRecords(childValue(group, 'PackageVersion'))) {
+        const name = xmlScalar(item, 'Include');
+        const version = xmlScalar(item, 'Version');
+        if (!name || !version) continue;
+        const key = name.toLowerCase();
+        if (!versions.has(key)) versions.set(key, version);
+      }
+    }
+  }
+  return versions;
+}
+
+/**
+ * `VersionOverride` wins, then an inline `Version`, then the central
+ * `PackageVersion` for that id. Otherwise the row stays, with an unknown
+ * version.
+ */
+function resolvePackageVersion(row: PackageReferenceRow, central: ReadonlyMap<string, string>): string {
+  if (row.versionOverride) return row.versionOverride;
+  if (row.version) return row.version;
+  return central.get(row.name.toLowerCase()) ?? UNKNOWN_PACKAGE_VERSION;
+}
+
+async function nearestAncestorFile(
+  startDir: string,
+  rootDir: string,
+  fileName: string,
+  exists: (filePath: string) => Promise<boolean>,
+): Promise<string | null> {
+  let current = path.resolve(startDir);
+  const root = path.resolve(rootDir);
+  for (;;) {
+    if (!isWithinRoot(current, root)) return null;
+    const candidate = path.join(current, fileName);
+    if (await exists(candidate)) return candidate;
+    if (current === root) return null;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+async function nearestDirectoryPackagesProps(
+  projectDir: string,
+  rootDir: string,
+  exists: (filePath: string) => Promise<boolean>,
+): Promise<string | null> {
+  return nearestAncestorFile(projectDir, rootDir, CENTRAL_PACKAGE_PROPS, exists);
+}
+
+/**
+ * Monikers from one property value. Semicolon-separated lists are split.
+ * A token that contains `$(` is an MSBuild property reference (`$(DefaultTfm)`)
+ * and is dropped rather than reported as a framework.
+ */
+function concreteTargetFrameworks(raw: string): string[] {
+  if (!raw) return [];
+  const frameworks: string[] = [];
+  for (const part of raw.split(';')) {
+    const tfm = part.trim();
+    if (!tfm || tfm.includes('$(')) continue;
+    frameworks.push(tfm);
+  }
+  return frameworks;
+}
+
+/**
+ * `TargetFramework`, then `TargetFrameworks`, from each `PropertyGroup`.
+ * Element names match without regard to case. The first concrete moniker
+ * for a repeated value wins.
+ */
+function targetFrameworksInProject(project: unknown): string[] {
+  const targetFrameworks: string[] = [];
+  for (const projectNode of asRecords(project)) {
+    for (const group of asRecords(childValue(projectNode, 'PropertyGroup'))) {
+      targetFrameworks.push(...concreteTargetFrameworks(xmlScalar(group, 'TargetFramework')));
+      targetFrameworks.push(...concreteTargetFrameworks(xmlScalar(group, 'TargetFrameworks')));
+    }
+  }
+  return [...new Set(targetFrameworks)];
+}
+
+/**
+ * Target frameworks from a `Directory.Build.props`. A missing, empty, or
+ * malformed file yields an empty list so the project is still scanned.
+ */
+function parseDirectoryBuildProps(xml: string): string[] {
+  if (!xml.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = parser.parse(xml);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== 'object') return [];
+  return targetFrameworksInProject(childValue(parsed as Record<string, unknown>, 'Project'));
+}
+
+async function directoryBuildTargetFrameworks(
+  projectDir: string,
+  rootDir: string,
+  cache: FileCache | undefined,
+  parsed: Map<string, string[]>,
+): Promise<string[]> {
+  const exists = (filePath: string) => (cache ? cache.pathExists(filePath) : pathExists(filePath));
+  const readText = (filePath: string) => (cache ? cache.readTextFile(filePath) : readTextFile(filePath));
+  const propsPath = await nearestAncestorFile(projectDir, rootDir, DIRECTORY_BUILD_PROPS, exists);
+  if (!propsPath) return [];
+  const cached = parsed.get(propsPath);
+  if (cached) return cached.slice();
+  let frameworks: string[] = [];
+  try {
+    frameworks = parseDirectoryBuildProps(await readText(propsPath));
+  } catch {
+    frameworks = [];
+  }
+  parsed.set(propsPath, frameworks);
+  return frameworks.slice();
+}
+
+async function centralPackageVersions(
+  projectDir: string,
+  rootDir: string,
+  cache: FileCache | undefined,
+  parsed: Map<string, Map<string, string>>,
+): Promise<Map<string, string>> {
+  const exists = (filePath: string) => (cache ? cache.pathExists(filePath) : pathExists(filePath));
+  const readText = (filePath: string) => (cache ? cache.readTextFile(filePath) : readTextFile(filePath));
+  const propsPath = await nearestDirectoryPackagesProps(projectDir, rootDir, exists);
+  if (!propsPath) return new Map();
+  const cached = parsed.get(propsPath);
+  if (cached) return cached;
+  let versions = new Map<string, string>();
+  try {
+    versions = parseDirectoryPackagesProps(await readText(propsPath));
+  } catch {
+    versions = new Map();
+  }
+  parsed.set(propsPath, versions);
+  return versions;
+}
+
+/**
+ * `PrivateAssets="all"` and `<PrivateAssets>all</PrivateAssets>` are
+ * build-time-only references (SourceLink, analyzers, MinVer,
+ * coverlet.collector). The attribute or element name and the value are
+ * compared without regard to case. Only a trimmed value of `all` counts.
+ * `compile` and every other token stay production.
+ */
+function privateAssetsIsAll(ref: Record<string, unknown>): boolean {
+  const values: string[] = [];
+  for (const [key, raw] of Object.entries(ref)) {
+    const bare = key.startsWith('@_') ? key.slice(2) : key;
+    if (bare.toLowerCase() !== 'privateassets') continue;
+    appendScalarText(raw, values);
+  }
+  return values.length > 0 && values.every((value) => value.trim().toLowerCase() === 'all');
+}
+
+/**
+ * One row per package id (NuGet ids are case-insensitive). A reference that
+ * is not `PrivateAssets=all` keeps the package in production, and that
+ * production reference supplies the version. The first production row wins.
+ * Two build-time-only rows keep the first version.
+ */
+function addPackageReference(rows: PackageReferenceRow[], next: PackageReferenceRow): void {
+  const existing = rows.find((row) => row.name.toLowerCase() === next.name.toLowerCase());
+  if (!existing) {
+    rows.push(next);
+    return;
+  }
+  if (existing.devOnly && !next.devOnly) {
+    existing.version = next.version;
+    existing.versionOverride = next.versionOverride;
+    existing.devOnly = false;
+  }
+}
+
+function dependencySection(ref: PackageReferenceRow): 'dependencies' | 'devDependencies' {
+  return ref.devOnly ? 'devDependencies' : 'dependencies';
 }
 
 function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
@@ -311,28 +604,14 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
     return { targetFrameworks: [], packageReferences: [], projectReferences: [], projectName: stripDotnetProjectExtension(filePath) };
   }
 
-  // Extract target frameworks
-  const propertyGroups = Array.isArray(project.PropertyGroup)
-    ? project.PropertyGroup
-    : project.PropertyGroup ? [project.PropertyGroup] : [];
-
-  const targetFrameworks: string[] = [];
-  for (const pg of propertyGroups) {
-    if (pg.TargetFramework) {
-      targetFrameworks.push(String(pg.TargetFramework));
-    }
-    if (pg.TargetFrameworks) {
-      const tfms = String(pg.TargetFrameworks).split(';').map((s: string) => s.trim()).filter(Boolean);
-      targetFrameworks.push(...tfms);
-    }
-  }
+  const targetFrameworks = targetFrameworksInProject(project);
 
   // Extract package references and project references
   const itemGroups = Array.isArray(project.ItemGroup)
     ? project.ItemGroup
     : project.ItemGroup ? [project.ItemGroup] : [];
 
-  const packageReferences: { name: string; version: string }[] = [];
+  const packageReferences: PackageReferenceRow[] = [];
   const projectReferences: string[] = [];
 
   for (const ig of itemGroups) {
@@ -342,11 +621,18 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
       : ig.PackageReference ? [ig.PackageReference] : [];
 
     for (const ref of pkgRefs) {
-      const name = ref['@_Include'] ?? ref['@_include'] ?? '';
-      const version = ref['@_Version'] ?? ref['@_version'] ?? ref.Version ?? '';
-      if (name && version) {
-        packageReferences.push({ name: String(name), version: String(version) });
-      }
+      if (!ref || typeof ref !== 'object') continue;
+      const record = ref as Record<string, unknown>;
+      const name = xmlScalar(record, 'Include');
+      if (!name) continue;
+      // A missing Version is kept. Central Package Management stores it in
+      // Directory.Packages.props; VersionOverride is applied later.
+      addPackageReference(packageReferences, {
+        name,
+        version: xmlScalar(record, 'Version'),
+        versionOverride: xmlScalar(record, 'VersionOverride'),
+        devOnly: privateAssetsIsAll(record),
+      });
     }
 
     // Project references (internal dependencies)
@@ -373,7 +659,8 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
 
 /**
  * Parse a legacy `packages.config` (pre-SDK NuGet format) into the same
- * `{ name, version }` shape as SDK-style `<PackageReference>`s.
+ * `{ name, version, devOnly }` shape as SDK-style `<PackageReference>`s.
+ * `packages.config` has no `PrivateAssets`, so every row is production.
  *
  * ```xml
  * <packages>
@@ -385,18 +672,18 @@ function parseDotnetProjectFile(xml: string, filePath: string): CsprojData {
  * declare their NuGet dependencies here instead of in the project file, so
  * without this they would surface zero dependencies and escape drift scoring.
  */
-function parsePackagesConfig(xml: string): { name: string; version: string }[] {
+function parsePackagesConfig(xml: string): PackageReferenceRow[] {
   const parsed = parser.parse(xml);
   const root = parsed?.packages;
   if (!root) return [];
 
   const pkgs = Array.isArray(root.package) ? root.package : root.package ? [root.package] : [];
-  const out: { name: string; version: string }[] = [];
+  const out: PackageReferenceRow[] = [];
   for (const pkg of pkgs) {
     const name = pkg['@_id'] ?? pkg['@_Id'] ?? '';
     const version = pkg['@_version'] ?? pkg['@_Version'] ?? '';
     if (name && version) {
-      out.push({ name: String(name), version: String(version) });
+      out.push({ name: String(name), version: String(version), versionOverride: '', devOnly: false });
     }
   }
   return out;
@@ -436,12 +723,22 @@ export async function scanDotnetProjects(rootDir: string, nugetCache?: NuGetCach
   // Merge discovered dotnet project files
   const allCsprojFiles = new Set([...projectFiles, ...slnProjectPaths]);
   const results: ProjectScan[] = [];
+  const centralVersions = new Map<string, Map<string, string>>();
+  const buildPropsFrameworks = new Map<string, string[]>();
 
   const STUCK_TIMEOUT_MS = projectScanTimeout ?? cache?.projectScanTimeout ?? 180_000;
 
   for (const csprojPath of allCsprojFiles) {
     try {
-      const scanPromise = scanOneDotnetProjectFile(csprojPath, rootDir, nugetCache, cache, catalog);
+      const scanPromise = scanOneDotnetProjectFile(
+        csprojPath,
+        rootDir,
+        nugetCache,
+        cache,
+        catalog,
+        centralVersions,
+        buildPropsFrameworks,
+      );
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
         results.push(result.value);
@@ -465,29 +762,58 @@ export async function scanDotnetProjects(rootDir: string, nugetCache?: NuGetCach
   return results;
 }
 
-async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nugetCache: NuGetCache | undefined, cache: FileCache | undefined, catalog: RuntimeCatalog): Promise<ProjectScan> {
+async function scanOneDotnetProjectFile(
+  csprojPath: string,
+  rootDir: string,
+  nugetCache: NuGetCache | undefined,
+  cache: FileCache | undefined,
+  catalog: RuntimeCatalog,
+  centralVersions: Map<string, Map<string, string>>,
+  buildPropsFrameworks: Map<string, string[]>,
+): Promise<ProjectScan> {
   const xml = cache
     ? await cache.readTextFile(csprojPath)
     : await readTextFile(csprojPath);
   const data = parseDotnetProjectFile(xml, csprojPath);
   const csprojDir = path.dirname(csprojPath);
+  // A concrete moniker in the project file wins. Otherwise take the nearest
+  // Directory.Build.props, which is where many solutions set TargetFramework
+  // once for every project.
+  if (data.targetFrameworks.length === 0) {
+    data.targetFrameworks = await directoryBuildTargetFrameworks(csprojDir, rootDir, cache, buildPropsFrameworks);
+  }
+  const central = await centralPackageVersions(csprojDir, rootDir, cache, centralVersions);
+  for (const row of data.packageReferences) {
+    row.version = resolvePackageVersion(row, central);
+  }
 
   // Legacy NuGet: non-SDK projects keep their dependencies in a sibling
   // `packages.config` rather than in <PackageReference>. Merge those in so
   // .NET Framework estates are scored for dependency drift too. SDK-style
   // references take precedence on name collisions (rare — projects use one
-  // format or the other).
+  // format or the other): a resolved PackageReference version is kept.
+  // packages.config fills a reference that stayed unknown, and it has no
+  // PrivateAssets, so that name is not build-time-only.
   {
     const packagesConfigPath = path.join(csprojDir, 'packages.config');
     try {
       const cfgXml = cache
         ? await cache.readTextFile(packagesConfigPath)
         : await readTextFile(packagesConfigPath);
-      const seen = new Set(data.packageReferences.map((r) => r.name.toLowerCase()));
+      const seen = new Map(data.packageReferences.map((r) => [r.name.toLowerCase(), r]));
       for (const ref of parsePackagesConfig(cfgXml)) {
-        if (!seen.has(ref.name.toLowerCase())) {
+        const existing = seen.get(ref.name.toLowerCase());
+        if (!existing) {
           data.packageReferences.push(ref);
-          seen.add(ref.name.toLowerCase());
+          seen.set(ref.name.toLowerCase(), ref);
+        } else {
+          // A versioned PackageReference still wins. packages.config only
+          // fills a reference whose version stayed unknown, and it is not
+          // build-time-only.
+          if (existing.devOnly) existing.devOnly = false;
+          if (existing.version === UNKNOWN_PACKAGE_VERSION && ref.version) {
+            existing.version = ref.version;
+          }
         }
       }
     } catch {
@@ -526,7 +852,7 @@ async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nug
     const resolved = await Promise.all(metaPromises);
 
     for (const { ref, meta } of resolved) {
-      const resolvedVersion = semver.valid(ref.version) ? ref.version : null;
+      const resolvedVersion = ref.version !== UNKNOWN_PACKAGE_VERSION && semver.valid(ref.version) ? ref.version : null;
       const latestStable = meta.latestStableOverall;
 
       let majorsBehind: number | null = null;
@@ -554,7 +880,7 @@ async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nug
 
       dependencies.push({
         package: ref.name,
-        section: 'dependencies',
+        section: dependencySection(ref),
         currentSpec: ref.version,
         resolvedVersion,
         latestStable,
@@ -567,9 +893,9 @@ async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nug
     for (const ref of data.packageReferences) {
       dependencies.push({
         package: ref.name,
-        section: 'dependencies',
+        section: dependencySection(ref),
         currentSpec: ref.version,
-        resolvedVersion: ref.version,
+        resolvedVersion: ref.version === UNKNOWN_PACKAGE_VERSION ? null : ref.version,
         latestStable: null,
         majorsBehind: null,
         drift: 'unknown',
@@ -584,9 +910,10 @@ async function scanOneDotnetProjectFile(csprojPath: string, rootDir: string, nug
   for (const ref of data.packageReferences) {
     if (ref.name in KNOWN_DOTNET_FRAMEWORKS) {
       const resolved = depLookup.get(ref.name);
+      const declaredVersion = ref.version === UNKNOWN_PACKAGE_VERSION ? null : ref.version;
       frameworks.push({
         name: KNOWN_DOTNET_FRAMEWORKS[ref.name]!,
-        currentVersion: resolved?.resolvedVersion ?? ref.version,
+        currentVersion: resolved?.resolvedVersion ?? declaredVersion,
         latestVersion: resolved?.latestStable ?? null,
         majorsBehind: resolved?.majorsBehind ?? null,
       });

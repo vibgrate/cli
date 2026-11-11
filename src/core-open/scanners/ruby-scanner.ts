@@ -153,11 +153,84 @@ const KNOWN_RUBY_FRAMEWORKS: Record<string, string> = {
 
 // Latest Ruby major.minor is resolved at scan time — see runtime-baselines.ts
 
+type RubyGemGroup = 'default' | 'development' | 'test';
+
 interface RubyDependency {
   name: string;
   spec: string;
   /** Group: :default, :development, :test */
-  group: 'default' | 'development' | 'test';
+  group: RubyGemGroup;
+}
+
+/**
+ * Bundler group symbols from a group list.
+ *
+ * `group :development, :test do` and `group [:development, :test] do`
+ * both yield `['development', 'test']`. The same list text is what an
+ * inline `group:` keyword carries (`group: :development` or
+ * `group: [:development, :test]`). Callers decide how to classify it.
+ */
+function gemfileGroupSymbols(value: string): string[] {
+  const names: string[] = [];
+  for (const match of value.matchAll(/:(\w+)/g)) {
+    names.push(match[1]!);
+  }
+  return names;
+}
+
+/**
+ * A `group ... do` block is development or test only when every symbol is
+ * `:development`, `:dev`, or `:test`. Any other symbol (`:default`,
+ * `:production`, or a custom group) means the gems ship, so the block is
+ * the production default.
+ */
+function classifyGemfileGroupBlock(names: string[]): RubyGemGroup {
+  const lowered = names.map((name) => name.toLowerCase());
+  const devOrTest = (name: string) => name === 'development' || name === 'dev' || name === 'test';
+  if (lowered.length === 0 || !lowered.every(devOrTest)) return 'default';
+  if (lowered.every((name) => name === 'test')) return 'test';
+  return 'development';
+}
+
+/**
+ * Quoted string arguments that follow a gem or dependency name, stopped at
+ * the first argument that is not a string (`require:`, `group:`, a comment,
+ * a symbol). Joined with `, ` so `">= 7.0", "< 8"` stays `>= 7.0, < 8`.
+ * A line with no version string stays `*`.
+ */
+function quotedVersionConstraints(afterName: string): string {
+  const constraints: string[] = [];
+  let i = 0;
+  while (i < afterName.length) {
+    while (i < afterName.length && (afterName[i] === ' ' || afterName[i] === '\t' || afterName[i] === ',')) {
+      i++;
+    }
+    if (i >= afterName.length) break;
+    const quote = afterName[i];
+    if (quote !== "'" && quote !== '"') break;
+    i++;
+    let value = '';
+    let closed = false;
+    while (i < afterName.length) {
+      const ch = afterName[i]!;
+      if (ch === '\\' && i + 1 < afterName.length) {
+        value += afterName[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === quote) {
+        closed = true;
+        i++;
+        break;
+      }
+      value += ch;
+      i++;
+    }
+    if (!closed) break;
+    const trimmed = value.trim();
+    if (trimmed) constraints.push(trimmed);
+  }
+  return constraints.length > 0 ? constraints.join(', ') : '*';
 }
 
 /**
@@ -166,22 +239,23 @@ interface RubyDependency {
  * Handles:
  *   gem 'rails', '~> 7.1'
  *   gem 'pg', '>= 0.18', '< 2.0'
+ *   gem "rails", ">= 7.0", "< 8"
+ *   gem "pg", "~> 1.5", require: false
  *   gem "puma", "~> 6.0"
  *   gem 'sidekiq'
  *   gem 'rspec-rails', group: :development
+ *   gem 'rspec-rails', groups: [:development, :test]
  */
 function parseGemfileLine(line: string): { name: string; spec: string } | null {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith('#')) return null;
 
-  // Match gem 'name' or gem "name" possibly followed by version constraints
-  const match = trimmed.match(
-    /^\s*gem\s+['"]([^'"]+)['"]\s*(?:,\s*['"]([^'"]+)['"])?/,
-  );
+  // Match gem 'name' or gem "name", then every quoted constraint before a keyword.
+  const match = trimmed.match(/^\s*gem\s+['"]([^'"]+)['"]/);
   if (!match) return null;
 
   const name = match[1]!;
-  const spec = match[2] ?? '*';
+  const spec = quotedVersionConstraints(trimmed.slice(match[0].length));
 
   return { name, spec };
 }
@@ -221,23 +295,52 @@ function rubyVersionToSemver(ver: string): string | null {
 }
 
 /**
+ * Code of a Gemfile line with quoted strings and a trailing comment removed,
+ * so a keyword check does not see text inside `'...'`, `"..."`, or `# ...`.
+ */
+function gemfileCode(trimmed: string): string {
+  const noQuotes = trimmed.replace(/'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g, '""');
+  const hash = noQuotes.indexOf('#');
+  return (hash === -1 ? noQuotes : noQuotes.slice(0, hash)).trim();
+}
+
+/**
+ * A block closed by a later bare `end` that does not change the group:
+ * a `do` opener (`platforms`, `install_if -> { ... } do`, `source ... do`)
+ * or a statement-form `if` / `unless`. A modifier (`gem 'x' if cond`) does
+ * not open a block. A same-line `end` closes the block here, so it takes
+ * no stack frame. `:end` is a symbol, not the keyword.
+ */
+function opensNonGroupBlock(trimmed: string): boolean {
+  const code = gemfileCode(trimmed);
+  if (!code) return false;
+  const closedHere = /(?:^|[\s;])end\s*$/.test(code) && !/:end\s*$/.test(code);
+  if (closedHere) return false;
+  if (/^(?:if|unless)\b/.test(code)) return true;
+  return /\bdo\b/.test(code);
+}
+
+/**
  * Parse a Gemfile to extract dependencies.
  */
 function parseGemfile(content: string): RubyDependency[] {
   const deps: RubyDependency[] = [];
-  let currentGroup: 'default' | 'development' | 'test' = 'default';
-  const groupStack: Array<'default' | 'development' | 'test'> = [];
+  let currentGroup: RubyGemGroup = 'default';
+  const groupStack: RubyGemGroup[] = [];
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
 
-    // Track group blocks
-    const groupMatch = trimmed.match(/^\s*group\s+:(\w+)/);
-    if (groupMatch) {
+    // Track group blocks. Read every symbol on the line (`:a, :b` and
+    // `[:a, :b]`). Nested `do` / `if` / `unless` blocks push the current
+    // group unchanged so their `end` does not close the group.
+    const groupHeader = trimmed.match(/^group\s+(.+)$/);
+    const groupNames = groupHeader ? gemfileGroupSymbols(groupHeader[1]!) : [];
+    if (groupNames.length > 0) {
       groupStack.push(currentGroup);
-      const g = groupMatch[1]!.toLowerCase();
-      if (g === 'development' || g === 'dev') currentGroup = 'development';
-      else if (g === 'test') currentGroup = 'test';
+      currentGroup = classifyGemfileGroupBlock(groupNames);
+    } else if (opensNonGroupBlock(trimmed)) {
+      groupStack.push(currentGroup);
     }
 
     if (trimmed === 'end' && groupStack.length > 0) {
@@ -248,13 +351,31 @@ function parseGemfile(content: string): RubyDependency[] {
     const parsed = parseGemfileLine(trimmed);
     if (!parsed) continue;
 
-    // Check for inline group specification
+    // Inline group. `group:` keeps the substring check. `groups:` (symbol or
+    // array) is development/test only when every listed symbol is
+    // :development, :dev, or :test; any other symbol is production.
     let group = currentGroup;
-    const inlineGroupMatch = trimmed.match(/group:\s*(?::(\w+)|\[([^\]]+)\])/);
+    const inlineGroupMatch = trimmed.match(/(groups?):\s*(?::(\w+)|\[([^\]]+)\])/);
     if (inlineGroupMatch) {
-      const g = (inlineGroupMatch[1] ?? inlineGroupMatch[2] ?? '').toLowerCase();
-      if (g.includes('development') || g.includes('dev')) group = 'development';
-      else if (g.includes('test')) group = 'test';
+      const key = inlineGroupMatch[1]!;
+      const symbol = inlineGroupMatch[2];
+      const arrayBody = inlineGroupMatch[3];
+      if (key === 'group') {
+        const g = (symbol ?? arrayBody ?? '').toLowerCase();
+        if (g.includes('development') || g.includes('dev')) group = 'development';
+        else if (g.includes('test')) group = 'test';
+      } else {
+        const listed = symbol
+          ? [symbol.toLowerCase()]
+          : [...(arrayBody ?? '').matchAll(/:(\w+)/g)].map((match) => match[1]!.toLowerCase());
+        const devOrTest = (name: string) =>
+          name === 'development' || name === 'dev' || name === 'test';
+        if (listed.length > 0 && listed.every(devOrTest)) {
+          group = listed.every((name) => name === 'test') ? 'test' : 'development';
+        } else if (listed.length > 0) {
+          group = 'default';
+        }
+      }
     }
 
     deps.push({
@@ -272,6 +393,7 @@ function parseGemfile(content: string): RubyDependency[] {
  *
  * Handles:
  *   spec.add_dependency 'rails', '~> 7.1'
+ *   spec.add_dependency "rack", ">= 2.2", "< 4"
  *   spec.add_development_dependency 'rspec', '~> 3.12'
  *   s.add_runtime_dependency "pg"
  */
@@ -281,15 +403,16 @@ function parseGemspec(content: string): RubyDependency[] {
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
 
-    // Match add_dependency, add_runtime_dependency, add_development_dependency
+    // Match add_dependency, add_runtime_dependency, add_development_dependency,
+    // then every quoted constraint before a non-string argument.
     const match = trimmed.match(
-      /\.add_(runtime_|development_)?dependency\s+['"]([^'"]+)['"]\s*(?:,\s*['"]([^'"]+)['"])?/,
+      /\.add_(runtime_|development_)?dependency\s+['"]([^'"]+)['"]/,
     );
-    if (!match) continue;
+    if (!match || match.index === undefined) continue;
 
     const depType = match[1] ?? 'runtime_';
     const name = match[2]!;
-    const spec = match[3] ?? '*';
+    const spec = quotedVersionConstraints(trimmed.slice(match.index + match[0].length));
 
     deps.push({
       name,
@@ -302,16 +425,124 @@ function parseGemspec(content: string): RubyDependency[] {
 }
 
 /**
- * Extract Ruby version from a Gemfile.
- *
- * Handles:
- *   ruby '3.2.2'
- *   ruby "3.3.0"
- *   ruby ">= 3.1"
+ * A version token from a Ruby pin file.
+ * A leading `ruby-` (chruby / ruby-install) is dropped so `ruby-3.3.0`
+ * is `3.3.0`. Tokens that are not a version (`system`) are ignored.
  */
-function extractRubyVersion(content: string): string | undefined {
-  const match = content.match(/^\s*ruby\s+['"]([^'"]+)['"]/m);
-  return match?.[1];
+function normalizeRubyVersionToken(token: string): string | undefined {
+  const stripped = token.trim().replace(/^ruby-/, '');
+  if (!/^\d+(?:\.\d+)*/.test(stripped)) return undefined;
+  return stripped;
+}
+
+/** Non-blank, non-comment lines, with an end-of-line `#` comment removed. */
+function rubyPinFileLines(content: string): string[] {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const lines: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+/**
+ * Runtime from an rbenv or chruby `.ruby-version` file.
+ * Only the first non-blank, non-comment line is read. Surrounding
+ * whitespace and a leading `ruby-` prefix are removed.
+ */
+export function rubyVersionFromRubyVersionFile(content: string): string | undefined {
+  const line = rubyPinFileLines(content)[0];
+  if (!line) return undefined;
+  return normalizeRubyVersionToken(line.split(/\s+/)[0]!);
+}
+
+/**
+ * Runtime from an asdf `.tool-versions` `ruby` entry.
+ * The first version token on that line wins (`ruby 3.3.4 3.2.2` →
+ * `3.3.4`). A non-version token such as `system` is skipped. A later
+ * `ruby` line is used only when the earlier one has no version token.
+ */
+export function rubyVersionFromToolVersions(content: string): string | undefined {
+  for (const line of rubyPinFileLines(content)) {
+    const parts = line.split(/\s+/);
+    if (parts[0]!.toLowerCase() !== 'ruby') continue;
+    for (const part of parts.slice(1)) {
+      const pin = normalizeRubyVersionToken(part);
+      if (pin) return pin;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * How a Gemfile names the Ruby runtime.
+ *
+ * An explicit version (`ruby '3.1.0'`, `ruby ">= 3.1"`) wins over a file.
+ * Bundler 2.4+ `ruby file: ".ruby-version"` and the hash-rocket form
+ * `ruby :file => ".ruby-version"` point at a version file relative to
+ * the Gemfile. No `ruby` line means the caller should read the pin files.
+ */
+function gemfileRubyRuntime(content: string): { version?: string; file?: string } {
+  let file: string | undefined;
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const versionMatch = /^ruby\s+['"]([^'"]+)['"]/.exec(line);
+    if (versionMatch) return { version: versionMatch[1] };
+    if (file === undefined) {
+      const fileMatch = /^ruby\s+(?:file\s*:|:file\s*=>)\s*['"]([^'"]+)['"]/.exec(line);
+      if (fileMatch) file = fileMatch[1];
+    }
+  }
+  return file !== undefined ? { file } : {};
+}
+
+/**
+ * Read a pin file through the scan cache when one is in use.
+ * A missing or unreadable file returns undefined and never fails the scan.
+ */
+async function readOptionalText(
+  filePath: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  try {
+    const exists = cache ? await cache.pathExists(filePath) : await pathExists(filePath);
+    if (!exists) return undefined;
+    return cache ? await cache.readTextFile(filePath) : await readTextFile(filePath);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Interpreter pin when the Gemfile does not declare one.
+ * `.ruby-version` next to the Gemfile wins over a `ruby` entry in
+ * `.tool-versions`.
+ */
+async function rubyRuntimeFromPinFiles(
+  dir: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const rubyVersionFile = await readOptionalText(path.join(dir, '.ruby-version'), cache);
+  if (rubyVersionFile !== undefined) {
+    const pinned = rubyVersionFromRubyVersionFile(rubyVersionFile);
+    if (pinned) return pinned;
+  }
+  const toolVersions = await readOptionalText(path.join(dir, '.tool-versions'), cache);
+  if (toolVersions === undefined) return undefined;
+  return rubyVersionFromToolVersions(toolVersions);
+}
+
+/** Version text from a `ruby file:` path, resolved relative to the Gemfile. */
+async function rubyRuntimeFromVersionFile(
+  dir: string,
+  versionFile: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const text = await readOptionalText(path.resolve(dir, versionFile), cache);
+  if (text === undefined) return undefined;
+  return rubyVersionFromRubyVersionFile(text);
 }
 
 // ── Ruby project file names ──
@@ -393,6 +624,7 @@ async function scanOneRubyProject(
   const relDir = path.relative(rootDir, dir) || '.';
   let projectName = path.basename(dir === rootDir ? rootDir : dir);
   let rubyVersion: string | undefined;
+  let rubyVersionFile: string | undefined;
   const allDeps = new Map<string, RubyDependency>();
 
   // Parse each manifest file, preferring Gemfile > .gemspec
@@ -401,8 +633,9 @@ async function scanOneRubyProject(
     const content = cache ? await cache.readTextFile(f) : await readTextFile(f);
 
     if (fileName === 'Gemfile') {
-      const parsedVersion = extractRubyVersion(content);
-      if (parsedVersion) rubyVersion = parsedVersion;
+      const requested = gemfileRubyRuntime(content);
+      if (requested.version) rubyVersion = requested.version;
+      else if (requested.file !== undefined) rubyVersionFile = requested.file;
 
       for (const dep of parseGemfile(content)) {
         if (!allDeps.has(dep.name)) allDeps.set(dep.name, dep);
@@ -416,6 +649,15 @@ async function scanOneRubyProject(
         if (!allDeps.has(dep.name)) allDeps.set(dep.name, dep);
       }
     }
+  }
+
+  // An explicit `ruby '3.1.0'` line already won. `ruby file:` reads that
+  // path relative to the Gemfile and does not fall through. With no `ruby`
+  // line, `.ruby-version` wins over a `ruby` entry in `.tool-versions`.
+  if (!rubyVersion) {
+    rubyVersion = rubyVersionFile !== undefined
+      ? await rubyRuntimeFromVersionFile(dir, rubyVersionFile, cache)
+      : await rubyRuntimeFromPinFiles(dir, cache);
   }
 
   // Determine Ruby runtime version lag

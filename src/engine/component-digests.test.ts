@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   digestFromCargoChecksum,
+  digestFromComposerShasum,
   digestFromGoSumHash,
+  digestFromNugetContentHash,
   digestsFromHashLabels,
   digestsFromSri,
   orderComponentDigests,
@@ -58,7 +60,15 @@ describe('orderComponentDigests', () => {
     expect(digestsFromSri('sha512-super-secret-token')).toEqual([]);
     expect(digestsFromSri(`sha512-${SHA512} sha256-not-a-digest`)).toEqual([{ alg: 'SHA-512', content: SHA512 }]);
     expect(digestFromCargoChecksum('super-secret-token')).toEqual([]);
+    expect(digestFromComposerShasum('super-secret-token')).toEqual([]);
+    expect(digestFromComposerShasum('a'.repeat(64))).toEqual([]);
     expect(digestFromGoSumHash('h1:abc=')).toEqual([]);
+    expect(digestFromNugetContentHash('super-secret-token')).toEqual([]);
+    expect(digestFromNugetContentHash(SHA256)).toEqual([]);
     expect(digestsFromHashLabels('hash = "sha256:super-secret-token"')).toEqual([]);
+  });
+
+  it('reads a NuGet contentHash as SHA-512 and keeps the lockfile text', () => {
+    expect(digestFromNugetContentHash(`  ${SHA512}  `)).toEqual([{ alg: 'SHA-512', content: SHA512 }]);
   });
 });

@@ -6,6 +6,7 @@ import {
   LockfileParseError,
   parseLockfileJson,
 } from '../core-open/utils/lockfile-parse.js';
+import { compareCodeUnits } from '../core-open/utils/code-unit.js';
 import { inspectUtf8 } from '../core-open/utils/text-bytes.js';
 import {
   emitUnknownOptionalLockfileWarnings,
@@ -24,7 +25,9 @@ import {
 } from '../core-open/utils/lockfile-unknown.js';
 import {
   digestFromCargoChecksum,
+  digestFromComposerShasum,
   digestFromGoSumHash,
+  digestFromNugetContentHash,
   digestsFromHashLabels,
   digestsFromSri,
   orderComponentDigests,
@@ -92,9 +95,10 @@ function reportLockfileFields(root: string, file: string, fill: (rel: string, no
  * A file that exists but is truncated or syntactically invalid throws
  * {@link LockfileParseError} instead of pretending the pin is absent.
  *
- * npm covers `package-lock.json` (v1/v2/v3), `pnpm-lock.yaml` (v6/v9) and
- * `yarn.lock`. Other ecosystems follow the same shape and return `undefined`
- * until their parser lands — honest degradation, no false mismatch.
+ * npm covers `package-lock.json` and `npm-shrinkwrap.json` (v1/v2/v3, same JSON),
+ * `pnpm-lock.yaml` (v6/v9) and `yarn.lock`. `package-lock.json` is preferred when
+ * both npm JSON lockfiles are present. Other ecosystems follow the same shape and
+ * return `undefined` until their parser lands — honest degradation, no false mismatch.
  */
 export function lockfileVersion(root: string, ecosystem: DepRecord['ecosystem'], name: string): string | undefined {
   if (ecosystem === 'npm') return packageLockVersion(root, name) ?? pnpmLockVersion(root, name) ?? yarnLockVersion(root, name);
@@ -123,8 +127,8 @@ function packageResolved(root: string, name: string): string | undefined {
   if (!parsed || typeof parsed !== 'object') return undefined;
   reportLockfileFields(root, 'Package.resolved', (rel, notes) => notePackageResolved(parsed, rel, notes));
   const data = parsed as {
-    pins?: Array<{ identity?: string; package?: string; state?: { version?: string } }>;
-    object?: { pins?: Array<{ identity?: string; package?: string; state?: { version?: string } }> };
+    pins?: Array<{ identity?: string; package?: string; repositoryURL?: string; state?: { version?: string } }>;
+    object?: { pins?: Array<{ identity?: string; package?: string; repositoryURL?: string; state?: { version?: string } }> };
   };
   const pins = data.pins ?? data.object?.pins;
   if (!Array.isArray(pins)) return undefined;
@@ -132,6 +136,10 @@ function packageResolved(root: string, name: string): string | undefined {
   for (const p of pins) {
     const id = (p.identity ?? p.package ?? '').toLowerCase();
     if (id === target && p.state?.version) return p.state.version;
+    // v1 files carry only `package` (display name) and `repositoryURL`; the
+    // identity is the last path segment of the URL, `.git` stripped, lower-cased.
+    const urlIdentity = p.repositoryURL?.replace(/\/+$/, '').split('/').pop()?.replace(/\.git$/i, '').toLowerCase();
+    if (urlIdentity && urlIdentity === target && p.state?.version) return p.state.version;
   }
   return undefined;
 }
@@ -142,15 +150,19 @@ function pubspecLock(root: string, name: string): string | undefined {
   if (text === undefined) return undefined;
   reportLockfileFields(root, 'pubspec.lock', (rel, notes) => notePubspecLockText(text, rel, notes));
   let inPkg = false;
+  let sdkSource = false;
   for (const line of text.split('\n')) {
     const key = /^  ([A-Za-z0-9_.]+):\s*$/.exec(line);
     if (key) {
       inPkg = key[1] === name;
+      sdkSource = false;
       continue;
     }
     if (inPkg) {
+      const sm = /^\s+source:\s*"?([^"\s]+)"?/.exec(line);
+      if (sm) sdkSource = sm[1] === 'sdk';
       const vm = /^\s+version:\s*"?([^"\s]+)"?/.exec(line);
-      if (vm) return vm[1];
+      if (vm) return sdkSource ? undefined : vm[1];
     }
   }
   return undefined;
@@ -166,8 +178,41 @@ function gemfileLock(root: string, name: string): string | undefined {
   if (text === undefined) return undefined;
   // Spec definitions are 4-space-indented with a concrete (digit-leading) version;
   // nested dep constraints (6-space) and the DEPENDENCIES list (2-space) don't match.
-  const m = new RegExp(`^    ${escapeRegExp(name)} \\((\\d[^)]*)\\)`, 'm').exec(text);
+  // A `-<platform>` suffix (`nokogiri (1.16.2-x86_64-linux)`) is not part of the
+  // version: RubyGems prerelease segments are dot-separated (`1.0.0.pre`), so a
+  // dash always starts a platform and is dropped here.
+  const m = gemfileSpecPattern(name).exec(text);
   return m ? m[1] : undefined;
+}
+
+/**
+ * Version group of a Gemfile.lock spec line. The version stops at the first
+ * `)` or `-`, and the optional platform group cannot overlap it, so the two
+ * parts never compete over the same dashed text (no quadratic backtracking).
+ * RubyGems prerelease segments are dot-separated (`1.0.0.pre`), so a dash
+ * always starts a platform (`1.16.0-x86_64-linux` → `1.16.0`).
+ */
+const GEMFILE_SPEC_VERSION = String.raw`(\d[^)-]*)(?:-[^)]*)?`;
+
+/**
+ * The spec-line pattern for one gem. Shares {@link GEMFILE_SPEC_VERSION} with
+ * the SBOM collector so a platform suffix is stripped the same way in both.
+ */
+export function gemfileSpecPattern(name: string): RegExp {
+  return new RegExp(`^    ${escapeRegExp(name)} \\(${GEMFILE_SPEC_VERSION}\\)`, 'm');
+}
+
+/** One resolved spec: four-space indent, `name (version[-platform])`. */
+const GEMFILE_SPEC_LINE = new RegExp(`^ {4}(\\S+) \\(${GEMFILE_SPEC_VERSION}\\)\\s*$`);
+
+/**
+ * True for Bundler's `remote: .` (the gem under development). A trailing
+ * slash and a leading `./` are the same directory. Other path and git remotes
+ * are real dependencies.
+ */
+function isBundlerProjectRemote(remote: string): boolean {
+  const value = remote.trim().replace(/^['"]|['"]$/g, '').replace(/\\/g, '/').replace(/\/+$/, '');
+  return value === '.' || value === './';
 }
 
 /** PHP `composer.lock` — JSON `packages` / `packages-dev` arrays of `{ name, version }`. */
@@ -180,7 +225,7 @@ function composerLock(root: string, name: string): string | undefined {
     const arr = data[section];
     if (!Array.isArray(arr)) continue;
     const p = arr.find((x) => x && x.name === name);
-    if (p && typeof p.version === 'string') return p.version.replace(/^v/, '');
+    if (p && typeof p.version === 'string') return composerVersion(p.version);
   }
   return undefined;
 }
@@ -260,6 +305,27 @@ function pipfileLock(root: string, name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Install mark from npm `package-lock.json` v2/v3 flags.
+ * `dev` covers `dev: true` and `devOptional: true` (CycloneDX `excluded`).
+ * `optional` is `optional: true` with neither of those set.
+ * Omitted on a production install and on lockfiles that do not record flags.
+ */
+export type LockfileInstallScope = 'dev' | 'optional';
+
+/**
+ * Least restrictive install mark. An omitted mark is production and beats
+ * `optional`, which beats `dev`. The two arguments are interchangeable.
+ */
+export function mergeLockScopes(
+  a: LockfileInstallScope | undefined,
+  b: LockfileInstallScope | undefined,
+): LockfileInstallScope | undefined {
+  if (a === undefined || b === undefined) return undefined;
+  if (a === 'optional' || b === 'optional') return 'optional';
+  return 'dev';
+}
+
 export interface LockfileComponent {
   package: string;
   version: string;
@@ -268,6 +334,12 @@ export interface LockfileComponent {
    * Omitted when it recorded none. Sorted by algorithm name, then value.
    */
   digests?: ComponentDigest[];
+  /**
+   * npm v2/v3 install mark for this name and version, after merging every
+   * install path. Omitted for production and for formats that do not record
+   * `dev` / `optional` / `devOptional`.
+   */
+  lockScope?: LockfileInstallScope;
 }
 
 /**
@@ -289,6 +361,13 @@ export interface LockfileGraph {
   rootDependsOn: string[];
   /** Which registry these components resolve against; `undefined` means the npm family (the historical default, still keyed by `npmLockGraph`/`pnpmLockTree`/`yarnLockTree`). */
   ecosystem?: DepRecord['ecosystem'];
+  /**
+   * True for npm `package-lock.json` v2/v3. Those entries record `dev`,
+   * `optional`, and `devOptional`, so a component with no `lockScope` is a
+   * production install. Other lockfiles leave this unset; a missing
+   * `lockScope` there means the format does not say.
+   */
+  recordsInstallScope?: boolean;
 }
 
 /**
@@ -299,8 +378,12 @@ export interface LockfileGraph {
  * *this* declared dependency resolve to") and stays a point lookup by
  * design. An SBOM needs the opposite shape: the whole installed graph, since
  * that is what a vulnerability scanner or supply-chain review actually
- * walks. Tries npm, then pnpm, then yarn; returns `undefined` when none is
- * present. A lockfile that exists but is truncated or invalid throws
+ * walks. Tries `package-lock.json` (or `npm-shrinkwrap.json` when that file is
+ * absent), `pnpm-lock.yaml`, `yarn.lock`,
+ * `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `Gemfile.lock`,
+ * `composer.lock`, then `packages.lock.json`, and returns `undefined` when
+ * none is present. A lockfile that exists but is
+ * truncated or invalid throws
  * {@link LockfileParseError} — a partial prefix is not a graph.
  */
 export function fullDependencyTree(root: string): LockfileComponent[] | undefined {
@@ -316,8 +399,24 @@ export function fullDependencyGraph(root: string): LockfileGraph | undefined {
     componentsOnly(cargoLockTree(root), 'rust') ??
     componentsOnly(goSumTree(root), 'go') ??
     componentsOnly(poetryLikeLockTree(root, 'poetry.lock'), 'pypi') ??
-    componentsOnly(poetryLikeLockTree(root, 'uv.lock'), 'pypi')
+    componentsOnly(poetryLikeLockTree(root, 'uv.lock'), 'pypi') ??
+    pipfileLockGraph(root) ??
+    componentsOnly(gemfileLockTree(root), 'ruby') ??
+    composerLockGraph(root) ??
+    packagesLockGraph(root)
   );
+}
+
+/** `Pipfile.lock` components, with `develop`-only rows marked `lockScope: 'dev'`. */
+function pipfileLockGraph(root: string): LockfileGraph | undefined {
+  const graph = componentsOnly(pipfileLockTree(root), 'pypi');
+  return graph ? { ...graph, recordsInstallScope: true } : undefined;
+}
+
+/** `composer.lock` records `packages` vs `packages-dev`, so its rows carry an install mark. */
+function composerLockGraph(root: string): LockfileGraph | undefined {
+  const graph = componentsOnly(composerLockTree(root), 'php');
+  return graph ? { ...graph, recordsInstallScope: true } : undefined;
 }
 
 function componentsOnly(components: LockfileComponent[] | undefined, ecosystem?: DepRecord['ecosystem']): LockfileGraph | undefined {
@@ -332,14 +431,50 @@ function sortComponents(map: Map<string, LockfileComponent>): LockfileComponent[
  * One component per name and version. A second install path of the same
  * version adds its digests; it does not add a second row. Digests are
  * ordered here so a later reader does not depend on lockfile key order.
+ *
+ * `installScope` is set by the npm v2/v3 reader. `'production'` is an
+ * explicit path with no flags and clears a stricter mark from another path.
+ * Omitting it means this caller does not record flags, so a mark already
+ * stored on the component stays. The merge is least-restrictive, so path
+ * order does not change the result.
  */
-function rememberComponent(map: Map<string, LockfileComponent>, component: LockfileComponent): void {
+function rememberComponent(
+  map: Map<string, LockfileComponent>,
+  component: LockfileComponent,
+  installScope?: LockfileInstallScope | 'production',
+): void {
   const key = `${component.package}@${component.version}`;
   const existing = map.get(key);
   const digests = orderComponentDigests([...(existing?.digests ?? []), ...(component.digests ?? [])]);
   const next: LockfileComponent = { package: component.package, version: component.version };
   if (digests.length) next.digests = digests;
+  const scope = rememberedLockScope(Boolean(existing), existing?.lockScope, installScope);
+  if (scope) next.lockScope = scope;
   map.set(key, next);
+}
+
+function rememberedLockScope(
+  hasExisting: boolean,
+  existingScope: LockfileInstallScope | undefined,
+  installScope: LockfileInstallScope | 'production' | undefined,
+): LockfileInstallScope | undefined {
+  if (installScope === undefined) return existingScope;
+  const incoming = installScope === 'production' ? undefined : installScope;
+  if (!hasExisting) return incoming;
+  return mergeLockScopes(existingScope, incoming);
+}
+
+/**
+ * One `packages` entry. `dev: true` is the dev tree, including an optional
+ * dependency of a development dependency. `devOptional: true` is the same
+ * development mark: CycloneDX has no combined value, and a manifest row that
+ * is both dev and optional is already `excluded`. `optional: true` alone is
+ * the optional tree. Anything else is production.
+ */
+function npmPackageLockScope(entry: NpmV2Package): LockfileInstallScope | 'production' {
+  if (entry.dev === true || entry.devOptional === true) return 'dev';
+  if (entry.optional === true) return 'optional';
+  return 'production';
 }
 
 function uniqSorted(keys: string[]): string[] {
@@ -350,13 +485,27 @@ interface NpmV2Package {
   name?: string;
   version?: string;
   integrity?: string;
+  dev?: boolean;
+  optional?: boolean;
+  devOptional?: boolean;
   dependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
 }
 
 /**
- * npm `package-lock.json` v2/v3 `packages` map, falling back to v1's nested
+ * npm JSON lockfile to read. `package-lock.json` wins when it is present, including
+ * when it has no usable versions; `npm-shrinkwrap.json` is the same document under
+ * the filename npm publishes with a package.
+ */
+function npmPackageLockFile(root: string): 'package-lock.json' | 'npm-shrinkwrap.json' | undefined {
+  if (fs.existsSync(path.join(root, 'package-lock.json'))) return 'package-lock.json';
+  if (fs.existsSync(path.join(root, 'npm-shrinkwrap.json'))) return 'npm-shrinkwrap.json';
+  return undefined;
+}
+
+/**
+ * npm `package-lock.json` / `npm-shrinkwrap.json` v2/v3 `packages` map, falling back to v1's nested
  * `dependencies` tree (which carries no resolvable edges — see
  * `LockfileGraph.edges`).
  *
@@ -369,9 +518,11 @@ interface NpmV2Package {
  * `packages` encodes without needing a second (real) install.
  */
 function npmLockGraph(root: string): LockfileGraph | undefined {
-  const parsed = readCheckedJson(root, 'package-lock.json');
+  const file = npmPackageLockFile(root);
+  if (!file) return undefined;
+  const parsed = readCheckedJson(root, file);
   if (!parsed || typeof parsed !== 'object') return undefined;
-  reportLockfileFields(root, 'package-lock.json', (rel, notes) => notePackageLock(parsed, rel, notes));
+  reportLockfileFields(root, file, (rel, notes) => notePackageLock(parsed, rel, notes));
   const data = parsed as {
     packages?: Record<string, NpmV2Package>;
     dependencies?: Record<string, { version?: string; dependencies?: Record<string, unknown> }>;
@@ -400,7 +551,7 @@ function npmLockGraph(root: string): LockfileGraph | undefined {
       const key = `${name}@${version}`;
       keyOf.set(p, key);
       const digests = digestsFromSri(typeof val?.integrity === 'string' ? val.integrity : undefined);
-      rememberComponent(components, { package: name, version, ...(digests.length ? { digests } : {}) });
+      rememberComponent(components, { package: name, version, ...(digests.length ? { digests } : {}) }, npmPackageLockScope(val));
     }
   }
   if (!components.size) return undefined;
@@ -434,7 +585,7 @@ function npmLockGraph(root: string): LockfileGraph | undefined {
     }
   }
 
-  return { components: sortComponents(components), edges, rootDependsOn };
+  return { components: sortComponents(components), edges, rootDependsOn, recordsInstallScope: true };
 }
 
 function walkNpmV1Tree(
@@ -599,6 +750,10 @@ function yarnHeaderRealName(spec: string): string | undefined {
  * version of that crate is present, and resolving the bare form correctly
  * needs the same edge bookkeeping `npmLockGraph` does for npm — not worth
  * duplicating for a components-only SBOM listing.
+ *
+ * Only registry and git crates carry a `source = "..."` key; the crate being
+ * scanned, path dependencies and workspace members do not. Those are not
+ * crates.io components, so a block without `source` is skipped (see #512).
  */
 function cargoLockTree(root: string): LockfileComponent[] | undefined {
   const text = readCheckedText(root, 'Cargo.lock');
@@ -609,6 +764,9 @@ function cargoLockTree(root: string): LockfileComponent[] | undefined {
     const nm = /(?:^|\n)\s*name\s*=\s*"([^"]+)"/.exec(block);
     const ver = /(?:^|\n)\s*version\s*=\s*"([^"]+)"/.exec(block);
     if (!nm || !ver) continue;
+    // Root crates, path dependencies and workspace members have no `source`.
+    // Listing them would claim a local project is a crates.io component.
+    if (!/(?:^|\n)\s*source\s*=\s*"/.test(block)) continue;
     const sum = /(?:^|\n)\s*checksum\s*=\s*"([^"]+)"/.exec(block);
     const digests = digestFromCargoChecksum(sum?.[1]);
     rememberComponent(out, { package: nm[1], version: ver[1], ...(digests.length ? { digests } : {}) });
@@ -623,6 +781,11 @@ function cargoLockTree(root: string): LockfileComponent[] | undefined {
  * `h1:` value is that component's SHA-256 digest. The `/go.mod` hash is a
  * different artifact and is not a second digest. No edges: go.sum records
  * the flattened build list, not which module required which.
+ *
+ * `go.work` is intentionally not read: a workspace layout does not change
+ * what each module's `go.sum` claims, so the scanned module directory is
+ * the resolution unit. A tree with only `go.work` (no `go.sum`) resolves
+ * to nothing. Both are pinned by tests (see #512).
  */
 function goSumTree(root: string): LockfileComponent[] | undefined {
   const text = readCheckedText(root, 'go.sum');
@@ -642,6 +805,67 @@ function goSumTree(root: string): LockfileComponent[] | undefined {
 }
 
 /**
+ * True when a `[[package]]` block's `source` records an editable install
+ * (`source = { editable = … }`) or a virtual / workspace member
+ * (`source = { virtual = … }`). Both the inline-table form uv.lock emits and
+ * the `[package.source]` sub-table form are recognised. Such entries are
+ * local projects, not registry packages, so they must not appear in the SBOM.
+ */
+function hasEditableOrVirtualSource(block: string): boolean {
+  if (/(?:^|\n)\s*source\s*=\s*\{\s*(editable|virtual)\s*=/.test(block)) return true;
+  const subTable = /(?:^|\n)\s*\[\s*package\s*\.\s*source\s*\]/m.exec(block);
+  if (!subTable) return false;
+  return /(?:^|\n)\s*(?:editable|virtual)\s*=\s*"/m.test(block.slice(subTable.index + subTable[0].length));
+}
+
+/**
+ * `Gemfile.lock` — every resolved gem under `GEM`, `PATH`, and `GIT`
+ * `specs:` blocks. Spec lines are indented four spaces (`name (version)`);
+ * their dependency constraints are indented six spaces and are not versions,
+ * so this collector does not turn them into edges.
+ *
+ * A `PATH` or `GIT` source with `remote: .` is the project being locked, not
+ * a registry component, and is skipped. Other path and git gems are kept:
+ * they are installed dependencies, with the same `pkg:gem` identity as a
+ * rubygems.org gem. Platform suffixes are stripped with
+ * {@link GEMFILE_SPEC_VERSION}, matching {@link gemfileLock}.
+ */
+function gemfileLockTree(root: string): LockfileComponent[] | undefined {
+  const text = readCheckedText(root, 'Gemfile.lock');
+  if (text === undefined) return undefined;
+  const out = new Map<string, LockfileComponent>();
+  let section: 'GEM' | 'PATH' | 'GIT' | 'skip' = 'skip';
+  let remote = '';
+  let inSpecs = false;
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (/^\S/.test(line)) {
+      section = line === 'GEM' || line === 'PATH' || line === 'GIT' ? line : 'skip';
+      remote = '';
+      inSpecs = false;
+      continue;
+    }
+    if (section === 'skip') continue;
+    const remoteLine = /^ {2}remote:\s*(.*)$/.exec(line);
+    if (remoteLine) {
+      remote = remoteLine[1] ?? '';
+      inSpecs = false;
+      continue;
+    }
+    if (/^ {2}specs:\s*$/.test(line)) {
+      inSpecs = true;
+      continue;
+    }
+    if (!inSpecs) continue;
+    const spec = GEMFILE_SPEC_LINE.exec(line);
+    if (!spec) continue;
+    if ((section === 'PATH' || section === 'GIT') && isBundlerProjectRemote(remote)) continue;
+    rememberComponent(out, { package: spec[1]!, version: spec[2]! });
+  }
+  return out.size ? sortComponents(out) : undefined;
+}
+
+/**
  * `poetry.lock` / `uv.lock` — same `[[package]]` TOML shape as `Cargo.lock`
  * (see `tomlPackageLock`, which does the equivalent point lookup), collected
  * in full for the SBOM's transitive component list.
@@ -656,17 +880,304 @@ function poetryLikeLockTree(root: string, file: string): LockfileComponent[] | u
     const nm = /(?:^|\n)\s*name\s*=\s*"([^"]+)"/.exec(block);
     const ver = /(?:^|\n)\s*version\s*=\s*"([^"]+)"/.exec(block);
     if (!nm || !ver) continue;
+    // uv.lock records the project itself (and virtual workspace members)
+    // with an editable or virtual source — those are not PyPI packages and
+    // must not pollute the SBOM.
+    if (hasEditableOrVirtualSource(block)) continue;
     const digests = digestsFromHashLabels(block);
     rememberComponent(out, { package: nm[1], version: ver[1], ...(digests.length ? { digests } : {}) });
   }
   return out.size ? sortComponents(out) : undefined;
 }
 
-/** npm `package-lock.json` — JSON, deterministic, no dependency. */
-function packageLockVersion(root: string, name: string): string | undefined {
-  const parsed = readCheckedJson(root, 'package-lock.json');
+/**
+ * `Pipfile.lock` — JSON `default` and `develop` maps. Versions are written
+ * `==1.2.3`; the leading `==` is not part of the installed version. `hashes`
+ * are `sha256:<hex>` labels and become component digests. An editable install
+ * and a path entry are local trees, not PyPI packages, and are skipped (they
+ * have no registry version). A name that appears only under `develop` is a
+ * development component (`lockScope: 'dev'`). The same name under `default` stays production,
+ * whichever section is listed first. No edges: the file does not record which
+ * package required which.
+ */
+function pipfileLockTree(root: string): LockfileComponent[] | undefined {
+  const parsed = readCheckedJson(root, 'Pipfile.lock');
   if (!parsed || typeof parsed !== 'object') return undefined;
-  reportLockfileFields(root, 'package-lock.json', (rel, notes) => notePackageLock(parsed, rel, notes));
+  reportLockfileFields(root, 'Pipfile.lock', (rel, notes) => notePipfileLock(parsed, rel, notes));
+  const data = parsed as Record<string, unknown>;
+  const out = new Map<string, LockfileComponent>();
+  const productionNames = new Set<string>();
+  collectPipfileSection(data.default, false, out, productionNames);
+  collectPipfileSection(data.develop, true, out, productionNames);
+  return out.size ? sortComponents(out) : undefined;
+}
+
+function collectPipfileSection(
+  section: unknown,
+  develop: boolean,
+  out: Map<string, LockfileComponent>,
+  productionNames: Set<string>,
+): void {
+  if (!section || typeof section !== 'object' || Array.isArray(section)) return;
+  const deps = section as Record<string, unknown>;
+  for (const name of Object.keys(deps).sort()) {
+    const entry = deps[name];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const version = pipfileRegistryVersion(record);
+    if (!version) continue;
+    const normalised = pep503(name);
+    if (!develop) productionNames.add(normalised);
+    const digests = pipfileDigests(record.hashes);
+    const development = develop && !productionNames.has(normalised);
+    rememberPipfileComponent(out, { package: name, version, ...(digests.length ? { digests } : {}) }, development);
+  }
+}
+
+/** Registry pin from one Pipfile.lock entry. Editable and path installs are not pins. */
+function pipfileRegistryVersion(entry: Record<string, unknown>): string | undefined {
+  if (entry.editable === true) return undefined;
+  if (typeof entry.path === 'string') return undefined;
+  if (typeof entry.version !== 'string') return undefined;
+  const version = entry.version.replace(/^==/, '').trim();
+  return version.length > 0 ? version : undefined;
+}
+
+/** `hashes: ["sha256:<hex>", ...]` — the same label shape poetry.lock stores on `hash`. */
+function pipfileDigests(hashes: unknown): ComponentDigest[] {
+  if (!Array.isArray(hashes)) return [];
+  const lines: string[] = [];
+  for (const hash of hashes) {
+    if (typeof hash !== 'string' || hash.includes('"') || hash.includes('\n')) continue;
+    lines.push(`hash = "${hash}"`);
+  }
+  return digestsFromHashLabels(lines.join('\n'));
+}
+
+/**
+ * One row per name and version. `default` is applied first, so a later
+ * `develop` copy of that name and version does not become a development row.
+ * A `develop` copy whose name is already in `default` at another version is
+ * passed as production. Digests from both rows are kept and ordered.
+ */
+function rememberPipfileComponent(out: Map<string, LockfileComponent>, component: LockfileComponent, development: boolean): void {
+  const key = `${component.package}@${component.version}`;
+  const existing = out.get(key);
+  const digests = orderComponentDigests([...(existing?.digests ?? []), ...(component.digests ?? [])]);
+  const next: LockfileComponent = { package: component.package, version: component.version };
+  if (digests.length) next.digests = digests;
+  if (existing ? existing.lockScope === 'dev' && development : development) next.lockScope = 'dev';
+  out.set(key, next);
+}
+
+/**
+ * Composer writes a leading `v` on tagged versions (`v6.4.1`). The installed
+ * version, `lockfileVersion`, and the purl omit that one prefix. A branch
+ * version such as `dev-main` is kept as written.
+ */
+function composerVersion(version: string): string {
+  return version.replace(/^v/, '');
+}
+
+/**
+ * `composer.lock` — every `packages` and `packages-dev` entry's `name` and
+ * `version`. `packages-dev` rows are development components. `dist.shasum`
+ * is the dist archive's SHA-1 when it is 40 hex characters. `require` is
+ * not an edge: the map is a constraint, not the resolved package it selected.
+ * A truncated or invalid file throws {@link LockfileParseError} from
+ * `readCheckedJson`, the same as every other JSON lockfile.
+ */
+function composerLockTree(root: string): LockfileComponent[] | undefined {
+  const parsed = readCheckedJson(root, 'composer.lock');
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'composer.lock', (rel, notes) => noteComposerLock(parsed, rel, notes));
+  const data = parsed as { packages?: unknown; 'packages-dev'?: unknown };
+  const out = new Map<string, LockfileComponent>();
+  collectComposerSection(data.packages, false, out);
+  collectComposerSection(data['packages-dev'], true, out);
+  return out.size ? sortComponents(out) : undefined;
+}
+
+function collectComposerSection(entries: unknown, development: boolean, out: Map<string, LockfileComponent>): void {
+  if (!Array.isArray(entries)) return;
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const pkg = entry as { name?: unknown; version?: unknown; dist?: unknown };
+    if (typeof pkg.name !== 'string' || pkg.name === '' || typeof pkg.version !== 'string') continue;
+    const version = composerVersion(pkg.version);
+    if (version === '') continue;
+    const digests = digestFromComposerShasum(composerDistShasum(pkg.dist));
+    rememberComposerComponent(out, { package: pkg.name, version, ...(digests.length ? { digests } : {}) }, development);
+  }
+}
+
+function composerDistShasum(dist: unknown): string | undefined {
+  if (!dist || typeof dist !== 'object') return undefined;
+  const shasum = (dist as { shasum?: unknown }).shasum;
+  return typeof shasum === 'string' ? shasum : undefined;
+}
+
+/**
+ * One row per name and version. `packages` is applied first, so a package
+ * that also appears under `packages-dev` stays a production component.
+ * Digests from both rows are kept and ordered.
+ */
+function rememberComposerComponent(out: Map<string, LockfileComponent>, component: LockfileComponent, development: boolean): void {
+  const key = `${component.package}@${component.version}`;
+  const existing = out.get(key);
+  const digests = orderComponentDigests([...(existing?.digests ?? []), ...(component.digests ?? [])]);
+  const next: LockfileComponent = { package: component.package, version: component.version };
+  if (digests.length) next.digests = digests;
+  // `packages` is not a development row. A later `packages-dev` copy of the
+  // same name and version does not turn it into one.
+  if (existing ? existing.lockScope === 'dev' && development : development) next.lockScope = 'dev';
+  out.set(key, next);
+}
+
+interface NugetLockEntry {
+  type?: unknown;
+  resolved?: unknown;
+  contentHash?: unknown;
+  dependencies?: unknown;
+}
+
+/** Code-unit minimum. Empty when `values` is empty. */
+function codeUnitMin(values: Iterable<string>): string {
+  let best: string | undefined;
+  for (const value of values) {
+    if (best === undefined || value < best) best = value;
+  }
+  return best ?? '';
+}
+
+/**
+ * A NuGet dependency spec that names a version already resolved in this
+ * lockfile. Exact versions are used as written. A range contributes its
+ * lower bound only when that bound is itself a resolved version here.
+ */
+function nugetDependencyVersion(spec: string, versions: ReadonlySet<string> | undefined): string | undefined {
+  if (!versions || versions.size === 0) return undefined;
+  const trimmed = spec.trim();
+  if (versions.has(trimmed)) return trimmed;
+  const exact = /^\[([^,\]\s]+)\]$/.exec(trimmed);
+  if (exact?.[1] && versions.has(exact[1])) return exact[1];
+  const lower = /^\[([^,\]\s]+)\s*,/.exec(trimmed);
+  if (lower?.[1] && versions.has(lower[1])) return lower[1];
+  return undefined;
+}
+
+/**
+ * NuGet `packages.lock.json` — every `Direct` and `Transitive` package under
+ * `dependencies.<framework>.<id>`. `Project` entries are project references,
+ * not registry packages, so they are skipped even when they carry a
+ * `resolved` string. The version is `resolved`. `contentHash` is the nupkg's
+ * base64 SHA-512.
+ *
+ * Package ids are case-insensitive. The same id and version under more than
+ * one target framework is one component. The kept spelling is the code-unit
+ * minimum of the spellings in the file, so framework order does not change
+ * the row. Two resolved versions stay two components.
+ *
+ * Each entry's `dependencies` map is an edge when the value is that
+ * package's resolved version, or a NuGet range whose lower bound is a
+ * resolved version in this file. A name that is not in the file is not an
+ * edge. `Direct` entries are the project's own dependencies (`rootDependsOn`).
+ */
+function packagesLockGraph(root: string): LockfileGraph | undefined {
+  const parsed = readCheckedJson(root, 'packages.lock.json');
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, 'packages.lock.json', (rel, notes) => noteNugetLock(parsed, rel, notes));
+  const frameworks = (parsed as { dependencies?: unknown }).dependencies;
+  if (!frameworks || typeof frameworks !== 'object' || Array.isArray(frameworks)) return undefined;
+
+  interface Acc {
+    ids: Set<string>;
+    direct: boolean;
+    digests: ComponentDigest[];
+    deps: Map<string, { id: string; spec: string }>;
+  }
+
+  const groups = new Map<string, Acc>();
+  for (const framework of Object.keys(frameworks).sort(compareCodeUnits)) {
+    const packages = (frameworks as Record<string, unknown>)[framework];
+    if (!packages || typeof packages !== 'object' || Array.isArray(packages)) continue;
+    for (const id of Object.keys(packages).sort(compareCodeUnits)) {
+      const entry = (packages as Record<string, NugetLockEntry>)[id];
+      if (!entry || typeof entry !== 'object') continue;
+      if (entry.type !== 'Direct' && entry.type !== 'Transitive') continue;
+      if (typeof entry.resolved !== 'string') continue;
+      const version = entry.resolved.trim();
+      if (!version) continue;
+      const key = `${id.toLowerCase()}\0${version}`;
+      let acc = groups.get(key);
+      if (!acc) {
+        acc = { ids: new Set(), direct: false, digests: [], deps: new Map() };
+        groups.set(key, acc);
+      }
+      acc.ids.add(id);
+      if (entry.type === 'Direct') acc.direct = true;
+      if (typeof entry.contentHash === 'string') acc.digests.push(...digestFromNugetContentHash(entry.contentHash));
+      const declared = entry.dependencies;
+      if (!declared || typeof declared !== 'object' || Array.isArray(declared)) continue;
+      for (const [depId, spec] of Object.entries(declared)) {
+        if (!depId || typeof spec !== 'string' || !spec.trim()) continue;
+        const depKey = `${depId.toLowerCase()}\0${spec.trim()}`;
+        if (!acc.deps.has(depKey)) acc.deps.set(depKey, { id: depId, spec: spec.trim() });
+      }
+    }
+  }
+  if (!groups.size) return undefined;
+
+  const versionsById = new Map<string, Set<string>>();
+  const nameByKey = new Map<string, string>();
+  for (const [key, acc] of groups) {
+    const name = codeUnitMin(acc.ids);
+    nameByKey.set(key, name);
+    const sep = key.indexOf('\0');
+    const lower = key.slice(0, sep);
+    const version = key.slice(sep + 1);
+    const versions = versionsById.get(lower) ?? new Set<string>();
+    versions.add(version);
+    versionsById.set(lower, versions);
+  }
+
+  const components = new Map<string, LockfileComponent>();
+  const edges = new Map<string, string[]>();
+  const rootDependsOn: string[] = [];
+  for (const key of [...groups.keys()].sort(compareCodeUnits)) {
+    const acc = groups.get(key)!;
+    const name = nameByKey.get(key)!;
+    const version = key.slice(key.indexOf('\0') + 1);
+    const digests = orderComponentDigests(acc.digests);
+    rememberComponent(components, { package: name, version, ...(digests.length ? { digests } : {}) });
+    const componentKey = `${name}@${version}`;
+    if (acc.direct) rootDependsOn.push(componentKey);
+    const childKeys: string[] = [];
+    for (const dep of acc.deps.values()) {
+      const resolved = nugetDependencyVersion(dep.spec, versionsById.get(dep.id.toLowerCase()));
+      if (!resolved) continue;
+      const depName = nameByKey.get(`${dep.id.toLowerCase()}\0${resolved}`);
+      if (!depName) continue;
+      childKeys.push(`${depName}@${resolved}`);
+    }
+    edges.set(componentKey, uniqSorted(childKeys));
+  }
+
+  return {
+    components: sortComponents(components),
+    edges,
+    rootDependsOn: uniqSorted(rootDependsOn),
+    ecosystem: 'dotnet',
+  };
+}
+
+/** npm `package-lock.json` or `npm-shrinkwrap.json` — JSON, deterministic, no dependency. */
+function packageLockVersion(root: string, name: string): string | undefined {
+  const file = npmPackageLockFile(root);
+  if (!file) return undefined;
+  const parsed = readCheckedJson(root, file);
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  reportLockfileFields(root, file, (rel, notes) => notePackageLock(parsed, rel, notes));
   const data = parsed as { packages?: Record<string, { version?: string }>; dependencies?: Record<string, { version?: string }> };
   // v2/v3: packages keyed by install path; the top-level dep is "node_modules/<name>".
   const top = data.packages?.[`node_modules/${name}`]?.version;

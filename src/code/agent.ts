@@ -21,6 +21,7 @@
  */
 
 import { buildCodeContext } from './context.js';
+import { ActivityAggregator, summarizeChanges, type ActivitySnapshot, type ChangesSummary } from './activity-aggregator.js';
 import { loadRoleMap } from '../engine/haile/role-preference.js';
 import { rankQuestion, type SanitizedRank } from '../engine/relevance-provider.js';
 import { loadTopicTags } from '../engine/relevance-enrich.js';
@@ -118,6 +119,18 @@ export interface AgentMetrics {
   usedCapsule: boolean;
   failureCapsuleBuilt: boolean;
   trajectory: TrajectoryRecord;
+  /** Model steps the turn took (same as {@link AgentResult.steps}). */
+  steps: number;
+  /** Why the turn ended (same as {@link AgentResult.stopped}). */
+  stopReason: AgentStop;
+  /** Wall-clock milliseconds from loop start to the terminal frame. */
+  wallMs: number;
+  /** Tool calls dispatched this turn (every tool, including finish). */
+  toolCalls: number;
+  /** File changes (per-edit records) the turn produced. */
+  changes: number;
+  /** Visible activity groups the turn produced (host lines under protocol v6). */
+  activityGroups: number;
 }
 
 export type AgentEvent =
@@ -157,7 +170,15 @@ export type AgentEvent =
   | { type: 'command-output'; command: string; chunk: string; stream: 'stdout' | 'stderr' }
   | { type: 'command-end'; command: string; exitCode: number; timedOut?: boolean; cancelled?: boolean }
   /** Focus-chain / todo checklist for the panel. */
-  | { type: 'progress'; items: Array<{ id: string; title: string; status: string }> };
+  | { type: 'progress'; items: Array<{ id: string; title: string; status: string }> }
+  /**
+   * v6: one aggregated activity line — a burst of tool work between two pieces
+   * of assistant prose (see activity-aggregator.ts). Hosts render one line per
+   * `group` and update it in place; raw tool events still flow for debug views.
+   */
+  | ({ type: 'activity' } & ActivitySnapshot)
+  /** v6: the end-of-turn Changes card (net per-file +/−). Emitted only when files changed. */
+  | ({ type: 'changes-summary' } & ChangesSummary);
 
 export interface AgentOptions {
   graph: VgGraph;
@@ -357,6 +378,22 @@ export interface AgentOptions {
    * tools (search_code, finish, edits). Opt-in only for offline/CI shortcuts.
    */
   deterministicLocate?: boolean;
+  /**
+   * Finish incentives (default true): after a small successful edit, a step
+   * that only explores gets one soft nudge to call finish. Set false to let the
+   * model keep exploring unprompted.
+   */
+  aggressiveFinish?: boolean;
+  /**
+   * Proportional verification (default true): a turn with at most one changed
+   * file and no shell command runs only the ladder's syntax checks — not the
+   * project test command — unless the instruction asks for tests. Applies only
+   * to the default-derived ladder: an explicit `verifyLadder: true` and an
+   * explicit {@link verify} command always run in full.
+   */
+  lightVerifyTrivial?: boolean;
+  /** Wall clock for `metrics.wallMs` (injected for tests); defaults to `Date.now`. */
+  wallClock?: () => number;
 }
 
 export type AgentStop = 'finished' | 'max-steps' | 'no-tools' | 'no-progress' | 'error' | 'cancelled';
@@ -416,6 +453,18 @@ const TRUNCATED_REPLY_CONTINUES = 2;
  */
 const REASONING_ONLY_RETRIES = 3;
 
+/**
+ * The soft finish nudge (Phase 3 finish incentives). Sent at most once per
+ * turn, after a small successful edit is followed by a step that only explored.
+ */
+export const AGENT_FINISH_NUDGE =
+  'The change appears complete. Call finish with a short summary unless you still need to verify something.';
+
+/** The instruction explicitly asks for tests / a check run (keeps full verification on trivial edits). */
+export function instructionAsksForTests(instruction: string): boolean {
+  return /\b(tests?|testing|specs?|vitest|jest|pytest|mocha|typecheck|type-check|lint|ci)\b/i.test(instruction);
+}
+
 export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const { root, instruction, providers } = options;
   let graph = options.graph;
@@ -427,7 +476,23 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     3000;
   const contextBudget = options.contextBudget ?? DEFAULT_CONTEXT_BUDGET;
   const now = options.now ?? (() => 0);
-  const onEvent = options.onEvent ?? (() => {});
+  const wallClock = options.wallClock ?? Date.now;
+  const wallStart = wallClock();
+  const sink = options.onEvent ?? (() => {});
+  // v6 activity aggregation: every event still reaches the host verbatim; the
+  // aggregator additionally folds tool work into one line per burst. Prose
+  // closes the open burst first, so the line lands above the text it precedes.
+  const activity = new ActivityAggregator();
+  const emitActivity = (snap: ActivitySnapshot | null): void => {
+    if (snap) sink({ type: 'activity', ...snap });
+  };
+  const onEvent = (e: AgentEvent): void => {
+    if (e.type === 'assistant' && e.text.trim()) emitActivity(activity.seal());
+    activity.observe(e);
+    sink(e);
+  };
+  /** Tool calls dispatched this turn (Phase 0 metrics). */
+  let toolCallCount = 0;
   const verifyConfig =
     options.verify && options.modelProfile?.maxRepairRounds != null && options.verify.maxRounds == null
       ? { ...options.verify, maxRounds: options.modelProfile.maxRepairRounds }
@@ -559,6 +624,19 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   let truncatedPrefix = '';
   let recordedSearch = false;
   let commandCount = 0;
+  /** run_command dispatches this turn, approved or not (proportional verification). */
+  let runCommandCalls = 0;
+  /** Finish incentive state: armed by a step that wrote, spent once per turn. */
+  const aggressiveFinish = options.aggressiveFinish ?? true;
+  let finishNudgeArmed = false;
+  let finishNudgeSent = false;
+  /** A mid-turn steer arrived — the user is still shaping the task; never nudge. */
+  let steered = false;
+  /**
+   * The task must write before it can finish. Never true in plan mode: a plan
+   * turn is read-only, so a finish without writes is the correct outcome there.
+   */
+  const expectsMutation = !options.plan && instructionRequiresMutation(instruction);
   let verifyRounds = verifyConfig?.maxRounds ?? 2;
   let lastVerifyPassed = true;
   /** Last verification ladder / command outcomes for run provenance. */
@@ -603,6 +681,12 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         usedCapsule: !!capsule,
         failureCapsuleBuilt: false,
         trajectory: traj,
+        steps: 0,
+        stopReason: 'finished',
+        wallMs: Math.max(0, wallClock() - wallStart),
+        toolCalls: 0,
+        changes: 0,
+        activityGroups: 0,
       };
       onEvent({ type: 'metrics', metrics: earlyMetrics });
       return {
@@ -818,7 +902,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   /** Single terminal path: flush overlay, write audit once, then return. */
   const finish = (stopped: AgentStop, finalText: string, steps: number): AgentResult => {
     flushOverlay();
-    const mutationMissing = instructionRequiresMutation(instruction) && changes.length === 0;
+    const mutationMissing = expectsMutation && changes.length === 0;
     const solved = stopped === 'finished' && lastVerifyPassed && !mutationMissing;
     const traj = trajectory.finalize({
       taskId: options.attribution?.client ? `${options.attribution.client}:${instruction.slice(0, 40)}` : instruction.slice(0, 48),
@@ -832,6 +916,13 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       usedCapsule: !!capsule,
       provider: { id: providerInfo.id, model: providerInfo.model },
     });
+    // Close the last activity line, then the Changes card (only when files
+    // changed — a Q&A turn has no card), then metrics: hosts render in order.
+    emitActivity(activity.seal());
+    if (changes.length) {
+      const card = summarizeChanges(changes);
+      if (card.files.length) sink({ type: 'changes-summary', ...card });
+    }
     const metrics: AgentMetrics = {
       discoveryToolCalls: traj.discoveryToolCalls,
       mutationToolCalls: traj.mutationToolCalls,
@@ -840,6 +931,12 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       usedCapsule: !!capsule,
       failureCapsuleBuilt: traj.failureCapsuleBuilt,
       trajectory: traj,
+      steps,
+      stopReason: stopped,
+      wallMs: Math.max(0, wallClock() - wallStart),
+      toolCalls: toolCallCount,
+      changes: changes.length,
+      activityGroups: activity.groups,
     };
     onEvent({ type: 'metrics', metrics });
     // What the in-loop compressor saved lands in the ledger `vg savings`
@@ -893,8 +990,19 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     if (changes.length === 0) return 'done';
 
     if (useLadder && capsule) {
+      // Proportional verification: a one-file edit with no shell use gets the
+      // syntax rungs only — the project test command is for real change sets
+      // (or when the user asked for tests). A caller that opted into the ladder
+      // explicitly (`verifyLadder: true`) asked for it, so it runs in full; an
+      // explicit --verify command still runs below either way.
+      const trivial =
+        (options.lightVerifyTrivial ?? true) &&
+        options.verifyLadder === undefined &&
+        new Set(changes.map((c) => c.file)).size <= 1 &&
+        runCommandCalls === 0 &&
+        !instructionAsksForTests(instruction);
       const steps = compileVerificationLadder(capsule.verificationPlan, {
-        testCommand: verifyConfig?.command ?? options.testCommand,
+        testCommand: verifyConfig?.command ?? (trivial ? undefined : options.testCommand),
       });
       // Shell steps need real files — flush before the ladder.
       flushOverlay();
@@ -978,6 +1086,8 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       return finish('cancelled', 'stopped at your request', step - 1);
     }
     currentStep = step;
+    // Live update of the open activity line before the next step starts.
+    emitActivity(activity.flush());
     onEvent({ type: 'step', n: step });
 
     // Steer (v4): content the user sent mid-turn joins the conversation here,
@@ -985,6 +1095,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     // of finishing the stale plan first.
     const injected = options.takeInjected?.();
     if (injected) {
+      steered = true;
       onEvent({ type: 'injected', text: injected });
       messages.push({
         role: 'user',
@@ -1086,7 +1197,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     if (
       toolCalls.length === 0 &&
       (result.text ?? '').trim() &&
-      instructionRequiresMutation(instruction)
+      expectsMutation
     ) {
       const defaultFile = options.files?.length === 1 ? options.files[0] : undefined;
       const residual = residualEditsToToolCalls(result.text ?? '', { defaultFile });
@@ -1102,7 +1213,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     if (
       toolCalls.length === 0 &&
       (result.text ?? '').trim() &&
-      instructionRequiresMutation(instruction)
+      expectsMutation
     ) {
       const defaultFile = options.files?.length === 1 ? options.files[0] : undefined;
       const dumped = dumpEditsToToolCalls(result.text ?? '', { defaultFile });
@@ -1165,7 +1276,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       // (Flow: edit_file not-found still counted mutationToolCalls=1 and
       // fake-finished with filesChanged=0).
       const editAskUnfulfilled =
-        instructionRequiresMutation(instruction) &&
+        expectsMutation &&
         changes.length === 0 &&
         !looksLikeClarifyingQuestion(fullText);
       if (
@@ -1257,7 +1368,11 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 
     messages.push({ role: 'assistant', content: result.text, toolCalls });
 
+    /** This step wrote at least one file (arms the finish incentive). */
+    let stepWrote = false;
     for (const call of toolCalls) {
+      toolCallCount++;
+      if (call.name === 'run_command') runCommandCalls++;
       onEvent({ type: 'tool-call', name: call.name, args: call.arguments });
       if (call.name === 'search_code' && options.attribution?.client && !recordedSearch) {
         recordedSearch = true;
@@ -1303,6 +1418,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       if (call.name === 'run_command' && toolResult.mutated) commandCount++;
       if (toolResult.change) {
         changes.push(toolResult.change);
+        stepWrote = true;
         onEvent({ type: 'change', change: toolResult.change });
       }
       // After an approved mutation, refresh the session graph so subsequent
@@ -1359,7 +1475,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       if (toolResult.finished) {
         if (
           call.name === 'finish' &&
-          instructionRequiresMutation(instruction) &&
+          expectsMutation &&
           changes.length === 0
         ) {
           rejectedEmptyFinish++;
@@ -1392,6 +1508,29 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
         return finish('finished', toolResult.finalSummary ?? 'done', step);
       }
       if (stopNoProgress) return finish('no-progress', `stopped: the model repeated \`${call.name}\` without making progress`, step);
+    }
+
+    // Finish incentive (Phase 3): after one or two files were edited, a step
+    // that only explored gets a single soft nudge to conclude. Skipped when the
+    // step already queued its own follow-up (verify retry, empty-finish
+    // rejection — the transcript then ends on a user turn), under plan mode,
+    // and after a mid-turn steer.
+    if (aggressiveFinish && !options.plan) {
+      const filesTouched = new Set(changes.map((c) => c.file)).size;
+      if (stepWrote) {
+        finishNudgeArmed = true;
+      } else if (
+        finishNudgeArmed &&
+        !finishNudgeSent &&
+        !steered &&
+        filesTouched >= 1 &&
+        filesTouched <= 2 &&
+        messages[messages.length - 1]?.role === 'tool'
+      ) {
+        messages.push({ role: 'user', content: AGENT_FINISH_NUDGE });
+        finishNudgeSent = true;
+        finishNudgeArmed = false;
+      }
     }
   }
   return finish(
@@ -1758,7 +1897,11 @@ const FILE_HINT_RE =
 
 /** Tight: `edit` / `edit_file`, Review propose, or change/fix/replace plus a file path, or "so … return(s)". */
 export function instructionRequiresMutation(instruction: string): boolean {
-  const t = (instruction ?? '').trim();
+  // A negated ask ("Do not edit yet", "without changing any files") is the
+  // opposite of an edit ask — strip it before looking for edit verbs.
+  const t = (instruction ?? '')
+    .replace(/\b(?:do\s+not|don['’]?t|never|without)\s+(?:edit|chang|modif|writ|touch)\w*(?:\s+(?:any|the|a)?\s*(?:files?|code|anything))?/gi, ' ')
+    .trim();
   if (!t) return false;
   if (/\bedit(?:_file)?\b/i.test(t)) return true;
   if (/\bpropose a minimal patch\b/i.test(t)) return true;

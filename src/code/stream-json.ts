@@ -11,6 +11,14 @@
  *
  * Pure over an injected `emit` + the decision channel, so the protocol is
  * unit-tested without a process, model, or socket.
+ *
+ * Host rendering guidance (v6 — full rules in ./HOST_UI.md):
+ *  - Hide raw `tool-call` / `tool-result` rows by default (keep them for a debug view).
+ *  - Render each `activity` event as a single collapsible line, keyed by its
+ *    `group` id and updated in place (`final: true` closes it).
+ *  - Always show `changes-summary` as the primary end-of-turn card.
+ *  - Collapse `thinking` and `progress` unless the user expands them.
+ *  - Keep `approve-request` permission cards expanded, with their diff.
  */
 
 import { runAgent, type AgentEvent, type AgentOptions, type AgentResult } from './agent.js';
@@ -44,8 +52,20 @@ import type { ImageAttachment, ReasoningEffort } from './types.js';
  *       served from cache, so a host can price a turn instead of guessing.
  *       `submit` also carries `attachments` metadata, so a restored chat can
  *       show what was attached to a turn (names and sizes, never the bytes).
+ *  - 6: engine-side aggregation for quiet transcripts. An `activity` event
+ *       (relayed as `{event:'event', type:'activity', group, final, summary,
+ *       explored, edited, ran, added, removed, tools, files}`) folds a burst of
+ *       tool work into one line per `group`, updated in place; a
+ *       `changes-summary` event (`files[{path, added, removed, status}]`,
+ *       `totalAdded`, `totalRemoved`) carries the end-of-turn Changes card with
+ *       net per-file stats. The final `metrics` event adds `steps`,
+ *       `stopReason`, `wallMs`, `toolCalls`, `changes` and `activityGroups`.
+ *       Additive: raw tool-call / tool-result / change events still flow, so a
+ *       v5 host keeps working unchanged. `session-start.provider` is
+ *       `grok-build` (or `acp`) when turns are driven by an external ACP agent
+ *       (`vg code --provider grok-build`); the frames are the same.
  */
-export const STREAM_JSON_PROTOCOL_VERSION = 5;
+export const STREAM_JSON_PROTOCOL_VERSION = 6;
 
 /** Environment facts a `session-start` frame reports to the host (all optional for older callers). */
 export interface SessionStartInfo {

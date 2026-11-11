@@ -38,7 +38,7 @@ export interface RuntimeCatalog {
   /** ISO timestamp the catalog was generated — the freshness/confidence signal. */
   generatedAt: string;
   source: 'endoflife.date';
-  /** Keyed by endoflife.date product slug: nodejs, python, dotnet, java, php, ruby, go. */
+  /** Keyed by product slug: nodejs, python, dotnet, java, php, ruby, go, swift, dart. */
   products: Record<string, RuntimeProduct>;
 }
 

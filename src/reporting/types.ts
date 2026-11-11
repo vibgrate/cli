@@ -73,6 +73,18 @@ export interface NpmMeta {
 
 export interface DependencyRow {
   package: string;
+  /**
+   * Module path a go.mod `replace` rewrote into `package`, when the row is
+   * reported under the replacement module. Absent for an ordinary requirement
+   * and for a local-path replacement (those keep the original module path).
+   */
+  replacedFrom?: string;
+  /**
+   * Helm `alias:` for this dependency. `package` stays the chart name so
+   * registry lookups still use it; the alias separates two dependencies on
+   * the same chart. Absent when the manifest entry has no alias.
+   */
+  alias?: string;
   section: DepSection;
   currentSpec: string;
   resolvedVersion: string | null;

@@ -6,7 +6,7 @@ import * as semver from 'semver';
 import { readTextFile, FileCache } from '../utils/fs.js';
 import { recordedSemver } from '../utils/recorded-semver.js';
 import { withTimeout } from '../utils/timeout.js';
-import { GoCache } from './go-cache.js';
+import { GoCache, type GoModuleMeta } from './go-cache.js';
 import { latestStable, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
 import type { RuntimeCatalog } from '../runtimes/types.js';
@@ -91,87 +91,316 @@ interface GoDependency {
    * Concrete `v…` token from the require line, or null when the line names a
    * module and does not pin one. A range is not a version — it stays on
    * `declared` and `version` stays null. Never synthesize a number.
+   * A module `replace` overwrites this with the replacement version.
    */
   version: string | null;
-  /** What was written after the module path, or null when the line has no spec. */
+  /**
+   * What was written after the module path, or null when the line has no spec.
+   * A module `replace` stores the original module path here so the requirement
+   * that was swapped out stays visible next to the replacement version.
+   */
   declared: string | null;
   indirect: boolean;
+  /** Original module path when `path` and `version` come from a module replace. */
+  replacedFrom?: string;
+  /** Local-path replace: keep the row and do not query the module proxy. */
+  localReplace?: boolean;
+}
+
+/** A `replace` collected from the file. Applied only after every require is read. */
+interface ReplaceDirective {
+  modulePath: string;
+  /** Left-hand version when the replace is version-scoped; null applies to every version. */
+  version: string | null;
+  target: { kind: 'module'; path: string; version: string } | { kind: 'local' };
 }
 
 /**
- * Parse go.mod to extract dependencies and Go version.
- * 
+ * Parse go.mod to extract dependencies, tool package paths, and Go version.
+ *
+ * `replace` may appear before or after the `require` it rewrites, so directives
+ * are collected and applied after the whole file is read. A version on the left
+ * (`a v1.2.0 => …`) applies only to that version and wins over a versionless
+ * replace of the same module. A later directive for the same key wins.
+ *
  * Example:
  *   module github.com/example/project
- *   go 1.21
+ *   go 1.24
+ *   tool golang.org/x/tools/cmd/stringer
  *   require (
  *     github.com/gin-gonic/gin v1.9.1
  *     github.com/stretchr/testify v1.8.4 // indirect
  *   )
  */
-function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[] } {
+function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[]; tools: string[] } {
   const deps: GoDependency[] = [];
+  const replaces: ReplaceDirective[] = [];
+  const tools: string[] = [];
   let goVersion: string | undefined;
-  let inRequireBlock = false;
+  let block: 'require' | 'replace' | 'tool' | null = null;
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
 
-    // Extract Go version
+    // Extract Go version. A top-level directive; a `go` token inside a block
+    // is not one, but matching here (and skipping the line) is the historical
+    // behavior for a require line that happens to start with `go `.
     if (trimmed.startsWith('go ')) {
       const match = trimmed.match(/^go\s+(\d+\.\d+)/);
       if (match) goVersion = match[1];
       continue;
     }
 
-    // Track require blocks. A one-line `require ( … )` is a require, not a block.
-    if (/^require\s*\(/.test(trimmed) && !/^require\s*\(.*\)\s*$/.test(trimmed)) {
-      inRequireBlock = true;
+    if (block === null) {
+      // A one-line `require ( … )` / `replace ( … )` / `tool ( … )` is a
+      // directive, not a block.
+      if (/^tool\s*\(/.test(trimmed) && !/^tool\s*\(.*\)\s*$/.test(trimmed)) {
+        block = 'tool';
+        continue;
+      }
+      if (/^tool\s*\(.*\)\s*$/.test(trimmed)) {
+        const toolPath = toolPackagePath(trimmed.replace(/^tool\s*\(/, '').replace(/\)\s*$/, ''));
+        if (toolPath) tools.push(toolPath);
+        continue;
+      }
+      if (trimmed.startsWith('tool ')) {
+        const toolPath = toolPackagePath(trimmed.substring('tool '.length));
+        if (toolPath) tools.push(toolPath);
+        continue;
+      }
+      if (/^require\s*\(/.test(trimmed) && !/^require\s*\(.*\)\s*$/.test(trimmed)) {
+        block = 'require';
+        continue;
+      }
+      if (/^replace\s*\(/.test(trimmed) && !/^replace\s*\(.*\)\s*$/.test(trimmed)) {
+        block = 'replace';
+        continue;
+      }
+      if (/^require\s*\(.*\)\s*$/.test(trimmed)) {
+        const dep = parseRequireLine(trimmed.replace(/^require\s*\(/, '').replace(/\)\s*$/, ''));
+        if (dep) deps.push(dep);
+        continue;
+      }
+      if (/^replace\s*\(.*\)\s*$/.test(trimmed)) {
+        const directive = parseReplaceLine(trimmed.replace(/^replace\s*\(/, '').replace(/\)\s*$/, ''));
+        if (directive) replaces.push(directive);
+        continue;
+      }
+      if (trimmed.startsWith('require ')) {
+        const dep = parseRequireLine(trimmed.substring(8));
+        if (dep) deps.push(dep);
+        continue;
+      }
+      if (trimmed.startsWith('replace ')) {
+        const directive = parseReplaceLine(trimmed.substring(8));
+        if (directive) replaces.push(directive);
+        continue;
+      }
       continue;
     }
 
-    if (trimmed === ')' && inRequireBlock) {
-      inRequireBlock = false;
+    if (trimmed === ')') {
+      block = null;
       continue;
     }
 
-    // Parse dependency lines
-    // Format: github.com/gin-gonic/gin v1.9.1
-    // Format: github.com/gin-gonic/gin v1.9.1 // indirect
-    // Format: example.com/mod            (no version — still a direct require)
-    let depLine = trimmed;
-    if (inRequireBlock) {
-      depLine = trimmed;
-    } else if (/^require\s*\(.*\)\s*$/.test(trimmed)) {
-      depLine = trimmed.replace(/^require\s*\(/, '').replace(/\)\s*$/, '');
-    } else if (trimmed.startsWith('require ')) {
-      depLine = trimmed.substring(8);
+    if (block === 'require') {
+      const dep = parseRequireLine(trimmed);
+      if (dep) deps.push(dep);
+    } else if (block === 'tool') {
+      const toolPath = toolPackagePath(trimmed);
+      if (toolPath) tools.push(toolPath);
     } else {
-      continue;
+      const directive = parseReplaceLine(trimmed);
+      if (directive) replaces.push(directive);
     }
-
-    const indirect = depLine.includes('// indirect');
-    depLine = depLine.replace(/\/\/.*$/, '').trim();
-    if (!depLine || depLine === '(' || depLine === ')' || depLine.includes('=>')) continue;
-
-    const parts = depLine.split(/\s+/);
-    const modulePath = parts[0];
-    if (!modulePath) continue;
-    const rest = parts.slice(1);
-    const concrete =
-      rest.length === 1 && /^v\S+$/.test(rest[0]!) && !/[\^~*<>|]/.test(rest[0]!) ? rest[0]! : null;
-    // A `v…` pin is kept as written. A bare module path (version inherited or
-    // not yet chosen) and a range stay visible with no invented version.
-    if (!concrete && !looksLikeGoModule(modulePath)) continue;
-    deps.push({
-      path: modulePath,
-      version: concrete,
-      declared: concrete ?? (rest.length ? rest.join(' ') : null),
-      indirect,
-    });
   }
 
-  return { goVersion, deps };
+  applyReplacements(deps, replaces);
+  return { goVersion, deps, tools };
+}
+
+/** Package path from a `tool` line, ignoring a trailing comment. */
+function toolPackagePath(line: string): string | null {
+  const code = line.replace(/\/\/.*$/, '').trim();
+  if (!code || code === '(' || code === ')') return null;
+  const token = code.split(/\s+/)[0];
+  if (!token || !looksLikeGoModule(token)) return null;
+  return token;
+}
+
+/**
+ * Required module that provides `toolPath`: the longest module path that is
+ * the tool path itself or a `/`-bounded prefix of it. A `tool` line names the
+ * package under the module as required, so a replaced row matches on
+ * `replacedFrom`. Returns the row's (possibly replaced) path.
+ */
+function moduleProvidingTool(toolPath: string, deps: GoDependency[]): string | null {
+  let best: { required: string; path: string } | null = null;
+  for (const dep of deps) {
+    const required = dep.replacedFrom ?? dep.path;
+    if (toolPath !== required && !toolPath.startsWith(`${required}/`)) continue;
+    if (best === null || required.length > best.required.length) best = { required, path: dep.path };
+  }
+  return best ? best.path : null;
+}
+
+/**
+ * One require line, already stripped of a leading `require` keyword.
+ * Returns null for comments, `replace`/`exclude`, and tokens that are not a
+ * module path. A line containing `=>` is a replace, not a require.
+ */
+function parseRequireLine(depLine: string): GoDependency | null {
+  const indirect = depLine.includes('// indirect');
+  const code = depLine.replace(/\/\/.*$/, '').trim();
+  if (!code || code === '(' || code === ')' || code.includes('=>')) return null;
+
+  const parts = code.split(/\s+/);
+  const modulePath = parts[0];
+  if (!modulePath) return null;
+  const rest = parts.slice(1);
+  const concrete =
+    rest.length === 1 && isGoVersionToken(rest[0]!) ? rest[0]! : null;
+  // A `v…` pin is kept as written. A bare module path (version inherited or
+  // not yet chosen) and a range stay visible with no invented version.
+  if (!concrete && !looksLikeGoModule(modulePath)) return null;
+  return {
+    path: modulePath,
+    version: concrete,
+    declared: concrete ?? (rest.length ? rest.join(' ') : null),
+    indirect,
+  };
+}
+
+/** `v1.2.3`, a pseudo-version, or `v2.0.0+incompatible`. A range is not a version. */
+function isGoVersionToken(token: string): boolean {
+  return /^v\S+$/.test(token) && !/[\^~*<>|]/.test(token);
+}
+
+/**
+ * `./…`, `../…`, or an absolute path (POSIX, UNC, or a Windows drive).
+ * A module replacement always names a version; these do not.
+ */
+function isFilesystemPath(token: string): boolean {
+  return (
+    token.startsWith('./') ||
+    token.startsWith('../') ||
+    token.startsWith('.\\') ||
+    token.startsWith('..\\') ||
+    token.startsWith('/') ||
+    token.startsWith('\\') ||
+    /^[A-Za-z]:[\\/]/.test(token)
+  );
+}
+
+/** Drop a `//` comment that is not inside a quoted path. */
+function stripGoComment(line: string): string {
+  let quote: '"' | '`' | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (quote) {
+      if (c === '\\' && quote === '"') {
+        i++;
+        continue;
+      }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === '`') {
+      quote = c;
+      continue;
+    }
+    if (c === '/' && line[i + 1] === '/') return line.slice(0, i);
+  }
+  return line;
+}
+
+/** Quoted paths (`"../My Lib"`, `` `./dir` ``) stay one token. */
+function goTokens(input: string): string[] {
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < input.length) {
+    while (i < input.length && /\s/.test(input[i]!)) i++;
+    if (i >= input.length) break;
+    const q = input[i];
+    if (q === '"' || q === '`') {
+      i++;
+      let s = '';
+      while (i < input.length && input[i] !== q) {
+        if (input[i] === '\\' && q === '"') {
+          i++;
+          if (i < input.length) s += input[i++];
+          continue;
+        }
+        s += input[i++];
+      }
+      if (i < input.length) i++;
+      tokens.push(s);
+      continue;
+    }
+    let s = '';
+    while (i < input.length && !/\s/.test(input[i]!)) s += input[i++];
+    tokens.push(s);
+  }
+  return tokens;
+}
+
+/**
+ * One replace arrow. A filesystem path on the right is local, even when a
+ * version token follows it. A module path plus a version is a replacement
+ * module. A module path with no version is ignored.
+ */
+function parseReplaceLine(line: string): ReplaceDirective | null {
+  const code = stripGoComment(line).trim();
+  if (!code || code === '(' || code === ')') return null;
+  const arrow = code.indexOf('=>');
+  if (arrow < 0) return null;
+  const left = goTokens(code.slice(0, arrow));
+  const right = goTokens(code.slice(arrow + 2));
+  const modulePath = left[0];
+  const rightPath = right[0];
+  if (!modulePath || !rightPath || !looksLikeGoModule(modulePath)) return null;
+  if (left.length > 2) return null;
+  if (left.length === 2 && !isGoVersionToken(left[1]!)) return null;
+  const version = left.length === 2 ? left[1]! : null;
+
+  if (isFilesystemPath(rightPath) || right.length < 2 || !isGoVersionToken(right[1]!)) {
+    if (!isFilesystemPath(rightPath)) return null;
+    return { modulePath, version, target: { kind: 'local' } };
+  }
+  return {
+    modulePath,
+    version,
+    target: { kind: 'module', path: rightPath, version: right[1]! },
+  };
+}
+
+/**
+ * Rewrite requires from the replace map. A version-scoped directive wins over
+ * a versionless one. Local paths keep the original module and mark the row so
+ * the scan does not ask the module proxy.
+ */
+function applyReplacements(deps: GoDependency[], directives: ReplaceDirective[]): void {
+  const wildcard = new Map<string, ReplaceDirective>();
+  const scoped = new Map<string, ReplaceDirective>();
+  for (const directive of directives) {
+    if (directive.version) scoped.set(`${directive.modulePath}\0${directive.version}`, directive);
+    else wildcard.set(directive.modulePath, directive);
+  }
+  for (const dep of deps) {
+    const specific = dep.version ? scoped.get(`${dep.path}\0${dep.version}`) : undefined;
+    const rule = specific ?? wildcard.get(dep.path);
+    if (!rule) continue;
+    if (rule.target.kind === 'local') {
+      dep.localReplace = true;
+      continue;
+    }
+    const original = dep.path;
+    dep.replacedFrom = original;
+    dep.declared = original;
+    dep.path = rule.target.path;
+    dep.version = rule.target.version;
+  }
 }
 
 function looksLikeGoModule(token: string): boolean {
@@ -182,7 +411,8 @@ function looksLikeGoModule(token: string): boolean {
     token === 'replace' ||
     token === 'exclude' ||
     token === 'retract' ||
-    token === 'toolchain'
+    token === 'toolchain' ||
+    token === 'tool'
   ) {
     return false;
   }
@@ -254,10 +484,20 @@ async function scanOneGoProject(
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
   
   const content = cache ? await cache.readTextFile(manifestFile) : await readTextFile(manifestFile);
-  const { goVersion, deps: allDeps } = parseGoMod(content);
-  
-  // Filter out indirect dependencies for main analysis
-  const directDeps = allDeps.filter(d => !d.indirect);
+  const { goVersion, deps: allDeps, tools } = parseGoMod(content);
+
+  // Indirect requires stay out of the scan unless they provide a `tool`
+  // package. Those modules are development dependencies. A module that is
+  // also a direct require stays in dependencies.
+  const toolProviders = new Set<string>();
+  for (const toolPath of tools) {
+    const provider = moduleProvidingTool(toolPath, allDeps);
+    if (provider) toolProviders.add(provider);
+  }
+  const directPaths = new Set(allDeps.filter((d) => !d.indirect).map((d) => d.path));
+  const directDeps = allDeps.filter(
+    (d) => !d.indirect || (toolProviders.has(d.path) && !directPaths.has(d.path)),
+  );
   
   // Determine Go runtime version lag
   let runtimeMajorsBehind: number | undefined;
@@ -290,8 +530,12 @@ async function scanOneGoProject(
   const frameworks: DetectedFramework[] = [];
   const buckets = { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 };
 
-  // Fetch all metadata in parallel
+  // Fetch all metadata in parallel. A local-path replace has no module to
+  // look up — skip the proxy (and any offline manifest) so it cannot be
+  // counted as behind upstream.
+  const emptyMeta = (): GoModuleMeta => ({ latest: null, stableVersions: [], latestStableOverall: null });
   const metaPromises = directDeps.map(async (dep) => {
+    if (dep.localReplace) return { dep, meta: emptyMeta() };
     const meta = await goCache.get(dep.path);
     return { dep, meta };
   });
@@ -327,15 +571,18 @@ async function scanOneGoProject(
 
     dependencies.push({
       package: dep.path,
-      section: 'dependencies',
+      section: dep.indirect ? 'devDependencies' : 'dependencies',
       // `*` is the existing marker for a dependency declared with no version
       // (same as an unpinned Python/Ruby requirement). A written range stays
-      // the spec. Neither is promoted to resolvedVersion.
+      // the spec. Neither is promoted to resolvedVersion. A module replace
+      // keeps the replacement `v…` token here; the original path is
+      // `replacedFrom` (and on `declared`, which loses to a concrete version).
       currentSpec: dep.version ?? dep.declared ?? '*',
       resolvedVersion,
       latestStable,
       majorsBehind,
       drift,
+      ...(dep.replacedFrom ? { replacedFrom: dep.replacedFrom } : {}),
     });
 
     // Detect known frameworks

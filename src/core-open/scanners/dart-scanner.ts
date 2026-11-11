@@ -8,7 +8,10 @@ import { recordedSemver } from '../utils/recorded-semver.js';
 import { assertLockfileText, LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { lockfileWarningPath, notePubspecLockText, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
-import { PubCache } from './pub-cache.js';
+import { PubCache, type PubDevMeta } from './pub-cache.js';
+import { latestStable } from '../runtimes/catalog.js';
+import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
+import type { RuntimeCatalog } from '../runtimes/types.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
 
@@ -86,9 +89,6 @@ const KNOWN_DART_FRAMEWORKS: Record<string, string> = {
   'lint': 'Lint',
 };
 
-/** Latest Dart major.minor (as of 2026) */
-const LATEST_DART = { major: 3, minor: 6 };
-
 interface DartDependency {
   name: string;
   version: string;
@@ -96,8 +96,86 @@ interface DartDependency {
 }
 
 /**
+ * A production declaration wins over a development declaration of the same
+ * name, whichever section is listed first. The winning declaration supplies
+ * the version. SDK entries are not rows in either section.
+ */
+function dedupeDartDeps(deps: DartDependency[]): DartDependency[] {
+  const byName = new Map<string, DartDependency>();
+  for (const dep of deps) {
+    const kept = byName.get(dep.name);
+    if (!kept || (kept.isDev && !dep.isDev)) byName.set(dep.name, dep);
+  }
+  return [...byName.values()];
+}
+
+/** Leading indent. A tab counts as two spaces so space- and tab-indented pubspecs compare. */
+function indentWidth(line: string): number {
+  let width = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === ' ') width += 1;
+    else if (ch === '\t') width += 2;
+    else break;
+  }
+  return width;
+}
+
+/** Unquote a YAML scalar and drop an unquoted trailing comment. */
+function yamlScalar(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  const quoted = trimmed.match(/^(['"])([\s\S]*?)\1\s*(?:#.*)?$/);
+  if (quoted) return quoted[2] ?? '';
+  const comment = trimmed.search(/\s+#/);
+  return (comment === -1 ? trimmed : trimmed.slice(0, comment)).trim();
+}
+
+/**
+ * A map-form dependency (`http:` then nested keys). Path and git sources
+ * have no pub version constraint. They are stored as `path:<path>` or
+ * `git:<url>` (`git:<url>#<ref>` when a ref is set) so the package is kept
+ * and those nested keys are not reported as packages. A nested `version:`
+ * is the constraint and wins over path or git. `sdk: flutter` drops the entry.
+ */
+interface OpenPubDep {
+  name: string;
+  indent: number;
+  isDev: boolean;
+  version?: string;
+  path?: string;
+  gitUrl?: string;
+  gitRef?: string;
+  nestedKey?: string;
+  nestedIndent?: number;
+  skip: boolean;
+}
+
+function pubDepSpec(open: OpenPubDep): string | undefined {
+  if (open.skip) return undefined;
+  if (open.version) return open.version;
+  if (open.path) return `path:${open.path}`;
+  if (open.gitUrl) return open.gitRef ? `git:${open.gitUrl}#${open.gitRef}` : `git:${open.gitUrl}`;
+  return undefined;
+}
+
+function takeOpenDep(deps: DartDependency[], open: OpenPubDep | null): void {
+  if (!open) return;
+  const version = pubDepSpec(open);
+  if (!version) return;
+  deps.push({ name: open.name, version, isDev: open.isDev });
+}
+
+function flowField(body: string, key: string): string | undefined {
+  const match = body.match(new RegExp(`(?:^|[{,\\s])${key}:\\s*([^,}]+)`));
+  if (!match) return undefined;
+  const scalar = yamlScalar(match[1] ?? '');
+  return scalar || undefined;
+}
+
+/**
  * Parse pubspec.yaml to extract dependencies.
- * 
+ *
  * Example YAML:
  *   name: my_app
  *   environment:
@@ -105,11 +183,22 @@ interface DartDependency {
  *   dependencies:
  *     flutter:
  *       sdk: flutter
+ *     http:
+ *       version: ^1.2.0
+ *     shared:
+ *       path: ../shared
  *     provider: ^6.1.0
  *   dev_dependencies:
  *     flutter_test:
  *       sdk: flutter
  *     mockito: ^5.4.0
+ *
+ * `dependencies` and `dev_dependencies` are both kept. An SDK entry
+ * (`flutter: { sdk: flutter }`, a nested `sdk: flutter`, or `sdk: flutter`
+ * on the same line) is skipped in either section. A key with no value at
+ * the dependency indent opens one package; deeper keys belong to it and
+ * are never emitted as packages. A name listed in both sections is stored
+ * once, as a production dependency.
  */
 function parsePubspecYaml(content: string): {
   dartVersion?: string;
@@ -118,58 +207,128 @@ function parsePubspecYaml(content: string): {
   const deps: DartDependency[] = [];
   let dartVersion: string | undefined;
   let currentSection: 'dependencies' | 'dev_dependencies' | null = null;
+  let childIndent: number | null = null;
+  let open: OpenPubDep | null = null;
+
+  const flush = () => {
+    takeOpenDep(deps, open);
+    open = null;
+  };
+
+  const enterSection = (section: 'dependencies' | 'dev_dependencies') => {
+    flush();
+    currentSection = section;
+    childIndent = null;
+  };
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const indent = indentWidth(line);
 
     // Extract Dart SDK version. Require a digit so `sdk: flutter` lines
     // (SDK dependencies inside dependency sections) cannot clobber the
-    // environment constraint.
+    // environment constraint. Caret and tilde forms (`^3.5.0`, `~3.4.1`)
+    // count the same as an explicit `>=` range.
     if (trimmed.startsWith('sdk:')) {
-      const match = trimmed.match(/sdk:\s*['"]?>?=?\s*(\d[^<'"]*)/);
+      const match = trimmed.match(/sdk:\s*['"]?>?=?\s*[~^]?(\d[^<'"]*)/);
       if (match) dartVersion = match[1]!.trim();
+      else if (open && /sdk:\s*flutter\b/.test(trimmed)) open.skip = true;
       continue;
     }
 
-    // Track sections. Only an unindented key ends the current section —
-    // testing the trimmed line here would match every indented dependency
-    // line and reset the section before the dependency is captured.
     if (trimmed === 'dependencies:') {
-      currentSection = 'dependencies';
+      enterSection('dependencies');
       continue;
-    } else if (trimmed === 'dev_dependencies:') {
-      currentSection = 'dev_dependencies';
+    }
+    if (trimmed === 'dev_dependencies:') {
+      enterSection('dev_dependencies');
       continue;
-    } else if (/^\w+:/.test(line)) {
+    }
+    // Only an unindented key ends the current section — testing the trimmed
+    // line here would match every indented dependency line and reset the
+    // section before the dependency is captured.
+    if (indent === 0 && /^\w+:/.test(line)) {
+      flush();
       currentSection = null;
+      childIndent = null;
       continue;
     }
 
     if (!currentSection) continue;
 
-    // Parse dependency lines
-    // Simple: provider: ^6.1.0
-    // SDK: flutter: { sdk: flutter }
-    
-    const simpleMatch = trimmed.match(/^([\w_]+):\s*([^\s{]+)/);
-    if (simpleMatch) {
-      const name = simpleMatch[1]!;
-      const version = simpleMatch[2]!;
-      
-      // Skip SDK dependencies (flutter, flutter_test from SDK)
-      if (version === 'sdk:' || trimmed.includes('sdk: flutter')) {
+    if (childIndent === null) {
+      if (indent === 0) continue;
+      childIndent = indent;
+    }
+
+    if (indent < childIndent) {
+      flush();
+      currentSection = null;
+      childIndent = null;
+      continue;
+    }
+
+    if (indent === childIndent) {
+      flush();
+      const isDev = currentSection === 'dev_dependencies';
+      // One-line: provider: ^6.1.0. The value token is kept exactly,
+      // including quotes, so existing manifests do not change spec text.
+      const simpleMatch = trimmed.match(/^([\w_]+):\s*([^\s{]+)/);
+      if (simpleMatch) {
+        const name = simpleMatch[1]!;
+        const version = simpleMatch[2]!;
+        if (version === 'sdk:' || trimmed.includes('sdk: flutter')) continue;
+        deps.push({ name, version, isDev });
         continue;
       }
-      
-      deps.push({
-        name,
-        version,
-        isDev: currentSection === 'dev_dependencies',
-      });
+
+      const bare = trimmed.match(/^([\w_]+):\s*(.*)$/);
+      if (!bare) continue;
+      const name = bare[1]!;
+      const rest = (bare[2] ?? '').trim();
+      if (rest.startsWith('{')) {
+        if (/sdk:\s*flutter\b/.test(rest)) continue;
+        const version = flowField(rest, 'version');
+        const pathSpec = flowField(rest, 'path');
+        const gitUrl = flowField(rest, 'git');
+        let spec: string | undefined;
+        if (version) spec = version;
+        else if (pathSpec) spec = `path:${pathSpec}`;
+        else if (gitUrl) spec = `git:${gitUrl}`;
+        if (spec) deps.push({ name, version: spec, isDev });
+        continue;
+      }
+
+      // Bare key: the following deeper lines belong to this package.
+      open = { name, indent, isDev, skip: false };
+      continue;
+    }
+
+    if (!open || indent <= open.indent) continue;
+    const keyMatch = trimmed.match(/^([\w_]+):\s*(.*)$/);
+    if (!keyMatch) continue;
+    const key = keyMatch[1]!;
+    const value = yamlScalar(keyMatch[2] ?? '');
+    const direct = open.nestedIndent === undefined || indent <= open.nestedIndent;
+    if (direct) {
+      open.nestedKey = key;
+      open.nestedIndent = indent;
+      if (key === 'version' && value) open.version = value;
+      else if (key === 'path' && value) open.path = value;
+      else if (key === 'sdk' && value === 'flutter') open.skip = true;
+      else if (key === 'git' && value) open.gitUrl = value;
+      continue;
+    }
+    if (open.nestedKey === 'git') {
+      if (key === 'url' && value) open.gitUrl = value;
+      else if (key === 'ref' && value) open.gitRef = value;
     }
   }
 
-  return { dartVersion, deps };
+  flush();
+  return { dartVersion, deps: dedupeDartDeps(deps) };
 }
 
 /**
@@ -252,6 +411,7 @@ export async function scanDartProjects(
   pubCache: PubCache,
   cache?: FileCache,
   projectScanTimeout?: number,
+  catalog: RuntimeCatalog = BUNDLED_RUNTIME_CATALOG,
 ): Promise<ProjectScan[]> {
   // Find pubspec.yaml files
   const manifestFiles = cache
@@ -264,7 +424,7 @@ export async function scanDartProjects(
   for (const manifestFile of manifestFiles) {
     const dir = path.dirname(manifestFile);
     try {
-      const scanPromise = scanOneDartProject(dir, manifestFile, rootDir, pubCache, cache);
+      const scanPromise = scanOneDartProject(dir, manifestFile, rootDir, pubCache, cache, catalog);
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
         results.push(result.value);
@@ -296,7 +456,8 @@ async function scanOneDartProject(
   manifestFile: string,
   rootDir: string,
   pubCache: PubCache,
-  cache?: FileCache,
+  cache: FileCache | undefined,
+  catalog: RuntimeCatalog,
 ): Promise<ProjectScan> {
   const relDir = path.relative(rootDir, dir) || '.';
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
@@ -313,8 +474,9 @@ async function scanOneDartProject(
     rethrowLockfileParseError(err);
   }
   
-  // Filter out dev dependencies for main analysis
-  const prodDeps = allDeps.filter(d => !d.isDev);
+  // pub.dev lookups and drift buckets stay on production rows. A name in
+  // both sections is already one production row (`parsePubspecYaml`).
+  // Development rows are still emitted.
   
   // Determine Dart runtime version lag
   let runtimeMajorsBehind: number | undefined;
@@ -328,12 +490,15 @@ async function scanOneDartProject(
       if (verMatch) {
         const reqMajor = parseInt(verMatch[1]!, 10);
         const reqMinor = parseInt(verMatch[2]!, 10);
-        if (reqMajor === LATEST_DART.major) {
-          runtimeMajorsBehind = Math.max(0, LATEST_DART.minor - reqMinor);
-        } else if (reqMajor < LATEST_DART.major) {
-          runtimeMajorsBehind = LATEST_DART.minor + (LATEST_DART.major - reqMajor) * 10;
+        const latestDart = latestStable(catalog, 'dart');
+        if (latestDart) {
+          if (reqMajor === latestDart.major) {
+            runtimeMajorsBehind = Math.max(0, latestDart.minor - reqMinor);
+          } else if (reqMajor < latestDart.major) {
+            runtimeMajorsBehind = latestDart.minor + (latestDart.major - reqMajor) * 10;
+          }
+          runtimeLatest = `${latestDart.major}.${latestDart.minor}`;
         }
-        runtimeLatest = `${LATEST_DART.major}.${LATEST_DART.minor}`;
       }
     }
   }
@@ -343,19 +508,36 @@ async function scanOneDartProject(
   const frameworks: DetectedFramework[] = [];
   const buckets = { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 };
 
-  // Fetch all metadata in parallel
-  const metaPromises = prodDeps.map(async (dep) => {
+  // Fetch production metadata in parallel. Development packages are not looked up.
+  const metaByName = new Map<string, PubDevMeta>();
+  const metaPromises = allDeps.filter((dep) => !dep.isDev).map(async (dep) => {
     const meta = await pubCache.get(dep.name);
-    return { dep, meta };
+    return { name: dep.name, meta };
   });
+  for (const { name, meta } of await Promise.all(metaPromises)) {
+    metaByName.set(name, meta);
+  }
 
-  const resolved = await Promise.all(metaPromises);
-
-  for (const { dep, meta } of resolved) {
+  for (const dep of allDeps) {
     // Use resolved version if available
     const resolvedVersionStr = resolvedVersions.get(dep.name);
     const resolvedVersion = resolvedVersionStr ? recordedSemver(resolvedVersionStr) : null;
-    const latestStable = meta.latestStableOverall;
+    const section = dep.isDev ? 'devDependencies' as const : 'dependencies' as const;
+
+    if (dep.isDev) {
+      dependencies.push({
+        package: dep.name,
+        section,
+        currentSpec: dep.version,
+        resolvedVersion,
+        latestStable: null,
+        majorsBehind: null,
+        drift: 'unknown',
+      });
+      continue;
+    }
+
+    const latestStable = metaByName.get(dep.name)?.latestStableOverall ?? null;
 
     let majorsBehind: number | null = null;
     let drift: DependencyRow['drift'] = 'unknown';
@@ -380,8 +562,6 @@ async function scanOneDartProject(
       buckets.unknown++;
     }
 
-    const section = dep.isDev ? 'devDependencies' as const : 'dependencies' as const;
-
     dependencies.push({
       package: dep.name,
       section,
@@ -392,7 +572,7 @@ async function scanOneDartProject(
       drift,
     });
 
-    // Detect known frameworks
+    // Development packages are not production frameworks.
     if (dep.name in KNOWN_DART_FRAMEWORKS) {
       frameworks.push({
         name: KNOWN_DART_FRAMEWORKS[dep.name]!,

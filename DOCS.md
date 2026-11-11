@@ -33,6 +33,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
     - [Unknown lockfile fields](#unknown-lockfile-fields)
     - [CDN and non-registry resolutions](./docs/non-registry-lockfile-resolutions.md)
     - [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest)
+    - [Docker and Compose manifests](#docker-and-compose-manifests)
     - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
       - [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible)
     - [Maven and Gradle manifests](#maven-and-gradle-manifests)
@@ -187,11 +188,11 @@ This section summarizes what the CLI supports today and how to use each capabili
 Vibgrate evaluates **upgrade drift** in depth for:
 
 - **Node.js / TypeScript** (`package.json`, lockfiles)
-- **.NET** (`.sln`, `.csproj`)
+- **.NET** (`.sln`, `.csproj`). A `<PackageReference>` with no `Version` takes its version from the nearest `Directory.Packages.props` between that project and the directory you scanned. The package id matches without regard to letter case. `VersionOverride` on the reference wins. A reference with no resolvable version stays in the result with version `unknown`. A project that sets neither `TargetFramework` nor `TargetFrameworks` takes them from the nearest `Directory.Build.props` between that project and the directory you scanned. A value in the project file wins. A value that contains `$(` is not reported as a runtime.
 - **Python** (`requirements.txt`, `pyproject.toml`-style manifests)
 - **Java** (`pom.xml`, Gradle-style manifests). Which Maven profiles, scopes, and Gradle configurations become a `vg scan` row or a `vg build` edge is in [Maven and Gradle manifests](#maven-and-gradle-manifests).
 
-**Known-vulnerability detection** (`--vulns`) and **dependency attribution** (`vg why`, exposure windows) additionally cover npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle, read from each project's lockfile. For npm, pnpm, and yarn, `--vulns` checks every package the lockfile resolves, not only the ones in `package.json`. A finding on a package pulled in by another dependency says `transitive` and names the shortest path from a dependency you declared. Other ecosystems are matched as described above. Go is matched from direct `require` lines in `go.mod`. Pseudo-versions and `+incompatible` tags follow [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).
+**Known-vulnerability detection** (`--vulns`) and **dependency attribution** (`vg why`, exposure windows) additionally cover npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle, read from each project's lockfile. For npm, pnpm, and yarn, `--vulns` checks every package the lockfile resolves, not only the ones in `package.json`. A finding on a package pulled in by another dependency says `transitive` and names the shortest path from a dependency you declared. Other ecosystems are matched as described above. Go is matched from direct `require` lines in `go.mod`, and from an `// indirect` module that provides a Go 1.24 `tool` package. Pseudo-versions and `+incompatible` tags follow [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).
 
 ### End-to-end workflow (recommended)
 
@@ -1912,7 +1913,7 @@ Direct and transitive scope, and the production, development, and optional signa
 How a declared license is copied into each format is in [Declared licenses](#declared-licenses).
 
 `vg sbom export` reports the full resolved dependency tree, not just what's declared
-in the manifest: it reads `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` (npm,
+in the manifest: it reads `package-lock.json` / `npm-shrinkwrap.json` / `pnpm-lock.yaml` / `yarn.lock` (npm,
 pnpm, and yarn) from `--root` (defaults to the current directory) and folds every
 transitive package in alongside the directly-scanned ones. Each component carries a
 `vibgrate:scope` property (`direct` or `transitive`) so consumers can still tell the
@@ -2039,7 +2040,10 @@ Two other strings in the same file are easy to misread as package digests. `vcs.
 | `yarn.lock` | `integrity` | The same tokens. |
 | `Cargo.lock` | `checksum` | The SHA-256 hex of the crate. |
 | `poetry.lock`, `uv.lock` | `hash` | Each labeled hash on that package block (`sha256:…`). |
+| `Pipfile.lock` | `hashes` | Each `sha256:…` label on that package. An editable or path entry is not a component. |
 | `go.sum` | `h1:` on `<module> <version>` | The module zip, as SHA-256. |
+| `packages.lock.json` | `contentHash` | The nupkg SHA-512, as base64. |
+| `composer.lock` | `dist.shasum` | The dist archive's SHA-1 hex, when the value is 40 hexadecimal characters. A missing `dist`, an empty `shasum`, or any other value is omitted. |
 
 **Several digests, one component.** A lockfile can list more than one digest for one package. The export still writes one component for that ecosystem, name, and version. It does not add a row per digest. `hashes` and `checksums` list every accepted digest on that component. The array is sorted by algorithm name, then by the digest value. The comparison is code-point order, so it does not follow the lockfile text, the install path, or the order of projects. The same digests produce the same array on every run. An identical algorithm and value is written once.
 
@@ -2054,7 +2058,7 @@ That order is the same when the lockfile listed `sha512` before `sha256`. SPDX w
 
 Component order stays the order in [Several versions of one package](#several-versions-of-one-package): Package URL when the component has one, otherwise the package name, then the version. Digest text is not part of that sort. It is part of the document id. A lockfile edit that changes only those digest strings changes `serialNumber`, `documentNamespace`, and the hash arrays, and leaves the component order in place.
 
-`go.sum` lists a module twice: `<module> <version> h1:…` and `<module> <version>/go.mod h1:…`. The `/go.mod` line is not a second component, and its hash is not a second digest of the module. A `uv.lock` or `poetry.lock` package block can carry more than one `hash`. Those values stay on the one component, in the order above. An npm or pnpm integrity string that names more than one algorithm is read the same way. `--no-transitive` does not read the lockfile, so the hash arrays are omitted with the lockfile-only rows.
+`go.sum` lists a module twice: `<module> <version> h1:…` and `<module> <version>/go.mod h1:…`. The `/go.mod` line is not a second component, and its hash is not a second digest of the module. A `uv.lock` or `poetry.lock` package block can carry more than one `hash`. A `Pipfile.lock` package can carry more than one `hashes` entry. Those values stay on the one component, in the order above. An npm or pnpm integrity string that names more than one algorithm is read the same way. `--no-transitive` does not read the lockfile, so the hash arrays are omitted with the lockfile-only rows.
 
 ```bash
 vg scan --offline --no-graph --format json --out scan.json
@@ -2260,9 +2264,9 @@ is omitted on every package.
 | Source | Where it is written | CycloneDX `type` | SPDX `primaryPackagePurpose` |
 | --- | --- | --- | --- |
 | Scan root (the artifact's root directory name) | CycloneDX `metadata.component` only. It is not copied into `components`. SPDX has no package for the root. | `application` | Omitted. There is no package to carry the field. |
-| Lockfile package (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`), including a package that only the lockfile lists | One CycloneDX component and one SPDX package | `library` | Omitted |
+| Lockfile package (`package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `Gemfile.lock`, `composer.lock`, `packages.lock.json`), including a package that only the lockfile lists | One CycloneDX component and one SPDX package | `library` | Omitted |
 | Manifest dependency from a scanned project (Node, Python, Rust, Go, Java, Kotlin, Scala, Ruby, PHP, .NET, Swift, Dart, and any other project the scan records) | One CycloneDX component and one SPDX package | `library` | Omitted |
-| Container image named by a `Dockerfile` `FROM` or a Compose `image:` line | The same kind of row. A Docker Hub image with no namespace is named `library/<image>`. The tag is the version. | `library` | Omitted |
+| Container image named by a `Dockerfile` `FROM` or a Compose `image:` line | The same kind of row. A Docker Hub image with no namespace is named `library/<image>`; one with a namespace is named `<namespace>/<image>`. `docker.io`, `index.docker.io`, and `registry-1.docker.io` are Docker Hub and use those same names. An image on any other registry keeps that registry in the name (`ghcr.io/acme/api`). The tag is the version. Only Docker Hub names are looked up on Docker Hub; any other registry stays `unknown` unless a package-version manifest lists that exact name. | `library` | Omitted |
 | Helm chart dependency (`Chart.yaml` `dependencies`) | The same kind of row. The chart itself is not a row. | `library` | Omitted |
 | Terraform registry provider or registry module | The same kind of row. The name is `provider:<source>` or `module:<source>`. | `library` | Omitted |
 | OS packages, packages installed inside an image, Terraform `resource` blocks, local or git Terraform modules (`./`, `../`, `git::`), Kubernetes manifests | Not emitted | — | — |
@@ -2462,11 +2466,39 @@ Switches (flags that take no value, such as `--vulns`, `--offline` or `--no-grap
 
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
-A truncated or syntactically invalid lockfile stops the scan before a dependency graph is built. The error names the file (for example `package-lock.json`, `pnpm-lock.yaml`, or `yarn.lock`) and tells you to regenerate it with your package manager. The message does not include the lockfile, and the process exits non-zero. A valid lockfile is scanned as before.
+A truncated or syntactically invalid lockfile stops the scan before a dependency graph is built. The error names the file (for example `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, or `yarn.lock`) and tells you to regenerate it with your package manager. The message does not include the lockfile, and the process exits non-zero. A valid lockfile is scanned as before.
 
 `vg scan` does not follow symlinks while it indexes the tree. A skipped link is named once, as `warning [VG_WARN_SYMLINK_SKIPPED]`. See [Symlinks](#symlinks). Archive files (`.zip`, `.tar`, `.gz`, `.bz2`, `.7z`, `.rar`) are not opened during that walk.
 
 For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`. The manifest shape, the fail-closed errors, and what offline mode skips are in [Offline scan with a package-version manifest](#offline-scan-with-a-package-version-manifest).
+
+### Docker and Compose manifests
+
+`vg scan` reads container images from every Dockerfile and every Compose file that sits directly in a directory. Files in a subdirectory are a separate project. One image name with two tags is two rows. The same name and tag in more than one file in that directory is one row.
+
+Names are matched with the capitalisation below.
+
+Dockerfiles:
+
+| Name | Example |
+| --- | --- |
+| `Dockerfile` | `Dockerfile` |
+| `Containerfile` | `Containerfile` |
+| `Dockerfile.<suffix>` | `Dockerfile.prod`, `Dockerfile.dev` |
+| `<name>.Dockerfile` | `api.Dockerfile` |
+
+The suffix and the name are non-empty. `Dockerfile.` and `.Dockerfile` are not manifests.
+
+Compose files. A directory that contains more than one of these is parsed in full, including a base file next to an override:
+
+| Name | Example |
+| --- | --- |
+| `docker-compose.yml`, `docker-compose.yaml` | `docker-compose.yml` |
+| `compose.yml`, `compose.yaml` | `compose.yaml` |
+| `docker-compose.<name>.yml`, `docker-compose.<name>.yaml` | `docker-compose.override.yml`, `docker-compose.prod.yaml` |
+| `compose.<name>.yml`, `compose.<name>.yaml` | `compose.override.yaml`, `compose.ci.yml` |
+
+`<name>` may contain dots (`docker-compose.prod.override.yml`). A `FROM` line in a Dockerfile and an `image:` line in a Compose file each supply an image. A Docker Hub image with no namespace is named `library/<image>`. The tag is the version.
 
 ### Unknown lockfile fields
 
@@ -2680,7 +2712,7 @@ In a git repository the scan also attributes each finding: the commit, author, a
 
 The scan also reconstructs **closed** exposure windows from history — a vulnerable version that was later bumped out of the affected range or removed from the lockfile entirely — and reports real remediation time (MTTR) from them: measured, not estimated. Offline, a package-version manifest extends this to advisories that are fully fixed today, so a dependency that is clean now but was once vulnerable still counts toward your remediation record.
 
-Detection and attribution read each project's lockfile for npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle. Go is matched from direct `require` lines in `go.mod`. The pseudo-version and `+incompatible` rules are in [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).
+Detection and attribution read each project's lockfile for npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, pub, hex, NuGet, and Maven/Gradle. Go is matched from direct `require` lines in `go.mod`, and from an `// indirect` module that provides a Go 1.24 `tool` package. The pseudo-version and `+incompatible` rules are in [Go modules: pseudo-versions and +incompatible](#go-modules-pseudo-versions-and-incompatible).
 
 ```bash
 # Online detection against OSV
@@ -2699,12 +2731,12 @@ Go modules pin an untagged commit as a pseudo-version (`v0.0.0-20191109021931-da
 
 ##### Which version is compared
 
-The scan reads direct `require` lines in `go.mod`.
+The scan reads direct `require` lines in `go.mod`. A module that appears only as `// indirect` is included when a `tool` directive names a package that module provides: the longest required module path that equals the tool path or is a `/`-bounded prefix of it. That row is a development dependency (`section` `devDependencies`). A module that is also a direct require stays a production dependency. Any other `// indirect` require is left out.
 
 - A concrete `v` version that is valid semver after the leading `v` is removed is the recorded version. `v1.2.3` is recorded as `1.2.3`.
 - Build metadata stays. `v2.0.0+incompatible` is recorded as `2.0.0+incompatible`. The major stays 2. Range checks ignore the suffix.
 - A pseudo-version keeps its pre-release suffix. `v0.0.0-20191109021931-daa7c04131f5` is recorded as `0.0.0-20191109021931-daa7c04131f5`.
-- A bare module path, a range such as `>=1.4.0`, a line marked `// indirect`, and a token that is not a full semver (`v1.2`) are not matched against advisories.
+- A bare module path, a range such as `>=1.4.0`, a line marked `// indirect` that does not provide a `tool`, and a token that is not a full semver (`v1.2`) are not matched against advisories. An indirect module that provides a `tool` is recorded and matched.
 - `go.sum` is not the version source for this match.
 
 A range is half-open: the version matches from `introduced` up to, and not including, `fixed`. `introduced` of `0` means from the beginning. Before that check, the recorded version is reduced to `major.minor.patch`. The pre-release suffix and any build metadata are not ordered against the tag. An explicit `versions` list matches the recorded string exactly, so the list entry still has the pre-release suffix and any build metadata, and has no leading `v`.
@@ -2730,12 +2762,14 @@ The suffix stays on the recorded version. `v2.0.0+incompatible` matches a range 
 
 ##### `replace` and `exclude`
 
-`replace` and `exclude` are not applied before the match.
+`vg scan` applies `replace` after the whole `go.mod` is read, so a directive may sit above or below its `require`. A version on the left (`old v1.2.0 => …`) applies only to that version and wins over a versionless replace of the same module.
 
-- The module path and version on the `require` line are what get matched. A `replace` to a fork, another version, or a local directory does not change that target. A `replace` with no `require` adds nothing.
+- A replacement that names a module and a version is reported as that module and version. The original module path stays on the row as `replacedFrom`. Drift and vulnerability matching use the replacement, not the upstream path.
+- A replacement that is a local path (`./…`, `../…`, or an absolute path) keeps the required module and version, and the scan does not look that module up. The row's drift is `unknown`, so it is not counted as behind. A quoted path (`"../My Lib"`) is a local path too.
+- A `replace` with no `require` adds nothing.
 - An `exclude` line does not add a module, and it does not drop a version that is also required.
 
-The code graph records those same `require` paths, including lines marked `// indirect`, and skips `replace` and `exclude`. The graph does not store the version. Vulnerability matching still skips `// indirect`.
+The code graph records the `require` paths, including lines marked `// indirect`, and does not apply `replace` or `exclude`. The graph does not store the version. Vulnerability matching still skips `// indirect` requires that do not provide a `tool`. The local `replace` in the example below keeps `example.com/replaced-mod` at `v1.0.0` and does not query the module proxy for it.
 
 ##### Check it locally
 
@@ -3171,7 +3205,7 @@ The map's dependency edges come from the manifest. An `external` node is the pac
 |------|---------|-------------|
 | `[paths...]` | `.` | Folders or files to map. A directory outside the working directory is mapped as its own project |
 | `--only <langs>` | — | Restrict to languages (e.g. `ts,py,go`) |
-| `--exclude <glob>` | — | Extra ignore glob (repeatable) |
+| `--exclude <glob>` | — | Extra ignore glob (repeatable). Empty and whitespace-only values are skipped |
 | `--jobs <n>` | auto | Worker count (`1` = single-threaded) |
 | `--scip <file>` | auto-detect | Ingest a SCIP index for precise resolution |
 | `--no-scip` | — | Ignore any SCIP index |
@@ -3348,7 +3382,7 @@ error: `vg verify` has moved to `vg build --verify`
 
 ### Maven and Gradle manifests
 
-`vg scan` and `vg build` read Java build files as text and XML. They do not run Maven or Gradle, and they do not decide which Maven profile is active. A profile that is `activeByDefault`, and a profile that is not, are treated the same: the dependencies inside `<profiles>` are left out of both outputs.
+`vg scan` and `vg build` read Java build files as text and XML. They do not run Maven or Gradle, and they do not decide which Maven profile is active. A profile that is `activeByDefault`, and a profile that is not, are treated the same. `vg scan` reads `<dependencies>` and `<dependencyManagement>` inside every `<profile>`. A profile-only production coordinate is `section` `optionalDependencies`. `vg build` still leaves those coordinates out of `import` edges.
 
 `vg scan` writes one dependency row per coordinate it keeps. The rows are `projects[].dependencies` in `vg scan --format json` and in `.vibgrate/scan_result.json`. `vg build` writes `import` edges in the code map (`graph.json`, or the file you pass to `vg build -o`). `vg show` lists call edges. On a POM-only tree its `calls` list stays empty even when `import` edges exist. Read the map file for those edges.
 
@@ -3358,7 +3392,7 @@ error: `vg verify` has moved to `vg build --verify`
 
 A code-map `import` edge runs from the POM's `package` node to an `external` node. The external name is `groupId:artifactId`. The edge fields are `kind: "import"`, `epistemic: "declared"`, `resolution: "heuristic"`, `confidence: 1`, `count: 1`. There is no version field and no scope field. The package node's qualified name is `groupId:artifactId` when the POM has its own `<groupId>`. When `<groupId>` is only on a parent POM, the qualified name is the `<artifactId>` alone.
 
-A scan row has `package` (`groupId:artifactId`), `section`, `currentSpec`, `resolvedVersion`, `latestStable`, `majorsBehind`, and `drift`. For a Maven coordinate, `section` is `devDependencies` when `<scope>` is `test` (trimmed, any letter case), including when `<optional>` is also true. It is `optionalDependencies` when `<optional>` is true and the scope is not test. `compile`, `runtime`, `provided`, `system`, `import`, a missing scope, and `<optional>false</optional>` stay `dependencies`. A Gradle `testImplementation`, `testRuntimeOnly`, or `testCompileOnly` coordinate is `devDependencies`. `implementation`, `api`, `compileOnly`, `runtimeOnly`, `annotationProcessor`, `kapt`, and a `platform` row stay `dependencies`. A coordinate declared on a production configuration and a test configuration stays `dependencies`, and the production declaration supplies the version. Scope and the Gradle configuration name are not their own fields. A missing resolved version is `null`, and a missing major lag is `null`.
+A scan row has `package` (`groupId:artifactId`), `section`, `currentSpec`, `resolvedVersion`, `latestStable`, `majorsBehind`, and `drift`. For a Maven coordinate, `section` is `devDependencies` when `<scope>` is `test` (trimmed, any letter case), including when `<optional>` is also true. It is `optionalDependencies` when `<optional>` is true and the scope is not test. `compile`, `runtime`, `provided`, `system`, `import`, a missing scope, and `<optional>false</optional>` stay `dependencies`. A coordinate that appears only inside `<profiles>` uses those same scope rules, and a row that would be `dependencies` is stored as `optionalDependencies`. Test scope inside a profile stays `devDependencies`. A Gradle `testImplementation`, `testRuntimeOnly`, or `testCompileOnly` coordinate is `devDependencies`. `implementation`, `api`, `compileOnly`, `runtimeOnly`, `annotationProcessor`, `kapt`, and a `platform` row stay `dependencies`. A coordinate declared on a production configuration and a test configuration stays `dependencies`, and the production declaration supplies the version. Scope and the Gradle configuration name are not their own fields. A missing resolved version is `null`, and a missing major lag is `null`.
 
 `resolvedVersion` is the declared version when that string converts to a semantic version, with a missing patch padded (`1.2` becomes `1.2.0`). `32.1.3-jre` is kept. `1.2.3+build.7` stays `1.2.3+build.7`. `1.2.3-SNAPSHOT` and a Maven range such as `[1.0,2.0)` stay in `currentSpec` and set `resolvedVersion` to `null`. With `--offline`, `latestStable` is `null` and `drift` is `unknown`. A run that can reach Maven Central fills `latestStable` and `drift` from that registry.
 
@@ -3374,7 +3408,7 @@ A scan row has `package` (`groupId:artifactId`), `section`, `currentSpec`, `reso
 | `${…}` that is not a `<properties>` entry in the same file, including `${project.version}` | Included. | Omitted. The unsubstituted text contains `${`. |
 | `<dependencyManagement>` entry in the same file with `groupId`, `artifactId`, and `<version>` (a BOM `<scope>import</scope>` included) | Omitted. | Included when `<dependencies>` does not already name that coordinate. The direct entry is stored first and wins, including its section and version. A pin that is emitted uses the same scope and optional rules. `<scope>import</scope>` stays `section` `dependencies`. |
 | `<dependencyManagement>` entry with no `<version>` | Omitted. | Omitted. |
-| `<dependencies>` or `<dependencyManagement>` inside `<profiles>`, whether or not the profile is `activeByDefault` | Omitted. | Omitted. |
+| `<dependencies>` or `<dependencyManagement>` inside `<profiles>`, whether or not the profile is `activeByDefault` | Omitted. The code map does not read profile blocks. | Included when the entry has a version the scan can keep (a literal, or `${name}` defined in this file's `<properties>`). `<scope>test</scope>` is `section` `devDependencies`. Any other profile-only row is `section` `optionalDependencies`, including `<optional>false</optional>` and a versioned management pin, because activation is not evaluated. A coordinate already present from the top-level `<dependencies>` or `<dependencyManagement>` keeps that top-level row. The same coordinate in a later profile does not replace it. |
 | Version that exists only on a parent POM's `<dependencyManagement>` | Edge from the child POM when the child lists the coordinate under its own top-level `<dependencies>`. The parent's management block is not an edge. | Omitted on the child. The parent file can still have its own row for a versioned management entry in that parent file. |
 | `<dependencies>` nested under a `<plugin>` | Omitted. | Omitted. |
 
@@ -3382,7 +3416,7 @@ A direct dependency and a `<dependencyManagement>` entry for the same coordinate
 
 #### Gradle
 
-`vg scan` reads `build.gradle` and `build.gradle.kts`. The match is a text search over the whole file for these configuration names: `implementation`, `api`, `compileOnly`, `runtimeOnly`, `testImplementation`, `testRuntimeOnly`, `testCompileOnly`, `annotationProcessor`, `kapt`. The coordinate has to be a quoted `group:artifact:version` (`implementation 'g:a:v'` or `implementation("g:a:v")`). `implementation platform('g:a:v')` and `api(platform("g:a:v"))` are included too. The configuration name is not stored. `testImplementation`, `testRuntimeOnly`, and `testCompileOnly` are `section` `devDependencies`. The other names in that list, and a `platform` row, are `section` `dependencies`. A coordinate declared on a production configuration and one of those test configurations is stored once, as `dependencies`, and the production declaration supplies the version.
+`vg scan` reads `build.gradle` and `build.gradle.kts`. The match is a text search over the whole file for these configuration names: `implementation`, `api`, `compileOnly`, `runtimeOnly`, `testImplementation`, `testRuntimeOnly`, `testCompileOnly`, `annotationProcessor`, `kapt`. The coordinate is a quoted `group:artifact:version` (`implementation 'g:a:v'` or `implementation("g:a:v")`), or a `libs…` alias from `gradle/libs.versions.toml`. `implementation platform('g:a:v')`, `api(platform("g:a:v"))`, and `platform(libs…)` on `implementation` or `api` are included too. The configuration name is not stored. `testImplementation`, `testRuntimeOnly`, and `testCompileOnly` are `section` `devDependencies`. The other names in that list, and a `platform` row, are `section` `dependencies`. A coordinate declared on a production configuration and one of those test configurations is stored once, as `dependencies`, and the production declaration supplies the version.
 
 | Declaration | `vg build` import edge | `vg scan` row |
 | --- | --- | --- |
@@ -3391,10 +3425,16 @@ A direct dependency and a `<dependencyManagement>` entry for the same coordinate
 | Same configurations with no version (`implementation 'g:a'`) | Omitted. | Omitted. A `gradle.lockfile` line for that coordinate does not add the row. |
 | Dynamic version such as `1.+`, with `gradle.lockfile` beside the build file containing `group:artifact:1.4.2=runtimeClasspath` | Omitted. The lockfile is not a map input. | Included. `currentSpec` stays `1.+`. `resolvedVersion` is `1.4.2`. |
 | Custom configuration (`integrationTestImplementation`, `smoke`), legacy `compile`, Spring `developmentOnly` | Omitted. | Omitted. |
-| Version catalog (`implementation(libs.guava)`), map notation (`group:`, `name:`, `version:`), `project(':core')` | Omitted. | Omitted. |
-| A matching configuration string in a comment, or inside `constraints { }` | Omitted. | Included. The search does not know comments or which block it is in. |
+| `libs.<alias>` on a configuration in the list above. Groovy `implementation libs.guava` and `implementation(libs.guava)`. Kotlin `implementation(libs.guava)` and `implementation(libs.guava.get())`. | Omitted. | Included when `gradle/libs.versions.toml` defines that library with a version. `-`, `_`, and `.` in the alias are dots in the accessor (`junit-jupiter` is `libs.junit.jupiter`). `currentSpec` is that version. `version.ref` reads `[versions]`. A string `group:artifact:version`, `{ module = "g:a", version = "…" }`, and `{ group, name, version }` are all read. `version.require`, `version.strictly`, and `version.prefer` supply the pin when there is no `version.ref`. |
+| `libs.bundles.<alias>` on a configuration in the list above | Omitted. | Included. Each `[bundles]` member that resolves to a versioned library becomes its own row on that configuration. |
+| `implementation(platform(libs.<alias>))` or `api(platform(libs.<alias>))` | Omitted. | Included, same as a quoted platform coordinate. |
+| Alias with no version, a `version.ref` that is not in `[versions]`, or no matching library | Omitted. | Omitted. A `gradle.lockfile` line for that coordinate does not add the row. |
+| Map notation (`group:`, `name:`, `version:`), `project(':core')`, `[plugins]` aliases | Omitted. | Omitted. |
+| A matching configuration string in a comment, or inside `constraints { }` | Omitted. | Included. The search does not know comments or which block it is in. The same is true of a `libs…` alias in a comment. |
 
-`gradle.lockfile` lines look like `group:artifact:version=conf1,conf2`. Blank lines, `#` comments, and `empty=` are skipped. The first line for a coordinate wins. The configuration list on that line is not copied onto the row. The lockfile version is used for `resolvedVersion` only when the build file already contributed that coordinate with a non-empty version string. `currentSpec` stays the declared text.
+`gradle/libs.versions.toml` is read from the directory that contains the build file. When that file is absent, parent directories are searched up to the directory you scanned. A catalog file that is present but not valid TOML is ignored, and a parent catalog is not used in its place. The first library alias that normalizes to the same accessor wins. `[plugins]` is not a dependency.
+
+`gradle.lockfile` lines look like `group:artifact:version=conf1,conf2`. Blank lines, `#` comments, and `empty=` are skipped. The first line for a coordinate wins. The configuration list on that line is not copied onto the row. The lockfile version is used for `resolvedVersion` only when the build file already contributed that coordinate with a non-empty version string, including a version that came from the catalog. `currentSpec` stays the declared text or the catalog version. When both the catalog and the lockfile name the coordinate, the lockfile pin is `resolvedVersion`.
 
 #### Same directory
 
@@ -3402,21 +3442,21 @@ A directory that contains both `pom.xml` and `build.gradle` (or `build.gradle.kt
 
 #### Gaps
 
-- Profile activation is not evaluated. Active and inactive profile dependencies are both omitted from `vg scan` and from `vg build`.
+- Profile activation is not evaluated. A profile that is `activeByDefault` and a profile that is not are read the same way. `vg scan` keeps a coordinate from `<dependencies>` or `<dependencyManagement>` inside `<profiles>`. A coordinate already declared at the top level keeps that top-level row. A coordinate that appears in more than one profile is stored once, from the first versioned entry in the file. A profile-only row whose scope is `test` is `devDependencies`. Any other profile-only row, including a production scope and a versioned management pin, is `optionalDependencies`. `vg build` still omits those coordinates from `import` edges.
 - `import` edges never carry a version or a scope, including when the POM has both.
 - Gradle dependencies never become `import` edges. `gradle.lockfile` is not read by `vg build`.
 - A Maven `<scope>test</scope>` row is `section: "devDependencies"`. `<optional>true</optional>` is `section: "optionalDependencies"`. Test scope wins when both are set. Other Maven scopes stay `section: "dependencies"`. Gradle `testImplementation`, `testRuntimeOnly`, and `testCompileOnly` are `section: "devDependencies"`. A coordinate also declared on `implementation`, `api`, `compileOnly`, `runtimeOnly`, `annotationProcessor`, `kapt`, or `platform` stays `section: "dependencies"`. The configuration name is not a scan field.
 - A versioned `<dependencyManagement>` entry becomes a scan row even when the POM does not depend on that artifact. A BOM import can show up as its own row.
 - Parent POMs, imported BOMs that this file does not restate, and `${project.version}` do not fill a missing child version.
-- A `gradle.lockfile` does not create a row for a coordinate the build file declared without a version.
-- The Gradle reader is a text search. Commented-out lines and `constraints` blocks that contain a recognized configuration become rows. Custom configurations, catalogs, map notation, and `project()` dependencies do not.
+- A `gradle.lockfile` does not create a row for a coordinate the build file declared without a version, and it does not create a row for a catalog alias that has no version.
+- The Gradle reader is a text search. Commented-out lines and `constraints` blocks that contain a recognized configuration become rows. Custom configurations, map notation, and `project()` dependencies do not. A `libs…` alias is included only when the version catalog supplies a version.
 - Two manifests in one directory do not have a defined winner.
 
 #### Recover a missing version
 
-**Maven, scan row missing.** Put a literal `<version>` on the `<dependency>` in that same `pom.xml`, or use `${name}` with `<name>` defined in that file's `<properties>`. A versioned `<dependencyManagement>` entry in that same file also creates the row. Move a profile coordinate you need scored into the top-level `<dependencies>` or into that file's `<dependencyManagement>`, with a version. Repeat a parent-managed or BOM-managed version in this file. Replace `${project.version}` with a literal or with a `<properties>` entry in this file.
+**Maven, scan row missing.** Put a literal `<version>` on the `<dependency>` in that same `pom.xml`, or use `${name}` with `<name>` defined in that file's `<properties>`. A versioned `<dependencyManagement>` entry in that same file also creates the row, including one inside `<profiles>`. A profile coordinate with a version is already a scan row. It is `optionalDependencies` unless its scope is `test`. Declare it in the top-level `<dependencies>` when it should be a required production row. Repeat a parent-managed or BOM-managed version in this file. Replace `${project.version}` with a literal or with a `<properties>` entry in this file.
 
-**Gradle, scan row missing.** Declare `group:artifact:version` on `implementation`, `api`, `compileOnly`, `runtimeOnly`, `testImplementation`, `testRuntimeOnly`, `testCompileOnly`, `annotationProcessor`, or `kapt`, or use `implementation platform('g:a:v')` / `api(platform("g:a:v"))`. A declaration with no version stays omitted; add the version on that line. `gradle.lockfile` then supplies `resolvedVersion` for a dynamic declared version (`1.+`) and leaves `currentSpec` as the text you wrote. Generate the lockfile with Gradle's dependency locking so the line is `group:artifact:version=configurations`, and keep it next to the build file. For a custom configuration or a version-catalog alias, declare the same coordinate again on one of the configurations above. Delete a commented-out coordinate if it should not be a row.
+**Gradle, scan row missing.** Declare `group:artifact:version` on `implementation`, `api`, `compileOnly`, `runtimeOnly`, `testImplementation`, `testRuntimeOnly`, `testCompileOnly`, `annotationProcessor`, or `kapt`, or use `implementation platform('g:a:v')` / `api(platform("g:a:v"))`. A `libs…` alias on one of those configurations is included when `gradle/libs.versions.toml` maps it to a group, an artifact, and a version, including `version.ref` and a `libs.bundles…` alias. Put that file in the project's `gradle/` directory, or in a parent directory up to the directory you scanned. A declaration with no version stays omitted; add the version on that line or in the catalog. `gradle.lockfile` then supplies `resolvedVersion` for a dynamic declared version (`1.+`) or a catalog pin, and leaves `currentSpec` as the text you wrote or the catalog version. Generate the lockfile with Gradle's dependency locking so the line is `group:artifact:version=configurations`, and keep it next to the build file. For a custom configuration, declare the same coordinate again on one of the configurations above. Delete a commented-out coordinate if it should not be a row.
 
 **`resolvedVersion` is null.** The row is present and `currentSpec` holds the declared text, and the text is not a semantic version (`1.2.3-SNAPSHOT`, `[1.0,2.0)`, `1.+` with no lockfile pin). Pin a semantic version in the declaration, or add a `gradle.lockfile` pin for a dynamic Gradle version.
 
@@ -3502,7 +3542,7 @@ vg scan --offline --format json --out scan.json --no-graph
 
 `com.squareup.okhttp3:okhttp` and `com.google.code.gson:gson` were not edges. `vg show demo --json` reported `calls` and `calledBy` as empty arrays.
 
-`vg scan --offline` wrote these rows (`latestStable` and `majorsBehind` are `null`, `drift` is `unknown`, because the run did not ask Maven Central). `org.slf4j:slf4j-api` and `gson` are absent:
+`vg scan --offline` wrote these rows (`latestStable` and `majorsBehind` are `null`, `drift` is `unknown`, because the run did not ask Maven Central). `org.slf4j:slf4j-api` is absent because it has no `<version>`:
 
 ```json
 [
@@ -3511,6 +3551,15 @@ vg scan --offline --format json --out scan.json --no-graph
     "section": "dependencies",
     "currentSpec": "2.17.0",
     "resolvedVersion": "2.17.0",
+    "latestStable": null,
+    "majorsBehind": null,
+    "drift": "unknown"
+  },
+  {
+    "package": "com.google.code.gson:gson",
+    "section": "optionalDependencies",
+    "currentSpec": "2.10.1",
+    "resolvedVersion": "2.10.1",
     "latestStable": null,
     "majorsBehind": null,
     "drift": "unknown"
@@ -3545,7 +3594,7 @@ vg scan --offline --format json --out scan.json --no-graph
 ]
 ```
 
-The test-scoped JUnit row uses `section: "devDependencies"`. OkHttp is a row because `<dependencyManagement>` in this file carries a version, and that pin has no test scope and no optional flag, so its section is `dependencies`. Gson stays out because it lives in a profile, including one marked `activeByDefault`.
+The test-scoped JUnit row uses `section: "devDependencies"`. OkHttp is a row because `<dependencyManagement>` in this file carries a version, and that pin has no test scope and no optional flag, so its section is `dependencies`. Gson is a row because it lives in a profile. The profile is marked `activeByDefault`, and that flag is not read. The coordinate is not declared at the top level and its scope is not `test`, so its section is `optionalDependencies`. `vg build` still has no `import` edge for Gson.
 
 #### Example: Gradle
 
@@ -3827,7 +3876,10 @@ With no `--provider`, `vg code` chooses from what you have already configured, b
 | Flag | Default | Description |
 |------|---------|-------------|
 | `<instruction>` | — | What to change, in plain language. Omit it at a TTY for guided mode. |
-| `--provider <id>` | auto | `vibgrate-relay`, `ollama`, `lmstudio`, `foundry-local`, `openrouter`, `litellm`, `openai`, `together`, `llama-cpp` |
+| `--provider <id>` | auto | `vibgrate-relay`, `ollama`, `lmstudio`, `foundry-local`, `openrouter`, `litellm`, `openai`, `together`, `llama-cpp`, or `grok-build` (run the task on Grok Build over ACP, see below) |
+| `--acp-command <cmd>` | — | Run the task on an external Agent Client Protocol (ACP) agent instead of VG Code's own loop, e.g. `"grok agent stdio"` |
+| `--inject-capsule` | — | ACP agents: add the code graph's context for the task to the first prompt |
+| `--no-acp-mcp` | — | ACP agents: do not offer the local `vg serve` graph tools to the agent |
 | `--model <id>` | — | Model id (or set `VG_CODE_MODEL`) |
 | `--mode <mode>` | auto-fit | Code Mode: `spark` \| `flow` \| `forge` — preferred over raw model names |
 | `--model-path <gguf>` | — | GGUF path for `--provider llama-cpp` (weights are never auto-downloaded) |
@@ -3851,9 +3903,37 @@ With no `--provider`, `vg code` chooses from what you have already configured, b
 | `--session` | — | With `--stream-json`: stay open for further turns instead of exiting after one |
 | `--mock <file>` | — | Use a scripted reply instead of a model (offline; tests/CI/benchmarks) |
 | `-o, --out <file>` | — | Write the JSON result to a file (for CI/benchmarks) |
+| `--profile` | — | Print a one-line profile after each turn to stderr (steps, wall time, stop reason, tool calls, changes, visible activity lines) |
+| `--profile-out <file>` | — | Append one JSON profile record per turn to `<file>` (JSONL) |
+| `--trace-out <file>` | — | Append every protocol event, timestamped, to `<file>` (NDJSON audit trace) |
+| `--acp-log <file>` | — | ACP agents: append the raw protocol messages to `<file>` |
 | `--local` (global) | — | On-device model backends only — never a hosted model. Implies `--offline` |
 
 `--stream-json` is the protocol **Vibgrate for VS Code** speaks to the CLI: the panel renders the agent's steps, approves or denies each mutating tool call over stdin, and with `--session` keeps one warm graph across turns. It is a supported surface for any host UI, not just ours.
+
+Protocol version 6 adds two summary events so a host can keep the transcript short. An `activity` event folds a burst of tool calls into one line, such as `Explored 4 items · Edited 2 files · +18 −7`, and updates that line in place as the burst grows. A `changes-summary` event closes a turn that changed files with one card: each file with its net lines added and removed. The per-call events still arrive, so a host can show them in a debug view, and a host built for version 5 keeps working unchanged.
+
+#### Use Grok Build as the agent
+
+`vg code --provider grok-build "add a --timeout flag to the scan command"` runs the task on Grok Build (`grok agent stdio`) over the Agent Client Protocol (ACP) instead of VG Code's own loop. The rules around the agent stay the same:
+
+- Each edit and command still asks for your approval, or runs under `--auto` with the command denylist. Standing allow rules from `.vibgrate/code-approvals.json` apply.
+- Approved edits are checkpointed, so they can be undone.
+- Plan mode stays read-only: VG Code refuses every write and asks the agent to switch to its own plan mode when it has one.
+- File reads and writes the agent asks VG Code for stay inside the repository.
+- `--stream-json` and `--session` send the same events as the built-in loop, so the VS Code panel shows the same approval cards, activity lines, and Changes card.
+
+Install Grok Build and sign in first (`npm install -g @xai-official/grok`, then `grok login`). Grok Build signs in by itself, and the credential never passes through `vg`. For each session, VG Code offers the agent the local code graph tools (`vg serve`) as an MCP server. Pass `--no-acp-mcp` to skip that, or `--inject-capsule` to also add the graph's context for the task to the first prompt. `--acp-command "<cmd>"` runs any other ACP agent the same way.
+
+#### Profile a turn
+
+`--profile` prints one line per turn to stderr:
+
+```
+profile: steps=<n> stop=<reason> wall=<seconds>s tools=<n> changes=<n> activity=<lines> cards=<n> ttft=<seconds>s clean=yes|no backend=<id>
+```
+
+`activity` and `cards` count what a host following the default rendering rules shows: activity lines and Changes cards. `--profile-out <file>` appends the full record for each turn as JSON lines. `--trace-out <file>` appends every protocol event with its time offset, for auditing a run after the fact. `--acp-log <file>` records the raw messages exchanged with an ACP agent. Hosts that start `vg` for you can set `VG_CODE_PROFILE=1`, `VG_CODE_PROFILE_OUT`, `VG_CODE_TRACE_OUT`, and `VG_CODE_ACP_LOG` instead. These files stay on your machine, and credential-shaped values are masked before anything is written.
 
 Add `--json` for the full machine-readable result (proposed changes, diffs, and the verification summary), or `--out <file>` to write it for CI. Requires a map — run `vg` first if you have not built one.
 
@@ -4055,11 +4135,12 @@ The label uses the first version it can read:
 
 `--json` reports that choice as `source`: `lockfile`, `installed`, `declared`, or `unknown`.
 
-Readers open these filenames in the directory you run from (`-C` changes it). A lockfile that lives only in a subdirectory is left unread. For npm, the first file that contains the name wins.
+Readers open these filenames in the directory you run from (`-C` changes it). A lockfile that lives only in a subdirectory is left unread. For npm, the first file that contains the name wins. `package-lock.json` is preferred over `npm-shrinkwrap.json` when both are present.
 
 | Ecosystem | File | What is read |
 |-----------|------|----------------|
 | npm | `package-lock.json` | v2/v3: `packages["node_modules/<name>"].version`. v1: `dependencies.<name>.version`. |
+| npm | `npm-shrinkwrap.json` | The same fields as `package-lock.json`. Read when `package-lock.json` is absent. |
 | npm | `pnpm-lock.yaml` | The importer entry's `version`. A peer suffix such as `(zod@4.0.0)` is removed. |
 | npm | `yarn.lock` | The `version` line in the block whose header names the package. |
 | Python | `poetry.lock`, then `uv.lock` | `version` on the `[[package]]` table with that name. Matching ignores case and treats `-`, `_`, and `.` as the same character. |
@@ -4072,7 +4153,7 @@ Readers open these filenames in the directory you run from (`-C` changes it). A 
 | Dart | `pubspec.lock` | The `version` field on that package. |
 | Java | `gradle.lockfile` | The version in a `group:artifact:version=` line. Pass the name as `group:artifact`. |
 
-The pin lookup skips `go.sum` (Go keeps the version declared in `go.mod`), `pdm.lock`, `npm-shrinkwrap.json`, `bun.lock`, and Maven lockfiles. A Java dependency declared only in `pom.xml` uses that declared version.
+The pin lookup skips `go.sum` (Go keeps the version declared in `go.mod`), `pdm.lock`, `bun.lock`, and Maven lockfiles. A Java dependency declared only in `pom.xml` uses that declared version.
 
 The text is chosen separately from the label:
 
@@ -5622,6 +5703,13 @@ The warning names each file, the `driftBudget` value in that file, and which
 file is the config in use (the first one in the lookup order). The other
 files are not read. The same settings in a different key order do not warn.
 Only the `driftBudget` value is printed, not the rest of the file.
+
+An empty or whitespace-only `exclude` entry is skipped, and so is a blank
+`.gitignore` line — including a file whose only content is a carriage return,
+or a carriage return left after the last newline. A blank entry never hides
+the project. A real pattern written next to one still applies, for both
+`vg build` and `vg scan`, including the lockfile check those commands run
+before they read source.
 
 ### Drift budget
 
