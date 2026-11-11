@@ -137,7 +137,7 @@ The same rule applies where the lockfile carries a source URL. The URL is a know
 | `Cargo.lock` | `source` (a registry index URL, a `git+` URL, or absent for a path crate) | `name` and `version`. Ecosystem `rust`. Purl `pkg:cargo/<name>@<version>`. A git `source` and a path crate use that same purl type. `checksum` is the digest when it is 64 hex characters. |
 | `poetry.lock`, `uv.lock` | `source` | `name` and `version`. Ecosystem `pypi`. |
 | `Package.resolved` | `location` | `state.version`, keyed by `identity`. A pin with no `state.version` is skipped. `location` is not the version. |
-| `packages.lock.json` (NuGet) | — | The field named `resolved` is the version string, not a URL. That string is the installed version. |
+| `packages.lock.json` (NuGet) | — | The field named `resolved` is the version string, not a URL. That string is the installed version. `Direct` and `Transitive` entries are components (`pkg:nuget/<id>@<version>`). `Project` entries are omitted. `contentHash` is the SHA-512 digest. |
 
 ## Credentials stay out of identity
 

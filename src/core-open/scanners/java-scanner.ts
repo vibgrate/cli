@@ -10,6 +10,11 @@ import { withTimeout } from '../utils/timeout.js';
 import { MavenCache } from './maven-cache.js';
 import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { loadGradleLockIndex, type GradleLockIndex } from './gradle-lockfile.js';
+import {
+  gradleCatalogUses,
+  loadGradleVersionCatalog,
+  type GradleVersionCatalog,
+} from './gradle-version-catalog.js';
 import type { LockfileIo } from './npm-lockfile.js';
 import { latestLts, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
@@ -191,15 +196,14 @@ function parsePom(xml: string, filePath: string): PomData {
     }
   }
 
-  // Extract dependencies
-  const depContainer = project.dependencies;
-  const rawDeps = depContainer?.dependency
-    ? (Array.isArray(depContainer.dependency) ? depContainer.dependency : [depContainer.dependency])
-    : [];
-
-  const dependencies: PomDependency[] = rawDeps
-    .filter((d: Record<string, unknown>) => d.groupId && d.artifactId)
-    .map((d: Record<string, unknown>) => readPomDependency(d, properties));
+  // Extract dependencies. Top-level blocks are stored first. The scan
+  // keeps the first versioned coordinate, so a later profile entry does not
+  // replace a top-level row.
+  const dependencies: PomDependency[] = [];
+  appendPomDependencies(dependencies, project.dependencies, properties, {
+    requireVersion: false,
+    profileOnly: false,
+  });
 
   // `<dependencyManagement>` is a version pin, not a declaration that this
   // project uses the artifact. A versioned pin is still emitted as its own
@@ -208,15 +212,29 @@ function parsePom(xml: string, filePath: string): PomData {
   // optional on the pin use the same section rules, so a test or optional
   // pin is not recorded as a production dependency. `<scope>import</scope>`
   // (a BOM) is not test, so that pin stays `dependencies`.
-  const mgmt = project.dependencyManagement?.dependencies;
-  const mgmtDeps = mgmt?.dependency
-    ? (Array.isArray(mgmt.dependency) ? mgmt.dependency : [mgmt.dependency])
-    : [];
+  appendPomDependencies(dependencies, project.dependencyManagement?.dependencies, properties, {
+    requireVersion: true,
+    profileOnly: false,
+  });
 
-  for (const d of mgmtDeps) {
-    if (d.groupId && d.artifactId && d.version) {
-      dependencies.push(readPomDependency(d as Record<string, unknown>, properties));
-    }
+  // `<profiles><profile>` may be one object or an array. Activation is not
+  // evaluated: `activeByDefault` and an inactive profile are both read.
+  // Profile `<dependencies>` and `<dependencyManagement>` use the same scope
+  // and optional rules. A profile-only production row is marked optional,
+  // because that coordinate applies only when the profile is active.
+  for (const profile of xmlList<{
+    dependencies?: unknown;
+    dependencyManagement?: { dependencies?: unknown };
+  }>(project.profiles?.profile)) {
+    if (!profile || typeof profile !== 'object') continue;
+    appendPomDependencies(dependencies, profile.dependencies, properties, {
+      requireVersion: false,
+      profileOnly: true,
+    });
+    appendPomDependencies(dependencies, profile.dependencyManagement?.dependencies, properties, {
+      requireVersion: true,
+      profileOnly: true,
+    });
   }
 
   // Modules
@@ -246,6 +264,41 @@ function parsePom(xml: string, filePath: string): PomData {
     parent,
     properties,
   };
+}
+
+/** One XML child is an object; several children are an array. */
+function xmlList<T>(value: T | T[] | undefined | null): T[] {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function appendPomDependencies(
+  dependencies: PomDependency[],
+  container: unknown,
+  properties: Record<string, string>,
+  options: { requireVersion: boolean; profileOnly: boolean },
+): void {
+  if (!container || typeof container !== 'object') return;
+  const nodes = xmlList<Record<string, unknown>>(
+    (container as { dependency?: Record<string, unknown> | Record<string, unknown>[] }).dependency,
+  );
+  for (const d of nodes) {
+    if (!d || typeof d !== 'object' || !d.groupId || !d.artifactId) continue;
+    if (options.requireVersion && !d.version) continue;
+    const dep = readPomDependency(d, properties);
+    dependencies.push(options.profileOnly ? markProfileOnlyDependency(dep) : dep);
+  }
+}
+
+/**
+ * Profile activation is not evaluated. A profile-only row that would be a
+ * production dependency is optional. `<scope>test</scope>` stays a dev row
+ * and still wins over optional.
+ */
+function markProfileOnlyDependency(dep: PomDependency): PomDependency {
+  if (dep.scope?.trim().toLowerCase() === 'test') return dep;
+  if (dep.optional) return dep;
+  return { ...dep, optional: true };
 }
 
 function resolveProperty(value: string, properties: Record<string, string>): string {
@@ -345,8 +398,32 @@ function considerGradleDep(deps: GradleDependency[], dep: GradleDependency): voi
   }
 }
 
-export function parseGradleBuild(content: string, filePath: string): GradleData {
-  const deps: GradleDependency[] = [];
+const GRADLE_CONFIG_NAMES = 'implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|testCompileOnly|annotationProcessor|kapt';
+
+interface GradleDepEvent {
+  index: number;
+  dep: GradleDependency;
+}
+
+function pushGradleCoord(events: GradleDepEvent[], index: number, notation: string, configuration: string): void {
+  const parts = notation.split(':');
+  if (parts.length < 2) return;
+  events.push({
+    index,
+    dep: {
+      groupId: parts[0]!,
+      artifactId: parts[1]!,
+      version: parts[2] ?? '',
+      configuration,
+    },
+  });
+}
+
+export function parseGradleBuild(
+  content: string,
+  filePath: string,
+  catalog?: GradleVersionCatalog | null,
+): GradleData {
   const projectName = path.basename(path.dirname(filePath));
 
   // Detect Java/JVM version
@@ -360,51 +437,45 @@ export function parseGradleBuild(content: string, filePath: string): GradleData 
   const toolchainMatch = content.match(/JavaLanguageVersion\.of\((\d+)\)/);
   if (toolchainMatch) javaVersion = toolchainMatch[1];
 
-  const configNames = 'implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|testCompileOnly|annotationProcessor|kapt';
+  const events: GradleDepEvent[] = [];
 
   // Parse dependencies: implementation 'group:artifact:version'
   // The optional parenthesis also matches Kotlin DSL `implementation("g:a:v")`.
-  const depRegex = new RegExp(`(?:${configNames})\\s*(?:\\(?\\s*)?['"]([^'"]+)['"]`, 'g');
+  const depRegex = new RegExp(`(?:${GRADLE_CONFIG_NAMES})\\s*(?:\\(?\\s*)?['"]([^'"]+)['"]`, 'g');
   let match: RegExpExecArray | null;
   while ((match = depRegex.exec(content)) !== null) {
-    const parts = match[1]!.split(':');
-    if (parts.length >= 2) {
-      considerGradleDep(deps, {
-        groupId: parts[0]!,
-        artifactId: parts[1]!,
-        version: parts[2] ?? '',
-        configuration: bareGradleConfiguration(match[0]!),
-      });
-    }
+    pushGradleCoord(events, match.index, match[1]!, bareGradleConfiguration(match[0]!));
   }
 
   // Parse Kotlin DSL: implementation("group:artifact:version")
-  const kotlinDepRegex = new RegExp(`(?:${configNames})\\s*\\(\\s*"([^"]+)"\\s*\\)`, 'g');
+  const kotlinDepRegex = new RegExp(`(?:${GRADLE_CONFIG_NAMES})\\s*\\(\\s*"([^"]+)"\\s*\\)`, 'g');
   while ((match = kotlinDepRegex.exec(content)) !== null) {
-    const parts = match[1]!.split(':');
-    if (parts.length >= 2) {
-      considerGradleDep(deps, {
-        groupId: parts[0]!,
-        artifactId: parts[1]!,
-        version: parts[2] ?? '',
-        configuration: bareGradleConfiguration(match[0]!),
-      });
-    }
+    pushGradleCoord(events, match.index, match[1]!, bareGradleConfiguration(match[0]!));
   }
 
   // Parse platform/BOM dependencies
   const platformRegex = /(?:implementation|api)\s*(?:\(?\s*)?platform\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   while ((match = platformRegex.exec(content)) !== null) {
-    const parts = match[1]!.split(':');
-    if (parts.length >= 2) {
-      considerGradleDep(deps, {
-        groupId: parts[0]!,
-        artifactId: parts[1]!,
-        version: parts[2] ?? '',
-        configuration: 'platform',
+    pushGradleCoord(events, match.index, match[1]!, 'platform');
+  }
+
+  if (catalog) {
+    for (const use of gradleCatalogUses(content, catalog, GRADLE_CONFIG_NAMES)) {
+      events.push({
+        index: use.index,
+        dep: {
+          groupId: use.groupId,
+          artifactId: use.artifactId,
+          version: use.version,
+          configuration: use.configuration,
+        },
       });
     }
   }
+
+  events.sort((a, b) => a.index - b.index);
+  const deps: GradleDependency[] = [];
+  for (const event of events) considerGradleDep(deps, event.dep);
 
   return { javaVersion, dependencies: deps, projectName };
 }
@@ -502,6 +573,15 @@ async function scanOneJavaProject(
   const allDeps = new Map<string, { groupId: string; artifactId: string; version: string; scope?: string; optional?: boolean; configuration?: string }>();
   const projectReferences: ProjectReference[] = [];
 
+  // Shared by the version catalog and gradle.lockfile. The lockfile is applied
+  // later and wins for resolvedVersion; the catalog only fills declared pins.
+  const lockIo: LockfileIo = {
+    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
+    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
+    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
+  };
+  const versionCatalog = await loadGradleVersionCatalog(dir, rootDir, lockIo);
+
   // Parse manifests — prefer pom.xml over Gradle
   for (const f of manifestFiles) {
     const fileName = path.basename(f);
@@ -528,7 +608,7 @@ async function scanOneJavaProject(
         });
       }
     } else if (fileName === 'build.gradle' || fileName === 'build.gradle.kts') {
-      const gradle = parseGradleBuild(content, f);
+      const gradle = parseGradleBuild(content, f, versionCatalog);
       if (gradle.projectName) projectName = gradle.projectName;
       if (gradle.javaVersion) javaVersion = gradle.javaVersion;
 
@@ -573,13 +653,9 @@ async function scanOneJavaProject(
   }
 
   // Gradle's optional dependency locking pins exact resolved versions in gradle.lockfile (beside
-  // build.gradle). Prefer it over the declared/BOM-supplied version. Maven projects have no such
-  // file, so this is a no-op there.
-  const lockIo: LockfileIo = {
-    exists: (p) => (cache ? cache.pathExists(p) : pathExists(p)),
-    readText: (p) => (cache ? cache.readTextFile(p) : readTextFile(p)),
-    readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
-  };
+  // build.gradle). Prefer it over the declared version, a version-catalog pin, and a BOM-supplied
+  // version. currentSpec stays the declared or catalog text. Maven projects have no such file, so
+  // this is a no-op there.
   const lockIndex: GradleLockIndex | null = await loadGradleLockIndex(dir, lockIo).catch((err: unknown) => {
     rethrowLockfileParseError(err);
     return null;

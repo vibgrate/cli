@@ -68,7 +68,7 @@ export function registerBuild(program: Command): void {
       'folders or files to map (default: the working directory). A directory outside the working directory is mapped as its own project',
     )
     .option('--only <langs>', 'restrict to languages, e.g. ts,py,go')
-    .option('--exclude <glob>', 'extra ignore glob (repeatable)', collect, [])
+    .option('--exclude <glob>', 'extra ignore glob (repeatable). Empty and whitespace-only values are skipped', collect, [])
     .option('--no-html', 'do not write graph.html')
     .option('--no-report', 'do not write GRAPH_REPORT.md')
     .option('--no-ground', 'do not attach grounding (Phase 2)')

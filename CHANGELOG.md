@@ -14,6 +14,53 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` reports a .NET runtime inherited from `Directory.Build.props`.** A project that sets neither `TargetFramework` nor `TargetFrameworks` takes them from the nearest `Directory.Build.props` between that project and the scanned directory. A value in the project file wins. A value that contains `$(`, such as `$(DefaultTfm)`, is not reported as a runtime (#627).
+
+- **`vg scan` and `vg sbom export` include NuGet packages pinned in `Directory.Packages.props`.** A `<PackageReference>` with no `Version` takes the matching `<PackageVersion>` from the nearest `Directory.Packages.props` between the project and the scanned directory. The package id matches without regard to letter case. `VersionOverride` on the reference wins. A reference whose version cannot be resolved stays in the scan and the SBOM with version `unknown`.
+
+- **A blank `.gitignore` line no longer hides lockfiles.** `vg build` and
+  `vg scan` already skipped empty and whitespace-only exclude patterns and
+  blank ignore lines while discovering source. The lockfile check read
+  `.gitignore` raw, so a carriage return that was not part of a CRLF pair —
+  including a file that contains only `\r`, or a real rule followed by a bare
+  `\r` — was compiled as a pattern that matches every path. Lockfiles were
+  then skipped and a truncated lockfile did not fail the command. Those lines
+  are dropped. A real pattern next to a blank one still applies.
+
+- **`vg scan` reads every Dockerfile and Compose file in a directory.**
+  `Containerfile`, `Dockerfile.<suffix>`, and `<name>.Dockerfile` are Dockerfiles.
+  `docker-compose.yml` / `.yaml`, `compose.yml` / `.yaml`, and
+  `docker-compose.<name>.yml` / `.yaml` and `compose.<name>.yml` / `.yaml`
+  overrides are Compose files. A directory that has more than one is parsed
+  in full. Image rows stay deduplicated on name and tag (#580).
+
+- **`vg scan` expands PEP 735 `{include-group}` entries in `[dependency-groups]`.**
+  An include pulls in that group's requirements from the same `pyproject.toml`.
+  Group names are normalised (lowercase; runs of `-`, `_`, and `.` collapse to
+  `-`), so `Dev_Tools` and `dev-tools` are one group. An include cycle stops
+  at the repeated group and writes one warning. Production and optional
+  section precedence is unchanged.
+
+- **`vg scan` reads Elixir keyword options in `mix.exs`.** A dependency tuple with a keyword list of any length is a scan row, including a tuple written across multiple lines. `only: :dev`, `only: :test`, and a list whose every environment is `:dev` or `:test` are section `devDependencies`. `only: [:dev, :prod]` stays a production dependency. `optional: true` is section `optionalDependencies`, and a development `only:` wins when both are set. `optional: false` stays section `dependencies`. A `git:`, `github:`, `path:`, or `in_umbrella:` dependency is still skipped. Development rows are not looked up on Hex and do not change drift age buckets.
+
+- **`vg sbom export` marks .NET `PrivateAssets="all"` package references as development dependencies.** A `<PackageReference>` whose `PrivateAssets` attribute or child element is `all` (trimmed, any letter case) is stored as section `devDependencies`. CycloneDX component `scope` is `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. Any other value, including `compile`, and a reference with no `PrivateAssets`, stays section `dependencies`. The same package referenced again in that project without `PrivateAssets=all` stays a production dependency, and the production reference supplies the version. `vibgrate:scope` stays `direct`.
+
+- **`vg sbom export` marks Cargo dev and build crates as development dependencies.** A crate declared only in `Cargo.toml` `[dev-dependencies]`, `[build-dependencies]`, or a `[target.<spec>.dev-dependencies]` or `[target.<spec>.build-dependencies]` table is stored as section `devDependencies`. CycloneDX component `scope` is `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. `vibgrate:scope` stays `direct`. `[target.<spec>.dependencies]` maps to `[dependencies]`, including `optional = true`. The target spec may be a single-quoted cfg, a double-quoted cfg with an escaped quote, or a bare triple. A crate that is also in a production table stays a production row, and that production declaration supplies the version. `[dependencies]` wins over a target production table. `[dev-dependencies]` wins over `[build-dependencies]`. Production drift buckets do not include dev or build crates.
+
+- **`vg sbom export` marks Pipfile dev packages and dev requirements files as development dependencies.**
+  A package declared only in `Pipfile` `[dev-packages]`, or only in a requirements
+  file whose base name has a `dev` or `test` segment (`requirements-dev.txt`,
+  `requirements_dev.txt`, `requirements-test.txt`, `dev-requirements.txt`), is
+  stored as section `devDependencies`. CycloneDX component `scope` is `excluded`,
+  and SPDX writes `DEV_DEPENDENCY_OF`. `vibgrate:scope` stays `direct`.
+  `[packages]` and `requirements.txt` stay production rows. A package that is
+  also in a production manifest row stays a production row, and that production
+  declaration supplies the spec, whichever file is read first.
+
+- **`vg scan` reads `dev-requirements.txt`.** Python requirements-file discovery
+  and parsing now use the same filename check, so dependencies declared only in
+  `dev-requirements.txt` are included in the scan (#523).
+
 - **`vg sbom export` marks Python dependency groups as development dependencies.**
   A package declared only in `pyproject.toml` `[dependency-groups]`,
   `[tool.poetry.group.<name>.dependencies]`, or the legacy
@@ -23,8 +70,8 @@ backward compatible.
   is also in `[project] dependencies` or a required
   `[tool.poetry.dependencies]` entry stays a production row. A package in a
   dev group and an optional extra, with no production row, stays a
-  development row. A `{include-group = "..."}` entry is not expanded. The
-  `python` key is still not a dependency.
+  development row. A `{include-group = "..."}` entry expands to that group's
+  requirements. The `python` key is still not a dependency.
 - **`vg sbom export` marks Gradle test configurations as development dependencies.** A `testImplementation`, `testRuntimeOnly`, or `testCompileOnly` dependency in `build.gradle` or `build.gradle.kts` is stored as section `devDependencies`. CycloneDX component `scope` is `excluded`, and SPDX writes `DEV_DEPENDENCY_OF`. `implementation`, `api`, `compileOnly`, `runtimeOnly`, and `platform` stay section `dependencies`. A coordinate declared on a production configuration and a test configuration stays a production dependency, and the production declaration supplies the version. `vibgrate:scope` stays `direct`.
 
 - **`vg scan --vulns` JSON keeps one finding when CVE, GHSA, and OSV ids are aliases.** Linked ids, including a chain through a third id, collapse to one group. The group id is the lowest CVE in the group, or the lowest advisory id when there is no CVE. A single advisory keeps its own id. Alias lists are sorted, and the same tree with the same `--package-manifest` writes the same group on every run. SARIF still writes one result per advisory id.
@@ -125,8 +172,8 @@ backward compatible.
   CycloneDX component `scope` is `optional`, and SPDX writes
   `OPTIONAL_DEPENDENCY_OF`. A required crate still omits component `scope`.
   `vibgrate:scope` stays `direct`. An `optional = true` entry under
-  `[dev-dependencies]` is still left out of the scan artifact with the other
-  dev-dependencies.
+  `[dev-dependencies]` or `[build-dependencies]` stays a development row, not
+  an optional row.
 
 - **`vg report --format html` does not turn a skipped security pack into a
   row of zeros.** A DriftScore that was not measured stays `n/a`. A security

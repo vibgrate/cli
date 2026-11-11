@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import * as path from 'node:path';
 import { discover, mergeExcludes, readConfigExcludes } from '../src/engine/discover.js';
+import { assertLockfilesValid, LockfileSyntaxError } from '../src/engine/lockfile-guard.js';
 import { compileGlobs } from '../src/core-open/utils/glob.js';
 import { compileGlobs as reportingCompileGlobs } from '../src/reporting/utils/glob.js';
 import { FileCache } from '../src/core-open/utils/fs.js';
@@ -52,6 +53,41 @@ describe('blank exclude and ignore patterns', () => {
       '.gitignore': 'gen/**\n\r',
     });
     expect(discover({ root }).map((f) => f.rel)).toEqual(['a.ts']);
+  });
+
+  it('does not let a carriage-return-only .gitignore hide lockfiles or source', () => {
+    const truncated = '{"lockfileVersion":3,"packages":{';
+    const valid = JSON.stringify({
+      name: 'ok',
+      lockfileVersion: 3,
+      requires: true,
+      packages: { '': { name: 'ok', version: '1.0.0' } },
+    });
+    const source = project({
+      '.gitignore': '\r',
+      'package-lock.json': valid,
+      'src/a.ts': 'export const a = 1;\n',
+    });
+    expect(discover({ root: source }).map((f) => f.rel)).toEqual(['src/a.ts']);
+    expect(() => assertLockfilesValid(source)).not.toThrow();
+
+    // The lockfile walk used to compile a bare CR as "match every path".
+    const hidden = project({
+      '.gitignore': '\r',
+      'package-lock.json': truncated,
+      'src/a.ts': 'export const a = 1;\n',
+    });
+    expect(() => assertLockfilesValid(hidden)).toThrow(LockfileSyntaxError);
+
+    // A bare CR after a real rule must not become a match-everything pattern.
+    const ruled = project({
+      '.gitignore': 'scratch/\n\r',
+      'scratch/package-lock.json': truncated,
+      'package-lock.json': valid,
+      'src/a.ts': 'export const a = 1;\n',
+    });
+    expect(discover({ root: ruled }).map((f) => f.rel)).toEqual(['src/a.ts']);
+    expect(() => assertLockfilesValid(ruled)).not.toThrow();
   });
 
   it('drops blank entries when merging config and flag excludes', () => {

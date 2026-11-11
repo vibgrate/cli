@@ -9,6 +9,9 @@ import { LockfileParseError, rethrowLockfileParseError } from '../utils/lockfile
 import { lockfileWarningPath, noteComposerLock, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
 import { ComposerCache } from './composer-cache.js';
+import { latestStable } from '../runtimes/catalog.js';
+import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
+import type { RuntimeCatalog } from '../runtimes/types.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
 
@@ -76,9 +79,6 @@ const KNOWN_PHP_FRAMEWORKS: Record<string, string> = {
   'squizlabs/php_codesniffer': 'PHP_CodeSniffer',
 };
 
-/** Latest PHP major.minor (as of 2026) */
-const LATEST_PHP = { major: 8, minor: 4 };
-
 interface PhpDependency {
   name: string;
   version: string;
@@ -96,7 +96,7 @@ async function parseComposerJson(filePath: string, cache?: FileCache): Promise<{
     ? await cache.readJsonFile(filePath)
     : await readJsonFile(filePath) as any;
   
-  const deps: PhpDependency[] = [];
+  const deps = new Map<string, PhpDependency>();
   let phpVersion: string | undefined;
 
   // Extract PHP version requirement
@@ -104,31 +104,38 @@ async function parseComposerJson(filePath: string, cache?: FileCache): Promise<{
     phpVersion = data.require.php;
   }
 
-  // Extract dependencies
+  // Production rows are recorded first. A name that also appears in
+  // `require-dev` stays a production row, and this declaration supplies the spec.
   if (data.require && typeof data.require === 'object') {
     for (const [name, version] of Object.entries(data.require)) {
-      if (name === 'php' || name.startsWith('ext-')) continue;
-      deps.push({
-        name,
-        version: String(version),
-        isDev: false,
-      });
+      rememberComposerDep(deps, name, version, false);
     }
   }
 
-  // Extract dev dependencies
   if (data['require-dev'] && typeof data['require-dev'] === 'object') {
     for (const [name, version] of Object.entries(data['require-dev'])) {
-      if (name === 'php' || name.startsWith('ext-')) continue;
-      deps.push({
-        name,
-        version: String(version),
-        isDev: true,
-      });
+      rememberComposerDep(deps, name, version, true);
     }
   }
 
-  return { phpVersion, deps };
+  return { phpVersion, deps: [...deps.values()] };
+}
+
+/** Skip platform requirements. A name in both tables is stored once, as production. */
+function rememberComposerDep(
+  deps: Map<string, PhpDependency>,
+  name: string,
+  version: unknown,
+  isDev: boolean,
+): void {
+  if (name === 'php' || name.startsWith('ext-')) return;
+  const row: PhpDependency = { name, version: String(version), isDev };
+  const existing = deps.get(name);
+  if (!existing) {
+    deps.set(name, row);
+    return;
+  }
+  if (existing.isDev && !isDev) deps.set(name, row);
 }
 
 /**
@@ -200,6 +207,7 @@ export async function scanPhpProjects(
   composerCache: ComposerCache,
   cache?: FileCache,
   projectScanTimeout?: number,
+  catalog: RuntimeCatalog = BUNDLED_RUNTIME_CATALOG,
 ): Promise<ProjectScan[]> {
   // Find composer.json files
   const manifestFiles = cache
@@ -212,7 +220,7 @@ export async function scanPhpProjects(
   for (const manifestFile of manifestFiles) {
     const dir = path.dirname(manifestFile);
     try {
-      const scanPromise = scanOnePhpProject(dir, manifestFile, rootDir, composerCache, cache);
+      const scanPromise = scanOnePhpProject(dir, manifestFile, rootDir, composerCache, cache, catalog);
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
         results.push(result.value);
@@ -244,7 +252,8 @@ async function scanOnePhpProject(
   manifestFile: string,
   rootDir: string,
   composerCache: ComposerCache,
-  cache?: FileCache,
+  cache: FileCache | undefined,
+  catalog: RuntimeCatalog,
 ): Promise<ProjectScan> {
   const relDir = path.relative(rootDir, dir) || '.';
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
@@ -260,7 +269,8 @@ async function scanOnePhpProject(
     rethrowLockfileParseError(err);
   }
   
-  // Filter out dev dependencies for main analysis
+  // Packagist lookups and drift buckets stay on production rows.
+  // Development rows are still emitted, and they do not change those buckets.
   const prodDeps = allDeps.filter(d => !d.isDev);
   
   // Determine PHP runtime version lag
@@ -275,12 +285,15 @@ async function scanOnePhpProject(
       if (verMatch) {
         const reqMajor = parseInt(verMatch[1]!, 10);
         const reqMinor = parseInt(verMatch[2]!, 10);
-        if (reqMajor === LATEST_PHP.major) {
-          runtimeMajorsBehind = Math.max(0, LATEST_PHP.minor - reqMinor);
-        } else if (reqMajor < LATEST_PHP.major) {
-          runtimeMajorsBehind = LATEST_PHP.minor + (LATEST_PHP.major - reqMajor) * 10;
+        const latestPhp = latestStable(catalog, 'php');
+        if (latestPhp) {
+          if (reqMajor === latestPhp.major) {
+            runtimeMajorsBehind = Math.max(0, latestPhp.minor - reqMinor);
+          } else if (reqMajor < latestPhp.major) {
+            runtimeMajorsBehind = latestPhp.minor + (latestPhp.major - reqMajor) * 10;
+          }
+          runtimeLatest = `${latestPhp.major}.${latestPhp.minor}`;
         }
-        runtimeLatest = `${LATEST_PHP.major}.${LATEST_PHP.minor}`;
       }
     }
   }
@@ -327,11 +340,9 @@ async function scanOnePhpProject(
       buckets.unknown++;
     }
 
-    const section = dep.isDev ? 'devDependencies' as const : 'dependencies' as const;
-
     dependencies.push({
       package: dep.name,
-      section,
+      section: 'dependencies',
       currentSpec: dep.version,
       resolvedVersion,
       latestStable,
@@ -339,7 +350,7 @@ async function scanOnePhpProject(
       drift,
     });
 
-    // Detect known frameworks
+    // Development packages are not production frameworks.
     if (dep.name in KNOWN_PHP_FRAMEWORKS) {
       frameworks.push({
         name: KNOWN_PHP_FRAMEWORKS[dep.name]!,
@@ -348,6 +359,21 @@ async function scanOnePhpProject(
         majorsBehind,
       });
     }
+  }
+
+  for (const dep of allDeps) {
+    if (!dep.isDev) continue;
+    const resolvedVersionStr = resolvedVersions.get(dep.name);
+    const resolvedVersion = resolvedVersionStr ? recordedSemver(resolvedVersionStr) : null;
+    dependencies.push({
+      package: dep.name,
+      section: 'devDependencies',
+      currentSpec: dep.version,
+      resolvedVersion,
+      latestStable: null,
+      majorsBehind: null,
+      drift: 'unknown',
+    });
   }
 
   // Sort: worst drift first

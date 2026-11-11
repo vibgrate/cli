@@ -62,6 +62,7 @@ const WATCHED_FILES = new Set([
   'build.gradle',
   'build.gradle.kts',
   'gradle.lockfile',
+  'libs.versions.toml',
   // dotnet
   'packages.lock.json',
 ]);

@@ -9,11 +9,20 @@ import { parseLockfileJson, rethrowLockfileParseError } from '../utils/lockfile-
 import { lockfileWarningPath, notePackageResolved, withLockfileNotes } from '../utils/lockfile-unknown.js';
 import { withTimeout } from '../utils/timeout.js';
 import { SwiftCache } from './swift-cache.js';
+import { latestStable } from '../runtimes/catalog.js';
+import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
+import type { RuntimeCatalog } from '../runtimes/types.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
 
-/** Well-known Swift frameworks / libraries to track */
-const KNOWN_SWIFT_FRAMEWORKS: Record<string, string> = {
+/**
+ * Well-known Swift frameworks / libraries to track.
+ *
+ * Keys are the repository names as they appear in package URLs, lowercased
+ * (`https://github.com/apple/swift-log.git` -> `swift-log`), because lookups
+ * are done with `dep.name.toLowerCase()`.
+ */
+export const KNOWN_SWIFT_FRAMEWORKS: Record<string, string> = {
   // ── Server-Side Frameworks ──
   'vapor': 'Vapor',
   'hummingbird': 'Hummingbird',
@@ -44,10 +53,10 @@ const KNOWN_SWIFT_FRAMEWORKS: Record<string, string> = {
   // ── Testing ──
   'quick': 'Quick',
   'nimble': 'Nimble',
-  'snapshotTesting': 'SnapshotTesting',
+  'swift-snapshot-testing': 'SnapshotTesting',
 
   // ── Logging ──
-  'swiftlog': 'SwiftLog',
+  'swift-log': 'SwiftLog',
   'cocoalumberjack': 'CocoaLumberjack',
 
   // ── Dependency Injection ──
@@ -60,9 +69,6 @@ const KNOWN_SWIFT_FRAMEWORKS: Record<string, string> = {
   'then': 'Then',
 };
 
-/** Latest Swift version (as of 2026) */
-const LATEST_SWIFT = { major: 6, minor: 0 };
-
 interface SwiftDependency {
   name: string;
   url: string;
@@ -72,43 +78,157 @@ interface SwiftDependency {
 
 /**
  * Parse Package.swift to extract dependencies.
- * 
- * Example:
+ *
+ * Remote and registry dependencies:
  *   .package(url: "https://github.com/vapor/vapor.git", from: "4.0.0")
  *   .package(url: "https://github.com/apple/swift-nio.git", .upToNextMajor(from: "2.0.0"))
  *   .package(url: "https://github.com/realm/realm-swift.git", exact: "10.0.0")
+ *   .package(url: "https://github.com/apple/swift-argument-parser", "1.2.0"..<"2.0.0")
+ *   .package(url: "https://github.com/pointfreeco/swift-snapshot-testing", "1.10.0"..."1.17.0")
+ *   .package(name: "Kingfisher", url: "https://github.com/onevcat/Kingfisher.git", from: "7.0.0")
+ *   .package(id: "mona.LinkedList", from: "1.0.0")
+ *
+ * Local `.package(path:)` dependencies are ignored: they have no version to drift.
  */
 function parsePackageSwift(content: string): SwiftDependency[] {
   const deps: SwiftDependency[] = [];
-  
-  // Match .package(url: "...", ...)
-  const packageRegex = /\.package\s*\(\s*url:\s*"([^"]+)"[^)]*?(from|exact|upToNextMajor|revision|branch):\s*"([^"]+)"/g;
-  
+  const callRe = /\.package\s*\(/g;
   let match: RegExpExecArray | null;
-  while ((match = packageRegex.exec(content)) !== null) {
-    const url = match[1]!;
-    const versionType = match[2]!;
-    const versionValue = match[3]!;
-    
-    // Extract package name from URL
-    const nameMatch = url.match(/\/([^/]+?)(\.git)?$/);
-    const name = nameMatch?.[1] ?? url;
-    
-    let type: SwiftDependency['type'] = 'range';
-    let version = versionValue;
-    
-    if (versionType === 'exact') {
-      type = 'exact';
-    } else if (versionType === 'branch') {
-      type = 'branch';
-    } else if (versionType === 'revision') {
-      type = 'revision';
+  while ((match = callRe.exec(content)) !== null) {
+    const openParen = match.index + match[0].length - 1;
+    const extracted = extractPackageCall(content, openParen);
+    if (!extracted) {
+      callRe.lastIndex = openParen + 1;
+      continue;
     }
-    
-    deps.push({ name, url, version, type });
+    callRe.lastIndex = extracted.end;
+    const dep = dependencyFromPackageArgs(extracted.args);
+    if (dep) deps.push(dep);
   }
-  
   return deps;
+}
+
+/** Args of one `.package(` call, starting at the opening parenthesis. */
+function extractPackageCall(content: string, openParen: number): { args: string; end: number } | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = openParen; i < content.length; i++) {
+    const c = content[i]!;
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (c === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === '(') depth++;
+    else if (c === ')') {
+      depth--;
+      if (depth === 0) return { args: content.slice(openParen + 1, i), end: i + 1 };
+    }
+  }
+  return null;
+}
+
+/** Drop `//` and block comments without eating `//` inside string literals. */
+function stripSwiftComments(input: string): string {
+  let out = '';
+  let i = 0;
+  while (i < input.length) {
+    const c = input[i]!;
+    if (c === '"') {
+      const start = i;
+      i++;
+      while (i < input.length) {
+        if (input[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (input[i] === '"') {
+          i++;
+          break;
+        }
+        i++;
+      }
+      out += input.slice(start, i);
+      continue;
+    }
+    if (c === '/' && input[i + 1] === '/') {
+      while (i < input.length && input[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && input[i + 1] === '*') {
+      i += 2;
+      while (i < input.length && !(input[i] === '*' && input[i + 1] === '/')) i++;
+      i = Math.min(input.length, i + 2);
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+function packageNameFromUrl(url: string): string {
+  const nameMatch = url.match(/\/([^/]+?)(\.git)?$/);
+  return nameMatch?.[1] ?? url;
+}
+
+/**
+ * Version requirement on a `.package` call.
+ * `from:` / `.upToNextMajor(from:)` / `.upToNextMinor(from:)` stay ranges whose
+ * current spec is the declared lower bound, matching the labeled forms.
+ * `"lo"..<"hi"` and `"lo"..."hi"` use that same lower bound.
+ */
+function versionFromPackageArgs(args: string): { value: string; type: SwiftDependency['type'] } | null {
+  const exact = args.match(/\bexact\s*:\s*"([^"]+)"/);
+  if (exact?.[1]) return { value: exact[1], type: 'exact' };
+  const branch = args.match(/\bbranch\s*:\s*"([^"]+)"/);
+  if (branch?.[1]) return { value: branch[1], type: 'branch' };
+  const revision = args.match(/\brevision\s*:\s*"([^"]+)"/);
+  if (revision?.[1]) return { value: revision[1], type: 'revision' };
+  const from = args.match(/\bfrom\s*:\s*"([^"]+)"/);
+  if (from?.[1]) return { value: from[1], type: 'range' };
+  const halfOpen = args.match(/"([^"]+)"\s*\.\.<\s*"[^"]*"/);
+  if (halfOpen?.[1]) return { value: halfOpen[1], type: 'range' };
+  const closed = args.match(/"([^"]+)"\s*\.\.\.\s*"[^"]*"/);
+  if (closed?.[1]) return { value: closed[1], type: 'range' };
+  return null;
+}
+
+function dependencyFromPackageArgs(rawArgs: string): SwiftDependency | null {
+  const args = stripSwiftComments(rawArgs);
+  // Local packages (`.package(path:)`, including `name:` + `path:`) have no registry version.
+  const withoutStrings = args.replace(/"(?:\\.|[^"\\])*"/g, '""');
+  if (/\bpath\s*:/.test(withoutStrings)) return null;
+
+  const version = versionFromPackageArgs(args);
+  if (!version) return null;
+
+  const urlMatch = args.match(/\burl\s*:\s*"([^"]+)"/);
+  if (urlMatch?.[1]) {
+    const url = urlMatch[1];
+    // Identity follows the URL, including when the deprecated `name:` label comes first.
+    // Package.resolved pins that identity, not the manifest's name label.
+    return { name: packageNameFromUrl(url), url, version: version.value, type: version.type };
+  }
+
+  const idMatch = args.match(/\bid\s*:\s*"([^"]+)"/);
+  if (idMatch?.[1]) {
+    const id = idMatch[1];
+    return { name: id, url: id, version: version.value, type: version.type };
+  }
+  return null;
 }
 
 /**
@@ -177,6 +297,7 @@ export async function scanSwiftProjects(
   swiftCache: SwiftCache,
   cache?: FileCache,
   projectScanTimeout?: number,
+  catalog: RuntimeCatalog = BUNDLED_RUNTIME_CATALOG,
 ): Promise<ProjectScan[]> {
   // Find Package.swift files
   const manifestFiles = cache
@@ -189,7 +310,7 @@ export async function scanSwiftProjects(
   for (const manifestFile of manifestFiles) {
     const dir = path.dirname(manifestFile);
     try {
-      const scanPromise = scanOneSwiftProject(dir, manifestFile, rootDir, swiftCache, cache);
+      const scanPromise = scanOneSwiftProject(dir, manifestFile, rootDir, swiftCache, cache, catalog);
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
         results.push(result.value);
@@ -221,7 +342,8 @@ async function scanOneSwiftProject(
   manifestFile: string,
   rootDir: string,
   swiftCache: SwiftCache,
-  cache?: FileCache,
+  cache: FileCache | undefined,
+  catalog: RuntimeCatalog,
 ): Promise<ProjectScan> {
   const relDir = path.relative(rootDir, dir) || '.';
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
@@ -250,12 +372,15 @@ async function scanOneSwiftProject(
     if (verMatch) {
       const reqMajor = parseInt(verMatch[1]!, 10);
       const reqMinor = parseInt(verMatch[2]!, 10);
-      if (reqMajor === LATEST_SWIFT.major) {
-        runtimeMajorsBehind = Math.max(0, LATEST_SWIFT.minor - reqMinor);
-      } else if (reqMajor < LATEST_SWIFT.major) {
-        runtimeMajorsBehind = (LATEST_SWIFT.major - reqMajor) * 10 + LATEST_SWIFT.minor;
+      const latestSwift = latestStable(catalog, 'swift');
+      if (latestSwift) {
+        if (reqMajor === latestSwift.major) {
+          runtimeMajorsBehind = Math.max(0, latestSwift.minor - reqMinor);
+        } else if (reqMajor < latestSwift.major) {
+          runtimeMajorsBehind = (latestSwift.major - reqMajor) * 10 + latestSwift.minor;
+        }
+        runtimeLatest = `${latestSwift.major}.${latestSwift.minor}`;
       }
-      runtimeLatest = `${LATEST_SWIFT.major}.${LATEST_SWIFT.minor}`;
     }
   }
 
