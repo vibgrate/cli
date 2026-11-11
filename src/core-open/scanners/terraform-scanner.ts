@@ -4,7 +4,8 @@
 import { fetchTerraformVersionsBulk } from './terraform-cache.js';
 import { gt, minVersion, validRange } from 'semver';
 import type { ProjectScan, DependencyRow } from '../types.js';
-import { readTextFile, pathExists, FileCache } from '../utils/fs.js';
+import { readTextFile, pathExists, stripBom, FileCache } from '../utils/fs.js';
+import { recordedSemver } from '../utils/recorded-semver.js';
 import type { PackageVersionManifest } from '../package-version-manifest.js';
 import * as path from 'node:path';
 import { parseHclBlocks, parseHclAttributes, hclStringAttribute } from './hcl-blocks.js';
@@ -15,8 +16,19 @@ interface TerraformProvider {
 }
 
 interface TerraformModule {
+  /** Module call name (`module "vpc"`). Absent when the block has no label. */
+  name?: string;
   source: string; // e.g., "terraform-aws-modules/vpc/aws"
   version?: string;
+}
+
+/** One registry module recorded by `terraform init` / `tofu init`. */
+interface InstalledRegistryModule {
+  /** `Modules[].Key`. A root call is the block name; a nested call is `parent.child`. */
+  key: string;
+  /** Registry package address with the public host and `//subdir` removed. */
+  address: string;
+  version: string;
 }
 
 /**
@@ -194,6 +206,27 @@ function publicRegistryModuleAddress(source: string): string | null {
   return null;
 }
 
+/**
+ * Address used to compare a module `source` with `modules.json` `Source`.
+ *
+ * `registry.terraform.io/ns/name/system` and `ns/name/system` are the same
+ * public module, and a `//subdir` is still that package. A private registry
+ * host stays on the address so it cannot match a public module of the same
+ * name. Local, Git, and other non-registry sources return null.
+ */
+function registryModuleMatchAddress(source: string): string | null {
+  if (classifyTerraformModuleSource(source) !== 'registry') return null;
+
+  const { packageAddr } = splitModulePackageSubdir(source);
+  const parts = packageAddr.split('/');
+  if (parts.length === 3) return packageAddr;
+  if (parts.length !== 4) return null;
+
+  const host = parts[0].toLowerCase();
+  if (host === PUBLIC_REGISTRY_HOST) return parts.slice(1).join('/');
+  return [host, ...parts.slice(1)].join('/');
+}
+
 function subDirEscapesPackage(subDir: string): boolean {
   if (!subDir) return false;
   let depth = 0;
@@ -299,7 +332,12 @@ export function extractTerraformRequirements(content: string): {
       // archives, and object-storage URLs are not versioned there, so they
       // are not drift rows.
       if (classifyTerraformModuleSource(source) !== 'registry') continue;
-      modules.push({ source, version: hclStringAttribute(block.body, 'version') });
+      const name = block.labels[0];
+      modules.push({
+        ...(name ? { name } : {}),
+        source,
+        version: hclStringAttribute(block.body, 'version'),
+      });
     }
   }
 
@@ -337,6 +375,79 @@ async function parseTerraformLock(filePath: string, cache?: FileCache): Promise<
   }
   
   return resolved;
+}
+
+/**
+ * Read `.terraform/modules/modules.json` for the version `terraform init` or
+ * `tofu init` installed. A missing, unreadable, or malformed file yields no
+ * versions — the scan then keeps using the constraint alone.
+ *
+ * Only registry `Source` values are kept. Git, local, and other installers
+ * have no registry version to report.
+ */
+async function parseTerraformModulesManifest(
+  filePath: string,
+  cache?: FileCache,
+): Promise<InstalledRegistryModule[]> {
+  try {
+    const content = cache
+      ? await cache.readTextFile(filePath)
+      : await readTextFile(filePath);
+    const parsed: unknown = JSON.parse(stripBom(content));
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return [];
+
+    const modules = (parsed as { Modules?: unknown }).Modules;
+    if (!Array.isArray(modules)) return [];
+
+    const installed: InstalledRegistryModule[] = [];
+    for (const entry of modules) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const record = entry as { Key?: unknown; Source?: unknown; Version?: unknown };
+      if (typeof record.Source !== 'string' || typeof record.Version !== 'string') continue;
+      const address = registryModuleMatchAddress(record.Source);
+      const version = recordedSemver(record.Version);
+      if (!address || !version) continue;
+      installed.push({
+        key: typeof record.Key === 'string' ? record.Key : '',
+        address,
+        version,
+      });
+    }
+    return installed;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Installed version for one registry module pin.
+ *
+ * A root call is matched on `Key` (the module block name) and checked against
+ * `Source`. Nested keys (`parent.child`) belong to modules inside an
+ * installed module, so they are not used for a root call of a different name.
+ * Several calls that share a source and a constraint must agree; otherwise
+ * the pin stays unresolved. With no call name, root-level installs of that
+ * address are used only when they record the same version.
+ */
+function installedModuleVersion(
+  installed: readonly InstalledRegistryModule[],
+  source: string,
+  names: readonly string[],
+): string | null {
+  const address = registryModuleMatchAddress(source);
+  if (!address) return null;
+
+  const sameAddress = installed.filter((entry) => entry.address === address);
+  const candidates = names.length > 0
+    ? sameAddress.filter((entry) => names.includes(entry.key))
+    : sameAddress.filter((entry) => entry.key.length > 0 && !entry.key.includes('.'));
+  if (candidates.length === 0) return null;
+
+  const version = candidates[0].version;
+  for (let i = 1; i < candidates.length; i++) {
+    if (candidates[i].version !== version) return null;
+  }
+  return version;
 }
 
 /**
@@ -486,12 +597,19 @@ export async function scanTerraform(
   // version and dropped the other pin's drift. The same source at the same
   // version is still one row. Rows are emitted in source, then version,
   // order so the report does not follow filesystem walk order.
-  const uniqueModules = new Map<string, TerraformModule>();
+  const uniqueModules = new Map<string, TerraformModule & { names: string[] }>();
   for (const m of allModules) {
     const key = `${m.source}\0${m.version ?? ''}`;
-    if (!uniqueModules.has(key)) {
-      uniqueModules.set(key, { source: m.source, version: m.version });
+    const existing = uniqueModules.get(key);
+    if (!existing) {
+      uniqueModules.set(key, {
+        source: m.source,
+        version: m.version,
+        names: m.name ? [m.name] : [],
+      });
+      continue;
     }
+    if (m.name && !existing.names.includes(m.name)) existing.names.push(m.name);
   }
   const modulePins = [...uniqueModules.values()].sort((a, b) => {
     if (a.source < b.source) return -1;
@@ -502,10 +620,21 @@ export async function scanTerraform(
     if (left > right) return 1;
     return 0;
   });
+  for (const pin of modulePins) {
+    pin.names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  }
 
-  // Read lock file for exact versions
+  // Read lock file for exact provider versions. Modules have no lock file;
+  // `terraform init` / `tofu init` records the installed module version in
+  // `.terraform/modules/modules.json` beside this configuration.
   const lockPath = `${projectPath}/.terraform.lock.hcl`;
   const resolvedVersions = await parseTerraformLock(lockPath, cache);
+  const installedModules = modulePins.length === 0
+    ? []
+    : await parseTerraformModulesManifest(
+      path.join(projectPath, '.terraform', 'modules', 'modules.json'),
+      cache,
+    );
 
   // Prepare items to fetch
   const itemsToFetch: Array<{ type: 'provider' | 'module'; namespace: string; name: string; provider?: string }> = [];
@@ -569,8 +698,11 @@ export async function scanTerraform(
     else buckets.unknown++;
   }
 
-  for (const { source, version: constraintVersion } of modulePins) {
-    const currentVersion = constraintVersion || 'unknown';
+  for (const { source, version: constraintVersion, names } of modulePins) {
+    const resolvedVersion = installedModuleVersion(installedModules, source, names);
+    // Drift uses the installed version when init recorded one. Otherwise it
+    // stays on the constraint, whose lower bound is what the range allows.
+    const currentVersion = resolvedVersion || constraintVersion || 'unknown';
     // The version map is keyed by `namespace/name/system`. The row name stays
     // the raw source, so a subdir and a public-registry prefix still show up
     // as distinct pins while sharing the fetched latest version.
@@ -594,7 +726,7 @@ export async function scanTerraform(
       package: `module:${source}`,
       section: 'dependencies',
       currentSpec: constraintVersion || 'unknown',
-      resolvedVersion: null,
+      resolvedVersion,
       latestStable: latestVersion || null,
       majorsBehind,
       drift,

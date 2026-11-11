@@ -57,8 +57,8 @@ describe('extractTerraformRequirements module sources', () => {
     ];
     const { modules } = extractTerraformRequirements(blocks.join('\n'));
     expect(modules).toEqual([
-      { source: 'hashicorp/consul/aws', version: '0.11.0' },
-      { source: 'registry.terraform.io/hashicorp/consul/aws', version: '0.11.0' },
+      { name: 'consul', source: 'hashicorp/consul/aws', version: '0.11.0' },
+      { name: 'prefixed', source: 'registry.terraform.io/hashicorp/consul/aws', version: '0.11.0' },
     ]);
   });
 });

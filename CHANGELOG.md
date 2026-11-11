@@ -14,6 +14,8 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` reads installed Terraform module versions from `.terraform/modules/modules.json`.** A registry module constraint such as `~> 5.0` reports the `Version` `terraform init` or `tofu init` installed, matched to the module call. Drift uses that version. A missing or unreadable file leaves `resolvedVersion` null, as before. Provider versions still come from `.terraform.lock.hcl` (#621).
+
 - **`vg scan` reports a .NET runtime inherited from `Directory.Build.props`.** A project that sets neither `TargetFramework` nor `TargetFrameworks` takes them from the nearest `Directory.Build.props` between that project and the scanned directory. A value in the project file wins. A value that contains `$(`, such as `$(DefaultTfm)`, is not reported as a runtime (#627).
 
 - **`vg scan` reads OpenTofu `.tofu` files for provider and module drift.** `required_providers`, `required_version`, and registry `module` blocks in a `.tofu` file are scored, including a tree that has no `.tf` file. When `x.tf` and `x.tofu` are in the same directory, only `x.tofu` is read. A `.tf` file with no `.tofu` sibling is unchanged. The file list used when there is no file index also includes `terraform.tf` and the `.tofu` names of the usual root files (#622).

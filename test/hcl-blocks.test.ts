@@ -188,8 +188,8 @@ module "github" { source = "github.com/acme/terraform-modules//vpc?ref=v1.2.0" }
 module "eks"   { source = "terraform-aws-modules/eks/aws" }
 `);
     expect(modules).toEqual([
-      { source: 'terraform-aws-modules/vpc/aws', version: '5.0.0' },
-      { source: 'terraform-aws-modules/eks/aws', version: undefined },
+      { name: 'vpc', source: 'terraform-aws-modules/vpc/aws', version: '5.0.0' },
+      { name: 'eks', source: 'terraform-aws-modules/eks/aws', version: undefined },
     ]);
   });
 
@@ -208,7 +208,7 @@ terraform {
 module "vpc" { source = "terraform-aws-modules/vpc/aws" version = "5.0.0" }
 `);
     expect(providers).toEqual([{ source: 'hashicorp/aws', version: '5.1.0' }]);
-    expect(modules).toEqual([{ source: 'terraform-aws-modules/vpc/aws', version: '5.0.0' }]);
+    expect(modules).toEqual([{ name: 'vpc', source: 'terraform-aws-modules/vpc/aws', version: '5.0.0' }]);
   });
 
   it('returns empty results for malformed input instead of throwing', () => {
