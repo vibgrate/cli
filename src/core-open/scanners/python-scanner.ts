@@ -1,6 +1,7 @@
 // VENDORED from @vibgrate/core-open (packages/vibgrate-core-open) by
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
+import { realpath, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as semver from 'semver';
 import { readTextFile, readJsonFile, pathExists, FileCache } from '../utils/fs.js';
@@ -163,6 +164,8 @@ interface PythonDependency {
 function parseRequirementLine(line: string): PythonDependency | null {
   // pip comments start after whitespace; URL fragments such as #egg= remain part of the spec.
   const trimmed = line.replace(/\s+#.*$/, '').trim();
+  // `-r` / `-c` (and their long forms) name other files. They are followed by
+  // the requirements loader, not parsed as packages.
   if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('-')) return null;
 
   // Strip environment markers (after ;)
@@ -225,14 +228,244 @@ export function requirementsManifestSection(fileName: string): DepSection {
   return 'dependencies';
 }
 
-function parseRequirementsTxt(content: string, section: DepSection = 'dependencies'): PythonDependency[] {
+interface RequirementsLoad {
+  deps: PythonDependency[];
+  /** First exact `==` pin per normalised name, in file order. */
+  pins: Map<string, string>;
+}
+
+function emptyRequirementsLoad(): RequirementsLoad {
+  return { deps: [], pins: new Map() };
+}
+
+/**
+ * A requirements line that names another file.
+ *
+ * Accepted forms: `-r <file>`, `-r<file>`, `--requirement <file>`,
+ * `--requirement=<file>`, and the same four shapes for `-c` / `--constraint`.
+ * A trailing comment introduced by whitespace is not part of the path.
+ * Other options (`--index-url`, `-e`) are left untouched.
+ */
+function parseRequirementsDirective(line: string): { kind: 'requirement' | 'constraint'; file: string } | null {
+  const trimmed = line.replace(/\s+#.*$/, '').trim();
+  if (!trimmed.startsWith('-')) return null;
+
+  let kind: 'requirement' | 'constraint' | undefined;
+  let rawPath = '';
+  const longOption = /^--(requirement|constraint)(?:=([^\s].*)|\s+([^\s].*))?$/.exec(trimmed);
+  if (longOption) {
+    kind = longOption[1] === 'requirement' ? 'requirement' : 'constraint';
+    rawPath = (longOption[2] ?? longOption[3] ?? '').trim();
+  } else {
+    const shortOption = /^-(r|c)(?:\s+([^\s].*)|([^\s].*))$/.exec(trimmed);
+    if (!shortOption) return null;
+    kind = shortOption[1] === 'r' ? 'requirement' : 'constraint';
+    rawPath = (shortOption[2] ?? shortOption[3] ?? '').trim();
+  }
+
+  const file = requirementDirectivePath(rawPath);
+  if (!file || !kind) return null;
+  return { kind, file };
+}
+
+/** Strip one matching pair of quotes around a directive path. */
+function requirementDirectivePath(raw: string): string | null {
+  let file = raw.trim();
+  if (!file) return null;
+  const quote = file[0];
+  if ((quote === '"' || quote === "'") && file.length >= 2 && file.endsWith(quote)) {
+    file = file.slice(1, -1).trim();
+  }
+  return file || null;
+}
+
+/**
+ * True when `candidate` is the scan root or a path inside it.
+ * Both arguments are absolute; `..` has already been collapsed.
+ */
+function isInsideScanRoot(rootDir: string, candidate: string): boolean {
+  const root = path.resolve(rootDir);
+  const resolved = path.resolve(candidate);
+  if (resolved === root) return true;
+  const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  return resolved.startsWith(prefix);
+}
+
+/**
+ * Absolute path of an included requirements file, or undefined when it
+ * cannot be read. The lexical path and the symlink target must both stay
+ * inside the scan root. A missing file, a directory, or a path that escapes
+ * the root is skipped.
+ */
+async function resolveRequirementsInclude(
+  includingFile: string,
+  spec: string,
+  rootDir: string,
+): Promise<string | undefined> {
+  const lexicalRoot = path.resolve(rootDir);
+  const lexical = path.resolve(path.dirname(includingFile), spec);
+  if (!isInsideScanRoot(lexicalRoot, lexical)) return undefined;
+  try {
+    // Compare canonical paths so a symlink in the temp directory (or the
+    // scan root) does not look like an escape, while a symlink that points
+    // outside the tree still does.
+    const realRoot = await realpath(lexicalRoot);
+    const real = await realpath(lexical);
+    if (!isInsideScanRoot(realRoot, real)) return undefined;
+    const info = await stat(real);
+    if (!info.isFile()) return undefined;
+    return real;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readRequirementsSource(
+  filePath: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  try {
+    const exists = cache ? await cache.pathExists(filePath) : await pathExists(filePath);
+    if (!exists) return undefined;
+    return cache ? await cache.readTextFile(filePath) : await readTextFile(filePath);
+  } catch {
+    return undefined;
+  }
+}
+
+function mergeConstraintPins(into: Map<string, string>, from: Map<string, string>): void {
+  for (const [name, pin] of from) {
+    if (!into.has(name)) into.set(name, pin);
+  }
+}
+
+/** A requirement with no version of its own. A declared specifier is kept. */
+function isUnpinnedRequirementSpec(spec: string): boolean {
+  const trimmed = spec.trim();
+  return trimmed === '' || trimmed === '*';
+}
+
+/**
+ * Fill versions from constraint files. An exact pin is copied only onto a
+ * requirement that does not already name a version. Constraint-only names
+ * are not added here.
+ */
+function applyConstraintPins(deps: PythonDependency[], pins: Map<string, string>): PythonDependency[] {
+  if (pins.size === 0) return deps;
+  return deps.map((dep) => {
+    if (!isUnpinnedRequirementSpec(dep.spec)) return dep;
+    const pin = pins.get(dep.normalisedName);
+    if (!pin) return dep;
+    return { ...dep, spec: `==${pin}` };
+  });
+}
+
+/**
+ * Packages and constraint pins from one requirements file.
+ *
+ * `-r` / `--requirement` are followed relative to this file and inherit
+ * `section` (the top-level manifest name decides dev versus production).
+ * `-c` / `--constraint` contribute pins only. `visited` is the set of
+ * `mode + path` values already entered from this top-level file, so a cycle
+ * stops and a file reached twice in the same role is read once. The caller
+ * marks `filePath` visited before parsing.
+ */
+async function parseRequirementsContent(
+  filePath: string,
+  content: string,
+  rootDir: string,
+  section: DepSection,
+  mode: 'requirement' | 'constraint',
+  visited: Set<string>,
+  cache: FileCache | undefined,
+): Promise<RequirementsLoad> {
   const deps: PythonDependency[] = [];
-  for (const line of content.split('\n')) {
+  const pins = new Map<string, string>();
+
+  for (const line of content.split(/\r?\n/)) {
+    const directive = parseRequirementsDirective(line);
+    if (directive) {
+      const childMode = mode === 'constraint' || directive.kind === 'constraint' ? 'constraint' : 'requirement';
+      const child = await loadIncludedRequirements(
+        filePath,
+        directive.file,
+        rootDir,
+        section,
+        childMode,
+        visited,
+        cache,
+      );
+      if (childMode === 'requirement') deps.push(...child.deps);
+      mergeConstraintPins(pins, child.pins);
+      continue;
+    }
+
     const dep = parseRequirementLine(line);
     if (!dep) continue;
+    if (mode === 'constraint') {
+      const pin = extractPinnedVersion(dep.spec);
+      if (pin !== null && !pins.has(dep.normalisedName)) pins.set(dep.normalisedName, pin);
+      continue;
+    }
     deps.push(section === 'dependencies' ? dep : { ...dep, section });
   }
-  return deps;
+
+  return { deps, pins };
+}
+
+async function loadIncludedRequirements(
+  includingFile: string,
+  spec: string,
+  rootDir: string,
+  section: DepSection,
+  mode: 'requirement' | 'constraint',
+  visited: Set<string>,
+  cache: FileCache | undefined,
+): Promise<RequirementsLoad> {
+  const resolved = await resolveRequirementsInclude(includingFile, spec, rootDir);
+  if (!resolved) return emptyRequirementsLoad();
+  const visitKey = `${mode}\0${resolved}`;
+  if (visited.has(visitKey)) return emptyRequirementsLoad();
+  visited.add(visitKey);
+  const content = await readRequirementsSource(resolved, cache);
+  if (content === undefined) return emptyRequirementsLoad();
+  return parseRequirementsContent(resolved, content, rootDir, section, mode, visited, cache);
+}
+
+/**
+ * Requirements from a discovered manifest. Includes are followed from this
+ * file. Constraint files fill in versions of unpinned requirements and never
+ * add rows of their own. `section` comes from this file's name and applies
+ * to every package reached through it.
+ */
+async function requirementsFromContent(
+  filePath: string,
+  content: string,
+  rootDir: string,
+  section: DepSection,
+  cache: FileCache | undefined,
+): Promise<PythonDependency[]> {
+  const opened = path.resolve(filePath);
+  // Includes record the canonical path. Use that same identity here so an
+  // include that leads back to this manifest is the same visited entry.
+  let identity = opened;
+  try {
+    identity = await realpath(opened);
+  } catch {
+    // The manifest was already read. Keep the opened path when it cannot
+    // be canonicalised so a self-include still terminates.
+  }
+  const visited = new Set<string>([`requirement\0${identity}`]);
+  const loaded = await parseRequirementsContent(
+    opened,
+    content,
+    rootDir,
+    section,
+    'requirement',
+    visited,
+    cache,
+  );
+  return applyConstraintPins(loaded.deps, loaded.pins);
 }
 
 interface PyProjectToml {
@@ -912,6 +1145,94 @@ function parseSetupCfg(content: string): { deps: PythonDependency[]; pythonVersi
   return result;
 }
 
+/**
+ * A pyenv or asdf version token.
+ * `system`, `latest`, and a virtualenv name do not match, so they stay
+ * absent instead of being stored as a runtime.
+ * A leading `v` is dropped. `3.12.4` is kept as `3.12.4`.
+ */
+const PYTHON_PIN_VERSION = /^(?:v)?(\d+(?:\.\d+){0,3})((?:a|b|rc)\d+|t)?$/i;
+
+function pythonPinVersion(token: string): string | undefined {
+  const match = PYTHON_PIN_VERSION.exec(token);
+  if (!match) return undefined;
+  return `${match[1]}${match[2] ?? ''}`;
+}
+
+/** Non-blank, non-comment lines, with an end-of-line `#` comment removed. */
+function pinFileLines(content: string): string[] {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const lines: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+/**
+ * Runtime from a pyenv `.python-version` file.
+ * Only the first non-blank, non-comment line is read. A non-version value
+ * (`system`, a virtualenv name) yields no runtime.
+ */
+export function pythonVersionFromPythonVersionFile(content: string): string | undefined {
+  const line = pinFileLines(content)[0];
+  if (!line) return undefined;
+  return pythonPinVersion(line.split(/\s+/)[0]!);
+}
+
+/**
+ * Runtime from an asdf `.tool-versions` `python` entry.
+ * The first version token on that line wins (`python 3.12.4 3.11.9` →
+ * `3.12.4`). A non-version token such as `system` is skipped. A later
+ * `python` line is used only when the earlier one has no version token.
+ */
+export function pythonVersionFromToolVersions(content: string): string | undefined {
+  for (const line of pinFileLines(content)) {
+    const parts = line.split(/\s+/);
+    if (parts[0]!.toLowerCase() !== 'python') continue;
+    for (const part of parts.slice(1)) {
+      const pin = pythonPinVersion(part);
+      if (pin) return pin;
+    }
+  }
+  return undefined;
+}
+
+async function readOptionalProjectFile(
+  dir: string,
+  name: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const filePath = path.join(dir, name);
+  try {
+    const exists = cache ? await cache.pathExists(filePath) : await pathExists(filePath);
+    if (!exists) return undefined;
+    return cache ? await cache.readTextFile(filePath) : await readTextFile(filePath);
+  } catch {
+    // An optional pin file must not fail the project scan.
+    return undefined;
+  }
+}
+
+/**
+ * Interpreter pin for a project whose manifests do not declare one.
+ * `.python-version` wins over `.tool-versions`.
+ */
+async function pythonRuntimeFromPinFiles(
+  dir: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const pythonVersionFile = await readOptionalProjectFile(dir, '.python-version', cache);
+  if (pythonVersionFile !== undefined) {
+    const pinned = pythonVersionFromPythonVersionFile(pythonVersionFile);
+    if (pinned) return pinned;
+  }
+  const toolVersions = await readOptionalProjectFile(dir, '.tool-versions', cache);
+  if (toolVersions === undefined) return undefined;
+  return pythonVersionFromToolVersions(toolVersions);
+}
+
 // ── Python project file names ──
 
 const PYTHON_MANIFEST_FILES = new Set([
@@ -1021,7 +1342,8 @@ async function scanOnePythonProject(
       for (const dep of parsePipfile(content)) sourced.push({ path: f, dep });
     } else if (isRequirementsFile(fileName)) {
       const section = requirementsManifestSection(fileName);
-      for (const dep of parseRequirementsTxt(content, section)) sourced.push({ path: f, dep });
+      const deps = await requirementsFromContent(f, content, rootDir, section, cache);
+      for (const dep of deps) sourced.push({ path: f, dep });
     }
   }
 
@@ -1029,6 +1351,14 @@ async function scanOnePythonProject(
   const allDeps = new Map<string, PythonDependency>();
   for (const dep of collapsePythonDeps(sourced.map((row) => row.dep))) {
     allDeps.set(dep.normalisedName, dep);
+  }
+
+  // requires-python, Poetry's python dependency, and setup.cfg
+  // python_requires already won above. A requirements-only project often
+  // pins the interpreter in pyenv's .python-version, or in asdf's
+  // .tool-versions, and otherwise reports no runtime and no runtime lag.
+  if (!pythonVersion) {
+    pythonVersion = await pythonRuntimeFromPinFiles(dir, cache);
   }
 
   // Determine Python runtime version lag
