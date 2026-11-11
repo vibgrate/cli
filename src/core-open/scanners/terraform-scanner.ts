@@ -377,6 +377,56 @@ function calculateDrift(
 }
 
 /**
+ * Check if a file is a Terraform or OpenTofu configuration file.
+ * `.tofu` is included so a directory that has only those files is a project.
+ */
+export function isTerraformManifest(fileName: string): boolean {
+  return fileName.endsWith('.tf') || fileName.endsWith('.tofu');
+}
+
+/**
+ * Root filenames checked when the scan has no file index. `.tofu` is the
+ * OpenTofu extension (1.8+). `terraform.tf` is where provider requirements
+ * usually live when they are not in `versions.tf`.
+ */
+const TERRAFORM_FALLBACK_FILES = [
+  'main.tf',
+  'main.tofu',
+  'variables.tf',
+  'variables.tofu',
+  'outputs.tf',
+  'outputs.tofu',
+  'versions.tf',
+  'versions.tofu',
+  'providers.tf',
+  'providers.tofu',
+  'terraform.tf',
+  'terraform.tofu',
+] as const;
+
+/**
+ * OpenTofu reads `x.tofu` and ignores `x.tf` when both are in the same
+ * directory. Drop the shadowed `.tf` path so its providers, modules, and
+ * `required_version` are not recorded. A `.tf` file in another directory,
+ * or with a different stem, stays.
+ */
+function withoutShadowedTfFiles(files: string[]): string[] {
+  const tofuStems = new Set<string>();
+  for (const file of files) {
+    const base = path.basename(file);
+    if (path.extname(base) !== '.tofu') continue;
+    tofuStems.add(path.join(path.dirname(file), base.slice(0, -'.tofu'.length)));
+  }
+  if (tofuStems.size === 0) return files;
+  return files.filter((file) => {
+    const base = path.basename(file);
+    if (path.extname(base) !== '.tf') return true;
+    const stem = path.join(path.dirname(file), base.slice(0, -'.tf'.length));
+    return !tofuStems.has(stem);
+  });
+}
+
+/**
  * Scan a directory for Terraform configurations.
  */
 export async function scanTerraform(
@@ -385,22 +435,19 @@ export async function scanTerraform(
   manifest?: PackageVersionManifest,
   offline = false,
 ): Promise<ProjectScan | null> {
-  // Find all .tf files
+  // `.tf` and OpenTofu `.tofu`. A same-stem `.tofu` replaces its `.tf`.
   const tfFiles: string[] = [];
-  
+
   if (cache) {
-    // Use cache to find .tf files
-    const allFiles = await cache.findFiles(projectPath, (name) => name.endsWith('.tf'));
-    tfFiles.push(...allFiles);
+    const allFiles = await cache.findFiles(projectPath, isTerraformManifest);
+    tfFiles.push(...withoutShadowedTfFiles(allFiles));
   } else {
-    // Fallback: check for common files
-    const commonFiles = ['main.tf', 'variables.tf', 'outputs.tf', 'versions.tf', 'providers.tf'];
-    for (const file of commonFiles) {
-      const p = `${projectPath}/${file}`;
-      if (await pathExists(p)) {
-        tfFiles.push(p);
-      }
+    const present: string[] = [];
+    for (const file of TERRAFORM_FALLBACK_FILES) {
+      const p = path.join(projectPath, file);
+      if (await pathExists(p)) present.push(p);
     }
+    tfFiles.push(...withoutShadowedTfFiles(present));
   }
 
   if (tfFiles.length === 0) {
@@ -572,13 +619,6 @@ export async function scanTerraform(
 }
 
 /**
- * Check if a file is a Terraform file.
- */
-export function isTerraformManifest(fileName: string): boolean {
-  return fileName.endsWith('.tf');
-}
-
-/**
  * Scan for Terraform configurations in a directory tree.
  */
 export async function scanTerraformProjects(
@@ -590,7 +630,7 @@ export async function scanTerraformProjects(
 ): Promise<ProjectScan[]> {
   // Find Terraform manifest files
   const manifestFiles = cache
-    ? await cache.findFiles(rootDir, (name) => name.endsWith('.tf'))
+    ? await cache.findFiles(rootDir, isTerraformManifest)
     : [];
 
   // Group manifests by directory to form "projects"
