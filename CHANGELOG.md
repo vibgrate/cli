@@ -14,6 +14,8 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` reports a .NET runtime inherited from `Directory.Build.props`.** A project that sets neither `TargetFramework` nor `TargetFrameworks` takes them from the nearest `Directory.Build.props` between that project and the scanned directory. A value in the project file wins. A value that contains `$(`, such as `$(DefaultTfm)`, is not reported as a runtime (#627).
+
 - **`vg scan` and `vg sbom export` include NuGet packages pinned in `Directory.Packages.props`.** A `<PackageReference>` with no `Version` takes the matching `<PackageVersion>` from the nearest `Directory.Packages.props` between the project and the scanned directory. The package id matches without regard to letter case. `VersionOverride` on the reference wins. A reference whose version cannot be resolved stays in the scan and the SBOM with version `unknown`.
 
 - **A blank `.gitignore` line no longer hides lockfiles.** `vg build` and

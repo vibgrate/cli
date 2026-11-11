@@ -425,16 +425,124 @@ function parseGemspec(content: string): RubyDependency[] {
 }
 
 /**
- * Extract Ruby version from a Gemfile.
- *
- * Handles:
- *   ruby '3.2.2'
- *   ruby "3.3.0"
- *   ruby ">= 3.1"
+ * A version token from a Ruby pin file.
+ * A leading `ruby-` (chruby / ruby-install) is dropped so `ruby-3.3.0`
+ * is `3.3.0`. Tokens that are not a version (`system`) are ignored.
  */
-function extractRubyVersion(content: string): string | undefined {
-  const match = content.match(/^\s*ruby\s+['"]([^'"]+)['"]/m);
-  return match?.[1];
+function normalizeRubyVersionToken(token: string): string | undefined {
+  const stripped = token.trim().replace(/^ruby-/, '');
+  if (!/^\d+(?:\.\d+)*/.test(stripped)) return undefined;
+  return stripped;
+}
+
+/** Non-blank, non-comment lines, with an end-of-line `#` comment removed. */
+function rubyPinFileLines(content: string): string[] {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const lines: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+/**
+ * Runtime from an rbenv or chruby `.ruby-version` file.
+ * Only the first non-blank, non-comment line is read. Surrounding
+ * whitespace and a leading `ruby-` prefix are removed.
+ */
+export function rubyVersionFromRubyVersionFile(content: string): string | undefined {
+  const line = rubyPinFileLines(content)[0];
+  if (!line) return undefined;
+  return normalizeRubyVersionToken(line.split(/\s+/)[0]!);
+}
+
+/**
+ * Runtime from an asdf `.tool-versions` `ruby` entry.
+ * The first version token on that line wins (`ruby 3.3.4 3.2.2` →
+ * `3.3.4`). A non-version token such as `system` is skipped. A later
+ * `ruby` line is used only when the earlier one has no version token.
+ */
+export function rubyVersionFromToolVersions(content: string): string | undefined {
+  for (const line of rubyPinFileLines(content)) {
+    const parts = line.split(/\s+/);
+    if (parts[0]!.toLowerCase() !== 'ruby') continue;
+    for (const part of parts.slice(1)) {
+      const pin = normalizeRubyVersionToken(part);
+      if (pin) return pin;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * How a Gemfile names the Ruby runtime.
+ *
+ * An explicit version (`ruby '3.1.0'`, `ruby ">= 3.1"`) wins over a file.
+ * Bundler 2.4+ `ruby file: ".ruby-version"` and the hash-rocket form
+ * `ruby :file => ".ruby-version"` point at a version file relative to
+ * the Gemfile. No `ruby` line means the caller should read the pin files.
+ */
+function gemfileRubyRuntime(content: string): { version?: string; file?: string } {
+  let file: string | undefined;
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const versionMatch = /^ruby\s+['"]([^'"]+)['"]/.exec(line);
+    if (versionMatch) return { version: versionMatch[1] };
+    if (file === undefined) {
+      const fileMatch = /^ruby\s+(?:file\s*:|:file\s*=>)\s*['"]([^'"]+)['"]/.exec(line);
+      if (fileMatch) file = fileMatch[1];
+    }
+  }
+  return file !== undefined ? { file } : {};
+}
+
+/**
+ * Read a pin file through the scan cache when one is in use.
+ * A missing or unreadable file returns undefined and never fails the scan.
+ */
+async function readOptionalText(
+  filePath: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  try {
+    const exists = cache ? await cache.pathExists(filePath) : await pathExists(filePath);
+    if (!exists) return undefined;
+    return cache ? await cache.readTextFile(filePath) : await readTextFile(filePath);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Interpreter pin when the Gemfile does not declare one.
+ * `.ruby-version` next to the Gemfile wins over a `ruby` entry in
+ * `.tool-versions`.
+ */
+async function rubyRuntimeFromPinFiles(
+  dir: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const rubyVersionFile = await readOptionalText(path.join(dir, '.ruby-version'), cache);
+  if (rubyVersionFile !== undefined) {
+    const pinned = rubyVersionFromRubyVersionFile(rubyVersionFile);
+    if (pinned) return pinned;
+  }
+  const toolVersions = await readOptionalText(path.join(dir, '.tool-versions'), cache);
+  if (toolVersions === undefined) return undefined;
+  return rubyVersionFromToolVersions(toolVersions);
+}
+
+/** Version text from a `ruby file:` path, resolved relative to the Gemfile. */
+async function rubyRuntimeFromVersionFile(
+  dir: string,
+  versionFile: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const text = await readOptionalText(path.resolve(dir, versionFile), cache);
+  if (text === undefined) return undefined;
+  return rubyVersionFromRubyVersionFile(text);
 }
 
 // ── Ruby project file names ──
@@ -516,6 +624,7 @@ async function scanOneRubyProject(
   const relDir = path.relative(rootDir, dir) || '.';
   let projectName = path.basename(dir === rootDir ? rootDir : dir);
   let rubyVersion: string | undefined;
+  let rubyVersionFile: string | undefined;
   const allDeps = new Map<string, RubyDependency>();
 
   // Parse each manifest file, preferring Gemfile > .gemspec
@@ -524,8 +633,9 @@ async function scanOneRubyProject(
     const content = cache ? await cache.readTextFile(f) : await readTextFile(f);
 
     if (fileName === 'Gemfile') {
-      const parsedVersion = extractRubyVersion(content);
-      if (parsedVersion) rubyVersion = parsedVersion;
+      const requested = gemfileRubyRuntime(content);
+      if (requested.version) rubyVersion = requested.version;
+      else if (requested.file !== undefined) rubyVersionFile = requested.file;
 
       for (const dep of parseGemfile(content)) {
         if (!allDeps.has(dep.name)) allDeps.set(dep.name, dep);
@@ -539,6 +649,15 @@ async function scanOneRubyProject(
         if (!allDeps.has(dep.name)) allDeps.set(dep.name, dep);
       }
     }
+  }
+
+  // An explicit `ruby '3.1.0'` line already won. `ruby file:` reads that
+  // path relative to the Gemfile and does not fall through. With no `ruby`
+  // line, `.ruby-version` wins over a `ruby` entry in `.tool-versions`.
+  if (!rubyVersion) {
+    rubyVersion = rubyVersionFile !== undefined
+      ? await rubyRuntimeFromVersionFile(dir, rubyVersionFile, cache)
+      : await rubyRuntimeFromPinFiles(dir, cache);
   }
 
   // Determine Ruby runtime version lag
