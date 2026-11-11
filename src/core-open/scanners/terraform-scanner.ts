@@ -46,6 +46,12 @@ const REGISTRY_HOSTNAME = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](
  * not module registries, even when the path has three or four segments.
  */
 const RESERVED_VCS_HOSTS = new Set(['github.com', 'bitbucket.org']);
+/**
+ * The public Terraform Registry. `registry.terraform.io/namespace/name/system`
+ * is the same module as `namespace/name/system`. Any other hostname is a
+ * private registry and is not queried here.
+ */
+const PUBLIC_REGISTRY_HOST = 'registry.terraform.io';
 
 /**
  * Classify a Terraform module `source` string.
@@ -166,6 +172,26 @@ function splitModulePackageSubdir(source: string): { packageAddr: string; subDir
     subDir = subDir.slice(0, queryInSubdir);
   }
   return { packageAddr, subDir };
+}
+
+/**
+ * Public-registry address (`namespace/name/system`) for a module source.
+ *
+ * A `//subdir` is the same published module as the package address, and an
+ * optional `registry.terraform.io/` prefix is the public registry. A private
+ * hostname has no public version, so this returns null and the scan leaves
+ * that row at drift `unknown`.
+ */
+function publicRegistryModuleAddress(source: string): string | null {
+  if (classifyTerraformModuleSource(source) !== 'registry') return null;
+
+  const { packageAddr } = splitModulePackageSubdir(source);
+  const parts = packageAddr.split('/');
+  if (parts.length === 3) return packageAddr;
+  if (parts.length === 4 && parts[0].toLowerCase() === PUBLIC_REGISTRY_HOST) {
+    return parts.slice(1).join('/');
+  }
+  return null;
 }
 
 function subDirEscapesPackage(subDir: string): boolean {
@@ -489,15 +515,16 @@ export async function scanTerraform(
     itemsToFetch.push({ type: 'provider', namespace, name });
   }
 
+  // Fetch by the public address, not the raw source. `ns/name/sys//subdir`
+  // and `registry.terraform.io/ns/name/sys` are one module; a private host
+  // is omitted so it never hits the public registry.
   const moduleSourcesSeen = new Set<string>();
   for (const pin of modulePins) {
-    if (moduleSourcesSeen.has(pin.source)) continue;
-    moduleSourcesSeen.add(pin.source);
-    const parts = pin.source.split('/');
-    if (parts.length === 3) {
-      const [namespace, name, provider] = parts;
-      itemsToFetch.push({ type: 'module', namespace, name, provider });
-    }
+    const address = publicRegistryModuleAddress(pin.source);
+    if (!address || moduleSourcesSeen.has(address)) continue;
+    moduleSourcesSeen.add(address);
+    const [namespace, name, provider] = address.split('/');
+    itemsToFetch.push({ type: 'module', namespace, name, provider });
   }
 
   // Fetch latest versions
@@ -544,7 +571,11 @@ export async function scanTerraform(
 
   for (const { source, version: constraintVersion } of modulePins) {
     const currentVersion = constraintVersion || 'unknown';
-    const latestVersion = latestVersions.get(source);
+    // The version map is keyed by `namespace/name/system`. The row name stays
+    // the raw source, so a subdir and a public-registry prefix still show up
+    // as distinct pins while sharing the fetched latest version.
+    const address = publicRegistryModuleAddress(source);
+    const latestVersion = address ? latestVersions.get(address) : undefined;
     const drift = (latestVersion && currentVersion !== 'unknown') ? calculateDrift(currentVersion, latestVersion) : 'unknown';
     
     let majorsBehind: number | null = null;
