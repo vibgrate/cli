@@ -94,6 +94,7 @@ describe('go.mod replace directives', () => {
     expect(fetchedModule(fetched, 'github.com/upstream/thing')).toBe(false);
     expect(fetchedModule(fetched, 'example.com/unused')).toBe(false);
     expect(fetchedModule(fetched, 'example.com/fork-only')).toBe(false);
+    expect(first!.projectReferences).toBeUndefined();
   });
 
   it('applies a replace block, including a version-scoped left side', async () => {
@@ -212,6 +213,7 @@ describe('go.mod replace directives', () => {
       unknown: local.length,
     });
     expect(fetchedModule(fetched, 'github.com/our-fork/dot')).toBe(false);
+    expect(project.projectReferences).toBeUndefined();
   });
 
   it('lets a version-scoped module replace win over a later local wildcard', async () => {

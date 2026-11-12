@@ -2765,7 +2765,9 @@ The suffix stays on the recorded version. `v2.0.0+incompatible` matches a range 
 `vg scan` applies `replace` after the whole `go.mod` is read, so a directive may sit above or below its `require`. A version on the left (`old v1.2.0 => …`) applies only to that version and wins over a versionless replace of the same module.
 
 - A replacement that names a module and a version is reported as that module and version. The original module path stays on the row as `replacedFrom`. Drift and vulnerability matching use the replacement, not the upstream path.
-- A replacement that is a local path (`./…`, `../…`, or an absolute path) keeps the required module and version, and the scan does not look that module up. The row's drift is `unknown`, so it is not counted as behind. A quoted path (`"../My Lib"`) is a local path too.
+- A replacement that is a local path (`./…`, `../…`, or an absolute path) keeps the required module and version, and the scan does not look that module up. The row's drift is `unknown`, so it is not counted as behind. A quoted path (`"../My Lib"`) is a local path too. When that directory is another Go module in the same scan, the project gains a `projectReferences` entry for it (`refType` `project`). The path is relative to the scan root, not to the `go.mod`. A path outside the scan, or a directory with no `go.mod`, adds no reference.
+- A root `go.work` `use` directory is linked the same way when this module requires that module's path and the require is not already a local replace. Listing a module in `use` does not, by itself, link it to the others.
+- A remote replacement does not add a project reference. References are sorted by path and left unset when there are none.
 - A `replace` with no `require` adds nothing.
 - An `exclude` line does not add a module, and it does not drop a version that is also required.
 
