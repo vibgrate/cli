@@ -429,9 +429,10 @@ export function parseGradleBuild(
   // Detect Java/JVM version
   let javaVersion: string | undefined;
 
-  // sourceCompatibility/targetCompatibility = '17'
-  const compatMatch = content.match(/(?:sourceCompatibility|targetCompatibility|javaVersion)\s*[=:]\s*['"]?(?:JavaVersion\.VERSION_)?(\d+)['"]?/);
-  if (compatMatch) javaVersion = compatMatch[1];
+  // sourceCompatibility/targetCompatibility = '17', '1.8', or JavaVersion.VERSION_1_8.
+  // The capture keeps the dotted or underscored token. '1.8' used to stop at 1.
+  const compatMatch = content.match(/(?:sourceCompatibility|targetCompatibility|javaVersion)\s*[=:]\s*['"]?(?:JavaVersion\.VERSION_)?([0-9]+(?:[._][0-9]+)?)['"]?/);
+  if (compatMatch) javaVersion = compatMatch[1]!.replace(/_/g, '.');
 
   // java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
   const toolchainMatch = content.match(/JavaLanguageVersion\.of\((\d+)\)/);
