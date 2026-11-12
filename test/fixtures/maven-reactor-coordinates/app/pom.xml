@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.acme.demo</groupId>
+    <artifactId>demo-parent</artifactId>
+    <version>2.5.0</version>
+  </parent>
+  <artifactId>app</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>core</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>${missing.group}</groupId>
+      <artifactId>ghost</artifactId>
+      <version>1.0.0</version>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>unresolved</artifactId>
+      <version>${missing.version}</version>
+    </dependency>
+  </dependencies>
+</project>

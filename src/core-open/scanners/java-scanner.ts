@@ -21,6 +21,7 @@ import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
 import type { RuntimeCatalog } from '../runtimes/types.js';
 import type { ProjectScan, DependencyRow, DepSection, DetectedFramework, ProjectReference } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
+import { resolveMavenProperty, seedMavenProjectProperties } from '../utils/maven-properties.js';
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -196,6 +197,36 @@ function parsePom(xml: string, filePath: string): PomData {
     }
   }
 
+  // Parent coordinates are known before dependencies so `${project.version}`
+  // and `${project.groupId}` can fall back to them. An explicit `<properties>`
+  // entry still wins; see `seedMavenProjectProperties`.
+  let parent: PomData['parent'];
+  if (project.parent?.groupId && project.parent?.artifactId) {
+    parent = {
+      groupId: String(project.parent.groupId),
+      artifactId: String(project.parent.artifactId),
+      version: String(project.parent.version ?? ''),
+    };
+  }
+
+  const declaredGroupId = project.groupId != null ? String(project.groupId) : undefined;
+  const declaredVersion = project.version != null ? String(project.version) : undefined;
+  const declaredArtifactId = project.artifactId != null ? String(project.artifactId) : undefined;
+  const groupId = declaredGroupId ?? parent?.groupId;
+  const artifactId = declaredArtifactId ?? path.basename(path.dirname(filePath));
+  const version = declaredVersion ?? parent?.version;
+
+  seedMavenProjectProperties(properties, {
+    groupId: declaredGroupId,
+    inheritedGroupId: parent?.groupId,
+    artifactId: declaredArtifactId,
+    inheritedArtifactId: artifactId,
+    version: declaredVersion,
+    inheritedVersion: parent?.version,
+    parentGroupId: parent?.groupId,
+    parentVersion: parent?.version,
+  });
+
   // Extract dependencies. Top-level blocks are stored first. The scan
   // keeps the first versioned coordinate, so a later profile entry does not
   // replace a top-level row.
@@ -243,20 +274,10 @@ function parsePom(xml: string, filePath: string): PomData {
     : [];
   const modules = rawModules.map(String);
 
-  // Parent
-  let parent: PomData['parent'];
-  if (project.parent?.groupId && project.parent?.artifactId) {
-    parent = {
-      groupId: String(project.parent.groupId),
-      artifactId: String(project.parent.artifactId),
-      version: String(project.parent.version ?? ''),
-    };
-  }
-
   return {
-    groupId: project.groupId ? String(project.groupId) : parent?.groupId,
-    artifactId: String(project.artifactId ?? path.basename(path.dirname(filePath))),
-    version: project.version ? String(project.version) : parent?.version,
+    groupId,
+    artifactId,
+    version,
     packaging: project.packaging ? String(project.packaging) : undefined,
     javaVersion,
     dependencies,
@@ -302,7 +323,13 @@ function markProfileOnlyDependency(dep: PomDependency): PomDependency {
 }
 
 function resolveProperty(value: string, properties: Record<string, string>): string {
-  return value.replace(/\$\{([^}]+)\}/g, (_, key: string) => properties[key] ?? `\${${key}}`);
+  return resolveMavenProperty(value, properties);
+}
+
+/** A coordinate is recorded only when group, artifact, and version are all concrete. */
+function mavenCoordinateReady(dep: { groupId: string; artifactId: string; version: string }): boolean {
+  if (!dep.groupId || !dep.artifactId || !dep.version) return false;
+  return !dep.groupId.includes('${') && !dep.artifactId.includes('${') && !dep.version.includes('${');
 }
 
 function readPomDependency(d: Record<string, unknown>, properties: Record<string, string>): PomDependency {
@@ -594,7 +621,7 @@ async function scanOneJavaProject(
 
       for (const dep of pom.dependencies) {
         const key = `${dep.groupId}:${dep.artifactId}`;
-        if (!allDeps.has(key) && dep.version && !dep.version.includes('${')) {
+        if (!allDeps.has(key) && mavenCoordinateReady(dep)) {
           allDeps.set(key, dep);
         }
       }

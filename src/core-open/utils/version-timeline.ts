@@ -15,6 +15,7 @@ import {
 } from './git-history.js';
 import { parseGradleLockfile } from '../scanners/gradle-lockfile.js';
 import type { VulnEcosystem } from '../types.js';
+import { resolveMavenProperty, seedMavenProjectProperties } from './maven-properties.js';
 
 /**
  * Per-package version history derived from a lockfile's git history, across every
@@ -425,8 +426,10 @@ function isConcreteMavenVersion(version: string): boolean {
 /**
  * Parse a Maven `pom.xml` into a `groupId:artifactId → version` map for the
  * direct `<dependencies>` that pin a concrete version. `${...}` is resolved
- * against the POM's own `<properties>` (plus `${project.version}`). Dependencies
- * whose version is managed by a BOM/`<dependencyManagement>` (no explicit
+ * against the POM's own `<properties>` plus the project coordinates
+ * (`${project.version}`, `${project.groupId}`, `${project.parent.version}`,
+ * and the `${pom.*}` aliases). Dependencies whose version is managed by a
+ * BOM/`<dependencyManagement>` (no explicit
  * `<version>`), a range, or an unresolved property are skipped — honestly absent,
  * since their resolved version isn't knowable from this file offline. The
  * coordinate matches OSV's Maven naming and the Java scanner's `dep.package`.
@@ -450,19 +453,19 @@ export function parsePomXml(content: string): Map<string, string> {
       if (val != null && typeof val !== 'object') properties[k] = String(val);
     }
   }
-  // `${project.version}` falls back to the parent's version, as Maven does.
-  const ownVersion =
-    project.version != null
-      ? String(project.version)
-      : (project.parent as Record<string, unknown> | undefined)?.version != null
-        ? String((project.parent as Record<string, unknown>).version)
-        : undefined;
-  if (ownVersion) {
-    properties['project.version'] = ownVersion;
-    properties['project.parent.version'] = ownVersion;
-  }
-  const resolve = (value: string): string =>
-    value.replace(/\$\{([^}]+)\}/g, (_, key: string) => properties[key] ?? `\${${key}}`);
+  const parent = project.parent && typeof project.parent === 'object'
+    ? project.parent as Record<string, unknown>
+    : undefined;
+  seedMavenProjectProperties(properties, {
+    groupId: project.groupId != null ? String(project.groupId) : undefined,
+    inheritedGroupId: parent?.groupId != null ? String(parent.groupId) : undefined,
+    artifactId: project.artifactId != null ? String(project.artifactId) : undefined,
+    version: project.version != null ? String(project.version) : undefined,
+    inheritedVersion: parent?.version != null ? String(parent.version) : undefined,
+    parentGroupId: parent?.groupId != null ? String(parent.groupId) : undefined,
+    parentVersion: parent?.version != null ? String(parent.version) : undefined,
+  });
+  const resolve = (value: string): string => resolveMavenProperty(value, properties);
 
   const deps = (project.dependencies as Record<string, unknown> | undefined)?.dependency;
   for (const dep of pomArray(deps)) {
@@ -471,7 +474,7 @@ export function parsePomXml(content: string): Map<string, string> {
     if (d.version == null) continue; // BOM/dependencyManagement-managed — not resolvable here
     const groupId = d.groupId != null ? resolve(String(d.groupId)).trim() : '';
     const artifactId = d.artifactId != null ? resolve(String(d.artifactId)).trim() : '';
-    if (!groupId || !artifactId) continue;
+    if (!groupId || !artifactId || groupId.includes('${') || artifactId.includes('${')) continue;
     const version = resolve(String(d.version)).trim();
     if (!isConcreteMavenVersion(version)) continue;
     considerVersion(out, `${groupId}:${artifactId}`, version);
