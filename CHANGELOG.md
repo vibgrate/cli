@@ -12,6 +12,16 @@ backward compatible.
 
 ## [Unreleased]
 
+### Added
+
+- **`vg scan` links Elixir umbrella apps and path dependencies.** An app that
+  depends on a sibling with `in_umbrella: true` records that sibling when both
+  Mix projects are in the scan. The sibling directory is the umbrella
+  `apps_path`, which defaults to `apps`. A `path:` dependency records the Mix
+  project it points at when that project is in the scan. The path is relative
+  to the scanned directory. These links are project references. They are not
+  Hex rows, and they do not change drift counts.
+
 ### Fixed
 
 - **`vg scan` reports a .NET runtime inherited from `Directory.Build.props`.** A project that sets neither `TargetFramework` nor `TargetFrameworks` takes them from the nearest `Directory.Build.props` between that project and the scanned directory. A value in the project file wins. A value that contains `$(`, such as `$(DefaultTfm)`, is not reported as a runtime (#627).

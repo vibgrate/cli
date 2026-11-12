@@ -224,6 +224,7 @@ describe('mix.exs dependency tuples', () => {
   it('reads keyword lists, maps optional and dev, and skips non-hex sources', async () => {
     const project = await scan(FULL_DEPS);
     expect(project.runtime).toBe('~> 1.15');
+    expect(project.projectReferences).toBeUndefined();
 
     const byPackage = new Map(project.dependencies.map((dep) => [dep.package, dep]));
     expect(project.dependencies.map((dep) => dep.package)).toEqual([

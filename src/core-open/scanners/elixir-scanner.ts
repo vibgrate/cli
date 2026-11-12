@@ -3,7 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import { fetchHexVersionsBulk } from './hex-cache.js';
 import { gt, minVersion, validRange } from 'semver';
-import type { ProjectScan, DependencyRow, DepSection, DetectedFramework } from '../types.js';
+import type { ProjectScan, DependencyRow, DepSection, DetectedFramework, ProjectReference } from '../types.js';
 import { readTextFile, pathExists, FileCache } from '../utils/fs.js';
 import type { PackageVersionManifest } from '../package-version-manifest.js';
 import * as path from 'node:path';
@@ -19,6 +19,20 @@ interface ElixirDependency {
 
 /** Mix source options that are not Hex packages. */
 const NON_HEX_SOURCE_KEYS = new Set(['git', 'github', 'path', 'in_umbrella']);
+
+/**
+ * Mix's default umbrella directory when `apps_path` is omitted.
+ * Child apps are direct children of that directory.
+ */
+const DEFAULT_UMBRELLA_APPS_PATH = 'apps';
+
+/** A Mix dependency that points at another project instead of Hex. */
+interface LocalProjectDep {
+  name: string;
+  kind: 'path' | 'in_umbrella';
+  /** `path:` value, relative to the mix.exs directory. Absent for `in_umbrella:`. */
+  path?: string;
+}
 
 const ELIXIR_MANIFEST_FILES = new Set(['mix.exs']);
 
@@ -339,17 +353,29 @@ function findMatchingBrace(content: string, openIndex: number): number {
   return -1;
 }
 
+/** A double-quoted keyword value. Anything else is skipped and not kept. */
+function readQuotedOption(content: string, start: number): { value: string | null; end: number } {
+  const i = skipWsComments(content, start);
+  if (content[i] !== '"') return { value: null, end: skipValue(content, start) };
+  const str = readString(content, i);
+  const value = str.value.trim();
+  return { value: value === '' ? null : value, end: str.end };
+}
+
 /**
  * Read one `{:name, "version", keyword: value, ...}` tuple.
  * `git:`, `github:`, `path:`, and `in_umbrella:` tuples are not Hex deps.
+ * `path:` and `in_umbrella: true` are kept as local project links.
  * The first double-quoted string is the version requirement.
  */
-function parseDepTuple(name: string, inner: string): ElixirDependency | null {
+function parseDepTuple(name: string, inner: string): { hex: ElixirDependency | null; local: LocalProjectDep | null } {
   let i = 0;
   let version: string | null = null;
   let skip = false;
   let isDev = false;
   let optional = false;
+  let inUmbrella = false;
+  let pathValue: string | null = null;
 
   while (i < inner.length) {
     const sigilEnd = skipSigil(inner, i);
@@ -384,7 +410,17 @@ function parseDepTuple(name: string, inner: string): ElixirDependency | null {
       const after = skipWsComments(inner, i);
       if (inner[after] === ':') {
         const valueAt = after + 1;
-        if (NON_HEX_SOURCE_KEYS.has(ident)) {
+        if (ident === 'path') {
+          skip = true;
+          const quoted = readQuotedOption(inner, valueAt);
+          if (pathValue === null && quoted.value) pathValue = quoted.value;
+          i = quoted.end;
+        } else if (ident === 'in_umbrella') {
+          skip = true;
+          const flag = parseOptionalFlag(inner, valueAt);
+          if (flag.optional) inUmbrella = true;
+          i = flag.end;
+        } else if (NON_HEX_SOURCE_KEYS.has(ident)) {
           skip = true;
           i = skipValue(inner, valueAt);
         } else if (ident === 'only') {
@@ -415,12 +451,17 @@ function parseDepTuple(name: string, inner: string): ElixirDependency | null {
     i++;
   }
 
-  if (skip || version === null || version === '') return null;
-  return { name, version, isDev, optional };
+  let local: LocalProjectDep | null = null;
+  if (inUmbrella) local = { name, kind: 'in_umbrella' };
+  else if (pathValue) local = { name, kind: 'path', path: pathValue };
+
+  if (skip || version === null || version === '') return { hex: null, local };
+  return { hex: { name, version, isDev, optional }, local };
 }
 
-function parseDepTuples(content: string): ElixirDependency[] {
+function parseDepTuples(content: string): { deps: ElixirDependency[]; localDeps: LocalProjectDep[] } {
   const deps: ElixirDependency[] = [];
+  const localDeps: LocalProjectDep[] = [];
   let i = 0;
   while (i < content.length) {
     const sigilEnd = skipSigil(content, i);
@@ -446,8 +487,9 @@ function parseDepTuples(content: string): ElixirDependency[] {
       if (named) {
         const end = findMatchingBrace(content, i);
         if (end > i) {
-          const dep = parseDepTuple(named.name, content.slice(named.innerStart, end));
-          if (dep) deps.push(dep);
+          const parsed = parseDepTuple(named.name, content.slice(named.innerStart, end));
+          if (parsed.hex) deps.push(parsed.hex);
+          if (parsed.local) localDeps.push(parsed.local);
           i = end + 1;
           continue;
         }
@@ -455,17 +497,96 @@ function parseDepTuples(content: string): ElixirDependency[] {
     }
     i++;
   }
-  return deps;
+  return { deps, localDeps };
+}
+
+/** `apps_path: "..."` from an umbrella mix.exs. Absent when the key is omitted. */
+function readAppsPath(content: string): string | undefined {
+  let i = 0;
+  while (i < content.length) {
+    const sigilEnd = skipSigil(content, i);
+    if (sigilEnd !== null) {
+      i = sigilEnd;
+      continue;
+    }
+    const c = content[i];
+    if (c === '#') {
+      while (i < content.length && content[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '"') {
+      i = endOfString(content, i);
+      continue;
+    }
+    if (c === '\'') {
+      i = skipCharlist(content, i);
+      continue;
+    }
+    if (content.startsWith('apps_path', i) && !isIdentChar(content[i - 1])) {
+      const after = i + 'apps_path'.length;
+      if (!isIdentChar(content[after])) {
+        const colonAt = skipWsComments(content, after);
+        if (content[colonAt] === ':') {
+          const quoted = readQuotedOption(content, colonAt + 1);
+          if (quoted.value) return quoted.value;
+        }
+      }
+    }
+    i++;
+  }
+  return undefined;
+}
+
+function isWithinRoot(dir: string, rootDir: string): boolean {
+  const root = path.resolve(rootDir);
+  const target = path.resolve(dir);
+  if (target === root) return true;
+  const rel = path.relative(root, target);
+  return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/**
+ * `{:app, in_umbrella: true}` is the sibling directory under the umbrella
+ * `apps_path`. Mix defaults that directory to `apps` when the key is omitted.
+ * The umbrella is the ancestor mix project whose apps directory is the
+ * parent of this app.
+ */
+function resolveInUmbrellaDir(
+  projectAbs: string,
+  depName: string,
+  rootDir: string,
+  appsPathByDir: Map<string, string | undefined>,
+): string | null {
+  const root = path.resolve(rootDir);
+  const appsDir = path.resolve(path.dirname(projectAbs));
+  let umbrella = path.resolve(appsDir, '..');
+  while (isWithinRoot(umbrella, root)) {
+    if (appsPathByDir.has(umbrella)) {
+      const declared = appsPathByDir.get(umbrella)?.trim();
+      const appsPath = declared ? declared : DEFAULT_UMBRELLA_APPS_PATH;
+      if (path.resolve(umbrella, appsPath) === appsDir) {
+        return path.resolve(appsDir, depName);
+      }
+    }
+    if (umbrella === root) break;
+    const parent = path.resolve(umbrella, '..');
+    if (parent === umbrella) break;
+    umbrella = parent;
+  }
+  return null;
 }
 
 /**
  * Parse mix.exs to extract dependencies.
  * Tuples may carry a keyword list of any length, including across lines.
- * `{:dep, git: "..."}`, `path:`, and `in_umbrella:` are skipped.
+ * `{:dep, git: "..."}`, `path:`, and `in_umbrella:` are not Hex deps.
+ * `path:` and `in_umbrella: true` are returned as local project links.
  */
 async function parseMixExs(filePath: string, cache?: FileCache): Promise<{
   elixirVersion?: string;
   deps: ElixirDependency[];
+  localDeps: LocalProjectDep[];
+  appsPath?: string;
 }> {
   const content = cache
     ? await cache.readTextFile(filePath)
@@ -473,7 +594,8 @@ async function parseMixExs(filePath: string, cache?: FileCache): Promise<{
 
   const elixirMatch = content.match(/elixir:\s*"([^"]+)"/);
   const elixirVersion = elixirMatch?.[1];
-  return { elixirVersion, deps: parseDepTuples(content) };
+  const { deps, localDeps } = parseDepTuples(content);
+  return { elixirVersion, deps, localDeps, appsPath: readAppsPath(content) };
 }
 
 /**
@@ -678,9 +800,16 @@ export async function scanElixirProjects(
   }
 
   const results: ProjectScan[] = [];
+  const scanned: Array<{
+    absDir: string;
+    appsPath: string | undefined;
+    localDeps: LocalProjectDep[];
+    scan: ProjectScan;
+  }> = [];
 
   for (const [dir] of projectDirs) {
     try {
+      const parsed = await parseMixExs(path.join(dir, 'mix.exs'), cache);
       const scan = await scanElixir(dir, cache, manifest, offline);
       if (scan) {
         // Report the repo-relative directory, not the basename: the project
@@ -689,6 +818,12 @@ export async function scanElixirProjects(
         // scanner's repo-relative entry).
         scan.path = path.relative(rootDir, dir) || '.';
         results.push(scan);
+        scanned.push({
+          absDir: dir,
+          appsPath: parsed.appsPath,
+          localDeps: parsed.localDeps,
+          scan,
+        });
       }
     } catch (error) {
       // Skip projects that fail to scan
@@ -696,5 +831,52 @@ export async function scanElixirProjects(
     }
   }
 
+  attachElixirProjectReferences(rootDir, scanned);
   return results;
+}
+
+/**
+ * Keep `path:` and `in_umbrella: true` links that name another Elixir project
+ * in this scan. The path is relative to the scan root, matching Maven module
+ * and npm workspace references. Hex rows are unchanged.
+ */
+function attachElixirProjectReferences(
+  rootDir: string,
+  scanned: Array<{
+    absDir: string;
+    appsPath: string | undefined;
+    localDeps: LocalProjectDep[];
+    scan: ProjectScan;
+  }>,
+): void {
+  const byAbs = new Map<string, ProjectScan>();
+  const appsPathByDir = new Map<string, string | undefined>();
+  for (const row of scanned) {
+    const abs = path.resolve(row.absDir);
+    byAbs.set(abs, row.scan);
+    appsPathByDir.set(abs, row.appsPath);
+  }
+
+  for (const row of scanned) {
+    const refs: ProjectReference[] = [];
+    const seen = new Set<string>();
+    const self = path.resolve(row.absDir);
+    for (const dep of row.localDeps) {
+      const targetAbs = dep.kind === 'in_umbrella'
+        ? resolveInUmbrellaDir(row.absDir, dep.name, rootDir, appsPathByDir)
+        : (dep.path ? path.resolve(row.absDir, dep.path) : null);
+      if (!targetAbs) continue;
+      const resolved = path.resolve(targetAbs);
+      if (resolved === self) continue;
+      const target = byAbs.get(resolved);
+      if (!target || seen.has(target.path)) continue;
+      seen.add(target.path);
+      refs.push({
+        path: target.path,
+        name: dep.name,
+        refType: 'workspace',
+      });
+    }
+    if (refs.length > 0) row.scan.projectReferences = refs;
+  }
 }
