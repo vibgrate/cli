@@ -147,12 +147,21 @@ export interface DependencyRow {
   resolvedVersion: string | null;
   latestStable: string | null;
   /**
-   * Latest stable release that still satisfies `currentSpec` — the newest
-   * version an install alone could reach without editing the manifest. Null
-   * when the registry list is unavailable (offline) or nothing satisfies.
-   * Populated by scanners that resolve ranges (npm today); absent elsewhere.
+   * Latest stable release that still satisfies the declared range — the newest
+   * version an install alone could reach without editing the manifest. For an
+   * npm alias (`npm:<name>@<range>`), that range is the alias target's range,
+   * not the raw `currentSpec` text. Null when the registry list is unavailable
+   * (offline) or nothing satisfies. Populated by scanners that resolve ranges
+   * (npm today); absent elsewhere.
    */
   latestSatisfying?: string | null;
+  /**
+   * Registry package an npm alias installs (`string-width` for
+   * `"string-width-cjs": "npm:string-width@^4.2.0"`). `package` stays the
+   * manifest key and `currentSpec` stays the original text. Absent when the
+   * dependency is not an alias.
+   */
+  registryPackage?: string;
   majorsBehind: number | null;
   drift: 'current' | 'minor-behind' | 'major-behind' | 'unknown';
   /** Declared license evidence (populated by ecosystem scanners). */

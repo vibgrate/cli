@@ -10,7 +10,7 @@ import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { loadNpmLockIndex, type NpmLockIndex, type LockfileIo } from './npm-lockfile.js';
 import { Semaphore } from '../utils/semaphore.js';
 import { withTimeout } from '../utils/timeout.js';
-import { NpmCache, isSemverSpec } from './npm-cache.js';
+import { NpmCache, npmInstallTarget } from './npm-cache.js';
 import { classifyNpmVersionLag } from './npm-latest.js';
 import { buildDependencyLicense, normalizeLicenseSourcePath } from '../licenses/dependency-license.js';
 import { ageDaysBetween, daysToLibyears, aggregateLibyears } from '../scoring/libyear.js';
@@ -217,7 +217,8 @@ export async function scanNodeProjects(
       for (const deps of depSections) {
         if (!deps) continue;
         for (const [pkg, spec] of Object.entries(deps)) {
-          if (isSemverSpec(spec)) allNpmPkgs.add(pkg);
+          const target = npmInstallTarget(pkg, spec);
+          if (target) allNpmPkgs.add(target.registryName);
         }
       }
     } catch {
@@ -341,32 +342,43 @@ async function scanOnePackageJson(
   const frameworks: DetectedFramework[] = [];
   const buckets = { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 };
 
-  // Collect all dep promises first for parallel resolution
-  const depEntries: { pkg: string; section: DepSection; spec: string }[] = [];
+  // Collect all dep promises first for parallel resolution.
+  // An `npm:` alias fetches the target package and satisfies the target range;
+  // the row still uses the manifest key and the original spec text.
+  const depEntries: {
+    pkg: string;
+    section: DepSection;
+    spec: string;
+    registryName: string;
+    range: string;
+    registryPackage?: string;
+  }[] = [];
   for (const s of sections) {
     if (!s.deps) continue;
     for (const [pkg, spec] of Object.entries(s.deps)) {
-      if (!isSemverSpec(spec)) continue;
-      depEntries.push({ pkg, section: s.name, spec });
+      const target = npmInstallTarget(pkg, spec);
+      if (!target) continue;
+      depEntries.push({ pkg, section: s.name, spec, ...target });
     }
   }
 
   // Warm cache in batch to reduce npm process/network overhead.
-  await npmCache.prefetch(depEntries.map((entry) => entry.pkg));
+  await npmCache.prefetch(depEntries.map((entry) => entry.registryName));
 
   // Resolve metadata from cache (misses transparently fetch as needed).
   const metaPromises = depEntries.map(async (entry) => {
-    const meta = await npmCache.get(entry.pkg);
+    const meta = await npmCache.get(entry.registryName);
     return { ...entry, meta };
   });
 
   const resolved = await Promise.all(metaPromises);
 
-  for (const { pkg, section, spec, meta } of resolved) {
+  for (const { pkg, section, spec, meta, range: declaredRange, registryPackage, registryName } of resolved) {
     // Latest stable release that still satisfies the declared range — the best
-    // version an install could bring in without editing the manifest.
+    // version an install could bring in without editing the manifest. Aliases
+    // satisfy the target range (`^4.2.0`), not the raw `npm:` text.
     const latestSatisfying = meta.stableVersions.length > 0
-      ? semver.maxSatisfying(meta.stableVersions, spec) ?? null
+      ? semver.maxSatisfying(meta.stableVersions, declaredRange) ?? null
       : null;
     // Prefer the lockfile's EXACT installed version (authoritative + works
     // offline) — but only while it still satisfies the declared range. Once the
@@ -375,8 +387,10 @@ async function scanOnePackageJson(
     // freeze the reported drift until the next install. An unparseable range
     // keeps the lock (satisfaction is undecidable, and the lock is still the
     // installed truth).
+    // Lockfiles key an alias by the manifest name (`node_modules/<alias>`,
+    // `alias@npm:target@range`), so resolve with that name and the original spec.
     const lockedVersion = lockIndex?.resolve(pkg, spec) ?? null;
-    const range = semver.validRange(spec);
+    const range = semver.validRange(declaredRange);
     const lockUsable =
       !!lockedVersion &&
       !!semver.valid(lockedVersion) &&
@@ -421,12 +435,13 @@ async function scanOnePackageJson(
       ageDays,
       libyears,
       ...(abandoned ? { abandoned: true } : {}),
+      ...(registryPackage ? { registryPackage } : {}),
     });
 
-    // Detect known frameworks
-    if (pkg in KNOWN_FRAMEWORKS) {
+    // Detect known frameworks from the package that is actually installed.
+    if (registryName in KNOWN_FRAMEWORKS) {
       frameworks.push({
-        name: KNOWN_FRAMEWORKS[pkg]!,
+        name: KNOWN_FRAMEWORKS[registryName]!,
         currentVersion: resolvedVersion,
         latestVersion: latestStable,
         majorsBehind,
