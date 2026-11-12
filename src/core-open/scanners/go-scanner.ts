@@ -123,20 +123,31 @@ interface ReplaceDirective {
  * (`a v1.2.0 => …`) applies only to that version and wins over a versionless
  * replace of the same module. A later directive for the same key wins.
  *
+ * A top-level `toolchain goX.Y[.Z]` is returned as `toolchainVersion`
+ * (major.minor only). `toolchain default`, a malformed name, and a toolchain
+ * line inside a block are ignored. A later valid toolchain line wins.
+ *
  * Example:
  *   module github.com/example/project
- *   go 1.24
+ *   go 1.21
+ *   toolchain go1.23.4
  *   tool golang.org/x/tools/cmd/stringer
  *   require (
  *     github.com/gin-gonic/gin v1.9.1
  *     github.com/stretchr/testify v1.8.4 // indirect
  *   )
  */
-function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[]; tools: string[] } {
+function parseGoMod(content: string): {
+  goVersion?: string;
+  toolchainVersion?: string;
+  deps: GoDependency[];
+  tools: string[];
+} {
   const deps: GoDependency[] = [];
   const replaces: ReplaceDirective[] = [];
   const tools: string[] = [];
   let goVersion: string | undefined;
+  let toolchainVersion: string | undefined;
   let block: 'require' | 'replace' | 'tool' | null = null;
 
   for (const line of content.split(/\r?\n/)) {
@@ -152,6 +163,11 @@ function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[]
     }
 
     if (block === null) {
+      const toolchain = readToolchainDirective(trimmed);
+      if (toolchain.isDirective) {
+        if (toolchain.version) toolchainVersion = toolchain.version;
+        continue;
+      }
       // A one-line `require ( … )` / `replace ( … )` / `tool ( … )` is a
       // directive, not a block.
       if (/^tool\s*\(/.test(trimmed) && !/^tool\s*\(.*\)\s*$/.test(trimmed)) {
@@ -217,7 +233,47 @@ function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[]
   }
 
   applyReplacements(deps, replaces);
-  return { goVersion, deps, tools };
+  return { goVersion, toolchainVersion, deps, tools };
+}
+
+/**
+ * A top-level `toolchain` line. `version` is major.minor for `goX.Y` or
+ * `goX.Y.Z`. `default`, a release candidate, and any other name are a
+ * directive with no version.
+ */
+function readToolchainDirective(line: string): { isDirective: boolean; version?: string } {
+  const code = stripGoComment(line).trim();
+  if (!/^toolchain(?:\s|$)/.test(code)) return { isDirective: false };
+  const match = /^toolchain\s+go(\d+)\.(\d+)(?:\.(\d+))?$/.exec(code);
+  if (!match) return { isDirective: true };
+  const parts = [match[1]!, match[2]!, match[3]].filter((part): part is string => part !== undefined);
+  if (parts.some((part) => !/^(0|[1-9]\d*)$/.test(part))) return { isDirective: true };
+  return { isDirective: true, version: `${Number(match[1])}.${Number(match[2])}` };
+}
+
+/**
+ * The version the module builds with. A toolchain newer than `go` wins
+ * (major and minor compared as numbers). With no `go` line, the toolchain
+ * stands alone. Otherwise the `go` directive is used.
+ */
+function effectiveGoRuntime(goVersion?: string, toolchainVersion?: string): string | undefined {
+  if (!toolchainVersion) return goVersion;
+  if (!goVersion || isNewerMajorMinor(toolchainVersion, goVersion)) return toolchainVersion;
+  return goVersion;
+}
+
+function isNewerMajorMinor(candidate: string, baseline: string): boolean {
+  const next = splitMajorMinor(candidate);
+  const current = splitMajorMinor(baseline);
+  if (!next || !current) return false;
+  if (next.major !== current.major) return next.major > current.major;
+  return next.minor > current.minor;
+}
+
+function splitMajorMinor(version: string): { major: number; minor: number } | null {
+  const match = /^(\d+)\.(\d+)$/.exec(version);
+  if (!match) return null;
+  return { major: Number(match[1]), minor: Number(match[2]) };
 }
 
 /** Package path from a `tool` line, ignoring a trailing comment. */
@@ -484,7 +540,8 @@ async function scanOneGoProject(
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
   
   const content = cache ? await cache.readTextFile(manifestFile) : await readTextFile(manifestFile);
-  const { goVersion, deps: allDeps, tools } = parseGoMod(content);
+  const { goVersion, toolchainVersion, deps: allDeps, tools } = parseGoMod(content);
+  const runtimeVersion = effectiveGoRuntime(goVersion, toolchainVersion);
 
   // Indirect requires stay out of the scan unless they provide a `tool`
   // package. Those modules are development dependencies. A module that is
@@ -505,8 +562,8 @@ async function scanOneGoProject(
   let runtimeEol: boolean | null | undefined;
   let runtimeEolDate: string | undefined;
 
-  if (goVersion) {
-    const verMatch = goVersion.match(/(\d+)\.(\d+)/);
+  if (runtimeVersion) {
+    const verMatch = runtimeVersion.match(/(\d+)\.(\d+)/);
     if (verMatch) {
       const reqMajor = parseInt(verMatch[1]!, 10);
       const reqMinor = parseInt(verMatch[2]!, 10);
@@ -520,8 +577,8 @@ async function scanOneGoProject(
         runtimeLatest = `${LATEST_GO_MINOR.major}.${LATEST_GO_MINOR.minor}`;
       }
     }
-    runtimeEol = runtimeEolStatus(catalog, 'go', goVersion);
-    const cycle = extractCycle('go', goVersion);
+    runtimeEol = runtimeEolStatus(catalog, 'go', runtimeVersion);
+    const cycle = extractCycle('go', runtimeVersion);
     if (cycle) runtimeEolDate = eolDate(catalog, 'go', cycle);
   }
 
@@ -614,7 +671,7 @@ async function scanOneGoProject(
     type: 'go',
     path: relDir,
     name: projectName,
-    runtime: goVersion,
+    runtime: runtimeVersion,
     runtimeLatest,
     runtimeMajorsBehind,
     runtimeEol,
