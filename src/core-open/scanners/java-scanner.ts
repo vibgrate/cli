@@ -430,8 +430,8 @@ export function parseGradleBuild(
   let javaVersion: string | undefined;
 
   // sourceCompatibility/targetCompatibility = '17'
-  const compatMatch = content.match(/(?:sourceCompatibility|targetCompatibility|javaVersion)\s*[=:]\s*['"]?(?:JavaVersion\.VERSION_)?(\d+)['"]?/);
-  if (compatMatch) javaVersion = compatMatch[1];
+  const compatMatch = content.match(/(?:sourceCompatibility|targetCompatibility|javaVersion)\s*[=:]\s*['"]?(?:JavaVersion\.VERSION_)?(\d+(?:[._]\d+)*)['"]?/);
+  if (compatMatch) javaVersion = compatMatch[1]!.replace(/_/g, '.');
 
   // java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
   const toolchainMatch = content.match(/JavaLanguageVersion\.of\((\d+)\)/);
