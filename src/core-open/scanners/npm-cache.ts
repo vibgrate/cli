@@ -278,7 +278,45 @@ export async function checkRegistryAccess(cwd: string): Promise<boolean> {
   }
 }
 
-export function isSemverSpec(spec: string): boolean {
+/**
+ * A package.json alias (`"string-width-cjs": "npm:string-width@^4.2.0"`).
+ * `target` is the registry package; `range` is what latest-satisfying and
+ * drift compare against. An alias with no range (`npm:string-width`) uses `*`.
+ */
+export interface NpmAliasSpec {
+  target: string;
+  range: string;
+}
+
+/**
+ * Registry package and range a manifest entry installs.
+ * A normal spec keeps the manifest key. An `npm:` alias fetches `target`
+ * and compares `range`, while the row still reports the alias.
+ */
+export interface NpmInstallTarget {
+  registryName: string;
+  range: string;
+  /** Set only for an `npm:` alias. The manifest key stays the alias. */
+  registryPackage?: string;
+}
+
+/** npm package-name part: letters, digits, and `.` `_` `-`, not empty. */
+const NPM_NAME_PART = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+function isNpmPackageName(name: string): boolean {
+  if (name.length === 0 || name.length > 214) return false;
+  if (name.startsWith('@')) {
+    const slash = name.indexOf('/');
+    if (slash <= 1 || slash !== name.lastIndexOf('/')) return false;
+    const scope = name.slice(1, slash);
+    const pkg = name.slice(slash + 1);
+    return NPM_NAME_PART.test(scope) && NPM_NAME_PART.test(pkg);
+  }
+  if (name.includes('/')) return false;
+  return NPM_NAME_PART.test(name);
+}
+
+function isPlainSemverSpec(spec: string): boolean {
   const s = spec.trim();
   if (!s) return false;
   if (s.startsWith('workspace:')) return false;
@@ -289,4 +327,69 @@ export function isSemverSpec(spec: string): boolean {
   if (s.startsWith('github:')) return false;
   if (s === '*' || s.toLowerCase() === 'latest') return true;
   return semver.validRange(s) !== null;
+}
+
+/**
+ * Parse `npm:<name>@<range>`, `npm:@scope/pkg@<range>`, and `npm:<name>`
+ * (no range). The range separator is the last `@` after an optional scope,
+ * so `@scope/pkg@^1` stays one package name. Returns null for anything that
+ * is not an alias of a real package onto a semver range.
+ */
+export function parseNpmAlias(spec: string): NpmAliasSpec | null {
+  const s = spec.trim();
+  if (!s.startsWith('npm:')) return null;
+  const body = s.slice('npm:'.length).trim();
+  if (!body || body.includes('://')) return null;
+
+  let target: string;
+  let range: string;
+  if (body.startsWith('@')) {
+    const slash = body.indexOf('/');
+    if (slash <= 1) return null;
+    const lastAt = body.lastIndexOf('@');
+    if (lastAt > slash) {
+      target = body.slice(0, lastAt);
+      range = body.slice(lastAt + 1).trim();
+      if (!range) return null;
+    } else {
+      target = body;
+      range = '*';
+    }
+  } else {
+    const at = body.lastIndexOf('@');
+    if (at === 0) return null;
+    if (at > 0) {
+      target = body.slice(0, at);
+      range = body.slice(at + 1).trim();
+      if (!range) return null;
+    } else {
+      target = body;
+      range = '*';
+    }
+  }
+
+  if (!isNpmPackageName(target) || !isPlainSemverSpec(range)) return null;
+  return { target, range };
+}
+
+/**
+ * Which dependency specs the npm registry can answer. Accepts semver ranges
+ * and `npm:` aliases. Rejects workspace/file/link/git/url/github specs.
+ */
+export function isSemverSpec(spec: string): boolean {
+  return parseNpmAlias(spec) !== null || isPlainSemverSpec(spec);
+}
+
+/**
+ * Package to fetch and range to satisfy for one manifest entry.
+ * Null when the spec is not a registry semver (or a valid `npm:` alias).
+ * Non-alias specs return the manifest key and the original text.
+ */
+export function npmInstallTarget(manifestName: string, spec: string): NpmInstallTarget | null {
+  const alias = parseNpmAlias(spec);
+  if (alias) {
+    return { registryName: alias.target, range: alias.range, registryPackage: alias.target };
+  }
+  if (!isPlainSemverSpec(spec)) return null;
+  return { registryName: manifestName, range: spec };
 }
