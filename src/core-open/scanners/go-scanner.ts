@@ -3,14 +3,14 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as semver from 'semver';
-import { readTextFile, FileCache } from '../utils/fs.js';
+import { readTextFile, pathExists, FileCache } from '../utils/fs.js';
 import { recordedSemver } from '../utils/recorded-semver.js';
 import { withTimeout } from '../utils/timeout.js';
 import { GoCache, type GoModuleMeta } from './go-cache.js';
 import { latestStable, runtimeEolStatus, extractCycle, eolDate } from '../runtimes/catalog.js';
 import { BUNDLED_RUNTIME_CATALOG } from '../runtimes/snapshot.js';
 import type { RuntimeCatalog } from '../runtimes/types.js';
-import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
+import type { ProjectScan, ProjectReference, DependencyRow, DetectedFramework } from '../types.js';
 import { compareCodeUnits } from '../utils/code-unit.js';
 
 /** Well-known Go frameworks / libraries to track */
@@ -105,6 +105,12 @@ interface GoDependency {
   replacedFrom?: string;
   /** Local-path replace: keep the row and do not query the module proxy. */
   localReplace?: boolean;
+  /**
+   * Filesystem path from the winning local `replace`, as written in go.mod
+   * (relative to that file, or absolute). Used to link another module in this
+   * scan. Not copied onto the dependency row.
+   */
+  localReplacePath?: string;
 }
 
 /** A `replace` collected from the file. Applied only after every require is read. */
@@ -112,7 +118,7 @@ interface ReplaceDirective {
   modulePath: string;
   /** Left-hand version when the replace is version-scoped; null applies to every version. */
   version: string | null;
-  target: { kind: 'module'; path: string; version: string } | { kind: 'local' };
+  target: { kind: 'module'; path: string; version: string } | { kind: 'local'; path: string };
 }
 
 /**
@@ -132,10 +138,16 @@ interface ReplaceDirective {
  *     github.com/stretchr/testify v1.8.4 // indirect
  *   )
  */
-function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[]; tools: string[] } {
+function parseGoMod(content: string): {
+  modulePath?: string;
+  goVersion?: string;
+  deps: GoDependency[];
+  tools: string[];
+} {
   const deps: GoDependency[] = [];
   const replaces: ReplaceDirective[] = [];
   const tools: string[] = [];
+  let modulePath: string | undefined;
   let goVersion: string | undefined;
   let block: 'require' | 'replace' | 'tool' | null = null;
 
@@ -161,6 +173,11 @@ function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[]
       if (/^tool\s*\(.*\)\s*$/.test(trimmed)) {
         const toolPath = toolPackagePath(trimmed.replace(/^tool\s*\(/, '').replace(/\)\s*$/, ''));
         if (toolPath) tools.push(toolPath);
+        continue;
+      }
+      if (trimmed.startsWith('module ')) {
+        const moduleToken = goTokens(stripGoComment(trimmed.substring('module '.length)))[0];
+        if (moduleToken) modulePath = moduleToken;
         continue;
       }
       if (trimmed.startsWith('tool ')) {
@@ -217,7 +234,7 @@ function parseGoMod(content: string): { goVersion?: string; deps: GoDependency[]
   }
 
   applyReplacements(deps, replaces);
-  return { goVersion, deps, tools };
+  return { modulePath, goVersion, deps, tools };
 }
 
 /** Package path from a `tool` line, ignoring a trailing comment. */
@@ -366,7 +383,7 @@ function parseReplaceLine(line: string): ReplaceDirective | null {
 
   if (isFilesystemPath(rightPath) || right.length < 2 || !isGoVersionToken(right[1]!)) {
     if (!isFilesystemPath(rightPath)) return null;
-    return { modulePath, version, target: { kind: 'local' } };
+    return { modulePath, version, target: { kind: 'local', path: rightPath } };
   }
   return {
     modulePath,
@@ -393,6 +410,7 @@ function applyReplacements(deps: GoDependency[], directives: ReplaceDirective[])
     if (!rule) continue;
     if (rule.target.kind === 'local') {
       dep.localReplace = true;
+      dep.localReplacePath = rule.target.path;
       continue;
     }
     const original = dep.path;
@@ -440,7 +458,7 @@ export async function scanGoProjects(
     ? await cache.findFiles(rootDir, (name) => GO_MANIFEST_FILES.has(name))
     : await findGoManifests(rootDir);
 
-  const results: ProjectScan[] = [];
+  const scanned: ScannedGoProject[] = [];
   const STUCK_TIMEOUT_MS = projectScanTimeout ?? cache?.projectScanTimeout ?? 180_000;
 
   for (const manifestFile of manifestFiles) {
@@ -449,7 +467,7 @@ export async function scanGoProjects(
       const scanPromise = scanOneGoProject(dir, manifestFile, rootDir, goCache, cache, catalog);
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
-        results.push(result.value);
+        scanned.push(result.value);
       } else {
         const relPath = path.relative(rootDir, dir);
         if (cache) cache.addStuckPath(relPath || '.');
@@ -464,12 +482,27 @@ export async function scanGoProjects(
     }
   }
 
-  return results;
+  const usePaths = await readRootGoWorkUses(rootDir, cache);
+  linkGoProjectReferences(scanned, rootDir, usePaths);
+  return scanned.map((entry) => entry.project);
 }
 
 async function findGoManifests(rootDir: string): Promise<string[]> {
   const { findFiles } = await import('../utils/fs.js');
   return findFiles(rootDir, (name) => GO_MANIFEST_FILES.has(name));
+}
+
+interface ScannedGoProject {
+  project: ProjectScan;
+  /** `module` path from go.mod, when the file declares one. */
+  modulePath?: string;
+  /** Winning local-replace targets, as written next to `=>`. */
+  localReplacePaths: string[];
+  /**
+   * Module paths this go.mod requires (direct and indirect), except a module
+   * supplied by a local replace — that link is the replace directory.
+   */
+  requiredModulePaths: string[];
 }
 
 async function scanOneGoProject(
@@ -479,12 +512,12 @@ async function scanOneGoProject(
   goCache: GoCache,
   cache: FileCache | undefined,
   catalog: RuntimeCatalog,
-): Promise<ProjectScan> {
+): Promise<ScannedGoProject> {
   const relDir = path.relative(rootDir, dir) || '.';
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
   
   const content = cache ? await cache.readTextFile(manifestFile) : await readTextFile(manifestFile);
-  const { goVersion, deps: allDeps, tools } = parseGoMod(content);
+  const { modulePath, goVersion, deps: allDeps, tools } = parseGoMod(content);
 
   // Indirect requires stay out of the scan unless they provide a `tool`
   // package. Those modules are development dependencies. A module that is
@@ -611,17 +644,149 @@ async function scanOneGoProject(
   } catch { /* ignore */ }
 
   return {
-    type: 'go',
-    path: relDir,
-    name: projectName,
-    runtime: goVersion,
-    runtimeLatest,
-    runtimeMajorsBehind,
-    runtimeEol,
-    runtimeEolDate,
-    frameworks,
-    dependencies,
-    dependencyAgeBuckets: buckets,
-    fileCount,
+    project: {
+      type: 'go',
+      path: relDir,
+      name: projectName,
+      runtime: goVersion,
+      runtimeLatest,
+      runtimeMajorsBehind,
+      runtimeEol,
+      runtimeEolDate,
+      frameworks,
+      dependencies,
+      dependencyAgeBuckets: buckets,
+      fileCount,
+    },
+    modulePath,
+    localReplacePaths: allDeps.flatMap((dep) => (dep.localReplacePath ? [dep.localReplacePath] : [])),
+    // A local replace already names the directory that supplies the module.
+    // Matching that require against go.work would point at a second copy.
+    requiredModulePaths: allDeps.flatMap((dep) => (dep.localReplace ? [] : [dep.path])),
   };
+}
+
+/** `use` paths from a go.work file at the scan root. Missing file yields none. */
+async function readRootGoWorkUses(rootDir: string, cache: FileCache | undefined): Promise<string[]> {
+  const workFile = path.join(rootDir, 'go.work');
+  try {
+    const exists = cache ? await cache.pathExists(workFile) : await pathExists(workFile);
+    if (!exists) return [];
+    const content = cache ? await cache.readTextFile(workFile) : await readTextFile(workFile);
+    return parseGoWorkUses(content);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Directory paths from `use` / `use ( … )`. A one-line `use ( … )` is a
+ * directive, not a block. Comments are ignored. Order is file order.
+ */
+function parseGoWorkUses(content: string): string[] {
+  const uses: string[] = [];
+  let inUse = false;
+
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = stripGoComment(line).trim();
+    if (!trimmed) continue;
+
+    if (!inUse) {
+      if (/^use\s*\(/.test(trimmed) && !/^use\s*\(.*\)\s*$/.test(trimmed)) {
+        inUse = true;
+        continue;
+      }
+      if (/^use\s*\(.*\)\s*$/.test(trimmed)) {
+        uses.push(...goTokens(trimmed.replace(/^use\s*\(/, '').replace(/\)\s*$/, '')));
+        continue;
+      }
+      if (trimmed.startsWith('use ')) {
+        uses.push(...goTokens(trimmed.substring('use '.length)));
+      }
+      continue;
+    }
+
+    if (trimmed === ')') {
+      inUse = false;
+      continue;
+    }
+    uses.push(...goTokens(trimmed));
+  }
+
+  return uses.filter((token) => token !== '(' && token !== ')');
+}
+
+function normalizeRel(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+/**
+ * `targetPath` resolved from `fromDir`, then made relative to the scan root.
+ * A path that leaves the root is not a project in this scan.
+ */
+function scanRelative(rootDir: string, fromDir: string, targetPath: string): string | null {
+  const abs = path.resolve(fromDir, targetPath.replace(/\\/g, '/'));
+  const rel = path.relative(rootDir, abs);
+  if (rel === '') return '.';
+  const normalized = normalizeRel(rel);
+  if (path.isAbsolute(rel) || normalized === '..' || normalized.startsWith('../')) return null;
+  return normalized;
+}
+
+/**
+ * Local `replace` targets and root `go.work` `use` entries become
+ * `projectReferences` when they name another scanned Go module.
+ *
+ * A replace is resolved from the go.mod directory. A `use` entry counts only
+ * when this module requires that module path. Remote replaces and paths that
+ * are not scanned projects add nothing. The list is sorted and de-duplicated
+ * by project path, and omitted entirely when empty.
+ */
+function linkGoProjectReferences(scanned: ScannedGoProject[], rootDir: string, usePaths: string[]): void {
+  const byPath = new Map<string, ProjectScan>();
+  for (const entry of scanned) {
+    byPath.set(normalizeRel(entry.project.path), entry.project);
+  }
+
+  const usedPaths = new Set<string>();
+  for (const usePath of usePaths) {
+    const rel = scanRelative(rootDir, rootDir, usePath);
+    if (rel && byPath.has(rel)) usedPaths.add(rel);
+  }
+
+  const moduleToProject = new Map<string, ProjectScan>();
+  const workspaceModules = scanned
+    .filter((entry) => entry.modulePath && usedPaths.has(normalizeRel(entry.project.path)))
+    .sort((a, b) => compareCodeUnits(normalizeRel(a.project.path), normalizeRel(b.project.path)));
+  for (const entry of workspaceModules) {
+    const modulePath = entry.modulePath;
+    if (!modulePath || moduleToProject.has(modulePath)) continue;
+    moduleToProject.set(modulePath, entry.project);
+  }
+
+  for (const entry of scanned) {
+    const refs = new Map<string, ProjectReference>();
+    const add = (target: ProjectScan): void => {
+      if (target.path === entry.project.path || refs.has(target.path)) return;
+      refs.set(target.path, { path: target.path, name: target.name, refType: 'project' });
+    };
+
+    const moduleDir = path.resolve(rootDir, entry.project.path);
+    for (const replacePath of entry.localReplacePaths) {
+      const rel = scanRelative(rootDir, moduleDir, replacePath);
+      if (!rel) continue;
+      const target = byPath.get(rel);
+      if (target) add(target);
+    }
+
+    for (const required of entry.requiredModulePaths) {
+      const target = moduleToProject.get(required);
+      if (target) add(target);
+    }
+
+    const list = [...refs.values()].sort(
+      (a, b) => compareCodeUnits(a.path, b.path) || compareCodeUnits(a.name, b.name),
+    );
+    if (list.length > 0) entry.project.projectReferences = list;
+  }
 }
