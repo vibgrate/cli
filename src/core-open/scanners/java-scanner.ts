@@ -477,6 +477,118 @@ function pushGradleCoord(events: GradleDepEvent[], index: number, notation: stri
   });
 }
 
+interface GradleMapCall {
+  index: number;
+  end: number;
+  notation: string;
+  configuration: string;
+}
+
+/**
+ * Map notation, in any key order, with or without parentheses.
+ * Groovy is `key: 'value'`; Kotlin is `key = "value"`. A quoted coordinate
+ * (`implementation 'g:a:v'`) stays with the string matchers. The span covers
+ * the call so a configuration name at the end of a quoted value (`slf4j-api`)
+ * is not recorded again.
+ */
+function findGradleMapCalls(content: string): GradleMapCall[] {
+  const calls: GradleMapCall[] = [];
+  const callRegex = new RegExp(`\\b(?:${GRADLE_CONFIG_NAMES})\\b`, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = callRegex.exec(content)) !== null) {
+    const region = readGradleCall(content, match.index + match[0].length);
+    const notation = gradleMapNotation(region.argument);
+    if (!notation) continue;
+    calls.push({
+      index: match.index,
+      end: region.end,
+      notation,
+      configuration: bareGradleConfiguration(match[0]),
+    });
+  }
+  return calls;
+}
+
+function gradleMapCallCovers(calls: readonly GradleMapCall[], index: number): boolean {
+  return calls.some((call) => index >= call.index && index < call.end);
+}
+
+/** Parenthesized argument, or the rest of the line up to the next configuration. */
+function readGradleCall(content: string, argStart: number): { argument: string; end: number } {
+  let i = argStart;
+  while (i < content.length && (content[i] === ' ' || content[i] === '\t')) i++;
+  if (content[i] === '(') {
+    const end = matchingParenEnd(content, i);
+    if (end !== null) return { argument: content.slice(i + 1, end - 1), end };
+  }
+  const lineEnd = content.indexOf('\n', argStart);
+  const limit = lineEnd === -1 ? content.length : lineEnd;
+  const end = endBeforeNextCall(content, i, limit);
+  return { argument: content.slice(argStart, end), end };
+}
+
+function matchingParenEnd(content: string, open: number): number | null {
+  let depth = 0;
+  let quote: '"' | "'" | null = null;
+  for (let j = open; j < content.length; j++) {
+    const ch = content[j]!;
+    if (quote) {
+      if (ch === '\\') {
+        j++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return j + 1;
+    }
+  }
+  return null;
+}
+
+function endBeforeNextCall(content: string, from: number, limit: number): number {
+  const callAt = new RegExp(`^(?:${GRADLE_CONFIG_NAMES})\\b`);
+  let quote: '"' | "'" | null = null;
+  for (let i = from; i < limit; i++) {
+    const ch = content[i]!;
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (callAt.test(content.slice(i, limit))) return i;
+  }
+  return limit;
+}
+
+/** `group` and `name` are required. A missing `version` matches a coordinate with no version. */
+function gradleMapNotation(argument: string): string | null {
+  if (/^\s*['"]/.test(argument)) return null;
+  const fields: Partial<Record<'group' | 'name' | 'version', string>> = {};
+  const valueRegex = /\b(group|name|version)\s*[:=]\s*(['"])([^'"]*)\2/g;
+  let match: RegExpExecArray | null;
+  while ((match = valueRegex.exec(argument)) !== null) {
+    const key = match[1] as 'group' | 'name' | 'version';
+    if (fields[key] === undefined && match[3]) fields[key] = match[3];
+  }
+  if (!fields.group || !fields.name) return null;
+  return fields.version ? `${fields.group}:${fields.name}:${fields.version}` : `${fields.group}:${fields.name}`;
+}
+
 export function parseGradleBuild(
   content: string,
   filePath: string,
@@ -496,19 +608,27 @@ export function parseGradleBuild(
   if (toolchainMatch) javaVersion = toolchainMatch[1];
 
   const events: GradleDepEvent[] = [];
+  const mapCalls = findGradleMapCalls(content);
 
   // Parse dependencies: implementation 'group:artifact:version'
   // The optional parenthesis also matches Kotlin DSL `implementation("g:a:v")`.
+  // A hit inside a map call is the closing quote of a value such as `slf4j-api`.
   const depRegex = new RegExp(`\\b(?:${GRADLE_CONFIG_NAMES})\\s*(?:\\(?\\s*)?['"]([^'"]+)['"]`, 'g');
   let match: RegExpExecArray | null;
   while ((match = depRegex.exec(content)) !== null) {
+    if (gradleMapCallCovers(mapCalls, match.index)) continue;
     pushGradleCoord(events, match.index, match[1]!, bareGradleConfiguration(match[0]!));
   }
 
   // Parse Kotlin DSL: implementation("group:artifact:version")
   const kotlinDepRegex = new RegExp(`\\b(?:${GRADLE_CONFIG_NAMES})\\s*\\(\\s*"([^"]+)"\\s*\\)`, 'g');
   while ((match = kotlinDepRegex.exec(content)) !== null) {
+    if (gradleMapCallCovers(mapCalls, match.index)) continue;
     pushGradleCoord(events, match.index, match[1]!, bareGradleConfiguration(match[0]!));
+  }
+
+  for (const call of mapCalls) {
+    pushGradleCoord(events, call.index, call.notation, call.configuration);
   }
 
   // Parse platform/BOM dependencies
