@@ -134,18 +134,18 @@ const UNKNOWN_VERSION = 'unknown';
 /**
  * True for something that names one real, installed version — false for a
  * semver range (`^1.2.3`, `>=1.0.0`), a wildcard/dist-tag (`*`, `latest`), or
- * a package-manager protocol spec (`workspace:*`, `npm:real-name@1.2.3`,
- * `patch:pkg@…`, `file:../local`, a git/http(s) URL). Only `resolvedVersion`
- * or a lockfile hit should ever produce the latter; when neither exists the
- * SBOM must say so honestly (`UNKNOWN_VERSION`) rather than put someone's
- * *intent* ("whatever satisfies ^1.2.3") in the field a vulnerability scanner
- * reads as "this exact version is installed" — that's not a smaller version
- * of the truth, it's a different claim.
+ * a package-manager protocol spec (`workspace:*`, `catalog:`, `catalog:legacy`,
+ * `npm:real-name@1.2.3`, `patch:pkg@…`, `file:../local`, a git/http(s) URL).
+ * Only `resolvedVersion` or a lockfile hit should ever produce the latter.
+ * When neither exists, the SBOM must say so honestly (`UNKNOWN_VERSION`)
+ * rather than put someone's *intent* ("whatever satisfies ^1.2.3") in the
+ * field a vulnerability scanner reads as "this exact version is installed" —
+ * that's not a smaller version of the truth, it's a different claim.
  */
 function isConcreteVersion(spec: string): boolean {
   if (!spec || spec === '*' || spec === 'latest') return false;
   if (/[\^~*<>|]/.test(spec)) return false;
-  if (/^(npm|workspace|patch|file|link|git|github|https?):/i.test(spec)) return false;
+  if (/^(npm|workspace|catalog|patch|file|link|git|github|https?):/i.test(spec)) return false;
   return true;
 }
 

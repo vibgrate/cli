@@ -10,7 +10,13 @@ import { rethrowLockfileParseError } from '../utils/lockfile-parse.js';
 import { loadNpmLockIndex, type NpmLockIndex, type LockfileIo } from './npm-lockfile.js';
 import { Semaphore } from '../utils/semaphore.js';
 import { withTimeout } from '../utils/timeout.js';
-import { NpmCache, npmInstallTarget } from './npm-cache.js';
+import { NpmCache, npmInstallTarget, type NpmInstallTarget } from './npm-cache.js';
+import {
+  EMPTY_PNPM_CATALOGS,
+  parsePnpmCatalogs,
+  resolvePnpmCatalogSpec,
+  type PnpmCatalogs,
+} from './pnpm-catalog.js';
 import { classifyNpmVersionLag } from './npm-latest.js';
 import { buildDependencyLicense, normalizeLicenseSourcePath } from '../licenses/dependency-license.js';
 import { ageDaysBetween, daysToLibyears, aggregateLibyears } from '../scoring/libyear.js';
@@ -124,6 +130,44 @@ const KNOWN_FRAMEWORKS: Record<string, string> = {
   '@storybook/react': 'Storybook',
 };
 
+type ManifestDep =
+  | { kind: 'skip' }
+  | { kind: 'missing' }
+  | {
+      kind: 'install';
+      /** Spec the lockfile is keyed by: the catalog entry, or the manifest text. */
+      lockSpec: string;
+      registryName: string;
+      range: string;
+      registryPackage?: string;
+    };
+
+/**
+ * Turn one package.json entry into a registry install, a visible unresolved
+ * catalog row, or a skip. Catalog resolution happens before `npmInstallTarget`,
+ * so a catalog entry that is an `npm:` alias uses the alias path.
+ */
+function classifyManifestDep(pkg: string, spec: string, catalogs: PnpmCatalogs): ManifestDep {
+  const catalog = resolvePnpmCatalogSpec(pkg, spec, catalogs);
+  if (catalog.kind === 'missing') return { kind: 'missing' };
+  const lockSpec = catalog.kind === 'resolved' ? catalog.spec : spec;
+  const target: NpmInstallTarget | null = npmInstallTarget(pkg, lockSpec);
+  if (!target) return { kind: 'skip' };
+  return { kind: 'install', lockSpec, ...target };
+}
+
+async function loadPnpmCatalogs(rootDir: string, cache: FileCache | undefined): Promise<PnpmCatalogs> {
+  const workspacePath = path.join(rootDir, 'pnpm-workspace.yaml');
+  const exists = cache ? cache.pathExists(workspacePath) : pathExists(workspacePath);
+  if (!(await exists)) return EMPTY_PNPM_CATALOGS;
+  try {
+    const text = cache ? await cache.readTextFile(workspacePath) : await readTextFile(workspacePath);
+    return parsePnpmCatalogs(text);
+  } catch {
+    return EMPTY_PNPM_CATALOGS;
+  }
+}
+
 export async function scanNodeProjects(
   rootDir: string,
   npmCache: NpmCache,
@@ -196,6 +240,10 @@ export async function scanNodeProjects(
     return null;
   });
 
+  // pnpm catalogs live in the root pnpm-workspace.yaml. Resolve them once so
+  // `catalog:` specs are real ranges before prefetch and per-project scans.
+  const pnpmCatalogs = await loadPnpmCatalogs(rootDir, cache);
+
   const STUCK_TIMEOUT_MS = projectScanTimeout ?? cache?.projectScanTimeout ?? 180_000;
   const cores = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length || 4;
   const projectConcurrency = Math.max(2, Math.min(16, cores * 2));
@@ -217,8 +265,8 @@ export async function scanNodeProjects(
       for (const deps of depSections) {
         if (!deps) continue;
         for (const [pkg, spec] of Object.entries(deps)) {
-          const target = npmInstallTarget(pkg, spec);
-          if (target) allNpmPkgs.add(target.registryName);
+          const classified = classifyManifestDep(pkg, spec, pnpmCatalogs);
+          if (classified.kind === 'install') allNpmPkgs.add(classified.registryName);
         }
       }
     } catch {
@@ -236,7 +284,7 @@ export async function scanNodeProjects(
 
   const scannedProjects = await Promise.all(packageJsonFiles.map(async (pjPath) => projectSem.run(async () => {
     try {
-      const scanPromise = scanOnePackageJson(pjPath, rootDir, npmCache, cache, catalog, lockIndex);
+      const scanPromise = scanOnePackageJson(pjPath, rootDir, npmCache, cache, catalog, lockIndex, pnpmCatalogs);
       const result = await withTimeout(scanPromise, STUCK_TIMEOUT_MS);
       if (result.ok) {
         return result.value;
@@ -302,6 +350,7 @@ async function scanOnePackageJson(
   cache: FileCache | undefined,
   catalog: RuntimeCatalog,
   lockIndex: NpmLockIndex | null = null,
+  pnpmCatalogs: PnpmCatalogs = EMPTY_PNPM_CATALOGS,
 ): Promise<ProjectScan> {
   const pj = cache
     ? await cache.readJsonFile<PackageJson>(packageJsonPath)
@@ -343,12 +392,15 @@ async function scanOnePackageJson(
   const buckets = { current: 0, oneBehind: 0, twoPlusBehind: 0, unknown: 0 };
 
   // Collect all dep promises first for parallel resolution.
-  // An `npm:` alias fetches the target package and satisfies the target range;
-  // the row still uses the manifest key and the original spec text.
+  // An `npm:` alias fetches the target package and satisfies the target range.
+  // A `catalog:` specifier is replaced by its catalog entry first, so an entry
+  // that is itself an alias follows that same path. The row still uses the
+  // manifest key and the original spec text.
   const depEntries: {
     pkg: string;
     section: DepSection;
     spec: string;
+    lockSpec: string;
     registryName: string;
     range: string;
     registryPackage?: string;
@@ -356,9 +408,24 @@ async function scanOnePackageJson(
   for (const s of sections) {
     if (!s.deps) continue;
     for (const [pkg, spec] of Object.entries(s.deps)) {
-      const target = npmInstallTarget(pkg, spec);
-      if (!target) continue;
-      depEntries.push({ pkg, section: s.name, spec, ...target });
+      const classified = classifyManifestDep(pkg, spec, pnpmCatalogs);
+      if (classified.kind === 'missing') {
+        dependencies.push({
+          package: pkg,
+          section: s.name,
+          currentSpec: spec,
+          resolvedVersion: null,
+          latestStable: null,
+          majorsBehind: null,
+          drift: 'unknown',
+          license: buildDependencyLicense(null, 'none', manifestPath),
+        });
+        buckets.unknown++;
+        continue;
+      }
+      if (classified.kind !== 'install') continue;
+      const { kind: _kind, ...install } = classified;
+      depEntries.push({ pkg, section: s.name, spec, ...install });
     }
   }
 
@@ -373,7 +440,7 @@ async function scanOnePackageJson(
 
   const resolved = await Promise.all(metaPromises);
 
-  for (const { pkg, section, spec, meta, range: declaredRange, registryPackage, registryName } of resolved) {
+  for (const { pkg, section, spec, lockSpec, meta, range: declaredRange, registryPackage, registryName } of resolved) {
     // Latest stable release that still satisfies the declared range — the best
     // version an install could bring in without editing the manifest. Aliases
     // satisfy the target range (`^4.2.0`), not the raw `npm:` text.
@@ -388,8 +455,9 @@ async function scanOnePackageJson(
     // keeps the lock (satisfaction is undecidable, and the lock is still the
     // installed truth).
     // Lockfiles key an alias by the manifest name (`node_modules/<alias>`,
-    // `alias@npm:target@range`), so resolve with that name and the original spec.
-    const lockedVersion = lockIndex?.resolve(pkg, spec) ?? null;
+    // `alias@npm:target@range`), so an alias is looked up with that spec.
+    // A `catalog:` specifier is not a lockfile key; use the catalog entry.
+    const lockedVersion = lockIndex?.resolve(pkg, lockSpec) ?? null;
     const range = semver.validRange(declaredRange);
     const lockUsable =
       !!lockedVersion &&
