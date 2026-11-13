@@ -24,6 +24,8 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` and `vg sbom export` keep Gradle map-style dependencies.** Groovy `implementation group: 'g', name: 'a', version: 'v'` and Kotlin `implementation(group = "g", name = "a", version = "v")` are read in any key order, with or without parentheses. `testImplementation` stays a development dependency. A map entry with no `version` is omitted, the same as a quoted coordinate with no version (#661).
+
 - **`vg scan` reports a .NET runtime inherited from `Directory.Build.props`.** A project that sets neither `TargetFramework` nor `TargetFrameworks` takes them from the nearest `Directory.Build.props` between that project and the scanned directory. A value in the project file wins. A value that contains `$(`, such as `$(DefaultTfm)`, is not reported as a runtime (#627).
 
 - **`vg scan` reads OpenTofu `.tofu` files for provider and module drift.** `required_providers`, `required_version`, and registry `module` blocks in a `.tofu` file are scored, including a tree that has no `.tf` file. When `x.tf` and `x.tofu` are in the same directory, only `x.tofu` is read. A `.tf` file with no `.tofu` sibling is unchanged. The file list used when there is no file index also includes `terraform.tf` and the `.tofu` names of the usual root files (#622).
