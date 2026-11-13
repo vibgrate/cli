@@ -142,6 +142,8 @@ interface OpenPubDep {
   name: string;
   indent: number;
   isDev: boolean;
+  /** Set while the open key is under `dependency_overrides`. */
+  isOverride: boolean;
   version?: string;
   path?: string;
   gitUrl?: string;
@@ -159,11 +161,33 @@ function pubDepSpec(open: OpenPubDep): string | undefined {
   return undefined;
 }
 
-function takeOpenDep(deps: DartDependency[], open: OpenPubDep | null): void {
+function takeOpenDep(deps: DartDependency[], overrides: Map<string, string>, open: OpenPubDep | null): void {
   if (!open) return;
   const version = pubDepSpec(open);
   if (!version) return;
-  deps.push({ name: open.name, version, isDev: open.isDev });
+  if (open.isOverride) overrides.set(open.name, version);
+  else deps.push({ name: open.name, version, isDev: open.isDev });
+}
+
+/**
+ * `dependency_overrides` replaces the spec of a package already collected
+ * from `dependencies` or `dev_dependencies` and leaves that row's
+ * production or development flag alone. A name that appears only as an
+ * override is a production row. Names are appended in code-unit order so
+ * the row list does not follow map iteration.
+ */
+function applyDependencyOverrides(deps: DartDependency[], overrides: Map<string, string>): DartDependency[] {
+  if (overrides.size === 0) return deps;
+  const byName = new Map(deps.map((dep) => [dep.name, dep]));
+  const extras: DartDependency[] = [];
+  for (const name of [...overrides.keys()].sort(compareCodeUnits)) {
+    const version = overrides.get(name);
+    if (!version) continue;
+    const existing = byName.get(name);
+    if (existing) existing.version = version;
+    else extras.push({ name, version, isDev: false });
+  }
+  return extras.length === 0 ? deps : deps.concat(extras);
 }
 
 function flowField(body: string, key: string): string | undefined {
@@ -192,33 +216,50 @@ function flowField(body: string, key: string): string | undefined {
  *     flutter_test:
  *       sdk: flutter
  *     mockito: ^5.4.0
+ *   dependency_overrides:
+ *     http: 1.2.1
  *
  * `dependencies` and `dev_dependencies` are both kept. An SDK entry
  * (`flutter: { sdk: flutter }`, a nested `sdk: flutter`, or `sdk: flutter`
- * on the same line) is skipped in either section. A key with no value at
- * the dependency indent opens one package; deeper keys belong to it and
- * are never emitted as packages. A name listed in both sections is stored
- * once, as a production dependency.
+ * on the same line) is skipped in either section and under
+ * `dependency_overrides`. A skipped override does not replace a declared
+ * spec. A key with no value at the dependency indent opens one package;
+ * deeper keys belong to it and are never emitted as packages. A name
+ * listed in both dependency sections is stored once, as a production
+ * dependency. A `dependency_overrides` entry is read in the same forms
+ * (one-line version, `{ version: … }` map, nested `version:`, `path:`,
+ * and `git:`). It replaces that package's spec and keeps the production
+ * or development flag from the declaration. A package listed only in
+ * `dependency_overrides` is reported as a production dependency. Overrides
+ * are applied after both sections are read, so the spec wins whether the
+ * override is written before or after the declaration. The last override
+ * for a name wins. `pubspec.lock` is not read here.
  */
 function parsePubspecYaml(content: string): {
   dartVersion?: string;
   deps: DartDependency[];
 } {
   const deps: DartDependency[] = [];
+  const overrides = new Map<string, string>();
   let dartVersion: string | undefined;
-  let currentSection: 'dependencies' | 'dev_dependencies' | null = null;
+  let currentSection: 'dependencies' | 'dev_dependencies' | 'dependency_overrides' | null = null;
   let childIndent: number | null = null;
   let open: OpenPubDep | null = null;
 
   const flush = () => {
-    takeOpenDep(deps, open);
+    takeOpenDep(deps, overrides, open);
     open = null;
   };
 
-  const enterSection = (section: 'dependencies' | 'dev_dependencies') => {
+  const enterSection = (section: 'dependencies' | 'dev_dependencies' | 'dependency_overrides') => {
     flush();
     currentSection = section;
     childIndent = null;
+  };
+
+  const record = (name: string, version: string, isDev: boolean) => {
+    if (currentSection === 'dependency_overrides') overrides.set(name, version);
+    else deps.push({ name, version, isDev });
   };
 
   for (const line of content.split(/\r?\n/)) {
@@ -228,12 +269,13 @@ function parsePubspecYaml(content: string): {
     const indent = indentWidth(line);
 
     // Extract Dart SDK version. Require a digit so `sdk: flutter` lines
-    // (SDK dependencies inside dependency sections) cannot clobber the
-    // environment constraint. Caret and tilde forms (`^3.5.0`, `~3.4.1`)
-    // count the same as an explicit `>=` range.
+    // cannot clobber the environment constraint, and ignore `sdk:` inside
+    // a dependency section, including `dependency_overrides`, so a nested
+    // SDK constraint is not stored as the Dart version. Caret and tilde
+    // forms (`^3.5.0`, `~3.4.1`) count the same as an explicit `>=` range.
     if (trimmed.startsWith('sdk:')) {
       const match = trimmed.match(/sdk:\s*['"]?>?=?\s*[~^]?(\d[^<'"]*)/);
-      if (match) dartVersion = match[1]!.trim();
+      if (match && currentSection === null) dartVersion = match[1]!.trim();
       else if (open && /sdk:\s*flutter\b/.test(trimmed)) open.skip = true;
       continue;
     }
@@ -244,6 +286,10 @@ function parsePubspecYaml(content: string): {
     }
     if (trimmed === 'dev_dependencies:') {
       enterSection('dev_dependencies');
+      continue;
+    }
+    if (trimmed === 'dependency_overrides:') {
+      enterSection('dependency_overrides');
       continue;
     }
     // Only an unindented key ends the current section — testing the trimmed
@@ -280,7 +326,7 @@ function parsePubspecYaml(content: string): {
         const name = simpleMatch[1]!;
         const version = simpleMatch[2]!;
         if (version === 'sdk:' || trimmed.includes('sdk: flutter')) continue;
-        deps.push({ name, version, isDev });
+        record(name, version, isDev);
         continue;
       }
 
@@ -297,12 +343,18 @@ function parsePubspecYaml(content: string): {
         if (version) spec = version;
         else if (pathSpec) spec = `path:${pathSpec}`;
         else if (gitUrl) spec = `git:${gitUrl}`;
-        if (spec) deps.push({ name, version: spec, isDev });
+        if (spec) record(name, spec, isDev);
         continue;
       }
 
       // Bare key: the following deeper lines belong to this package.
-      open = { name, indent, isDev, skip: false };
+      open = {
+        name,
+        indent,
+        isDev,
+        isOverride: currentSection === 'dependency_overrides',
+        skip: false,
+      };
       continue;
     }
 
@@ -328,7 +380,7 @@ function parsePubspecYaml(content: string): {
   }
 
   flush();
-  return { dartVersion, deps: dedupeDartDeps(deps) };
+  return { dartVersion, deps: applyDependencyOverrides(dedupeDartDeps(deps), overrides) };
 }
 
 /**
