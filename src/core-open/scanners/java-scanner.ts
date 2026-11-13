@@ -227,6 +227,14 @@ function parsePom(xml: string, filePath: string): PomData {
     parentVersion: parent?.version,
   });
 
+  // A `<properties>` version wins. When none of those keys is set, read
+  // maven-compiler-plugin `<configuration>` from `build.plugins` and
+  // `build.pluginManagement`. `<release>` is checked in both places before
+  // `<source>`, then `<target>`. One plugin is an object; several are an array.
+  if (!javaVersion) {
+    javaVersion = javaVersionFromCompilerPlugin(project.build, properties);
+  }
+
   // Extract dependencies. Top-level blocks are stored first. The scan
   // keeps the first versioned coordinate, so a later profile entry does not
   // replace a top-level row.
@@ -285,6 +293,63 @@ function parsePom(xml: string, filePath: string): PomData {
     parent,
     properties,
   };
+}
+
+const COMPILER_PLUGIN_ARTIFACT = 'maven-compiler-plugin';
+const COMPILER_VERSION_KEYS = ['release', 'source', 'target'] as const;
+
+/**
+ * Java version from `maven-compiler-plugin` when `<properties>` did not set one.
+ * Configurations are collected from `build.plugins`, then `build.pluginManagement`.
+ * `<release>` is read across those configurations before `<source>`, then
+ * `<target>`, so a release in either place wins over source. The value is
+ * interpolated, and a result that still contains `${` is skipped.
+ */
+function javaVersionFromCompilerPlugin(
+  build: unknown,
+  properties: Record<string, string>,
+): string | undefined {
+  const configs = compilerPluginConfigurations(build);
+  for (const key of COMPILER_VERSION_KEYS) {
+    for (const config of configs) {
+      const raw = config[key];
+      if (typeof raw !== 'string' && typeof raw !== 'number') continue;
+      const resolved = resolveProperty(String(raw), properties).trim();
+      if (!resolved || resolved.includes('${')) continue;
+      return resolved;
+    }
+  }
+  return undefined;
+}
+
+function compilerPluginConfigurations(build: unknown): Record<string, unknown>[] {
+  if (!build || typeof build !== 'object') return [];
+  const record = build as Record<string, unknown>;
+  const pluginNodes = [
+    childPlugin(record.plugins),
+    childPlugin(nestedPlugins(record.pluginManagement)),
+  ];
+  const configs: Record<string, unknown>[] = [];
+  for (const plugins of pluginNodes) {
+    for (const plugin of xmlList<Record<string, unknown>>(plugins)) {
+      if (!plugin || typeof plugin !== 'object') continue;
+      if (String(plugin.artifactId ?? '') !== COMPILER_PLUGIN_ARTIFACT) continue;
+      const configuration = plugin.configuration;
+      if (!configuration || typeof configuration !== 'object') continue;
+      configs.push(configuration as Record<string, unknown>);
+    }
+  }
+  return configs;
+}
+
+function nestedPlugins(pluginManagement: unknown): unknown {
+  if (!pluginManagement || typeof pluginManagement !== 'object') return undefined;
+  return (pluginManagement as Record<string, unknown>).plugins;
+}
+
+function childPlugin(plugins: unknown): Record<string, unknown> | Record<string, unknown>[] | undefined {
+  if (!plugins || typeof plugins !== 'object') return undefined;
+  return (plugins as { plugin?: Record<string, unknown> | Record<string, unknown>[] }).plugin;
 }
 
 /** One XML child is an object; several children are an array. */
