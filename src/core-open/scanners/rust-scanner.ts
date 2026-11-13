@@ -508,8 +508,8 @@ function parseCargoToml(
  *   edition = "2021"
  */
 function extractRustEdition(content: string): string | undefined {
-  const match = content.match(/^\s*edition\s*=\s*"(\d+)"/m);
-  return match?.[1];
+  const match = content.match(/^\s*edition\s*=\s*(["'])(\d+)\1/m);
+  return match?.[2];
 }
 
 // ── Rust project file names ──
