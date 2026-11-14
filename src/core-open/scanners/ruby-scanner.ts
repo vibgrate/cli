@@ -405,8 +405,11 @@ function parseGemspec(content: string): RubyDependency[] {
 
     // Match add_dependency, add_runtime_dependency, add_development_dependency,
     // then every quoted constraint before a non-string argument.
+    // Both Ruby call styles are valid, so the gem name may be introduced by
+    // whitespace (`add_dependency "rails"`) or by a parenthesised argument
+    // list (`add_dependency("rails", "~> 7.1")`).
     const match = trimmed.match(
-      /\.add_(runtime_|development_)?dependency\s+['"]([^'"]+)['"]/,
+      /\.add_(runtime_|development_)?dependency(?:\s+|\s*\(\s*)['"]([^'"]+)['"]/,
     );
     if (!match || match.index === undefined) continue;
 
