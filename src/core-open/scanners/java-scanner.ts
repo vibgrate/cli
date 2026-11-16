@@ -492,8 +492,13 @@ export function parseGradleBuild(
   if (compatMatch) javaVersion = compatMatch[1];
 
   // java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
+  // kotlin { jvmToolchain { languageVersion.set(JavaLanguageVersion.of(17)) } }
   const toolchainMatch = content.match(/JavaLanguageVersion\.of\((\d+)\)/);
   if (toolchainMatch) javaVersion = toolchainMatch[1];
+
+  // kotlin { jvmToolchain(17) }
+  const kotlinToolchainMatch = content.match(/\bjvmToolchain\s*\(\s*(\d+)\s*\)/);
+  if (kotlinToolchainMatch) javaVersion = kotlinToolchainMatch[1];
 
   const events: GradleDepEvent[] = [];
 
