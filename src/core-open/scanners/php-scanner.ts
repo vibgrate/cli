@@ -99,9 +99,12 @@ async function parseComposerJson(filePath: string, cache?: FileCache): Promise<{
   const deps = new Map<string, PhpDependency>();
   let phpVersion: string | undefined;
 
-  // Extract PHP version requirement
+  // Prefer require.php (declared support range). When it is missing, fall back
+  // to config.platform.php — many projects pin the deploy runtime there only (#647).
   if (data.require?.php) {
     phpVersion = data.require.php;
+  } else if (typeof data.config?.platform?.php === 'string') {
+    phpVersion = data.config.platform.php;
   }
 
   // Production rows are recorded first. A name that also appears in
