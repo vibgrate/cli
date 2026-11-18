@@ -2,7 +2,7 @@
  * Deterministic package-manifest extraction.
  *
  * Pulls declared dependencies from package manifests (package.json, go.mod,
- * pom.xml, .csproj/.vbproj/.sqlproj, pyproject.toml, Cargo.toml, Gemfile) into the
+ * pom.xml, .csproj/.vbproj/.fsproj/.sqlproj, pyproject.toml, Cargo.toml, Gemfile) into the
  * code map as `package` nodes + `import` edges to external packages.
  * Complements source-level imports so hubs/impact/ask can see the
  * dependency surface without lockfile noise (lockfiles stay skipped by
@@ -341,7 +341,7 @@ function ingestPomXml(
   return n;
 }
 
-const DOTNET_PROJECT_EXTENSIONS = ['.csproj', '.vbproj', '.sqlproj'];
+const DOTNET_PROJECT_EXTENSIONS = ['.csproj', '.vbproj', '.fsproj', '.sqlproj'];
 
 function isDotnetProjectFile(base: string): boolean {
   return DOTNET_PROJECT_EXTENSIONS.some((ext) => base.endsWith(ext));
@@ -355,7 +355,7 @@ function ingestCsproj(
 ): number {
   const parsed = xml.parse(fs.readFileSync(abs, 'utf8')) as { Project?: Record<string, unknown> };
   const project = parsed.Project;
-  const projectName = path.posix.basename(rel).replace(/\.(cs|vb|sql)proj$/i, '');
+  const projectName = path.posix.basename(rel).replace(/\.(cs|vb|sql|fs)proj$/i, '');
   const localId = makePackageNode(nodes, edges, {
     rel,
     qualifiedName: projectName,
@@ -382,6 +382,7 @@ function ingestCsproj(
 
 function csprojLang(rel: string): string {
   if (rel.endsWith('.vbproj')) return 'vb';
+  if (rel.endsWith('.fsproj')) return 'fsharp';
   if (rel.endsWith('.sqlproj')) return 'sql';
   return 'csharp';
 }

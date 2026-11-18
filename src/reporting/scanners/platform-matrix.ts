@@ -175,12 +175,12 @@ export async function scanPlatformMatrix(rootDir: string, cache?: FileCache): Pr
   // OS assumptions
   result.osAssumptions = [...osAssumptions].sort();
 
-  // .NET target frameworks from .csproj/.vbproj files
-  const csprojFiles = cache
-    ? await cache.findFiles(rootDir, (name) => name.endsWith('.csproj') || name.endsWith('.vbproj'))
-    : await findFiles(rootDir, (name) => name.endsWith('.csproj') || name.endsWith('.vbproj'));
+  // .NET target frameworks from .csproj/.vbproj/.fsproj files
+  const dotnetProjectFiles = cache
+    ? await cache.findFiles(rootDir, (name) => name.endsWith('.csproj') || name.endsWith('.vbproj') || name.endsWith('.fsproj'))
+    : await findFiles(rootDir, (name) => name.endsWith('.csproj') || name.endsWith('.vbproj') || name.endsWith('.fsproj'));
   const tfms = new Set<string>();
-  for (const csprojPath of csprojFiles) {
+  for (const csprojPath of dotnetProjectFiles) {
     try {
       const xml = cache
         ? await cache.readTextFile(csprojPath)
