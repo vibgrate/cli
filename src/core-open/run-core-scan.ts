@@ -133,7 +133,7 @@ async function discoverSolutions(rootDir: string, fileCache: FileCache): Promise
       const rootBasename = path.basename(rootDir);
       const relSolutionPath = [rootBasename, path.relative(rootDir, solutionFile).replace(/\\/g, '/')].join('/');
       const projectPaths = new Set<string>();
-      const projectRegex = /Project\("[^"]*"\)\s*=\s*"([^"]*)",\s*"([^"]+\.(?:cs|vb)proj)"/g;
+      const projectRegex = /Project\("[^"]*"\)\s*=\s*"([^"]*)",\s*"([^"]+\.(?:cs|vb|fs)proj)"/g;
       let match: RegExpExecArray | null;
       while ((match = projectRegex.exec(content)) !== null) {
         const projectRelative = match[2];
