@@ -375,6 +375,8 @@ export function parseNpmAlias(spec: string): NpmAliasSpec | null {
 /**
  * Which dependency specs the npm registry can answer. Accepts semver ranges
  * and `npm:` aliases. Rejects workspace/file/link/git/url/github specs.
+ * A `catalog:` specifier is not a range; the node scanner resolves it from
+ * `pnpm-workspace.yaml` before this check.
  */
 export function isSemverSpec(spec: string): boolean {
   return parseNpmAlias(spec) !== null || isPlainSemverSpec(spec);

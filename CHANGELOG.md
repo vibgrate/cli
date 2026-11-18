@@ -24,6 +24,8 @@ backward compatible.
 
 ### Fixed
 
+- **`vg scan` resolves pnpm `catalog:` dependencies.** Ranges in the root `pnpm-workspace.yaml` (`catalog:` and `catalogs:`) fill in `catalog:`, `catalog:default`, and `catalog:<name>`. Drift and lockfile lookup use that range. `currentSpec` stays the specifier written in `package.json`. A missing catalog entry stays in the scan with an unknown version (#664).
+
 - **`vg scan` reports a .NET runtime inherited from `Directory.Build.props`.** A project that sets neither `TargetFramework` nor `TargetFrameworks` takes them from the nearest `Directory.Build.props` between that project and the scanned directory. A value in the project file wins. A value that contains `$(`, such as `$(DefaultTfm)`, is not reported as a runtime (#627).
 
 - **`vg scan` reads OpenTofu `.tofu` files for provider and module drift.** `required_providers`, `required_version`, and registry `module` blocks in a `.tofu` file are scored, including a tree that has no `.tf` file. When `x.tf` and `x.tofu` are in the same directory, only `x.tofu` is read. A `.tf` file with no `.tofu` sibling is unchanged. The file list used when there is no file index also includes `terraform.tf` and the `.tofu` names of the usual root files (#622).

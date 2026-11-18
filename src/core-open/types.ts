@@ -150,7 +150,9 @@ export interface DependencyRow {
    * Latest stable release that still satisfies the declared range — the newest
    * version an install alone could reach without editing the manifest. For an
    * npm alias (`npm:<name>@<range>`), that range is the alias target's range,
-   * not the raw `currentSpec` text. Null when the registry list is unavailable
+   * not the raw `currentSpec` text. For a pnpm `catalog:` specifier, the range
+   * is the catalog entry (and the alias target's range when that entry is an
+   * `npm:` alias). Null when the registry list is unavailable
    * (offline) or nothing satisfies. Populated by scanners that resolve ranges
    * (npm today); absent elsewhere.
    */

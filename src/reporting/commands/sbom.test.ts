@@ -581,7 +581,7 @@ describe('sbom helpers', () => {
       artifact.projects[0]!.dependencies[0]!.resolvedVersion = null;
       return artifact;
     };
-    for (const spec of ['^5.3.0', '*', 'latest', 'workspace:*', 'npm:string-width@^4.2.3']) {
+    for (const spec of ['^5.3.0', '*', 'latest', 'workspace:*', 'catalog:', 'catalog:legacy', 'npm:string-width@^4.2.3']) {
       const sbom = toCycloneDx(withUnresolvedVersion(spec)) as {
         components: Array<{ name: string; version: string; purl: string; 'bom-ref': string }>;
       };
