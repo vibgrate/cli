@@ -179,9 +179,15 @@ function stripSwiftComments(input: string): string {
   return out;
 }
 
+/**
+ * Repo name from a Swift package URL: last path segment, with a trailing `/`
+ * and a trailing `.git` removed. Case is preserved so the scan row keeps the
+ * manifest's spelling (`Kingfisher`); pin lookup lower-cases both sides.
+ */
 function packageNameFromUrl(url: string): string {
-  const nameMatch = url.match(/\/([^/]+?)(\.git)?$/);
-  return nameMatch?.[1] ?? url;
+  const trimmed = url.replace(/\/+$/, '');
+  const nameMatch = trimmed.match(/\/([^/]+?)(\.git)?$/);
+  return nameMatch?.[1] ?? trimmed;
 }
 
 /**
@@ -231,31 +237,28 @@ function dependencyFromPackageArgs(rawArgs: string): SwiftDependency | null {
   return null;
 }
 
+interface PackageResolvedPin {
+  identity?: string;
+  /** Version 1 pins name the repo here instead of `identity` / `location`. */
+  repositoryURL?: string;
+  state?: {
+    version?: string;
+  };
+}
+
 /**
  * Parse Package.resolved to get exact resolved versions.
- * 
- * Example JSON structure:
- * {
- *   "pins": [
- *     {
- *       "identity": "vapor",
- *       "location": "https://github.com/vapor/vapor.git",
- *       "state": {
- *         "version": "4.89.0"
- *       }
- *     }
- *   ]
- * }
+ *
+ * Version 2 and 3 files list pins at the top level, keyed by `identity`.
+ * Version 1 files nest them under `object.pins` and carry `repositoryURL`
+ * (plus a display `package` name, which is not the identity). The map key is
+ * the same URL-derived name `Package.swift` uses, lower-cased.
  */
 function parsePackageResolved(filePath: string, content: string): Map<string, string> {
   const resolved = new Map<string, string>();
   const data = parseLockfileJson(filePath, content) as {
-    pins?: Array<{
-      identity?: string;
-      state?: {
-        version?: string;
-      };
-    }>;
+    pins?: PackageResolvedPin[];
+    object?: { pins?: PackageResolvedPin[] };
   } | null;
 
   withLockfileNotes(undefined, (bucket) => {
@@ -263,10 +266,13 @@ function parsePackageResolved(filePath: string, content: string): Map<string, st
     return undefined;
   });
 
-  if (!data || typeof data !== 'object' || !data.pins) return resolved;
-  for (const pin of data.pins) {
-    if (!pin.identity || !pin.state?.version) continue;
-    resolved.set(pin.identity.toLowerCase(), pin.state.version);
+  if (!data || typeof data !== 'object') return resolved;
+  const pins = data.pins ?? data.object?.pins;
+  if (!Array.isArray(pins)) return resolved;
+  for (const pin of pins) {
+    const identity = pin.identity || (pin.repositoryURL ? packageNameFromUrl(pin.repositoryURL) : undefined);
+    if (!identity || !pin.state?.version) continue;
+    resolved.set(identity.toLowerCase(), pin.state.version);
   }
   return resolved;
 }
