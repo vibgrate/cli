@@ -463,8 +463,74 @@ interface GradleDepEvent {
   dep: GradleDependency;
 }
 
-function pushGradleCoord(events: GradleDepEvent[], index: number, notation: string, configuration: string): void {
-  const parts = notation.split(':');
+/** `key=value` lines from a gradle.properties file. `#` and `!` start comments. */
+export function parseGradleProperties(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith('!')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    if (!key || !value) continue;
+    out.set(key, value);
+  }
+  return out;
+}
+
+/**
+ * Simple literal assignments in a build file: `ext { name = '…' }`,
+ * `ext.name = '…'`, `ext['name'] = '…'`, and Kotlin `val name = "…"`.
+ * Anything computed stays unresolved.
+ */
+function collectGradleVariables(content: string, variables: Map<string, string>): void {
+  const extBlock = /\bext\s*\{([\s\S]*?)\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = extBlock.exec(content)) !== null) {
+    const assignment = /(?:^|[\s;,{])([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['"])([^'"]*)\2/g;
+    let inner: RegExpExecArray | null;
+    while ((inner = assignment.exec(match[1]!)) !== null) {
+      variables.set(inner[1]!, inner[3]!);
+    }
+  }
+
+  const extAssignment = /\bext\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['"])([^'"]*)\2/g;
+  while ((match = extAssignment.exec(content)) !== null) {
+    variables.set(match[1]!, match[3]!);
+  }
+
+  const extIndexAssignment = /\bext\[\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1\s*\]\s*=\s*(['"])([^'"]*)\3/g;
+  while ((match = extIndexAssignment.exec(content)) !== null) {
+    variables.set(match[2]!, match[4]!);
+  }
+
+  const kotlinVal = /\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*String\s*)?=\s*"([^"]*)"/g;
+  while ((match = kotlinVal.exec(content)) !== null) {
+    variables.set(match[1]!, match[2]!);
+  }
+}
+
+/**
+ * Replace `$name` / `${name}` from the collected variables. Unknown names stay as written.
+ * A bare `$name` stops at a dot, as in a Groovy string, so `$v.RELEASE` reads `v`.
+ */
+function resolveGradleVariables(notation: string, variables: ReadonlyMap<string, string>): string {
+  return notation.replace(
+    /\$\{([A-Za-z_][A-Za-z0-9_.]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+    (whole: string, braced: string | undefined, bare: string | undefined) =>
+      variables.get(braced ?? bare ?? '') ?? whole,
+  );
+}
+
+function pushGradleCoord(
+  events: GradleDepEvent[],
+  index: number,
+  notation: string,
+  configuration: string,
+  variables: ReadonlyMap<string, string>,
+): void {
+  const parts = resolveGradleVariables(notation, variables).split(':');
   if (parts.length < 2) return;
   events.push({
     index,
@@ -481,8 +547,11 @@ export function parseGradleBuild(
   content: string,
   filePath: string,
   catalog?: GradleVersionCatalog | null,
+  properties?: ReadonlyMap<string, string>,
 ): GradleData {
   const projectName = path.basename(path.dirname(filePath));
+  const variables = new Map<string, string>(properties);
+  collectGradleVariables(content, variables);
 
   // Detect Java/JVM version
   let javaVersion: string | undefined;
@@ -507,19 +576,19 @@ export function parseGradleBuild(
   const depRegex = new RegExp(`\\b(?:${GRADLE_CONFIG_NAMES})\\s*(?:\\(?\\s*)?['"]([^'"]+)['"]`, 'g');
   let match: RegExpExecArray | null;
   while ((match = depRegex.exec(content)) !== null) {
-    pushGradleCoord(events, match.index, match[1]!, bareGradleConfiguration(match[0]!));
+    pushGradleCoord(events, match.index, match[1]!, bareGradleConfiguration(match[0]!), variables);
   }
 
   // Parse Kotlin DSL: implementation("group:artifact:version")
   const kotlinDepRegex = new RegExp(`\\b(?:${GRADLE_CONFIG_NAMES})\\s*\\(\\s*"([^"]+)"\\s*\\)`, 'g');
   while ((match = kotlinDepRegex.exec(content)) !== null) {
-    pushGradleCoord(events, match.index, match[1]!, bareGradleConfiguration(match[0]!));
+    pushGradleCoord(events, match.index, match[1]!, bareGradleConfiguration(match[0]!), variables);
   }
 
   // Parse platform/BOM dependencies
   const platformRegex = /\b(?:implementation|api)\s*(?:\(?\s*)?platform\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   while ((match = platformRegex.exec(content)) !== null) {
-    pushGradleCoord(events, match.index, match[1]!, 'platform');
+    pushGradleCoord(events, match.index, match[1]!, 'platform', variables);
   }
 
   if (catalog) {
@@ -541,6 +610,33 @@ export function parseGradleBuild(
   for (const event of events) considerGradleDep(deps, event.dep);
 
   return { javaVersion, dependencies: deps, projectName };
+}
+
+/**
+ * Load `gradle.properties` from the repository root and the project directory.
+ * The project file is read last, so a key there overrides the root value.
+ */
+async function loadGradleProperties(
+  dir: string,
+  rootDir: string,
+  io: LockfileIo,
+): Promise<Map<string, string>> {
+  const files = [path.join(path.resolve(rootDir), 'gradle.properties')];
+  const projectFile = path.join(path.resolve(dir), 'gradle.properties');
+  if (projectFile !== files[0]) files.push(projectFile);
+
+  const properties = new Map<string, string>();
+  for (const file of files) {
+    try {
+      if (!(await io.exists(file))) continue;
+      for (const [key, value] of parseGradleProperties(await io.readText(file))) {
+        properties.set(key, value);
+      }
+    } catch {
+      // An unreadable property file leaves its variables unresolved.
+    }
+  }
+  return properties;
 }
 
 /**
@@ -644,6 +740,7 @@ async function scanOneJavaProject(
     readJson: <T>(p: string) => (cache ? cache.readJsonFile<T>(p) : readJsonFile<T>(p)),
   };
   const versionCatalog = await loadGradleVersionCatalog(dir, rootDir, lockIo);
+  const gradleProperties = await loadGradleProperties(dir, rootDir, lockIo);
 
   // Parse manifests — prefer pom.xml over Gradle
   for (const f of manifestFiles) {
@@ -671,7 +768,7 @@ async function scanOneJavaProject(
         });
       }
     } else if (fileName === 'build.gradle' || fileName === 'build.gradle.kts') {
-      const gradle = parseGradleBuild(content, f, versionCatalog);
+      const gradle = parseGradleBuild(content, f, versionCatalog, gradleProperties);
       if (gradle.projectName) projectName = gradle.projectName;
       if (gradle.javaVersion) javaVersion = gradle.javaVersion;
 
