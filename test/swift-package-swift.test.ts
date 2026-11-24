@@ -222,6 +222,48 @@ describe('Package.swift dependency forms', () => {
     expect(deps[0]!.resolvedVersion).toBe('2.65.0');
   });
 
+  it('reads version 1 Package.resolved pins from the repository URL', async () => {
+    const deps = await scan(
+      [
+        '.package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.0.0"),',
+        '.package(url: "https://github.com/apple/swift-nio", from: "2.0.0"),',
+        '.package(url: "https://github.com/apple/swift-log.git/", from: "1.4.0"),',
+      ].join('\n'),
+      '',
+      JSON.stringify({
+        object: {
+          pins: [
+            {
+              package: 'ArgumentParser',
+              repositoryURL: 'https://github.com/apple/swift-argument-parser',
+              state: { branch: null, revision: 'abc', version: '1.2.3' },
+            },
+            {
+              package: 'NIO',
+              repositoryURL: 'https://github.com/apple/swift-nio.git/',
+              state: { revision: 'def', version: '2.65.0' },
+            },
+            {
+              package: 'SwiftLog',
+              repositoryURL: 'https://github.com/apple/swift-log.git',
+              state: { revision: 'ghi', version: '1.5.4' },
+            },
+          ],
+        },
+        version: 1,
+      }),
+    );
+
+    expect(deps).toHaveLength(3);
+    expect(row(deps, 'swift-argument-parser').currentSpec).toBe('1.0.0');
+    expect(row(deps, 'swift-argument-parser').resolvedVersion).toBe('1.2.3');
+    expect(row(deps, 'swift-nio').currentSpec).toBe('2.0.0');
+    expect(row(deps, 'swift-nio').resolvedVersion).toBe('2.65.0');
+    expect(row(deps, 'swift-log').currentSpec).toBe('1.4.0');
+    expect(row(deps, 'swift-log').resolvedVersion).toBe('1.5.4');
+    expect(deps.some((d) => d.package === 'ArgumentParser' || d.package === 'SwiftLog' || d.package === 'NIO')).toBe(false);
+  });
+
   it('pins a registry identity from Package.resolved', async () => {
     const deps = await scan(
       '.package(id: "mona.LinkedList", from: "1.0.0"),',
