@@ -32,6 +32,96 @@ const MS_PER_DAY = 86_400_000;
  *  driftscore-3.0 §2.1. ~24 months. */
 const ABANDONED_MAX_DAYS = 730;
 
+/** Node.js LTS codenames, keyed by the major version they name. */
+const NODE_LTS_CODENAMES: Record<string, number> = {
+  argon: 4,
+  boron: 6,
+  carbon: 8,
+  dubnium: 10,
+  erbium: 12,
+  fermium: 14,
+  gallium: 16,
+  hydrogen: 18,
+  iron: 20,
+  jod: 22,
+  krypton: 24,
+};
+
+/**
+ * Normalize a Node version pin: `v20.11.1` → `20.11.1`, `20` → `20`.
+ * `lts/<codename>` resolves only when the catalog carries that major;
+ * anything else is skipped rather than guessed.
+ */
+export function normalizeNodePin(value: string, catalog: RuntimeCatalog): string | undefined {
+  const token = value.trim();
+  if (!token) return undefined;
+  const lts = /^lts\/([a-z0-9]+)$/i.exec(token);
+  if (lts) {
+    const major = NODE_LTS_CODENAMES[lts[1]!.toLowerCase()];
+    if (!major) return undefined;
+    const known = catalog.products.nodejs?.cycles.some((cycle) => parseInt(cycle.cycle, 10) === major);
+    return known ? String(major) : undefined;
+  }
+  const match = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/i.exec(token);
+  if (!match) return undefined;
+  return [match[1], match[2], match[3]]
+    .filter((part): part is string => part !== undefined)
+    .join('.');
+}
+
+/** First non-blank, non-comment line of `.nvmrc` / `.node-version`. */
+function nodePinToken(content: string): string | undefined {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (line) return line.split(/\s+/)[0];
+  }
+  return undefined;
+}
+
+async function readOptionalProjectFile(
+  dir: string,
+  name: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const filePath = path.join(dir, name);
+  try {
+    const exists = cache ? await cache.pathExists(filePath) : await pathExists(filePath);
+    if (!exists) return undefined;
+    return cache ? await cache.readTextFile(filePath) : await readTextFile(filePath);
+  } catch {
+    // An optional pin file must not fail the project scan.
+    return undefined;
+  }
+}
+
+/**
+ * Runtime pin for a package without `engines.node`.
+ * `volta.node` wins over `.nvmrc`, which wins over `.node-version`. A value
+ * that cannot be mapped is skipped so a later signal can still apply.
+ */
+async function nodeRuntimeFromPins(
+  pj: PackageJson,
+  dir: string,
+  cache: FileCache | undefined,
+  catalog: RuntimeCatalog,
+): Promise<string | undefined> {
+  const voltaNode = (pj as PackageJson & { volta?: { node?: unknown } }).volta?.node;
+  if (typeof voltaNode === 'string') {
+    const pinned = normalizeNodePin(voltaNode, catalog);
+    if (pinned) return pinned;
+  }
+  for (const file of ['.nvmrc', '.node-version']) {
+    const content = await readOptionalProjectFile(dir, file, cache);
+    if (content === undefined) continue;
+    const token = nodePinToken(content);
+    if (!token) continue;
+    const pinned = normalizeNodePin(token, catalog);
+    if (pinned) return pinned;
+  }
+  return undefined;
+}
+
 /** Well-known frameworks we detect and track */
 const KNOWN_FRAMEWORKS: Record<string, string> = {
   // ── Frontend ──
@@ -314,8 +404,9 @@ async function scanOnePackageJson(
   const projectPath = path.relative(rootDir, absProjectPath) || '.';
   const manifestPath = normalizeLicenseSourcePath(path.relative(rootDir, packageJsonPath));
 
-  // Detect Node runtime version
-  const nodeEngine = pj.engines?.node ?? undefined;
+  // Detect Node runtime version. `engines.node` wins; otherwise fall back to
+  // volta, then the version files many repos use to pin the runtime.
+  const nodeEngine = pj.engines?.node || await nodeRuntimeFromPins(pj, absProjectPath, cache, catalog);
   let runtimeLatest: string | undefined;
   let runtimeMajorsBehind: number | undefined;
   let runtimeEol: boolean | null | undefined;
