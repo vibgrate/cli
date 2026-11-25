@@ -577,6 +577,53 @@ function resolveInUmbrellaDir(
 }
 
 /**
+ * Runtime from an asdf/mise `.tool-versions` `elixir` entry.
+ * The first version token on that line wins (`elixir 1.16.3-otp-26 1.15.8`
+ * → `1.16.3`). An asdf OTP suffix (`-otp-26`) is stripped, and a
+ * non-version token such as `system`, `ref:...`, or `path:...` is skipped.
+ * A later `elixir` line is used only when the earlier one has no version
+ * token. Blank lines and `#` comments are ignored.
+ */
+export function elixirVersionFromToolVersions(content: string): string | undefined {
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (!line) continue;
+    const parts = line.split(/\s+/);
+    if (parts[0]!.toLowerCase() !== 'elixir') continue;
+    for (const part of parts.slice(1)) {
+      const match = /^(\d+(?:\.\d+){0,2})(?:-otp-\d+)?$/.exec(part);
+      if (match) return match[1];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Interpreter pin next to mix.exs when the project does not declare one.
+ * A missing or unreadable `.tool-versions` never fails the scan.
+ */
+async function elixirRuntimeFromToolVersions(
+  mixDir: string,
+  cache: FileCache | undefined,
+): Promise<string | undefined> {
+  const toolVersionsPath = path.join(mixDir, '.tool-versions');
+  try {
+    const exists = cache
+      ? await cache.pathExists(toolVersionsPath)
+      : await pathExists(toolVersionsPath);
+    if (!exists) return undefined;
+    const content = cache
+      ? await cache.readTextFile(toolVersionsPath)
+      : await readTextFile(toolVersionsPath);
+    return elixirVersionFromToolVersions(content);
+  } catch {
+    // An optional pin file must not fail the project scan.
+    return undefined;
+  }
+}
+
+/**
  * Parse mix.exs to extract dependencies.
  * Tuples may carry a keyword list of any length, including across lines.
  * `{:dep, git: "..."}`, `path:`, and `in_umbrella:` are not Hex deps.
@@ -682,7 +729,10 @@ export async function scanElixir(
     return null;
   }
 
-  const { elixirVersion, deps } = await parseMixExs(mixExsPath, cache);
+  const { elixirVersion: declaredElixirVersion, deps } = await parseMixExs(mixExsPath, cache);
+  // mix.exs stays the winner; `.tool-versions` is only the fallback.
+  const elixirVersion = declaredElixirVersion
+    ?? await elixirRuntimeFromToolVersions(path.dirname(mixExsPath), cache);
 
   // Read mix.lock for exact versions
   const mixLockPath = `${projectPath}/mix.lock`;
