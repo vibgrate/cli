@@ -1103,6 +1103,19 @@ function parsePipfileTable(body: string, section?: DepSection): PythonDependency
   return deps;
 }
 
+/**
+ * Runtime declared by a Pipfile's `[requires]` table.
+ * `python_full_version` wins over `python_version`. An empty value is ignored.
+ */
+function pipfilePythonVersion(content: string): string | undefined {
+  const requires = tomlTableBody(content, 'requires');
+  if (!requires) return undefined;
+  const full = requires.match(/^\s*python_full_version\s*=\s*["']([^"']+)["']/m)?.[1]?.trim();
+  if (full) return full;
+  const partial = requires.match(/^\s*python_version\s*=\s*["']([^"']+)["']/m)?.[1]?.trim();
+  return partial || undefined;
+}
+
 function parsePipfile(content: string): PythonDependency[] {
   const deps: PythonDependency[] = [];
   // [packages] is production. The pattern does not match `[dev-packages]`.
@@ -1339,6 +1352,8 @@ async function scanOnePythonProject(
       if (parsed.pythonVersion && !pythonVersion) pythonVersion = parsed.pythonVersion;
       for (const dep of parsed.deps) sourced.push({ path: f, dep });
     } else if (fileName === 'Pipfile') {
+      const parsedVersion = pipfilePythonVersion(content);
+      if (parsedVersion && !pythonVersion) pythonVersion = parsedVersion;
       for (const dep of parsePipfile(content)) sourced.push({ path: f, dep });
     } else if (isRequirementsFile(fileName)) {
       const section = requirementsManifestSection(fileName);
@@ -1353,10 +1368,10 @@ async function scanOnePythonProject(
     allDeps.set(dep.normalisedName, dep);
   }
 
-  // requires-python, Poetry's python dependency, and setup.cfg
-  // python_requires already won above. A requirements-only project often
-  // pins the interpreter in pyenv's .python-version, or in asdf's
-  // .tool-versions, and otherwise reports no runtime and no runtime lag.
+  // requires-python, Poetry's python dependency, setup.cfg python_requires,
+  // and a Pipfile [requires] table already won above. A requirements-only
+  // project often pins the interpreter in pyenv's .python-version, or in
+  // asdf's .tool-versions, and otherwise reports no runtime and no runtime lag.
   if (!pythonVersion) {
     pythonVersion = await pythonRuntimeFromPinFiles(dir, cache);
   }
