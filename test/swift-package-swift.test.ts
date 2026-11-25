@@ -234,6 +234,93 @@ describe('Package.swift dependency forms', () => {
     expect(deps[0]!.resolvedVersion).toBe('1.2.0');
   });
 
+  it('pins a v3 identity the same way as v2', async () => {
+    const deps = await scan(
+      '.package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),',
+      '',
+      JSON.stringify({
+        pins: [{
+          identity: 'swift-nio',
+          kind: 'remoteSourceControl',
+          location: 'https://github.com/apple/swift-nio.git',
+          state: { revision: 'abc123', version: '2.65.0' },
+        }],
+        version: 3,
+      }),
+    );
+    expect(deps).toHaveLength(1);
+    expect(deps[0]!.package).toBe('swift-nio');
+    expect(deps[0]!.currentSpec).toBe('2.0.0');
+    expect(deps[0]!.resolvedVersion).toBe('2.65.0');
+  });
+
+  it('pins a version 1 Package.resolved state.version for a URL-declared package', async () => {
+    const deps = await scan(
+      '.package(url: "https://github.com/apple/swift-argument-parser", from: "1.0.0"),',
+      '',
+      JSON.stringify({
+        object: {
+          pins: [{
+            package: 'ArgumentParser',
+            repositoryURL: 'https://github.com/apple/swift-argument-parser',
+            state: { branch: null, revision: 'abc123', version: '1.2.3' },
+          }],
+        },
+        version: 1,
+      }),
+    );
+    expect(deps).toHaveLength(1);
+    expect(deps[0]!.package).toBe('swift-argument-parser');
+    expect(deps[0]!.currentSpec).toBe('1.0.0');
+    expect(deps[0]!.resolvedVersion).toBe('1.2.3');
+  });
+
+  it.each([
+    ['no .git suffix', 'https://github.com/apple/swift-nio'],
+    ['.git suffix', 'https://github.com/apple/swift-nio.git'],
+    ['trailing slash', 'https://github.com/apple/swift-nio/'],
+    ['.git and a trailing slash', 'https://github.com/apple/swift-nio.git/'],
+  ])('matches a v1 pin URL with %s', async (_label, repositoryURL) => {
+    const deps = await scan(
+      '.package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),',
+      '',
+      JSON.stringify({
+        object: {
+          pins: [{
+            package: 'NIO',
+            repositoryURL,
+            state: { revision: 'abc123', version: '2.65.0' },
+          }],
+        },
+        version: 1,
+      }),
+    );
+    expect(deps).toHaveLength(1);
+    expect(deps[0]!.package).toBe('swift-nio');
+    expect(deps[0]!.resolvedVersion).toBe('2.65.0');
+  });
+
+  it('does not key a v1 pin on the package display name', async () => {
+    const deps = await scan(
+      '.package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),',
+      '',
+      JSON.stringify({
+        object: {
+          pins: [{
+            package: 'swift-nio',
+            repositoryURL: 'https://github.com/apple/something-else.git',
+            state: { revision: 'abc123', version: '9.9.9' },
+          }],
+        },
+        version: 1,
+      }),
+    );
+    expect(deps).toHaveLength(1);
+    expect(deps[0]!.package).toBe('swift-nio');
+    expect(deps[0]!.currentSpec).toBe('2.0.0');
+    expect(deps[0]!.resolvedVersion).toBeNull();
+  });
+
   it('emits no dependency rows for a path-only manifest', async () => {
     const deps = await scan([
       '.package(path: "../LocalLib"),',
