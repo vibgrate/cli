@@ -501,15 +501,40 @@ function parseCargoToml(
 }
 
 /**
+ * `[workspace.package] edition` from a workspace root Cargo.toml.
+ */
+function extractWorkspacePackageEdition(content: string): string | undefined {
+  let inPackage = false;
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('[') && trimmed.endsWith(']') && !trimmed.startsWith('[[')) {
+      inPackage = trimmed.slice(1, -1).replace(/\s+/g, '') === 'workspace.package';
+      continue;
+    }
+    if (!inPackage) continue;
+    const match = trimmed.match(/^edition\s*=\s*(["'])(\d+)\1/);
+    if (match) return match[2];
+  }
+  return undefined;
+}
+
+/**
  * Extract Rust edition from Cargo.toml.
- * 
+ *
  * Example:
  *   [package]
  *   edition = "2021"
+ *
+ * A member may inherit the workspace edition with `edition.workspace = true`
+ * or `edition = { workspace = true }`. That reads `[workspace.package] edition`
+ * from the workspace root manifest.
  */
-function extractRustEdition(content: string): string | undefined {
+function extractRustEdition(content: string, workspaceText?: string | null): string | undefined {
   const match = content.match(/^\s*edition\s*=\s*(["'])(\d+)\1/m);
-  return match?.[2];
+  if (match) return match[2];
+  const inherits = /^\s*edition\s*(?:\.\s*workspace\s*=\s*true|=\s*\{\s*workspace\s*=\s*true)\b/m.test(content);
+  if (!inherits || !workspaceText) return undefined;
+  return extractWorkspacePackageEdition(workspaceText);
 }
 
 // ── Rust project file names ──
@@ -614,10 +639,10 @@ async function scanOneRustProject(
   const projectName = path.basename(dir === rootDir ? rootDir : dir);
   
   const content = cache ? await cache.readTextFile(manifestFile) : await readTextFile(manifestFile);
-  const rustEdition = extractRustEdition(content);
   const readText = (filePath: string) => (cache ? cache.readTextFile(filePath) : readTextFile(filePath));
   const exists = (filePath: string) => (cache ? cache.pathExists(filePath) : pathExists(filePath));
   const workspaceText = await loadWorkspaceManifest(dir, rootDir, content, readText, exists);
+  const rustEdition = extractRustEdition(content, workspaceText);
   // Dev and build crates stay in this list. A name that is also production
   // is already a single production row (`parseCargoToml`).
   const allDeps = parseCargoToml(content, parseWorkspaceDependencies(workspaceText ?? ''));
