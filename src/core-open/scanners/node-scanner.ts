@@ -176,7 +176,11 @@ export async function scanNodeProjects(
         detectedPackageManager = 'yarn';
       } else if (await _pathExists(path.join(rootDir, 'package-lock.json'))) {
         detectedPackageManager = 'npm';
-      } else if (await _pathExists(path.join(rootDir, 'bun.lockb'))) {
+      } else if (
+        // Bun 1.2+ writes the text `bun.lock` by default; older releases wrote binary `bun.lockb`.
+        (await _pathExists(path.join(rootDir, 'bun.lock'))) ||
+        (await _pathExists(path.join(rootDir, 'bun.lockb')))
+      ) {
         detectedPackageManager = 'bun';
       }
     }
