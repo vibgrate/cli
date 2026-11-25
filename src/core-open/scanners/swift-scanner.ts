@@ -179,8 +179,13 @@ function stripSwiftComments(input: string): string {
   return out;
 }
 
+/**
+ * Package name from a Swift package URL, matching `.package(url:)`.
+ * Last path segment, with a trailing `/` and a trailing `.git` removed.
+ * Case is preserved; callers that key a lockfile lower-case the result.
+ */
 function packageNameFromUrl(url: string): string {
-  const nameMatch = url.match(/\/([^/]+?)(\.git)?$/);
+  const nameMatch = url.replace(/\/+$/, '').match(/\/([^/]+?)(\.git)?$/);
   return nameMatch?.[1] ?? url;
 }
 
@@ -231,31 +236,42 @@ function dependencyFromPackageArgs(rawArgs: string): SwiftDependency | null {
   return null;
 }
 
+interface ResolvedPin {
+  identity?: string;
+  repositoryURL?: string;
+  state?: {
+    version?: string;
+  };
+}
+
+/**
+ * Lockfile key for one pin.
+ * v2/v3 pins carry `identity`. v1 pins carry `package` (a display name) and
+ * `repositoryURL`; the key is the URL-derived package name, never `package`.
+ */
+function resolvedPinKey(pin: ResolvedPin): string | undefined {
+  if (pin.identity) return pin.identity.toLowerCase();
+  if (!pin.repositoryURL) return undefined;
+  return packageNameFromUrl(pin.repositoryURL).toLowerCase();
+}
+
 /**
  * Parse Package.resolved to get exact resolved versions.
- * 
- * Example JSON structure:
+ *
+ * v2/v3:
  * {
  *   "pins": [
- *     {
- *       "identity": "vapor",
- *       "location": "https://github.com/vapor/vapor.git",
- *       "state": {
- *         "version": "4.89.0"
- *       }
- *     }
+ *     { "identity": "vapor", "location": "https://github.com/vapor/vapor.git", "state": { "version": "4.89.0" } }
  *   ]
  * }
+ *
+ * v1 nests the same pins under `object.pins`, with `repositoryURL` instead of `identity`.
  */
 function parsePackageResolved(filePath: string, content: string): Map<string, string> {
   const resolved = new Map<string, string>();
   const data = parseLockfileJson(filePath, content) as {
-    pins?: Array<{
-      identity?: string;
-      state?: {
-        version?: string;
-      };
-    }>;
+    pins?: ResolvedPin[];
+    object?: { pins?: ResolvedPin[] };
   } | null;
 
   withLockfileNotes(undefined, (bucket) => {
@@ -263,10 +279,13 @@ function parsePackageResolved(filePath: string, content: string): Map<string, st
     return undefined;
   });
 
-  if (!data || typeof data !== 'object' || !data.pins) return resolved;
-  for (const pin of data.pins) {
-    if (!pin.identity || !pin.state?.version) continue;
-    resolved.set(pin.identity.toLowerCase(), pin.state.version);
+  if (!data || typeof data !== 'object') return resolved;
+  const pins = data.pins ?? data.object?.pins;
+  if (!pins) return resolved;
+  for (const pin of pins) {
+    const key = resolvedPinKey(pin);
+    if (!key || !pin.state?.version) continue;
+    resolved.set(key, pin.state.version);
   }
   return resolved;
 }
