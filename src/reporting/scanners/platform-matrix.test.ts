@@ -109,6 +109,17 @@ describe('scanPlatformMatrix', () => {
 
 
 
+  it('detects .NET target frameworks from .fsproj files', async () => {
+    await fs.writeFile(
+      path.join(tempDir, 'App.fsproj'),
+      `<Project Sdk="Microsoft.NET.Sdk">
+        <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+      </Project>`,
+    );
+    const result = await scanPlatformMatrix(tempDir);
+    expect(result.dotnetTargetFrameworks).toEqual(['net8.0']);
+  });
+
   it('detects .NET target frameworks from .vbproj files', async () => {
     await fs.writeFile(
       path.join(tempDir, 'VbApp.vbproj'),

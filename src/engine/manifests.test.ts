@@ -78,7 +78,29 @@ describe('extractManifests', () => {
     const out = extractManifests(dir);
     const pkgs = out.nodes.filter((n) => n.kind === 'package').map((n) => n.name).sort();
     expect(pkgs).toEqual(['ApplicationCore', 'Web']);
+    expect(out.nodes.filter((n) => n.kind === 'package').every((n) => n.lang === 'csharp')).toBe(true);
     expect(out.deps).toBe(2);
+  });
+
+  it('extracts an .fsproj as an F# project and does not label it C#', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-manifest-'));
+    write(
+      dir,
+      'src/App/App.fsproj',
+      `<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="Newtonsoft.Json" />
+  </ItemGroup>
+</Project>`,
+    );
+    const out = extractManifests(dir);
+    const pkg = out.nodes.find((n) => n.kind === 'package');
+    expect(pkg?.name).toBe('App');
+    expect(pkg?.lang).toBe('fsharp');
+    expect(out.deps).toBe(2);
+    const extNames = out.nodes.filter((n) => n.kind === 'external').map((n) => n.name).sort();
+    expect(extNames).toEqual(['FSharp.Core', 'Newtonsoft.Json']);
   });
 
   it('extracts a pyproject.toml, preferring PEP 621 [project] over [tool.poetry]', () => {
