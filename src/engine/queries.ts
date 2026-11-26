@@ -168,6 +168,14 @@ const JAVA: LangQueries = {
     { kind: 'method', query: '(constructor_declaration name: (identifier) @name) @def' },
     { kind: 'class', query: '(class_declaration name: (identifier) @name) @def' },
     { kind: 'interface', query: '(interface_declaration name: (identifier) @name) @def' },
+    // Status/permission enums, DTO records and custom annotations such as
+    // `@Audited` are real lookup targets in Spring codebases. Enums and records
+    // map to 'class', as in the C# block (the engine's kind for enum-like
+    // types). An `@interface` declares a type other code refers to by name
+    // and has no implementation, so it maps to 'interface'.
+    { kind: 'class', query: '(enum_declaration name: (identifier) @name) @def' },
+    { kind: 'class', query: '(record_declaration name: (identifier) @name) @def' },
+    { kind: 'interface', query: '(annotation_type_declaration name: (identifier) @name) @def' },
   ],
   calls: [
     '(method_invocation name: (identifier) @callee)',
