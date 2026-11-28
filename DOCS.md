@@ -277,6 +277,8 @@ vg drift
 
 Reads each project's lockfile and reports which dependencies have drifted behind their latest known version. Offline by default (uses the last-known catalog); add `--online` to check live registries for current latest versions.
 
+For Terraform, a provider's exact version comes from `.terraform.lock.hcl`, and a registry module's installed version comes from `.terraform/modules/modules.json`, which `terraform init` or `tofu init` writes next to the files that call the module. A missing or unreadable file leaves the declared constraint in place.
+
 | Flag | Description |
 |------|-------------|
 | `--online` | Check live registries for the latest versions instead of the offline catalog |

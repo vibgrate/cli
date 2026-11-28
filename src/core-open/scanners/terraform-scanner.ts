@@ -17,6 +17,8 @@ interface TerraformProvider {
 interface TerraformModule {
   source: string; // e.g., "terraform-aws-modules/vpc/aws"
   version?: string;
+  /** Directory of the file that declares the module block. */
+  dir?: string;
 }
 
 /**
@@ -340,6 +342,46 @@ async function parseTerraformLock(filePath: string, cache?: FileCache): Promise<
 }
 
 /**
+ * Installed registry module versions from `.terraform/modules/modules.json`,
+ * which `terraform init` / `tofu init` writes in the root it ran in. Keyed by
+ * the normalised registry address. Only the root's own module calls count
+ * (a `Key` with no `.`): nested calls such as `vpc.endpoints` belong to other
+ * modules. An address installed at two different versions in one root is left
+ * out, since the source alone can't say which call is which.
+ */
+async function parseTerraformModules(filePath: string, cache?: FileCache): Promise<Map<string, string>> {
+  const versions = new Map<string, Set<string>>();
+
+  try {
+    const content = cache
+      ? await cache.readTextFile(filePath)
+      : await readTextFile(filePath);
+    const parsed = JSON.parse(content) as { Modules?: unknown } | null;
+    const modules = Array.isArray(parsed?.Modules) ? parsed.Modules : [];
+
+    for (const entry of modules) {
+      if (!entry || typeof entry !== 'object') continue;
+      const { Key, Source, Version } = entry as { Key?: unknown; Source?: unknown; Version?: unknown };
+      if (typeof Key !== 'string' || Key === '' || Key.includes('.')) continue;
+      if (typeof Source !== 'string' || typeof Version !== 'string' || Version.length === 0) continue;
+      const address = publicRegistryModuleAddress(Source);
+      if (!address) continue;
+      const seen = versions.get(address) ?? new Set<string>();
+      seen.add(Version);
+      versions.set(address, seen);
+    }
+  } catch {
+    return new Map();
+  }
+
+  const resolved = new Map<string, string>();
+  for (const [address, seen] of versions) {
+    if (seen.size === 1) resolved.set(address, [...seen][0]);
+  }
+  return resolved;
+}
+
+/**
  * Calculate version drift.
  */
 function calculateDrift(
@@ -467,7 +509,8 @@ export async function scanTerraform(
     }
     
     allProviders.push(...providers);
-    allModules.push(...modules);
+    const dir = path.dirname(tfFile);
+    allModules.push(...modules.map((m) => ({ ...m, dir })));
   }
 
   // A provider requirement is one constraint per source. Terraform rejects
@@ -490,7 +533,7 @@ export async function scanTerraform(
   for (const m of allModules) {
     const key = `${m.source}\0${m.version ?? ''}`;
     if (!uniqueModules.has(key)) {
-      uniqueModules.set(key, { source: m.source, version: m.version });
+      uniqueModules.set(key, { source: m.source, version: m.version, dir: m.dir });
     }
   }
   const modulePins = [...uniqueModules.values()].sort((a, b) => {
@@ -506,6 +549,15 @@ export async function scanTerraform(
   // Read lock file for exact versions
   const lockPath = `${projectPath}/.terraform.lock.hcl`;
   const resolvedVersions = await parseTerraformLock(lockPath, cache);
+  // Each root keeps its own modules.json, next to the files that call the
+  // modules (envs/staging and envs/prod install separately).
+  const installedModules = new Map<string, Map<string, string>>();
+  for (const dir of new Set(modulePins.map((pin) => pin.dir ?? projectPath))) {
+    installedModules.set(
+      dir,
+      await parseTerraformModules(path.join(dir, '.terraform', 'modules', 'modules.json'), cache),
+    );
+  }
 
   // Prepare items to fetch
   const itemsToFetch: Array<{ type: 'provider' | 'module'; namespace: string; name: string; provider?: string }> = [];
@@ -569,12 +621,15 @@ export async function scanTerraform(
     else buckets.unknown++;
   }
 
-  for (const { source, version: constraintVersion } of modulePins) {
-    const currentVersion = constraintVersion || 'unknown';
+  for (const { source, version: constraintVersion, dir } of modulePins) {
     // The version map is keyed by `namespace/name/system`. The row name stays
     // the raw source, so a subdir and a public-registry prefix still show up
     // as distinct pins while sharing the fetched latest version.
     const address = publicRegistryModuleAddress(source);
+    const resolvedVersion = address
+      ? installedModules.get(dir ?? projectPath)?.get(address)
+      : undefined;
+    const currentVersion = resolvedVersion || constraintVersion || 'unknown';
     const latestVersion = address ? latestVersions.get(address) : undefined;
     const drift = (latestVersion && currentVersion !== 'unknown') ? calculateDrift(currentVersion, latestVersion) : 'unknown';
     
@@ -594,7 +649,7 @@ export async function scanTerraform(
       package: `module:${source}`,
       section: 'dependencies',
       currentSpec: constraintVersion || 'unknown',
-      resolvedVersion: null,
+      resolvedVersion: resolvedVersion || null,
       latestStable: latestVersion || null,
       majorsBehind,
       drift,

@@ -115,6 +115,171 @@ describe('scanTerraform module pins', () => {
   });
 });
 
+function modulesJson(entries: Array<{ Key?: string; Source: string; Version: string }>): string {
+  return JSON.stringify({
+    Modules: [
+      { Key: '', Source: '', Dir: '.' },
+      ...entries.map((entry, index) => ({
+        Key: entry.Key ?? `m${index}`,
+        Source: entry.Source,
+        Version: entry.Version,
+        Dir: `.terraform/modules/${entry.Key ?? `m${index}`}`,
+      })),
+    ],
+  });
+}
+
+describe('scanTerraform module resolved versions', () => {
+  const modulesPath = '.terraform/modules/modules.json';
+
+  it('reports the installed version from modules.json for a matching registry module', async () => {
+    const dir = await writeTree({
+      'main.tf': moduleBlock('vpc', 'terraform-aws-modules/vpc/aws', '~> 5.0'),
+      [modulesPath]: modulesJson([
+        { Source: 'registry.terraform.io/terraform-aws-modules/vpc/aws', Version: '5.8.1' },
+      ]),
+    });
+
+    const scan = await scanTerraform(dir, new FileCache(), manifest, true);
+    const modules = scan!.dependencies.filter((row) => row.package.startsWith('module:'));
+    expect(modules).toEqual([
+      expect.objectContaining({
+        package: 'module:terraform-aws-modules/vpc/aws',
+        currentSpec: '~> 5.0',
+        resolvedVersion: '5.8.1',
+        latestStable: '5.8.1',
+        drift: 'current',
+        majorsBehind: 0,
+      }),
+    ]);
+  });
+
+  it('leaves module rows unchanged when modules.json is absent', async () => {
+    const dir = await writeTree({
+      'main.tf': moduleBlock('vpc', 'terraform-aws-modules/vpc/aws', '~> 5.0'),
+    });
+
+    const scan = await scanTerraform(dir, new FileCache(), manifest, true);
+    const modules = scan!.dependencies.filter((row) => row.package.startsWith('module:'));
+    expect(modules).toEqual([
+      expect.objectContaining({
+        package: 'module:terraform-aws-modules/vpc/aws',
+        currentSpec: '~> 5.0',
+        resolvedVersion: null,
+        latestStable: '5.8.1',
+        drift: 'minor-behind',
+        majorsBehind: 0,
+      }),
+    ]);
+  });
+
+  it('falls back without throwing when modules.json is malformed', async () => {
+    const dir = await writeTree({
+      'main.tf': moduleBlock('vpc', 'terraform-aws-modules/vpc/aws', '~> 5.0'),
+      [modulesPath]: '{ "Modules": [',
+    });
+
+    for (const cache of [new FileCache(), undefined]) {
+      const scan = await scanTerraform(dir, cache, manifest, true);
+      const modules = scan!.dependencies.filter((row) => row.package.startsWith('module:'));
+      expect(modules).toEqual([
+        expect.objectContaining({
+          package: 'module:terraform-aws-modules/vpc/aws',
+          currentSpec: '~> 5.0',
+          resolvedVersion: null,
+          drift: 'minor-behind',
+        }),
+      ]);
+    }
+  });
+
+  it('does not use a modules.json version recorded for a different module', async () => {
+    const dir = await writeTree({
+      'main.tf': moduleBlock('vpc', 'terraform-aws-modules/vpc/aws', '~> 5.0'),
+      [modulesPath]: modulesJson([
+        { Source: 'registry.terraform.io/terraform-aws-modules/eks/aws', Version: '20.0.0' },
+      ]),
+    });
+
+    const scan = await scanTerraform(dir, new FileCache(), manifest, true);
+    const modules = scan!.dependencies.filter((row) => row.package.startsWith('module:'));
+    expect(modules).toEqual([
+      expect.objectContaining({
+        package: 'module:terraform-aws-modules/vpc/aws',
+        currentSpec: '~> 5.0',
+        resolvedVersion: null,
+        drift: 'minor-behind',
+      }),
+    ]);
+  });
+
+  it('reads the modules.json in each root', async () => {
+    const dir = await writeTree({
+      'envs/staging/main.tf': moduleBlock('vpc', 'terraform-aws-modules/vpc/aws', '~> 4.0'),
+      [`envs/staging/${modulesPath}`]: modulesJson([
+        { Source: 'registry.terraform.io/terraform-aws-modules/vpc/aws', Version: '4.0.2' },
+      ]),
+      'envs/prod/main.tf': moduleBlock('vpc', 'terraform-aws-modules/vpc/aws', '~> 5.0'),
+      [`envs/prod/${modulesPath}`]: modulesJson([
+        { Source: 'registry.terraform.io/terraform-aws-modules/vpc/aws', Version: '5.8.1' },
+      ]),
+    });
+
+    const scan = await scanTerraform(dir, new FileCache(), manifest, true);
+    const modules = scan!.dependencies.filter((row) => row.package.startsWith('module:'));
+    expect(modules.map((row) => [row.currentSpec, row.resolvedVersion])).toEqual([
+      ['~> 4.0', '4.0.2'],
+      ['~> 5.0', '5.8.1'],
+    ]);
+  });
+
+  it('does not apply a modules.json from another root', async () => {
+    const dir = await writeTree({
+      'main.tf': moduleBlock('vpc', 'terraform-aws-modules/vpc/aws', '~> 5.0'),
+      [modulesPath]: modulesJson([
+        { Source: 'registry.terraform.io/terraform-aws-modules/vpc/aws', Version: '5.8.1' },
+      ]),
+      'envs/staging/main.tf': moduleBlock('vpc', 'terraform-aws-modules/vpc/aws', '~> 4.0'),
+    });
+
+    const scan = await scanTerraform(dir, new FileCache(), manifest, true);
+    const modules = scan!.dependencies.filter((row) => row.package.startsWith('module:'));
+    expect(modules.map((row) => [row.currentSpec, row.resolvedVersion])).toEqual([
+      ['~> 4.0', null],
+      ['~> 5.0', '5.8.1'],
+    ]);
+  });
+
+  it('ignores modules.json entries for calls nested inside other modules', async () => {
+    const dir = await writeTree({
+      'main.tf': moduleBlock('vpc', 'terraform-aws-modules/vpc/aws', '~> 5.0'),
+      [modulesPath]: modulesJson([
+        { Key: 'network.vpc', Source: 'registry.terraform.io/terraform-aws-modules/vpc/aws', Version: '5.1.0' },
+      ]),
+    });
+
+    const scan = await scanTerraform(dir, new FileCache(), manifest, true);
+    const row = scan!.dependencies.find((r) => r.package === 'module:terraform-aws-modules/vpc/aws');
+    expect(row?.resolvedVersion).toBeNull();
+  });
+
+  it('leaves a source installed at two versions in one root unresolved', async () => {
+    const dir = await writeTree({
+      'main.tf':
+        moduleBlock('vpc_a', 'terraform-aws-modules/vpc/aws', '~> 5.0') +
+        moduleBlock('vpc_b', 'terraform-aws-modules/vpc/aws', '~> 4.0'),
+      [modulesPath]: modulesJson([
+        { Key: 'vpc_a', Source: 'registry.terraform.io/terraform-aws-modules/vpc/aws', Version: '5.8.1' },
+        { Key: 'vpc_b', Source: 'registry.terraform.io/terraform-aws-modules/vpc/aws', Version: '4.0.2' },
+      ]),
+    });
+
+    const scan = await scanTerraform(dir, new FileCache(), manifest, true);
+    const modules = scan!.dependencies.filter((row) => row.package.startsWith('module:'));
+    expect(modules.map((row) => row.resolvedVersion)).toEqual([null, null]);
+  });
+});
+
 function terraformBlock(body: string): string {
   return `terraform {\n${body}\n}\n`;
 }
